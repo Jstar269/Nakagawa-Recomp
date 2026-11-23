@@ -3,6 +3,7 @@
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
+#include "nk_ui_text.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -139,7 +140,7 @@ bool player_ui_build_date(long long epoch, char *out, size_t cap) {
     if (year < 1 || year > 9999) {
         return false;
     }
-    written = snprintf(out, cap, "%02lld-%02lld-%04lld", month, day, year);
+    written = snprintf(out, cap, NK_UI_STR(SHARED_ABOUT_BUILD_DATE), month, day, year);
     return written == 10;
 }
 
@@ -152,9 +153,9 @@ void player_ui_version_line(const char *version, long long epoch, char *out, siz
         version = NK_PLAYER_VERSION;
     }
     if (player_ui_build_date(epoch, date, sizeof(date))) {
-        (void)snprintf(out, cap, "v%s (%s)", version, date);
+        (void)snprintf(out, cap, NK_UI_STR(SHARED_ABOUT_VERSION_DATE), version, date);
     } else {
-        (void)snprintf(out, cap, "v%s (dev build)", version);
+        (void)snprintf(out, cap, NK_UI_STR(SHARED_ABOUT_VERSION_DEV), version);
     }
 }
 
@@ -177,14 +178,14 @@ void player_ui_apply_display(NkUi *ui, NkUiViewport *viewport, const PlayerUiDis
 PlayerUiActionKind player_ui_top_bar(NkUi *ui, NkUiId id, PlayerUiRoute active) {
     NkUiSection sections[3];
     int chosen;
-    sections[0].label = "Library";
+    sections[0].label = NK_UI_STR(SHARED_NAV_LIBRARY);
     sections[0].active = active != PLAYER_UI_ROUTE_ABOUT &&
                          active != PLAYER_UI_ROUTE_SETTINGS;
     sections[0].id = PLAYER_UI_ID_TAB_LIBRARY;
-    sections[1].label = "About";
+    sections[1].label = NK_UI_STR(SHARED_NAV_ABOUT);
     sections[1].active = active == PLAYER_UI_ROUTE_ABOUT;
     sections[1].id = PLAYER_UI_ID_TAB_ABOUT;
-    sections[2].label = "Settings";
+    sections[2].label = NK_UI_STR(SHARED_NAV_SETTINGS);
     sections[2].active = active == PLAYER_UI_ROUTE_SETTINGS;
     sections[2].id = PLAYER_UI_ID_TAB_SETTINGS;
     /* Down from a top-bar tab goes to the nearest control under it. */

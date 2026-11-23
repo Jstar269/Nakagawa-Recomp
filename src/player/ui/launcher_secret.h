@@ -15,6 +15,7 @@
    what it returns. */
 
 #include "nk_ui.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "player_ui_nk.h"
 
@@ -69,7 +70,7 @@ size_t launcher_secret_progress(const LauncherSecretDetector *detector);
    "Good evening." 18:00-04:59. */
 const char *launcher_secret_greeting(int hour, int minute);
 /* The toast leaving Love All shows. */
-#define LAUNCHER_SECRET_FAREWELL "Please come again soon!"
+#define LAUNCHER_SECRET_FAREWELL NK_UI_STR(ADAPTER_FAREWELL)
 
 /* ---- The moment ----------------------------------------------------------------------------- */
 

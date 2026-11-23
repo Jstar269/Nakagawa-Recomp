@@ -12,6 +12,7 @@
    (#1791). Under a top bar with SETTINGS active, as the Settings page. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -104,17 +105,17 @@ static void controller_row(NkUi *ui, const PlayerUiControllerModel *model, size_
                                       0.0f);
         if (nk_ui_begin_container(ui, base + 1u, &cell, NULL)) {
             nk_ui_text(ui, base + 2u,
-                       nk_ui_text_clamp(ui, safe_text(name, "Button"), &text, name_width, 1),
+                       nk_ui_text_clamp(ui, safe_text(name, NK_UI_STR(CONTROLLER_BUTTON)), &text, name_width, 1),
                        &text);
             nk_ui_end_container(ui);
         }
     }
     controller_glyph(ui, model, control);
     if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_BUTTON(control),
-                     controller_button_label(ui, capturing ? (model->keyboard ? "Press a key…"
-                                                                              : "Press a button…")
+                     controller_button_label(ui, capturing ? (model->keyboard ? NK_UI_STR(CONTROLLER_PRESS_A_KEY)
+                                                                              : NK_UI_STR(CONTROLLER_PRESS_A_BUTTON))
                                                            : safe_text(model->bindings[control],
-                                                                       "None"),
+                                                                       NK_UI_STR(CONTROLLER_NONE)),
                                              button_width),
                      NK_UI_BUTTON_SMALL | NK_UI_BUTTON_GROW |
                          (capturing ? NK_UI_BUTTON_PRIMARY : 0u))) {
@@ -143,8 +144,9 @@ static void controller_stepper(NkUi *ui, uint32_t k, const char *value, float wi
             nk_ui_end_container(ui);
         }
     }
-    if (nk_ui_button(ui, down, "-", NK_UI_BUTTON_SMALL)) *result = controller_op(down_op, 0u);
-    if (nk_ui_button(ui, up, "+", NK_UI_BUTTON_SMALL)) *result = controller_op(up_op, 0u);
+    if (nk_ui_button(ui, down, NK_UI_STR(CONTROLLER_DECREASE),
+        NK_UI_BUTTON_SMALL)) *result = controller_op(down_op, 0u);
+    if (nk_ui_button(ui, up, NK_UI_STR(CONTROLLER_INCREASE), NK_UI_BUTTON_SMALL)) *result = controller_op(up_op, 0u);
     nk_ui_end_container(ui);
 }
 
@@ -160,7 +162,7 @@ static void controller_stick_choice(NkUi *ui, const PlayerUiControllerModel *mod
     float button = PAD_STICK_BUTTON_WIDTH;
     {
         /* controller_button_label keeps 2 px spare beside the padding. */
-        float need = nk_ui_button_width(ui, "Right stick", NK_UI_BUTTON_SMALL) + 2.0f;
+        float need = nk_ui_button_width(ui, NK_UI_STR(CONTROLLER_RIGHT_STICK), NK_UI_BUTTON_SMALL) + 2.0f;
         if (need > button) button = need;
     }
     row.align_y = NK_UI_ALIGN_CENTER;
@@ -169,7 +171,7 @@ static void controller_stick_choice(NkUi *ui, const PlayerUiControllerModel *mod
         NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
         if (nk_ui_begin_container(ui, base + 1u, &cell, NULL)) {
             nk_ui_text(ui, base + 2u,
-                       nk_ui_text_clamp(ui, "PSP stick", &text, width - button - NK_UI_SPACE_2,
+                       nk_ui_text_clamp(ui, NK_UI_STR(CONTROLLER_PSP_STICK), &text, width - button - NK_UI_SPACE_2,
                                         1),
                        &text);
             nk_ui_end_container(ui);
@@ -180,8 +182,8 @@ static void controller_stick_choice(NkUi *ui, const PlayerUiControllerModel *mod
                                       0.0f);
         if (nk_ui_begin_container(ui, base + 3u, &cell, NULL)) {
             if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_STICK,
-                             controller_button_label(ui, model->stick_right ? "Right stick"
-                                                                            : "Left stick",
+                             controller_button_label(ui, model->stick_right ? NK_UI_STR(CONTROLLER_RIGHT_STICK)
+                                                                            : NK_UI_STR(CONTROLLER_LEFT_STICK),
                                                      button),
                              NK_UI_BUTTON_SMALL | NK_UI_BUTTON_GROW)) {
                 *result = controller_op(PLAYER_UI_CONTROLLER_STICK, 0u);
@@ -209,7 +211,7 @@ static void controller_live(NkUi *ui, const PlayerUiControllerModel *model, floa
 #define PAD_DEVICE_WIDTH 240.0f
 static float controller_device_width(NkUi *ui) {
     /* controller_button_label keeps 2 px spare beside the padding. */
-    float each = nk_ui_button_width(ui, "Controller", NK_UI_BUTTON_SMALL) + 2.0f;
+    float each = nk_ui_button_width(ui, NK_UI_STR(CONTROLLER_CONTROLLER), NK_UI_BUTTON_SMALL) + 2.0f;
     float pair = 2.0f * each + NK_UI_SPACE_2;
     return pair > PAD_DEVICE_WIDTH ? pair : PAD_DEVICE_WIDTH;
 }
@@ -223,12 +225,12 @@ static void controller_device(NkUi *ui, const PlayerUiControllerModel *model,
     uint32_t flags = NK_UI_BUTTON_SMALL | NK_UI_BUTTON_GROW | NK_UI_BUTTON_ROW;
     if (!nk_ui_begin_container(ui, PAD_ID_DEVICE_BUTTONS, &pair, NULL)) return;
     if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_SHOW_PAD,
-                     controller_button_label(ui, "Controller", each),
+                     controller_button_label(ui, NK_UI_STR(CONTROLLER_CONTROLLER), each),
                      flags | (model->keyboard ? 0u : NK_UI_BUTTON_PRIMARY))) {
         *result = controller_op(PLAYER_UI_CONTROLLER_SHOW_CONTROLLER, 0u);
     }
     if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_SHOW_KEYBOARD,
-                     controller_button_label(ui, "Keyboard", each),
+                     controller_button_label(ui, NK_UI_STR(CONTROLLER_KEYBOARD), each),
                      flags | (model->keyboard ? NK_UI_BUTTON_PRIMARY : 0u))) {
         *result = controller_op(PLAYER_UI_CONTROLLER_SHOW_KEYBOARD, 0u);
     }
@@ -240,23 +242,25 @@ static void controller_device(NkUi *ui, const PlayerUiControllerModel *model,
 #define PAD_STICK_NAME_WIDTH 48.0f
 static void controller_keyboard_card(NkUi *ui, const PlayerUiControllerModel *model, float card,
                                      PlayerUiAction *result) {
-    static const char *const kept[] = {"Esc or F1 pauses the game.", "F3 shows the frame rate."};
-    static const char *const directions[PLAYER_UI_CONTROLLER_STICK_KEYS] = {"Up", "Down", "Left",
-                                                                            "Right"};
+    static const char *const kept[] = {NK_UI_STR(CONTROLLER_PAUSE_KEY_HINT), NK_UI_STR(CONTROLLER_FRAME_RATE_KEY_HINT)};
+    static const char *const directions[PLAYER_UI_CONTROLLER_STICK_KEYS] = {
+        NK_UI_STR(CONTROLLER_UP), NK_UI_STR(CONTROLLER_DOWN),
+        NK_UI_STR(CONTROLLER_LEFT), NK_UI_STR(CONTROLLER_RIGHT)
+    };
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
     float inner = card - 2.0f * NK_UI_SPACE_5;
     if (!nk_ui_card_begin(ui, PAD_ID_STICK, sizing_fixed(card), sizing_grow(), NK_UI_SPACE_2)) {
         return;
     }
-    nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x21u, "Analog stick");
+    nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x21u, NK_UI_STR(CONTROLLER_ANALOG_STICK));
     for (size_t i = 0u; i < PLAYER_UI_CONTROLLER_STICK_KEYS; ++i) {
         controller_row(ui, model, PLAYER_UI_CONTROLLER_STICK_KEY + i, directions[i],
                        PAD_STICK_NAME_WIDTH,
                        inner - PAD_STICK_NAME_WIDTH - PAD_GLYPH_CELL - 2.0f * NK_UI_SPACE_2,
                        result);
     }
-    nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x20u, "Keys Nakagawa keeps");
+    nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x20u, NK_UI_STR(CONTROLLER_KEYS_NAKAGAWA_KEEPS));
     for (size_t i = 0u; i < sizeof(kept) / sizeof(kept[0]); ++i) {
         nk_ui_text(ui, (NkUiId)(PAD_ID_TEXT + 0x50u + (NkUiId)i),
                    nk_ui_text_clamp(ui, kept[i], &text, inner, 2), &text);
@@ -300,15 +304,14 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
             /* The SETTINGS tab names the area, so a short window drops the
                heading to keep every row on screen. */
             if (tall) {
-                nk_ui_text_role(ui, PAD_ID_TEXT + 0u, "CONTROLS", NK_UI_TYPE_DISPLAY,
+                nk_ui_text_role(ui, PAD_ID_TEXT + 0u, NK_UI_STR(CONTROLLER_TITLE), NK_UI_TYPE_DISPLAY,
                                 theme->paper);
             }
             if (nk_ui_begin_container(ui, PAD_ID_DEVICE, &row, NULL)) {
                 controller_device(ui, model, result);
                 nk_ui_text(ui, PAD_ID_TEXT + 1u,
                            nk_ui_text_clamp(ui, safe_text(model->status,
-                                                          "Choose a button to change it, then "
-                                                          "press the controller button to use."),
+                                                          NK_UI_STR(CONTROLLER_REMAP_INSTRUCTIONS)),
                                             &text,
                                             column - controller_device_width(ui) - NK_UI_SPACE_3,
                                             1),
@@ -323,9 +326,9 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
         if (nk_ui_card_begin(ui, PAD_ID_BUTTONS, sizing_grow(), sizing_grow(), NK_UI_SPACE_2)) {
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_EYEBROW,
                                             model->scope_title ? theme->ready : theme->muted);
-            (void)snprintf(eyebrow, sizeof(eyebrow), "%s" FLOW_MIDDOT "%s",
-                           model->keyboard ? "Keys" : "Buttons",
-                           safe_text(model->scope, "global mapping"));
+            (void)snprintf(eyebrow, sizeof(eyebrow), NK_UI_STR(CONTROLLER_MAPPING_SCOPE_FORMAT),
+                           model->keyboard ? NK_UI_STR(CONTROLLER_KEYS) : NK_UI_STR(CONTROLLER_BUTTONS),
+                           safe_text(model->scope, NK_UI_STR(CONTROLLER_GLOBAL_MAPPING)));
             nk_ui_text(ui, PAD_ID_TEXT + 0x10u,
                        nk_ui_text_clamp(ui, nk_ui_caps(ui, eyebrow), &text, buttons_inner, 1),
                        &text);
@@ -356,7 +359,7 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
         } else if (nk_ui_card_begin(ui, PAD_ID_STICK, sizing_fixed(stick_card), sizing_grow(),
                                     NK_UI_SPACE_2)) {
             float inner = stick_card - 2.0f * NK_UI_SPACE_5;
-            nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x20u, "Stick and triggers");
+            nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x20u, NK_UI_STR(CONTROLLER_STICK_AND_TRIGGERS));
             controller_stick_choice(ui, model, inner, result);
             controller_stepper(ui, 0u, model->deadzone, inner,
                                PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN,
@@ -368,11 +371,11 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
                                PLAYER_UI_ID_CONTROLLER_TRIGGER_UP,
                                PLAYER_UI_CONTROLLER_TRIGGER_DOWN,
                                PLAYER_UI_CONTROLLER_TRIGGER_UP, result);
-            if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_CALIBRATE, "Calibrate stick",
+            if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_CALIBRATE, NK_UI_STR(CONTROLLER_CALIBRATE_STICK),
                              NK_UI_BUTTON_SMALL | NK_UI_BUTTON_GROW)) {
                 *result = controller_op(PLAYER_UI_CONTROLLER_CALIBRATE, 0u);
             }
-            nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x21u, "Live input");
+            nk_ui_eyebrow(ui, PAD_ID_TEXT + 0x21u, NK_UI_STR(CONTROLLER_LIVE_INPUT));
             controller_live(ui, model, inner);
             nk_ui_end_container(ui);
         }
@@ -382,15 +385,15 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
        reaches it rather than a binding in the grid; Left and Right stay in the row. */
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
     if (nk_ui_begin_container(ui, PAD_ID_ACTIONS, &layout, NULL)) {
-        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_RESET, "Reset to defaults",
+        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_RESET, NK_UI_STR(CONTROLLER_RESET_TO_DEFAULTS),
                          NK_UI_BUTTON_ROW)) {
             *result = controller_op(PLAYER_UI_CONTROLLER_RESET, 0u);
         }
         /* Global or this game's own, offered only with a game selected (#520). */
         if (model->offer_scope &&
             nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_SCOPE,
-                         model->scope_title ? "Use the global mapping"
-                                            : "Use this game's own mapping",
+                         model->scope_title ? NK_UI_STR(CONTROLLER_USE_THE_GLOBAL_MAPPING)
+                                            : NK_UI_STR(CONTROLLER_USE_THIS_GAMES_OWN_MAPPING),
                          NK_UI_BUTTON_ROW)) {
             *result = controller_op(PLAYER_UI_CONTROLLER_TOGGLE_SCOPE, 0u);
         }
@@ -400,10 +403,10 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
            has no room for it at the largest text size. */
         if (model->keyboard &&
             nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_AIM_OPEN,
-                         safe_text(model->aim, "Mouse aim: Off"), NK_UI_BUTTON_ROW)) {
+                         safe_text(model->aim, NK_UI_STR(CONTROLLER_AIM_OFF_LABEL)), NK_UI_BUTTON_ROW)) {
             *result = controller_op(PLAYER_UI_CONTROLLER_AIM_OPEN, 0u);
         }
-        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_BACK, "Back", NK_UI_BUTTON_ROW)) {
+        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_BACK, NK_UI_STR(CONTROLLER_BACK), NK_UI_BUTTON_ROW)) {
             *result = controller_op(PLAYER_UI_CONTROLLER_BACK, 0u);
         }
         nk_ui_end_container(ui);
@@ -420,8 +423,8 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
 #define PAD_AIM_ROW(k) ((NkUiId)(PAD_ID_AIM_ROWS + (uint32_t)(k) * 4u))
 #define PAD_AIM_CELL_WIDTH 112.0f
 static float controller_aim_cell_width(NkUi *ui) {
-    float word = nk_ui_button_width(ui, "Off", 0u);
-    float steps = 2.0f * nk_ui_button_width(ui, "+", 0u) + NK_UI_SPACE_2;
+    float word = nk_ui_button_width(ui, NK_UI_STR(CONTROLLER_OFF), 0u);
+    float steps = 2.0f * nk_ui_button_width(ui, NK_UI_STR(CONTROLLER_INCREASE), 0u) + NK_UI_SPACE_2;
     float cell = PAD_AIM_CELL_WIDTH;
     if (word > cell) cell = word;
     if (steps > cell) cell = steps;
@@ -461,7 +464,7 @@ static void controller_aim_switch(NkUi *ui, uint32_t k, const char *name, bool o
                                   PlayerUiControllerOp op, float cell_width, float width,
                                   PlayerUiAction *result) {
     if (!controller_aim_row_begin(ui, k, cell_width)) return;
-    if (nk_ui_button(ui, id, on ? "On" : "Off",
+    if (nk_ui_button(ui, id, on ? NK_UI_STR(CONTROLLER_ON) : NK_UI_STR(CONTROLLER_OFF),
                      NK_UI_BUTTON_GROW | NK_UI_BUTTON_ROW | (on ? NK_UI_BUTTON_PRIMARY : 0u))) {
         *result = controller_op(op, 0u);
     }
@@ -475,8 +478,8 @@ static void controller_aim_stepper(NkUi *ui, uint32_t k, const char *value, NkUi
                                    PlayerUiAction *result) {
     uint32_t flags = NK_UI_BUTTON_GROW | NK_UI_BUTTON_ROW;
     if (!controller_aim_row_begin(ui, k, cell_width)) return;
-    if (nk_ui_button(ui, down, "-", flags)) *result = controller_op(down_op, 0u);
-    if (nk_ui_button(ui, up, "+", flags)) *result = controller_op(up_op, 0u);
+    if (nk_ui_button(ui, down, NK_UI_STR(CONTROLLER_DECREASE), flags)) *result = controller_op(down_op, 0u);
+    if (nk_ui_button(ui, up, NK_UI_STR(CONTROLLER_INCREASE), flags)) *result = controller_op(up_op, 0u);
     controller_aim_row_end(ui, k, value, width - cell_width - NK_UI_SPACE_3);
 }
 
@@ -493,41 +496,40 @@ static void controller_aim(NkUi *ui, const PlayerUiControllerModel *model, float
     if (card > 720.0f) card = 720.0f;
     inner = card - 56.0f;
     if (!nk_ui_dialog_begin(ui, FLOW_ID_CARD, card)) return;
-    (void)snprintf(eyebrow, sizeof(eyebrow), "Mouse aiming" FLOW_MIDDOT "%s",
-                   safe_text(model->scope, "global mapping"));
+    (void)snprintf(eyebrow, sizeof(eyebrow), NK_UI_STR(CONTROLLER_MOUSE_AIM_SCOPE_FORMAT),
+                   safe_text(model->scope, NK_UI_STR(CONTROLLER_GLOBAL_MAPPING)));
     scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, eyebrow,
                      model->scope_title ? theme->ready : theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, "Aim with the mouse", NK_UI_TYPE_TITLE, theme->paper);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(CONTROLLER_AIM_WITH_THE_MOUSE), NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY, theme->muted);
         nk_ui_text(ui, FLOW_ID_LEAD,
                    nk_ui_text_clamp(ui,
-                                    "In a game, the mouse pushes the PSP stick and the game "
-                                    "keeps the pointer until you pause. A change applies when "
-                                    "a game next starts.",
+                                    NK_UI_STR(CONTROLLER_MOUSE_AIM_LEAD),
                                     &text, inner, 3),
                    &text);
     }
     if (scr_wizard_box_begin(ui, 0u)) {
         float rows = inner - 32.0f;
         float cell = controller_aim_cell_width(ui);
-        controller_aim_switch(ui, 0u, "Mouse aim", model->aim_on,
+        controller_aim_switch(ui, 0u, NK_UI_STR(CONTROLLER_MOUSE_AIM), model->aim_on,
                               PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE,
                               PLAYER_UI_CONTROLLER_AIM_TOGGLE, cell, rows, result);
-        controller_aim_stepper(ui, 1u, safe_text(model->aim_speed, "Speed 100%"),
+        controller_aim_stepper(ui, 1u, safe_text(model->aim_speed, NK_UI_STR(CONTROLLER_DEFAULT_AIM_SPEED_LABEL)),
                                PLAYER_UI_ID_CONTROLLER_AIM_SPEED_DOWN,
                                PLAYER_UI_ID_CONTROLLER_AIM_SPEED_UP,
                                PLAYER_UI_CONTROLLER_AIM_SPEED_DOWN,
                                PLAYER_UI_CONTROLLER_AIM_SPEED_UP, cell, rows, result);
-        controller_aim_stepper(ui, 2u, safe_text(model->aim_smoothing, "Smoothing 0%"),
+        controller_aim_stepper(ui, 2u, safe_text(model->aim_smoothing,
+            NK_UI_STR(CONTROLLER_DEFAULT_AIM_SMOOTHING_LABEL)),
                                PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_DOWN,
                                PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_UP,
                                PLAYER_UI_CONTROLLER_AIM_SMOOTHING_DOWN,
                                PLAYER_UI_CONTROLLER_AIM_SMOOTHING_UP, cell, rows, result);
-        controller_aim_switch(ui, 3u, "Invert left and right", model->aim_invert_x,
+        controller_aim_switch(ui, 3u, NK_UI_STR(CONTROLLER_INVERT_LEFT_AND_RIGHT), model->aim_invert_x,
                               PLAYER_UI_ID_CONTROLLER_AIM_INVERT_X,
                               PLAYER_UI_CONTROLLER_AIM_INVERT_X, cell, rows, result);
-        controller_aim_switch(ui, 4u, "Invert up and down", model->aim_invert_y,
+        controller_aim_switch(ui, 4u, NK_UI_STR(CONTROLLER_INVERT_UP_AND_DOWN), model->aim_invert_y,
                               PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y,
                               PLAYER_UI_CONTROLLER_AIM_INVERT_Y, cell, rows, result);
         nk_ui_end_container(ui);
@@ -535,7 +537,7 @@ static void controller_aim(NkUi *ui, const PlayerUiControllerModel *model, float
     row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
     row.padding_top = NK_UI_SPACE_1;
     if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_AIM_DONE, "Done",
+        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_AIM_DONE, NK_UI_STR(CONTROLLER_DONE),
                          NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_ROW)) {
             *result = controller_op(PLAYER_UI_CONTROLLER_AIM_DONE, 0u);
         }
@@ -560,26 +562,23 @@ static void controller_calibration(NkUi *ui, const PlayerUiControllerModel *mode
     inner = card - 56.0f;
     switch (model->page) {
         case PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_REST:
-            step = "Step 1 of 3: rest";
-            title = "Leave the stick and triggers alone";
-            lead = "Don't touch the stick or the triggers for about a second while Nakagawa "
-                   "reads where they rest.";
+            step = NK_UI_STR(CONTROLLER_CALIBRATION_REST_STEP);
+            title = NK_UI_STR(CONTROLLER_CALIBRATION_REST_TITLE);
+            lead = NK_UI_STR(CONTROLLER_CALIBRATION_REST_LEAD);
             break;
         case PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_EXTREMES:
-            step = "Step 2 of 3: full range";
-            title = "Move the stick and press the triggers";
-            lead = "Turn the stick round its edge a few times and press both triggers all the "
-                   "way, then choose Finish.";
-            primary = "Finish";
+            step = NK_UI_STR(CONTROLLER_CALIBRATION_RANGE_STEP);
+            title = NK_UI_STR(CONTROLLER_CALIBRATION_RANGE_TITLE);
+            lead = NK_UI_STR(CONTROLLER_CALIBRATION_RANGE_LEAD);
+            primary = NK_UI_STR(CONTROLLER_FINISH);
             primary_op = PLAYER_UI_CONTROLLER_CALIBRATION_FINISH;
             break;
         case PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_RESULT:
         default:
-            step = "Step 3 of 3: check";
-            title = "Use this calibration?";
-            lead = "These are the resting points and ranges Nakagawa read. Accept uses them for "
-                   "the mapping you are editing.";
-            primary = "Accept";
+            step = NK_UI_STR(CONTROLLER_CALIBRATION_CONFIRM_STEP);
+            title = NK_UI_STR(CONTROLLER_CALIBRATION_CONFIRM_TITLE);
+            lead = NK_UI_STR(CONTROLLER_CALIBRATION_CONFIRM_LEAD);
+            primary = NK_UI_STR(CONTROLLER_ACCEPT);
             primary_op = PLAYER_UI_CONTROLLER_CALIBRATION_ACCEPT;
             break;
     }
@@ -605,7 +604,7 @@ static void controller_calibration(NkUi *ui, const PlayerUiControllerModel *mode
                          NK_UI_BUTTON_PRIMARY)) {
             *result = controller_op(primary_op, 0u);
         }
-        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_CALIBRATION_CANCEL, "Cancel",
+        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_CALIBRATION_CANCEL, NK_UI_STR(CONTROLLER_CANCEL),
                          primary == NULL ? NK_UI_BUTTON_PRIMARY : 0u)) {
             *result = controller_op(PLAYER_UI_CONTROLLER_CALIBRATION_CANCEL, 0u);
         }
@@ -616,15 +615,15 @@ static void controller_calibration(NkUi *ui, const PlayerUiControllerModel *mode
 
 PlayerUiAction player_ui_screen_controller(NkUi *ui, const PlayerUiControllerModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Change"},
-        {NK_UI_PROMPT_ACT_BACK, "Back to settings"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(CONTROLLER_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(CONTROLLER_CHANGE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(CONTROLLER_BACK_TO_SETTINGS)}
     };
     static const NkUiPromptItem prompts_calibrating[] = {
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"}, {NK_UI_PROMPT_ACT_BACK, "Cancel"}
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(CONTROLLER_SELECT)}, {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(CONTROLLER_CANCEL)}
     };
     static const NkUiPromptItem prompts_aim[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Change"},
-        {NK_UI_PROMPT_ACT_BACK, "Back to the keys"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(CONTROLLER_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(CONTROLLER_CHANGE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(CONTROLLER_BACK_TO_THE_KEYS)}
     };
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     bool aiming;

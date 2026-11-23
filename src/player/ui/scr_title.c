@@ -6,6 +6,7 @@
    Layout follows the design system (docs/PLAYER_UI_DESIGN.md). */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -134,12 +135,12 @@ PlayerUiTier player_ui_tier_for_category(const char *category) {
 
 const char *player_ui_tier_word(PlayerUiTier tier) {
     switch (tier) {
-        case PLAYER_UI_TIER_PERFECT: return "Perfect";
-        case PLAYER_UI_TIER_PLAYABLE: return "Playable";
-        case PLAYER_UI_TIER_IN_GAME: return "In-game";
-        case PLAYER_UI_TIER_MENU: return "Menu";
-        case PLAYER_UI_TIER_TITLE_SCREEN: return "Title screen";
-        case PLAYER_UI_TIER_WONT_BOOT: return "Won't boot";
+        case PLAYER_UI_TIER_PERFECT: return NK_UI_STR(TITLE_TIER_PERFECT);
+        case PLAYER_UI_TIER_PLAYABLE: return NK_UI_STR(TITLE_TIER_PLAYABLE);
+        case PLAYER_UI_TIER_IN_GAME: return NK_UI_STR(TITLE_TIER_IN_GAME);
+        case PLAYER_UI_TIER_MENU: return NK_UI_STR(TITLE_TIER_MENU);
+        case PLAYER_UI_TIER_TITLE_SCREEN: return NK_UI_STR(TITLE_TIER_TITLE_SCREEN);
+        case PLAYER_UI_TIER_WONT_BOOT: return NK_UI_STR(TITLE_TIER_WONT_BOOT);
         case PLAYER_UI_TIER_NONE:
         default: return NULL;
     }
@@ -162,17 +163,16 @@ static uint32_t tier_rgba(const NkUiTheme *theme, PlayerUiTier tier) {
 /* The package card's sentence for each package state (#1297). */
 static const char *package_state_text(PlayerUiPackageState state) {
     switch (state) {
-        case PLAYER_UI_PACKAGE_READY: return "Built for this PC and ready to play.";
-        case PLAYER_UI_PACKAGE_CHECKING: return "Checking the package for this game.";
-        case PLAYER_UI_PACKAGE_BUILDING: return "Building the package for this game.";
-        case PLAYER_UI_PACKAGE_CHECK_FAILED: return "The package could not be checked.";
+        case PLAYER_UI_PACKAGE_READY: return NK_UI_STR(TITLE_PACKAGE_READY);
+        case PLAYER_UI_PACKAGE_CHECKING: return NK_UI_STR(TITLE_PACKAGE_CHECKING);
+        case PLAYER_UI_PACKAGE_BUILDING: return NK_UI_STR(TITLE_PACKAGE_BUILDING);
+        case PLAYER_UI_PACKAGE_CHECK_FAILED: return NK_UI_STR(TITLE_PACKAGE_CHECK_FAILED);
         case PLAYER_UI_PACKAGE_STARTING:
-            return "Starting the game. Its window opens when it is ready.";
+            return NK_UI_STR(TITLE_PACKAGE_STARTING);
         case PLAYER_UI_PACKAGE_RUNNING:
-            return "Built, in use by the running game. Stop the game to rebuild or change "
-                   "settings.";
+            return NK_UI_STR(TITLE_PACKAGE_RUNNING);
         case PLAYER_UI_PACKAGE_MISSING:
-        default: return "The package for this game is not ready yet.";
+        default: return NK_UI_STR(TITLE_PACKAGE_NOT_READY);
     }
 }
 
@@ -281,7 +281,7 @@ static void title_achievement_row(NkUi *ui, size_t index, const PlayerUiAchievem
     char points[16];
     NkUiTextStyle pill_text = nk_ui_type(NK_UI_TYPE_LABEL_S, unlocked ? theme->paper
                                                                        : theme->muted);
-    (void)snprintf(points, sizeof(points), "%u", (unsigned)row->points);
+    (void)snprintf(points, sizeof(points), NK_UI_STR(TITLE_ACHIEVEMENT_ROW_POINTS_FORMAT), (unsigned)row->points);
     const char *pill_label = nk_ui_frame_text(ui, points);
     const float pill_w = nk_ui_text_width(ui, pill_label, &pill_text) + 2.0f * 10.0f + 2.0f;
     const float text_w = inner - side - pill_w - 2.0f * NK_UI_SPACE_3 - 2.0f * NK_UI_SPACE_2;
@@ -322,7 +322,7 @@ static void title_achievement_row(NkUi *ui, size_t index, const PlayerUiAchievem
             NkUiTextStyle words = nk_ui_type(NK_UI_TYPE_CAPTION,
                                              unlocked ? theme->muted : theme->dim);
             nk_ui_text(ui, id + 4u,
-                       nk_ui_text_clamp(ui, safe_text(row->title, "Untitled achievement"),
+                       nk_ui_text_clamp(ui, safe_text(row->title, NK_UI_STR(TITLE_ACHIEVEMENT_UNTITLED)),
                                         &title, text_w, 2), &title);
             if (row->description != NULL && row->description[0] != '\0') {
                 nk_ui_text(ui, id + 5u,
@@ -385,7 +385,7 @@ static void title_achievements_notice(NkUi *ui, const char *reason, float inner)
         if (nk_ui_begin_container(ui, TITLE_ID_ACHIEVEMENTS_NOTICE_TEXT, &column, NULL)) {
             NkUiTextStyle words = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
             nk_ui_text_role(ui, TITLE_ID_ACHIEVEMENTS_NOTICE_EYEBROW,
-                            nk_ui_caps(ui, "No achievements this session"), NK_UI_TYPE_EYEBROW,
+                            nk_ui_caps(ui, NK_UI_STR(TITLE_ACHIEVEMENT_NONE)), NK_UI_TYPE_EYEBROW,
                             theme->warning);
             nk_ui_text(ui, TITLE_ID_ACHIEVEMENTS_NOTICE_REASON, reason, &words);
             nk_ui_end_container(ui);
@@ -405,7 +405,7 @@ static void title_achievements_card(NkUi *ui, const PlayerUiTitleModel *model, f
                           NK_UI_SPACE_3)) {
         return;
     }
-    nk_ui_eyebrow(ui, TITLE_ID_ACHIEVEMENTS_HEAD, "RetroAchievements \xC2\xB7 Casual");
+    nk_ui_eyebrow(ui, TITLE_ID_ACHIEVEMENTS_HEAD, NK_UI_STR(TITLE_ACHIEVEMENTS_HEADING));
     if (model->achievement_count > 0u) {
         char count[64];
         char points[64];
@@ -414,9 +414,9 @@ static void title_achievements_card(NkUi *ui, const PlayerUiTitleModel *model, f
         const size_t total = model->achievement_total > model->achievement_count
                                  ? model->achievement_total : model->achievement_count;
         row.align_y = NK_UI_ALIGN_END;
-        (void)snprintf(count, sizeof(count), "%u of %zu unlocked",
+        (void)snprintf(count, sizeof(count), NK_UI_STR(TITLE_ACHIEVEMENT_UNLOCKED_FORMAT),
                        (unsigned)model->achievements_unlocked, total);
-        (void)snprintf(points, sizeof(points), "%u of %u points",
+        (void)snprintf(points, sizeof(points), NK_UI_STR(TITLE_ACHIEVEMENT_POINTS_FORMAT),
                        (unsigned)model->achievements_points_unlocked,
                        (unsigned)model->achievements_points_total);
         if (nk_ui_begin_container(ui, TITLE_ID_ACHIEVEMENTS_PROGRESS, &row, NULL)) {
@@ -615,15 +615,15 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
             bool demo = title->art_kind != NK_UI_ART_NONE;
             if (title->cover != NULL) {
                 char cover_size[32];
-                (void)snprintf(cover_size, sizeof(cover_size), "%u \xC3\x97 %u",
+                (void)snprintf(cover_size, sizeof(cover_size), NK_UI_STR(TITLE_ART_DIMENSIONS_FORMAT),
                                (unsigned)title->cover->width, (unsigned)title->cover->height);
                 nk_ui_hero(ui, TITLE_ID_HERO, NK_UI_ART_NONE, title->disc_id,
-                           title->cover, NULL, aside, "Box art", cover_size);
+                           title->cover, NULL, aside, NK_UI_STR(TITLE_BOX_ART), cover_size);
             } else {
                 nk_ui_hero(ui, TITLE_ID_HERO, (NkUiArtKind)title->art_kind, title->disc_id,
                            title->icon, title->picture, aside,
-                           demo ? "Picture made by the project" : "Your disc",
-                           "480 \xC3\x97 272");
+                           demo ? NK_UI_STR(TITLE_PROJECT_PICTURE) : NK_UI_STR(TITLE_YOUR_DISC),
+                           NK_UI_STR(TITLE_DISC_PICTURE_DIMENSIONS));
             }
             if (nk_ui_card_begin(ui, TITLE_ID_STATUS_CARD, sizing_grow(), sizing_fit(),
                                  NK_UI_SPACE_3)) {
@@ -631,12 +631,12 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                               NK_UI_SPACE_3);
                 head.align_y = NK_UI_ALIGN_CENTER;
                 if (nk_ui_begin_container(ui, TITLE_ID_STATUS_HEAD, &head, NULL)) {
-                    nk_ui_eyebrow(ui, TITLE_ID_STATUS_EYEBROW, "Package");
+                    nk_ui_eyebrow(ui, TITLE_ID_STATUS_EYEBROW, NK_UI_STR(TITLE_PACKAGE_HEADING));
                     if (title->package_state == PLAYER_UI_PACKAGE_STARTING ||
                         title->package_state == PLAYER_UI_PACKAGE_RUNNING) {
                         /* The header badge says Starting or Running once; the
                            package card describes the package. */
-                        nk_ui_status_pill(ui, TITLE_ID_STATUS_PILL, "\xE2\x97\x8F", "Ready",
+                        nk_ui_status_pill(ui, TITLE_ID_STATUS_PILL, "\xE2\x97\x8F", NK_UI_STR(TITLE_READY),
                                           theme->ready);
                     } else if (title->library_status != NULL &&
                                title->library_status[0] != '\0') {
@@ -687,8 +687,8 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
         layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_grow(), 14.0f);
         if (nk_ui_begin_container(ui, TITLE_ID_MAIN, &layout, NULL)) {
             NkUiLayout row;
-            nk_ui_eyebrow(ui, TITLE_ID_CRUMB, "Library \xE2\x80\xBA Title");
-            nk_ui_text_role(ui, TITLE_ID_NAME, safe_text(title->title, "Untitled PSP game"),
+            nk_ui_eyebrow(ui, TITLE_ID_CRUMB, NK_UI_STR(TITLE_BREADCRUMB));
+            nk_ui_text_role(ui, TITLE_ID_NAME, safe_text(title->title, NK_UI_STR(TITLE_UNTITLED_GAME)),
                             NK_UI_TYPE_TITLE_XL, theme->paper);
             if (title->disc_id != NULL && title->disc_id[0] != '\0') {
                 nk_ui_text_role(ui, TITLE_ID_DISC, title->disc_id, NK_UI_TYPE_DATA,
@@ -702,7 +702,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 }
                 nk_ui_tag(ui, TITLE_ID_CHIP_BADGE,
                           safe_text(title->badge, title->art_kind != NK_UI_ART_NONE
-                                                      ? "Showcase demo" : "Your disc"));
+                                                      ? NK_UI_STR(TITLE_SHOWCASE_BADGE) : NK_UI_STR(TITLE_YOUR_DISC)));
                 nk_ui_end_container(ui);
             }
             /* Disc verification: what the badge's Verified retail, Modified
@@ -715,22 +715,22 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 nk_ui_card_begin(ui, TITLE_ID_STALL_NOTICE, sizing_grow(), sizing_fit(),
                                  NK_UI_SPACE_2)) {
                 nk_ui_eyebrow(ui, TITLE_ID_STALL_EYEBROW,
-                              model->stalled_game_dark_picture ? "Black screen" : "No new frames");
+                              model->stalled_game_dark_picture ? NK_UI_STR(TITLE_BLACK_SCREEN) : NK_UI_STR(TITLE_NO_NEW_FRAMES));
                 nk_ui_text_role(ui, TITLE_ID_STALL_TEXT,
                                 model->stalled_game_dark_picture
-                                    ? "The game is running but has shown only a black screen for 30 seconds. It may be stuck."
-                                    : "The game hasn't drawn anything new for 30 seconds. It may be stuck.",
+                                    ? NK_UI_STR(TITLE_BLACK_SCREEN_DETAIL)
+                                    : NK_UI_STR(TITLE_NO_NEW_FRAMES_DETAIL),
                                 NK_UI_TYPE_BODY_S, theme->paper);
                 row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
                 row.align_y = NK_UI_ALIGN_CENTER;
                 if (nk_ui_begin_container(ui, TITLE_ID_STALL_ACTIONS, &row, NULL)) {
                     if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_STALL_KEEP_WAITING,
-                                     "Keep waiting", NK_UI_BUTTON_LARGE)) {
+                                     NK_UI_STR(TITLE_KEEP_WAITING), NK_UI_BUTTON_LARGE)) {
                         result = action(PLAYER_UI_ACTION_STALL_KEEP_WAITING,
                                         model->title_index, PLAYER_UI_PRIMARY_NONE);
                     }
                     if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_STALL_STOP_GAME,
-                                     "Stop game", NK_UI_BUTTON_LARGE | NK_UI_BUTTON_DANGER)) {
+                                     NK_UI_STR(TITLE_STOP_GAME), NK_UI_BUTTON_LARGE | NK_UI_BUTTON_DANGER)) {
                         result = action(PLAYER_UI_ACTION_STALL_STOP_GAME,
                                         model->title_index, PLAYER_UI_PRIMARY_NONE);
                     }
@@ -748,14 +748,14 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
                 row.align_y = NK_UI_ALIGN_CENTER;
                 if (nk_ui_begin_container(ui, TITLE_ID_RENDER_HEAD, &row, NULL)) {
-                    nk_ui_eyebrow(ui, TITLE_ID_RENDER_EYEBROW, "Picture");
+                    nk_ui_eyebrow(ui, TITLE_ID_RENDER_EYEBROW, NK_UI_STR(TITLE_PICTURE_HEADING));
                     nk_ui_status_pill(ui, TITLE_ID_RENDER_PILL, "\xE2\x97\x8F",
                                       model->render_notice_heading, theme->accent_dark);
                     nk_ui_end_container(ui);
                 }
                 nk_ui_text_role(ui, TITLE_ID_RENDER_TEXT, model->render_notice_text,
                                 NK_UI_TYPE_BODY_S, theme->paper);
-                if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE, "Hide",
+                if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE, NK_UI_STR(TITLE_HIDE),
                                  NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                     result = action(PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, model->title_index,
                                     PLAYER_UI_PRIMARY_NONE);
@@ -770,7 +770,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
             if (model->font_note_text != NULL && model->font_note_text[0] != '\0' &&
                 nk_ui_card_begin(ui, TITLE_ID_FONT_NOTE, sizing_grow(), sizing_fit(),
                                  NK_UI_SPACE_2)) {
-                nk_ui_eyebrow(ui, TITLE_ID_FONT_EYEBROW, "Fonts");
+                nk_ui_eyebrow(ui, TITLE_ID_FONT_EYEBROW, NK_UI_STR(TITLE_FONTS_HEADING));
                 nk_ui_text_role(ui, TITLE_ID_FONT_TEXT, model->font_note_text, NK_UI_TYPE_BODY_S,
                                 theme->paper);
                 row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
@@ -785,14 +785,14 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                          width - 2.0f * gutter - NK_UI_DETAIL_GAP - aside -
                                              2.0f * NK_UI_SPACE_5)) {
                         nk_ui_flow_item(ui, &flow,
-                                        nk_ui_button_width(ui, "Get fonts from my PSP", flags));
+                                        nk_ui_button_width(ui, NK_UI_STR(TITLE_GET_PSP_FONTS), flags));
                         if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_FONT_NOTE_GET,
-                                         "Get fonts from my PSP", flags)) {
+                                         NK_UI_STR(TITLE_GET_PSP_FONTS), flags)) {
                             result = action(PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS,
                                             model->title_index, PLAYER_UI_PRIMARY_NONE);
                         }
-                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Hide", flags));
-                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_FONT_NOTE_HIDE, "Hide", flags)) {
+                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(TITLE_HIDE), flags));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_FONT_NOTE_HIDE, NK_UI_STR(TITLE_HIDE), flags)) {
                             result = action(PLAYER_UI_ACTION_HIDE_FONT_NOTE, model->title_index,
                                             PLAYER_UI_PRIMARY_NONE);
                         }
@@ -816,7 +816,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                        one on the page. */
                     bool stop_in_stall_card = model->stalled_game_notice_visible &&
                         title->primary_action == PLAYER_UI_PRIMARY_STOP_GAME;
-                    const char *primary = safe_text(title->primary_action_label, "Unavailable");
+                    const char *primary = safe_text(title->primary_action_label, NK_UI_STR(TITLE_UNAVAILABLE));
                     uint32_t primary_flags = NK_UI_BUTTON_LARGE |
                         (title->primary_action_enabled ? NK_UI_BUTTON_PRIMARY
                                                        : NK_UI_BUTTON_DISABLED);
@@ -833,8 +833,8 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                        Rebuild sits beside it (the package card says why). */
                     if (title->rebuild_offered) {
                         nk_ui_flow_item(ui, &flow,
-                                        nk_ui_button_width(ui, "Rebuild", NK_UI_BUTTON_LARGE));
-                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REBUILD, "Rebuild",
+                                        nk_ui_button_width(ui, NK_UI_STR(TITLE_REBUILD), NK_UI_BUTTON_LARGE));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REBUILD, NK_UI_STR(TITLE_REBUILD),
                                          NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result = action(PLAYER_UI_ACTION_REBUILD, model->title_index,
                                             (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_TITLE);
@@ -844,8 +844,8 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                        Remove from queue while it waits (the package card says
                        its place). */
                     if (title->queue_add_offered || title->queue_remove_offered) {
-                        const char *queue = title->queue_add_offered ? "Add to queue"
-                                                                     : "Remove from queue";
+                        const char *queue = title->queue_add_offered ? NK_UI_STR(TITLE_QUEUE_ADD)
+                                                                     : NK_UI_STR(TITLE_QUEUE_REMOVE);
                         nk_ui_flow_item(ui, &flow,
                                         nk_ui_button_width(ui, queue, NK_UI_BUTTON_LARGE));
                         if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_QUEUE, queue,
@@ -857,13 +857,13 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                         }
                     }
                     /* Saves (#1883): back up, restore, add a save, open the folder. */
-                    nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Saves", save_flags));
-                    if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_SAVES, "Saves", save_flags)) {
+                    nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(TITLE_SAVES), save_flags));
+                    if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_SAVES, NK_UI_STR(TITLE_SAVES), save_flags)) {
                         result = action(PLAYER_UI_ACTION_OPEN_SAVES, model->title_index,
                                         PLAYER_UI_PRIMARY_NONE);
                     }
-                    nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Back", NK_UI_BUTTON_LARGE));
-                    if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_BACK, "Back", NK_UI_BUTTON_LARGE)) {
+                    nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(TITLE_BACK), NK_UI_BUTTON_LARGE));
+                    if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_BACK, NK_UI_STR(TITLE_BACK), NK_UI_BUTTON_LARGE)) {
                         result = action(PLAYER_UI_ACTION_BACK, model->title_index,
                                         PLAYER_UI_PRIMARY_NONE);
                     }
@@ -880,13 +880,13 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
                 row.align_y = NK_UI_ALIGN_CENTER;
                 if (nk_ui_begin_container(ui, TITLE_ID_INPUT_ACTIONS, &row, NULL)) {
-                    if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_CHECK_AGAIN, "Check again", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_CHECK_AGAIN, NK_UI_STR(TITLE_CHECK_AGAIN), 0u)) {
                         result = action(PLAYER_UI_ACTION_CHECK_INPUT_AGAIN,
                                         model->title_index, PLAYER_UI_PRIMARY_NONE);
                     }
                     if (model->input_guide.folder != NULL &&
                         model->input_guide.folder[0] != '\0' &&
-                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_OPEN_INPUT_FOLDER, "Open folder",
+                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_OPEN_INPUT_FOLDER, NK_UI_STR(TITLE_OPEN_FOLDER),
                                      0u)) {
                         result = action(PLAYER_UI_ACTION_OPEN_BUILD_INPUT_FOLDER,
                                         model->title_index, PLAYER_UI_PRIMARY_NONE);
@@ -900,7 +900,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                 NK_UI_TYPE_BODY_S, theme->error);
                 if (title->build_preflight_folder != NULL &&
                     title->build_preflight_folder[0] != '\0' &&
-                    nk_ui_button(ui, TITLE_ID_BUILD_FOLDER, "Open folder", 0u)) {
+                    nk_ui_button(ui, TITLE_ID_BUILD_FOLDER, NK_UI_STR(TITLE_OPEN_FOLDER), 0u)) {
                     result = action(PLAYER_UI_ACTION_OPEN_BUILD_INPUT_FOLDER,
                                     model->title_index, PLAYER_UI_PRIMARY_NONE);
                 }
@@ -916,13 +916,12 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                             2.0f * NK_UI_SPACE_5;
                 char line[320];
                 NkUiTextStyle name = nk_ui_type(NK_UI_TYPE_HEADING, theme->paper);
-                (void)snprintf(line, sizeof(line), "Starting %s\xE2\x80\xA6",
-                               safe_text(title->title, "the game"));
+                (void)snprintf(line, sizeof(line), NK_UI_STR(TITLE_STARTING_FORMAT),
+                               safe_text(title->title, NK_UI_STR(TITLE_GAME_FALLBACK)));
                 nk_ui_text(ui, TITLE_ID_START_NAME,
                            nk_ui_text_clamp(ui, line, &name, bar, 1), &name);
                 nk_ui_text_role(ui, TITLE_ID_START_TEXT,
-                                "Its window opens when it is ready. The first start can "
-                                "take several seconds.",
+                                NK_UI_STR(TITLE_STARTING_DETAIL),
                                 NK_UI_TYPE_BODY_S, theme->muted);
                 nk_ui_progress_bar(ui, TITLE_ID_START_BAR, bar > 40.0f ? bar : 40.0f,
                                    -1.0f, model->now_s);
@@ -937,7 +936,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                               NK_UI_SPACE_3);
                 head.align_y = NK_UI_ALIGN_CENTER;
                 if (nk_ui_begin_container(ui, TITLE_ID_COMPAT_HEAD, &head, NULL)) {
-                    nk_ui_eyebrow(ui, TITLE_ID_COMPAT_EYEBROW, "What to expect");
+                    nk_ui_eyebrow(ui, TITLE_ID_COMPAT_EYEBROW, NK_UI_STR(TITLE_COMPATIBILITY_HEADING));
                     const char *tier = player_ui_tier_word(title->compatibility_tier);
                     if (tier != NULL) {
                         nk_ui_status_pill(ui, TITLE_ID_COMPAT_TIER, NULL, tier,
@@ -947,7 +946,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 }
                 nk_ui_text_role(ui, TITLE_ID_COMPAT_EXPECT,
                                 safe_text(title->compatibility_expect,
-                                          "No one has tried this game in Nakagawa yet."),
+                                          NK_UI_STR(TITLE_COMPATIBILITY_UNTRIED)),
                                 NK_UI_TYPE_BODY_S, theme->paper);
                 if (title->compatibility_known_issues != NULL &&
                     title->compatibility_known_issues[0] != '\0') {
@@ -959,7 +958,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                     title->compatibility_category[0] != '\0') {
                     char line[160];
                     (void)snprintf(line, sizeof(line),
-                                   "Developer view: \"%s\" in docs/COMPATIBILITY.md.",
+                                   NK_UI_STR(TITLE_COMPATIBILITY_DEVELOPER_FORMAT),
                                    title->compatibility_category);
                     nk_ui_text_role(ui, TITLE_ID_COMPAT_CATEGORY, nk_ui_frame_text(ui, line),
                                     NK_UI_TYPE_FOOTNOTE, theme->dim);
@@ -982,10 +981,10 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                               NK_UI_SPACE_3);
                 head.align_y = NK_UI_ALIGN_CENTER;
                 if (nk_ui_begin_container(ui, TITLE_ID_ENH_HEAD, &head, NULL)) {
-                    nk_ui_eyebrow(ui, TITLE_ID_ENH_EYEBROW, "Enhancements");
+                    nk_ui_eyebrow(ui, TITLE_ID_ENH_EYEBROW, NK_UI_STR(TITLE_ENHANCEMENTS_HEADING));
                     if (title->enhancement_shown) {
                         nk_ui_tag(ui, TITLE_ID_ENH_TAG,
-                                  title->enhancement_released ? "Optional" : "Experimental");
+                                  title->enhancement_released ? NK_UI_STR(TITLE_ENHANCEMENT_OPTIONAL) : NK_UI_STR(TITLE_ENHANCEMENT_EXPERIMENTAL));
                     }
                     nk_ui_end_container(ui);
                 }
@@ -996,12 +995,12 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                   2.0f * NK_UI_SPACE_5;
                     NkUiFlowRow buttons;
                     char label[48];
-                    (void)snprintf(label, sizeof(label), "60 FPS game logic: %s",
-                                   title->enhancement_on ? "On" : "Off");
+                    (void)snprintf(label, sizeof(label), NK_UI_STR(TITLE_ENHANCEMENT_60HZ_FORMAT),
+                                   title->enhancement_on ? NK_UI_STR(TITLE_ON) : NK_UI_STR(TITLE_OFF));
                     row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
                     if (nk_ui_flow_begin(ui, &buttons, TITLE_ID_ACE_ROW, &row, inner)) {
                         if (title->ace_shown) {
-                            const char *ace = safe_text(title->ace_label, "Play mode");
+                            const char *ace = safe_text(title->ace_label, NK_UI_STR(TITLE_PLAY_MODE));
                             nk_ui_flow_item(ui, &buttons, nk_ui_button_width(ui, ace, 0u));
                             if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_ACE, ace,
                                              NK_UI_BUTTON_NOT_DEFAULT |
@@ -1013,7 +1012,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                             }
                         }
                         if (title->options_shown) {
-                            const char *options = "Enhanced options";
+                            const char *options = NK_UI_STR(TITLE_ENHANCED_OPTIONS);
                             nk_ui_flow_item(ui, &buttons, nk_ui_button_width(ui, options, 0u));
                             if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_PLAY_OPTIONS, options,
                                              NK_UI_BUTTON_NOT_DEFAULT |
@@ -1052,24 +1051,20 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 }
                 if (title->enhancement_shown) {
                     nk_ui_text_role(ui, TITLE_ID_ENH_TEXT,
-                                    "Ace's improvement made for this game: its logic runs 60 "
-                                    "times a second instead of 30, from its own package. Off "
-                                    "plays the original game logic. If this PC falls behind, "
-                                    "it says SLOWED.",
+                                    NK_UI_STR(TITLE_ENHANCEMENT_60HZ_DETAIL),
                                     NK_UI_TYPE_BODY_S, theme->paper);
                     if (title->enhancement_problem != NULL &&
                         title->enhancement_problem[0] != '\0') {
                         char line[256];
                         (void)snprintf(line, sizeof(line),
-                                       "%s Turn it off to play the original game.",
+                                       NK_UI_STR(TITLE_ENHANCEMENT_ENABLE_NOTE_FORMAT),
                                        title->enhancement_problem);
                         nk_ui_text_role(ui, TITLE_ID_ENH_PROBLEM, nk_ui_frame_text(ui, line),
                                         NK_UI_TYPE_BODY_S, theme->error);
                     }
                     if (title->enhancement_session) {
                         nk_ui_text_role(ui, TITLE_ID_ENH_SESSION,
-                                        "On for this session: Nakagawa was started with "
-                                        "--experimental-60hz.",
+                                        NK_UI_STR(TITLE_ENHANCEMENT_SESSION_NOTE),
                                         NK_UI_TYPE_CAPTION, theme->muted);
                     }
                 }
@@ -1087,16 +1082,16 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 if (nk_ui_flow_begin(ui, &flow, TITLE_ID_REMOVE_ROW, &row,
                                      width - 2.0f * gutter - NK_UI_DETAIL_GAP - aside)) {
                     if (title->can_add_to_steam) {
-                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Add to Steam", 0u));
-                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_STEAM, "Add to Steam", 0u)) {
+                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(TITLE_ADD_TO_STEAM), 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_STEAM, NK_UI_STR(TITLE_ADD_TO_STEAM), 0u)) {
                             result = action(PLAYER_UI_ACTION_ADD_TO_STEAM, model->title_index,
                                             PLAYER_UI_PRIMARY_NONE);
                         }
                     }
                     if (can_report) {
                         nk_ui_flow_item(ui, &flow,
-                                        nk_ui_button_width(ui, "Report a problem", 0u));
-                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, "Report a problem",
+                                        nk_ui_button_width(ui, NK_UI_STR(TITLE_REPORT_PROBLEM), 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, NK_UI_STR(TITLE_REPORT_PROBLEM),
                                          0u)) {
                             result = action(PLAYER_UI_ACTION_REPORT_PROBLEM,
                                             model->title_index, PLAYER_UI_PRIMARY_NONE);
@@ -1104,9 +1099,9 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                     }
                     if (title->can_remove) {
                         nk_ui_flow_item(ui, &flow,
-                                        nk_ui_button_width(ui, "Remove from library",
+                                        nk_ui_button_width(ui, NK_UI_STR(TITLE_REMOVE),
                                                            NK_UI_BUTTON_DANGER));
-                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, "Remove from library",
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, NK_UI_STR(TITLE_REMOVE),
                                          NK_UI_BUTTON_DANGER)) {
                             result = action(PLAYER_UI_ACTION_REMOVE_TITLE, model->title_index,
                                             PLAYER_UI_PRIMARY_NONE);
@@ -1121,9 +1116,9 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
     }
     {
         static const NkUiPromptItem prompts[] = {
-            {NK_UI_PROMPT_ACT_MOVE, "Move"},
-            {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-            {NK_UI_PROMPT_ACT_BACK, "Back"}
+            {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(TITLE_MOVE)},
+            {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(TITLE_SELECT)},
+            {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(TITLE_BACK)}
         };
         nk_ui_prompt_bar(ui, TITLE_ID_PROMPTS, "", prompts,
                          sizeof(prompts) / sizeof(prompts[0]));

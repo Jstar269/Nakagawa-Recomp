@@ -10,9 +10,15 @@
 #include "scr_shared.h"
 #include "player_enhanced_fixture.h"
 #include "nk_ui_image.h"
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+#include "launcher_secret.h"
+#endif
 
 #include <ctype.h>
 #include <math.h>
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+#include <stdarg.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -109,14 +115,14 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 6 };
-static const char *const k_enhanced_library_modes[] = {"Authentic", "Enhanced"};
-static const char k_enhanced_smooth_at_60[] = "Off (this game runs at 60 FPS)";
-static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Authentic",
-                                                     "Enhanced", "Ace"};
+static const char *const k_enhanced_library_modes[] = {
+    NK_UI_STR(ADAPTER_MODE_AUTHENTIC), NK_UI_STR(ADAPTER_MODE_ENHANCED)
+};
+static const char k_enhanced_smooth_at_60[] = NK_UI_STR(ADAPTER_SMOOTH_AT_60);
 /* What the Settings > Enhanced case shows instead of the fixture: a part's value (NULL
-   keeps the fixture's) and the play mode (NULL keeps the case's). */
+   keeps the fixture's) and the play mode's position in the stepper (-1 keeps the case's). */
 static const char *g_enhanced_value[PLAYER_PART_COUNT];
-static const char *g_enhanced_mode;
+static int g_enhanced_mode_index = -1;
 /* A game's page: its name and how many play modes its row steps (NULL and 0 keep the case's
    "Test Game" and four; three is a game with no package of its own). */
 static const char *g_enhanced_title_name;
@@ -401,6 +407,9 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                /* Mouse aiming (#1791): its settings off and at their defaults, on with the
                   widest value every row can show, and the keyboard keys with aiming on. */
                FLOW_CONTROLLER_AIM, FLOW_CONTROLLER_AIM_ON, FLOW_CONTROLLER_KEYS_AIM_ON,
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+               FLOW_PAGE_LOVE_ALL,
+#endif
                FLOW_COUNT,
                /* Not a screen: the build card with a container left open, so its frame
                   fails (nk_ui_end returns NULL) after drawing most of the card. Kept past
@@ -415,6 +424,11 @@ static float g_flow_width = 1280.0f;
 static float g_flow_height = 800.0f;
 /* The text size flow_case_layout lays a case out at (NkUiViewport.text_size_pct). */
 static int g_flow_text_size_pct = 100;
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+/* Count formatting events from the second frame, after layout and focus settle. */
+static bool g_pseudo_report_frame;
+static bool g_pseudo_report_text;
+#endif
 /* A player's own server for the Online play page and card (#1139), or NULL for socom.cc. */
 static const char *g_online_play_host = NULL;
 /* The picker's PPSSPP list is its shipped copy (the download unavailable). */
@@ -545,6 +559,11 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     /* The game page's "Library (...)" values: player_ui_screen_settings reads them at the
        end of this function, so they live as long as `settings` does. */
     char followed[PLAYER_PART_COUNT][48];
+    char library_mode[48]; /* same buffer size as the adapter */
+    const char *title_modes[] = {
+        library_mode, NK_UI_STR(ADAPTER_MODE_AUTHENTIC),
+        NK_UI_STR(ADAPTER_MODE_ENHANCED), NK_UI_STR(ADAPTER_MODE_ACE)
+    };
     memset(&settings, 0, sizeof(settings));
     settings.page = which == FLOW_SETTINGS_ONLINE || which == FLOW_SETTINGS_ONLINE_ON ||
                     which == FLOW_SETTINGS_ONLINE_DISCORD_ON ||
@@ -579,15 +598,22 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.enhanced_on = settings.enhanced_library_on;
         settings.enhanced_title =
             !title ? NULL : g_enhanced_title_name != NULL ? g_enhanced_title_name : "Test Game";
-        settings.enhanced_mode = title ? "Library (Enhanced)"
-                               : settings.enhanced_on ? "Enhanced" : "Authentic";
-        if (g_enhanced_mode != NULL) settings.enhanced_mode = g_enhanced_mode;
-        settings.enhanced_modes = title ? k_enhanced_title_modes : k_enhanced_library_modes;
+        int library_mode_index = settings.enhanced_library_on ? 1 : 0;
+        if (title) {
+            snprintf(library_mode, sizeof(library_mode), NK_UI_STR(ADAPTER_MODE_LIBRARY_VALUE),
+                     k_enhanced_library_modes[library_mode_index]);
+        }
+        int selected_mode = g_enhanced_mode_index >= 0 ? g_enhanced_mode_index
+                          : title ? PLAYER_PLAY_LIBRARY : library_mode_index;
+        settings.enhanced_modes = title ? title_modes : k_enhanced_library_modes;
         settings.enhanced_mode_count =
             !title ? 2 : g_enhanced_mode_count > 0 ? g_enhanced_mode_count : 4;
+        settings.enhanced_mode = settings.enhanced_modes[selected_mode];
+        settings.enhanced_mode_index =
+            selected_mode < settings.enhanced_mode_count ? selected_mode : -1;
         settings.enhanced_mode_sentence =
-            title ? "Enhanced adds the parts below. Ace needs a package made for this game."
-                  : "The default for every game; each game's page can choose its own.";
+            title ? NK_UI_STR(ADAPTER_MODE_ENHANCED_DESCRIPTION)
+                  : NK_UI_STR(ADAPTER_MODE_LIBRARY_DESCRIPTION);
         settings.enhanced_row_count = PLAYER_PART_COUNT;
         settings.enhanced_tab = g_enhanced_tab;
         settings.enhanced_tab_chosen = &g_enhanced_tab_chosen;
@@ -600,8 +626,10 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
             const int part = k_enhanced_layout_fixture[i].part;
             const char *value = g_enhanced_value[part] != NULL ? g_enhanced_value[part]
                                                                : k_enhanced_parts[part].value;
-            snprintf(followed[i], sizeof(followed[i]), "Library (%s)",
-                     k_enhanced_parts[part].value);
+            if (title) {
+                snprintf(followed[i], sizeof(followed[i]), NK_UI_STR(ADAPTER_MODE_LIBRARY_VALUE),
+                         k_enhanced_parts[part].value);
+            }
             settings.enhanced_rows[i].part = part;
             settings.enhanced_rows[i].group = k_enhanced_layout_fixture[i].group;
             settings.enhanced_rows[i].selected_index = 0;
@@ -643,11 +671,12 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                 settings.enhanced_rows[i].labels = g_enhanced_labels[part];
                 settings.enhanced_rows[i].label_count = g_enhanced_label_count[part];
             }
-            /* An Ace-only part is dimmed on a game's page until that game's mode is Ace. */
+            /* An Ace-only part needs both the selected mode and an available package. */
             if (settings.enhanced_rows[i].tag != NULL && title &&
-                strcmp(settings.enhanced_mode, "Ace") != 0) {
+                settings.enhanced_mode_index != PLAYER_PLAY_ACE) {
                 settings.enhanced_rows[i].disabled = true;
-                settings.enhanced_rows[i].disabled_reason = "Available only in Ace.";
+                settings.enhanced_rows[i].disabled_reason = settings.enhanced_mode_count == 4
+                    ? NK_UI_STR(ADAPTER_PART_ACE_REQUIRED) : NK_UI_STR(ADAPTER_ACE_PACKAGE_REQUIRED);
             }
         }
     }
@@ -1112,6 +1141,12 @@ static PlayerUiPrereqItem g_full_prereqs[35];
    a title page, About, and the remove dialog. */
 static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
     PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+    if (which == FLOW_PAGE_LOVE_ALL) {
+        PlayerUiLoveAllModel credits = {g_flow_width, g_flow_height, false, 0.0f};
+        return player_ui_screen_love_all(ui, &credits);
+    }
+#endif
     if (which == FLOW_PAGE_LIBRARY || which == FLOW_PAGE_LIBRARY_FIND) {
         PlayerUiLibraryModel library;
         memset(&library, 0, sizeof(library));
@@ -3062,6 +3097,9 @@ static const NkUiDrawList *flow_case_layout(FlowCase which, int width, int heigh
     g_flow_width = scale.logical_w;
     g_flow_height = scale.logical_h;
     for (int frame = 0; frame < 2; ++frame) {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+        g_pseudo_report_text = g_pseudo_report_frame && frame == 1;
+#endif
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
         draw = end_frame(ui);
@@ -3070,6 +3108,9 @@ static const NkUiDrawList *flow_case_layout(FlowCase which, int width, int heigh
             nk_ui_focus(ui, g_enhanced_focus_id);
         }
     }
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+    g_pseudo_report_text = false;
+#endif
     g_flow_width = 1280.0f;
     g_flow_height = 800.0f;
     return draw;
@@ -3182,6 +3223,245 @@ static bool flow_case_fits(FlowCase which, int width, int height, char *dump, si
     nk_ui_destroy(ui);
     return inside;
 }
+
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+typedef struct {
+    unsigned frames;
+    unsigned runs;
+    unsigned accented;
+    unsigned scroll_clips;
+    unsigned clamps;
+    unsigned findings;
+} PseudoLayoutResult;
+
+static PseudoLayoutResult g_pseudo_result;
+static int g_pseudo_case;
+static int g_pseudo_width;
+static int g_pseudo_height;
+
+static void pseudo_report_run(const char *kind, const NkUiDrawCmd *cmd,
+                              const NkUiTextRun *run, int lost_pixels) {
+    fprintf(stderr, "PSEUDO %s case=%d window=%dx%d text=%d%% id=%08X "
+                    "lost=%d bounds=[%d,%d,%d,%d] clip=[%d,%d,%d,%d] run=\"%.*s\"\n",
+            kind, g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, (unsigned)cmd->element_id, lost_pixels,
+            cmd->bounds[0], cmd->bounds[1], cmd->bounds[2], cmd->bounds[3],
+            cmd->clip[0], cmd->clip[1], cmd->clip[2], cmd->clip[3],
+            (int)(run->length > 120u ? 120u : run->length), run->text);
+}
+
+/* These probes are linked only by the pseudo-layout build. A deliberate
+   ellipsis and a buffer that loses bytes before layout are separate events. */
+void nk_ui_pseudo_clamped(const char *source, size_t retained_bytes) {
+    if (!g_pseudo_report_text) return;
+    ++g_pseudo_result.clamps;
+    fprintf(stderr, "PSEUDO CLAMP case=%d window=%dx%d text=%d%% kept=%zu source=\"%.120s\"\n",
+            g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, retained_bytes, source);
+}
+
+void nk_ui_pseudo_buffer_truncated(const char *source) {
+    if (!g_pseudo_report_text) return;
+    ++g_pseudo_result.findings;
+    fprintf(stderr, "PSEUDO BUFFER_TRUNCATED case=%d window=%dx%d text=%d%% "
+                    "id=widget-caps lost=0 source=\"%.120s\"\n",
+            g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, source);
+}
+
+/* Preserve snprintf semantics and check its output before layout loses the
+   original length. The generated test header keeps the compiler format check. */
+int nk_ui_pseudo_snprintf(const char *file, int line, char *dest, size_t cap,
+                          const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(dest, cap, format, args);
+    va_end(args);
+    if (g_pseudo_report_text && cap != 0u && written >= 0 && (size_t)written >= cap) {
+        ++g_pseudo_result.findings;
+        fprintf(stderr, "PSEUDO BUFFER_TRUNCATED case=%d window=%dx%d text=%d%% "
+                        "id=%s:%d lost=%zu output=\"%.120s\"\n",
+                g_pseudo_case, g_pseudo_width, g_pseudo_height, g_flow_text_size_pct,
+                file, line, (size_t)written - (cap - 1u), dest);
+    }
+    return written;
+}
+
+static bool pseudo_has_accent(const NkUiTextRun *run) {
+    /* The generated catalog substitutes Latin-1 letters. Count them as
+       rendered UTF-8 rather than counting the bytes of an unrelated symbol. */
+    for (size_t i = 1; i < run->length; ++i) {
+        unsigned char byte = (unsigned char)run->text[i];
+        if ((unsigned char)run->text[i - 1u] == 0xC3u &&
+            byte >= 0x80u && byte <= 0xBFu && byte != 0x97u && byte != 0xB7u) return true;
+    }
+    return false;
+}
+
+static int pseudo_worst_edge(int left, int top, int right, int bottom) {
+    int worst = left > right ? left : right;
+    int vertical = top > bottom ? top : bottom;
+    return worst > vertical ? worst : vertical;
+}
+
+static void pseudo_check_draw(const NkUi *ui, const NkUiDrawList *draw) {
+    /* Track scissors belonging to an actual vertical scroller. A clipped
+       first or last line can scroll into view. Report geometry outside that
+       scroller's edge and horizontal clipping as layout findings. */
+    const NkUiDrawCmd *scrolls[NK_UI_DRAW_CLIP_DEPTH];
+    size_t depth = 0u;
+    ++g_pseudo_result.frames;
+    for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        if (cmd->kind == NK_UI_DRAW_SCISSOR_START) {
+            NkUiScrollState state;
+            scrolls[depth++] = nk_ui_scroll_state(ui, cmd->element_id, &state) &&
+                                state.max_offset > 0.0f ? cmd : NULL;
+        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_END) {
+            --depth;
+        }
+        if (cmd->kind != NK_UI_DRAW_TEXT || cmd->custom == NULL) continue;
+        const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
+        if (run->length == 0u) continue;
+        ++g_pseudo_result.runs;
+        if (pseudo_has_accent(run)) ++g_pseudo_result.accented;
+
+        const int *bounds = cmd->bounds;
+        const int *clip = cmd->clip;
+        const bool top_cut = clip[1] > bounds[1] + 1;
+        const bool bottom_cut = clip[3] < bounds[3] - 1;
+        bool scroll_top = !top_cut;
+        bool scroll_bottom = !bottom_cut;
+        for (size_t j = 0u; j < depth; ++j) {
+            const NkUiDrawCmd *scroll = scrolls[j];
+            if (scroll == NULL) continue;
+            if (clip[1] <= scroll->clip[1] + 1) scroll_top = true;
+            if (clip[3] >= scroll->clip[3] - 1) scroll_bottom = true;
+        }
+        int crop = pseudo_worst_edge(clip[0] - bounds[0], scroll_top ? 0 : clip[1] - bounds[1],
+                                     bounds[2] - clip[2], scroll_bottom ? 0 : bounds[3] - clip[3]);
+        if (crop > 1) {
+            pseudo_report_run("CLIPPED", cmd, run, crop);
+            ++g_pseudo_result.findings;
+        } else if (top_cut || bottom_cut) {
+            ++g_pseudo_result.scroll_clips;
+        }
+
+        int off_window = pseudo_worst_edge(-clip[0], -clip[1], clip[2] - g_pseudo_width,
+                                           clip[3] - g_pseudo_height);
+        if (command_shows(cmd) && off_window > 1) {
+            pseudo_report_run("OFF_WINDOW", cmd, run, off_window);
+            ++g_pseudo_result.findings;
+        }
+
+        /* Clay keeps a line's declared rectangle even when the measured
+           run is wider, including centred keycaps drawn by the widgets. */
+        NkUiTextSize size = screen_test_wide_measure(NULL, run->font, run->size_px,
+                                                     run->text, run->length);
+        if (run->letter_spacing > 0.0f && run->size_px > 0) {
+            const float glyphs = size.width / ((float)run->size_px * 0.62f);
+            size.width += run->letter_spacing * (glyphs - 1.0f);
+        }
+        const float excess = size.width - (float)(bounds[2] - bounds[0]);
+        if (excess > 2.0f) {
+            pseudo_report_run("RUN_OVERFLOW", cmd, run, (int)ceilf(excess));
+            ++g_pseudo_result.findings;
+        }
+    }
+}
+
+static bool pseudo_checker_detects_clipping(void) {
+    static const char translated[] = "P\303\240\303\240ck\303\240ge";
+    NkUiDrawBuffer buffer = {0};
+    char small[4];
+    bool ok = nk_ui_draw_add_scissor(&buffer, true, (NkUiPixelRect){0, 0, 35, 40}, 1u) &&
+              nk_ui_draw_add_text(&buffer, (NkUiPixelRect){2, 10, 85, 28}, translated,
+                                  sizeof(translated) - 1u, 0, 16, 0xFFFFFFFFu, 2u) &&
+              nk_ui_draw_add_scissor(&buffer, false, (NkUiPixelRect){0, 0, 35, 40}, 1u) &&
+              nk_ui_draw_list_valid(&buffer.list);
+    fprintf(stderr, "PSEUDO SELF_CHECK expecting CLIPPED and BUFFER_TRUNCATED diagnostics\n");
+    if (ok) pseudo_check_draw(NULL, &buffer.list);
+    g_pseudo_report_text = true;
+    int written = nk_ui_pseudo_snprintf(__FILE__, __LINE__, small, sizeof(small), "%s", translated);
+    g_pseudo_report_text = false;
+    ok = ok && g_pseudo_result.findings == 2u && g_pseudo_result.accented == 1u &&
+         written == (int)sizeof(translated) - 1 && small[sizeof(small) - 1u] == '\0';
+    nk_ui_draw_buffer_destroy(&buffer);
+    memset(&g_pseudo_result, 0, sizeof(g_pseudo_result));
+    return ok;
+}
+
+static void pseudo_check_flow(FlowCase which, int report_case) {
+    NkUi *ui = NULL;
+    g_pseudo_case = report_case;
+    const NkUiDrawList *draw = flow_case_layout(which, g_pseudo_width, g_pseudo_height, &ui);
+    if (draw != NULL && nk_ui_draw_list_valid(draw)) {
+        pseudo_check_draw(ui, draw);
+    } else {
+        fprintf(stderr, "PSEUDO FRAME_FAILED case=%d window=%dx%d text=%d%% "
+                        "id=00000000 lost=0\n",
+                report_case, g_pseudo_width, g_pseudo_height, g_flow_text_size_pct);
+        ++g_pseudo_result.findings;
+    }
+    nk_ui_destroy(ui);
+}
+
+static int pseudo_layout_report(bool pseudo) {
+    static const struct { int width; int height; } windows[] = {
+        {960, 540}, {1280, 720}, {1366, 705}, {853, 480}
+    };
+    static const int text_sizes[] = {100, 125, 150};
+    g_pseudo_width = 96;
+    g_pseudo_height = 60;
+    if (!pseudo_checker_detects_clipping()) {
+        fprintf(stderr, "PSEUDO SELF_CHECK_FAILED\n");
+        return 2;
+    }
+    g_pseudo_report_frame = true;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t w = 0u; w < sizeof(windows) / sizeof(windows[0]); ++w) {
+            g_pseudo_width = windows[w].width;
+            g_pseudo_height = windows[w].height;
+            for (int which = FLOW_BUILD; which < FLOW_COUNT; ++which) {
+                pseudo_check_flow((FlowCase)which, which);
+            }
+            /* The ordinary flows cover both library modes and a title following the
+               library. Give each explicit title choice its own diagnostics, including
+               a saved Ace when its package is unavailable. */
+            g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_ACE_MODE;
+            int report_case = FLOW_COUNT;
+            for (int mode = PLAYER_PLAY_AUTHENTIC; mode <= PLAYER_PLAY_ACE; ++mode) {
+                g_enhanced_mode_index = mode;
+                pseudo_check_flow(FLOW_SETTINGS_ACE_TITLE, report_case++);
+            }
+            g_enhanced_mode_index = PLAYER_PLAY_ACE;
+            g_enhanced_mode_count = 3;
+            pseudo_check_flow(FLOW_SETTINGS_ACE_TITLE, report_case);
+            g_enhanced_focus_id = 0u;
+            g_enhanced_mode_index = -1;
+            g_enhanced_mode_count = 0;
+        }
+    }
+    printf("PSEUDO SUMMARY locale=%s frames=%u text_runs=%u accented_runs=%u "
+           "scroll_clips=%u clamps=%u findings=%u\n", pseudo ? "pseudo" : "english",
+           g_pseudo_result.frames, g_pseudo_result.runs, g_pseudo_result.accented,
+           g_pseudo_result.scroll_clips, g_pseudo_result.clamps, g_pseudo_result.findings);
+#ifndef NK_UI_PSEUDO_CATALOG_COUNT
+    if (pseudo) {
+        fprintf(stderr, "PSEUDO CATALOG_MISSING\n");
+        return 2;
+    }
+#else
+    if (!pseudo || NK_UI_PSEUDO_CATALOG_COUNT == 0 || g_pseudo_result.accented == 0u) {
+        fprintf(stderr, "PSEUDO CATALOG_UNUSED\n");
+        return 2;
+    }
+#endif
+    if (failures != 0) return 2;
+    return g_pseudo_result.findings != 0u ? 1 : 0;
+}
+#endif /* NK_UI_PSEUDO_LAYOUT_TEST */
 
 /* A dump the flow helpers hand to "X is absent" checks is a whole frame: a frame that
    failed, or a dump cut at the buffer's end, is no dump, since the text it dropped would
@@ -4437,7 +4717,7 @@ static void test_settings_pages(void) {
                       part.title_index == (size_t)i && part.choice_index == 0,
                   "Right on a row that follows the library sets the part's first own value");
         }
-        g_enhanced_mode = "Ace";
+        g_enhanced_mode_index = PLAYER_PLAY_ACE;
         part = activate_flow_button(row, FLOW_SETTINGS_ACE_TITLE);
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
                   part.title_index == (size_t)i,
@@ -4464,7 +4744,7 @@ static void test_settings_pages(void) {
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
                   part.title_index == (size_t)i && part.choice_index == 0,
               "in Ace, Right on a row that follows the library sets the part's first own value");
-        g_enhanced_mode = NULL;
+        g_enhanced_mode_index = -1;
         CHECK(activate_flow_button(row, FLOW_SETTINGS_ACE_OFF).kind == PLAYER_UI_ACTION_NONE &&
                   enhanced_send(FLOW_SETTINGS_ACE_OFF, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT).kind ==
                       PLAYER_UI_ACTION_NONE &&
@@ -5730,7 +6010,7 @@ static void test_enhanced_target_sizes(void) {
     const NkUiId saved_focus = g_enhanced_focus_id;
     const int saved_text = g_flow_text_size_pct;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
             for (int row = 0; row < ENHANCED_PLACE_ROWS; ++row) {
@@ -5879,7 +6159,7 @@ static void test_enhanced_title_with_an_ellipsis(void) {
     float plain;
     float ellipsis;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     plain = enhanced_list_viewport(FLOW_SETTINGS_ACE_TITLE, 1280, 720);
     g_enhanced_title_name = "Test Game\xE2\x80\xA6 Two";
     ellipsis = enhanced_list_viewport(FLOW_SETTINGS_ACE_TITLE, 1280, 720);
@@ -5897,7 +6177,7 @@ static void test_enhanced_title_with_an_ellipsis(void) {
    select button does: Right is Library, Left is Enhanced. Right stepped from Library. */
 static void test_enhanced_stale_ace_steps_from_ace(void) {
     PlayerUiAction step;
-    g_enhanced_mode = "Ace";
+    g_enhanced_mode_index = PLAYER_PLAY_ACE;
     g_enhanced_mode_count = 3;
     step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_ACE_MODE, NK_UI_EV_NAV,
                          NK_UI_DIR_RIGHT);
@@ -5908,7 +6188,7 @@ static void test_enhanced_stale_ace_steps_from_ace(void) {
     CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_PLAY_MODE) && step.choice_index == 2,
           "Left on a saved Ace with no package sets Enhanced, the mode before Ace");
     g_enhanced_mode_count = 0;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
 }
 
 /* Main's #2686 gave an activation to the control focused when it was pressed
@@ -5932,7 +6212,7 @@ static void test_enhanced_row_takes_the_press_made_on_it(void) {
          "Enter then Down in one frame on Texture filtering takes its next value"},
     };
     const int saved_tab = g_enhanced_tab;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     for (size_t i = 0u; i < sizeof(rows) / sizeof(rows[0]); ++i) {
         NkUiConfig config;
@@ -5998,7 +6278,7 @@ static void test_enhanced_pacing_says_all_games(void) {
     static char dump[CASE_DUMP_CAP];
     const int saved_tab = g_enhanced_tab;
     const NkUiId saved_focus = g_enhanced_focus_id;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_MOTION;
     g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_PACING;
     CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1280, 720, dump, sizeof(dump)) &&
@@ -6029,7 +6309,7 @@ static void test_enhanced_wheel_scrolls_past_the_focused_row(void) {
     float scrolled = -1.0f;
     float later = -1.0f;
     char message[200];
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     g_enhanced_focus_id = row;
     viewport.text_size_pct = g_flow_text_size_pct;
@@ -6126,7 +6406,7 @@ static void enhanced_panel_case_set(int which) {
         which == 3 ? k_enhanced_panel_long_sentence : NULL;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     g_enhanced_focus_id = which >= 0 ? k_enhanced_panel_cases[which].focus : 0u;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
 }
 
 /* A page of the case laid out in a launcher window at a UI scale and text size, focus on the
@@ -6521,7 +6801,7 @@ static void test_enhanced_walk_at_every_text_size(void) {
     const NkUiId saved_focus = g_enhanced_focus_id;
     const int saved_text = g_flow_text_size_pct;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_focus_id = 0u;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         for (size_t w = 0u; w < sizeof(windows) / sizeof(windows[0]); ++w) {
@@ -6647,7 +6927,7 @@ static void test_enhanced_selected_value_styles(void) {
     const NkUiTheme *theme = nk_ui_theme_n1();
     const int saved_tab = g_enhanced_tab;
     const NkUiId saved_focus = g_enhanced_focus_id;
-    const char *saved_mode = g_enhanced_mode;
+    const int saved_mode = g_enhanced_mode_index;
     /* WCAG 2.1 SC 1.4.11: what identifies a state stands 3:1 from what is next to it. The
        edge of a value marked without the accent does, from the list's ground and from its
        own box; an unselected value's hairline does not, which is what tells them apart. */
@@ -6668,7 +6948,7 @@ static void test_enhanced_selected_value_styles(void) {
           "a value's text keeps 4.5:1 on its box: selected Off, selected on, the library's "
           "value, and an unselected value");
     g_enhanced_focus_id = 0u;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         const bool title = pages[g] == FLOW_SETTINGS_ACE_TITLE;
         for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
@@ -6756,7 +7036,7 @@ static void test_enhanced_selected_value_styles(void) {
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     g_enhanced_tab = saved_tab;
     g_enhanced_focus_id = saved_focus;
-    g_enhanced_mode = saved_mode;
+    g_enhanced_mode_index = saved_mode;
 }
 
 /* Settings > Enhanced keeps its rows where they are. On every tab of the library's page and
@@ -6785,7 +7065,7 @@ static void test_enhanced_rows_stay_put(void) {
             char message[200];
             g_enhanced_tab = tab;
             memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-            g_enhanced_mode = NULL;
+            g_enhanced_mode_index = -1;
             base = enhanced_row_places(pages[g]);
             CHECK(base.box[0][0] >= 0 && base.box[0][1] > base.box[0][0] &&
                       base.box[1][0] >= 0 && base.box[1][1] > base.box[1][0],
@@ -6831,7 +7111,7 @@ static void test_enhanced_rows_stay_put(void) {
             for (int step = -3; step < 4 + PLAYER_PART_COUNT * ENHANCED_MAX_WORDS; ++step) {
                 EnhancedRowPlaces moved;
                 memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-                g_enhanced_mode = NULL;
+                g_enhanced_mode_index = -1;
                 if (step == -3) {
                     if (pages[g] != FLOW_SETTINGS_ACE_TITLE) continue;
                     g_enhanced_value[PLAYER_PART_SMOOTH] = k_enhanced_smooth_at_60;
@@ -6847,12 +7127,10 @@ static void test_enhanced_rows_stay_put(void) {
                 } else if (step < 4) {
                     int count = pages[g] == FLOW_SETTINGS_ACE_TITLE ? 4 : 2;
                     if (step + 1 >= count) continue;
-                    g_enhanced_mode = pages[g] == FLOW_SETTINGS_ACE_TITLE
-                                          ? k_enhanced_title_modes[step + 1]
-                                          : k_enhanced_library_modes[step + 1];
+                    g_enhanced_mode_index = step + 1;
                     (void)snprintf(message, sizeof(message),
-                                   "page %d, %s: play mode %s moves no row", (int)g,
-                                   k_enhanced_shown[tab].tab, g_enhanced_mode);
+                                   "page %d, %s: play mode choice %d moves no row", (int)g,
+                                   k_enhanced_shown[tab].tab, g_enhanced_mode_index);
                 } else {
                     int part = (step - 4) / ENHANCED_MAX_WORDS;
                     int value = (step - 4) % ENHANCED_MAX_WORDS;
@@ -6871,7 +7149,7 @@ static void test_enhanced_rows_stay_put(void) {
     }
     g_enhanced_tab = saved_tab;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
 }
 
 /* The find page (FLOW_PAGE_LIBRARY_FIND, the shared keyboard under its field) at
@@ -8424,7 +8702,7 @@ static void test_texture_scaling_rows(void) {
     int saved_tab = g_enhanced_tab;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         /* Every factor's word in the panel, with the smart 2D filter on beside it. */
         for (int factor = 2; factor <= 6; ++factor) {
@@ -8493,7 +8771,7 @@ static void test_texture_scaling_rows(void) {
     g_enhanced_tab = saved_tab;
     g_enhanced_focus_id = 0u;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
 }
 
 /* Supersampling's guard (owner, 2026-11-15): at a render scale of 3x or 4x the row with 4x picked
@@ -8518,7 +8796,7 @@ static void test_ssaa_warning_rows(void) {
     g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA);
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     memset(g_enhanced_sentence, 0, sizeof(g_enhanced_sentence));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t k = 0u; k < sizeof(cases) / sizeof(cases[0]); ++k) {
         g_enhanced_value[PLAYER_PART_SSAA] = cases[k].value;
         g_enhanced_sentence[PLAYER_PART_SSAA] = cases[k].sentence;
@@ -12161,6 +12439,10 @@ int main(int argc, char **argv) {
     bool write = false;
     const char *capture_dir = NULL;
     for (int i = 1; i < argc; ++i) {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+        if (strcmp(argv[i], "--pseudo-layout") == 0) return pseudo_layout_report(true);
+        if (strcmp(argv[i], "--english-layout") == 0) return pseudo_layout_report(false);
+#endif
         if (strcmp(argv[i], "--write-goldens") == 0) {
             write = true;
         } else if (strncmp(argv[i], "--capture-dir=", 14u) == 0) {
