@@ -395,6 +395,19 @@ be opened, is named on the setting's row (On: file
 missing, On: file damaged, On: no sound device) and in the log (`LAUNCHER_MUSIC_MISSING`, `LAUNCHER_MUSIC_DAMAGED`,
 `LAUNCHER_MUSIC_NO_DEVICE`); the launcher stays silent and carries on.
 
+A game's page plays that game's own startup clip, the `PSP_GAME/SND0.AT3` a PSP's home menu plays for it. **Game page
+music** in Settings (`launcher_game_music` in `settings.json`, on by default) turns it off, and it plays at the **Music
+volume**. The library list stays silent. When a game's page opens, the clip is read from that game's own disc image
+through the ISO reader (a file larger than 4 MiB is refused unread), decoded in memory on a worker thread with the
+runtime's ATRAC3 / ATRAC3+ decoder (`src/rt/atrac3p/`, FFmpeg n4.4; `src/player/ui/player_ui_at3.c` reads the RIFF
+format and data chunks), and played: it fades in over 0.3 s and loops from its first to its last sound. Leaving the
+page or losing focus fades it out over 0.3 s and lets go of the audio device; starting a game stops a read still
+running and fades the clip out before the game's process starts, and nothing of it is kept while the game runs. While
+a clip loads or plays the launcher music pauses, and it picks up where it stopped afterwards. The clip is never written
+to disk, cached, uploaded or logged. A disc without `SND0.AT3` is silent with no message; a clip that cannot be read or
+decoded, decodes to silence or would decode to more than 32 MiB of samples, or no audio device, is silent for that game
+and named once in the log (`GAME_MUSIC_DAMAGED`, `GAME_MUSIC_NO_DEVICE`) by its reason, never its path.
+
 Only actions the screen handles appear in its prompt bar.
 
 ## Screens

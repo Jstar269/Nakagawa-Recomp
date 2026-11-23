@@ -57,12 +57,14 @@ NK_UI_PLAYER_C5_SRCS := \
 	src/player/ui/scr_library.c \
 	$(NK_UI_PLAYER_TITLE_SRCS)
 
-# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds, and
-# the launcher music with its Ogg Vorbis decoder (stb_vorbis, built only here).
+# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds, the
+# launcher music with its Ogg Vorbis decoder (stb_vorbis, built only here), and a
+# highlighted game's SND0.AT3 clip (its decoder is PLAYER_ATRAC_OBJS, mk/pipeline.mk).
 NK_UI_PLAYER_HOST_SRCS := \
 	src/player/ui/player_ui_art.c \
 	src/player/ui/player_ui_sound.c \
 	src/player/ui/player_ui_music.c \
+	src/player/ui/player_ui_snd0.c \
 	src/player/ui/player_ui_vorbis.c
 
 # The overlay pages built so far (C9c, and the developer pages of #314).

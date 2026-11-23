@@ -107,19 +107,24 @@ endif
 # Player UI tests link SDL3 (software renderer, no window), so they run where the
 # player itself builds rather than in the SDL-free native-core-tests set. The
 # optional UI font selftest reports a named skip when SDL3_ttf is unavailable.
-player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest launcher-secret-selftest
+player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest launcher-secret-selftest $(PLAYER_ATRAC_OBJS)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -Wall -Wextra $(PLAYER_INCLUDES) $(LDFLAGS) tests/native/test_ui_clip.c -lSDL3 \
 		-o $(BUILD_ROOT)/test_ui_clip$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_ui_clip$(EXE_EXT)
 	$(CC) -std=c99 -Wall -Wextra -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) tests/native/test_player_ui_art.c \
-		$(NK_UI_PLAYER_HOST_SRCS) src/ui/nk_ui_image.c src/ui/nk_ui_assets.c -lSDL3 -lm \
+		$(NK_UI_PLAYER_HOST_SRCS) $(PLAYER_ATRAC_OBJS) src/ui/nk_ui_image.c src/ui/nk_ui_assets.c -lSDL3 -lm \
 		-o $(BUILD_ROOT)/test_player_ui_art$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_player_ui_art$(EXE_EXT)
 	$(CC) -std=c99 -O2 -Wall -Wextra -Werror -DPLAYER_UI_MUSIC_TEST_SEAMS -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) \
 		tests/native/test_player_ui_music.c src/player/ui/player_ui_music.c src/player/ui/player_ui_vorbis.c -lSDL3 -lm \
 		-o $(BUILD_ROOT)/test_player_ui_music$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_player_ui_music$(EXE_EXT) assets/music/launcher/ChillLofi.ogg
+	$(CC) -std=c99 -O2 -Wall -Wextra -Werror -DPLAYER_UI_SND0_TEST_SEAMS -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) \
+		tests/native/test_player_ui_snd0.c src/player/ui/player_ui_snd0.c src/player/ui/player_ui_music.c \
+		src/player/ui/player_ui_vorbis.c $(PLAYER_ATRAC_OBJS) -lSDL3 -lm \
+		-o $(BUILD_ROOT)/test_player_ui_snd0$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_player_ui_snd0$(EXE_EXT)
 
 .PHONY: nk-ui-player-screens-capture
 ifeq ($(SDL3_TTF_AVAILABLE),yes)

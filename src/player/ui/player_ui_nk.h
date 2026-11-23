@@ -694,6 +694,7 @@ typedef enum {
     PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
+    PLAYER_UI_SETTINGS_TOGGLE_GAME_MUSIC, /* the open game page's SND0.AT3 clip */
     PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY,         /* opens Settings > Online play (#1139) */
     PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY,       /* Off: opens the card; On: turns it off */
     PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS, /* the server picker */
@@ -818,6 +819,7 @@ typedef struct {
     bool launcher_music;
     const char *launcher_music_value;
     int music_volume;
+    bool game_music;          /* Game page music: the open page's own clip */
     bool launcher_fullscreen;
     /* Accessibility (VIEW_ACCESSIBILITY_SETTINGS): each setting's word, whether it
        is in effect, and what Automatic follows now */
@@ -1386,6 +1388,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC = 0x4557u,   /* Settings: launcher music on or off */
     PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN = 0x4558u,
     PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
+    PLAYER_UI_ID_SETTINGS_GAME_MUSIC = 0x455Eu,       /* Settings: a game's own clip on its page */
     PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
     PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS = 0x455Cu,    /* Settings > Online: RA opt-in */
@@ -1833,8 +1836,9 @@ void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused);
 /* Once per loop, whatever view shows: the launcher music follows its setting,
    whether a game is starting or running, and the window's focus (#2207). */
 void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app);
-/* True when neither the launcher music nor the UI sounds hold an audio stream and
-   no worker is decoding the track: a game may start. True for a NULL player. */
+/* True when neither the launcher music, an open game page's clip nor the UI sounds
+   hold an audio stream and no worker is decoding a track or clip: a game may start.
+   True for a NULL player. */
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player);
 /* Whether the UI sounds hold an audio stream, for reports. */
 bool player_ui_nk_ui_sounds_hold_audio(const PlayerUiNk *player);
@@ -1843,6 +1847,8 @@ int player_ui_nk_music_state(const PlayerUiNk *player);
 /* Whether the launcher music's worker is reading or decoding the track. */
 bool player_ui_nk_music_decoding(const PlayerUiNk *player);
 const char *player_ui_nk_music_state_name(const PlayerUiNk *player);
+/* The open game page's clip state (player_ui_snd0_state_name), for reports. */
+const char *player_ui_nk_snd0_state_name(const PlayerUiNk *player);
 /* Draws one launcher frame. False when it could not be drawn; *out_action still
    holds an action the frame committed, which the caller applies either way. */
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,

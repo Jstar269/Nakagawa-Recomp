@@ -413,13 +413,35 @@ set(NK_UI_PLAYER_C5_SOURCES
     src/player/ui/scr_library.c
     ${NK_UI_PLAYER_TITLE_SOURCES}
 )
-# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds, and the
-# optional launcher music with its Ogg Vorbis decoder (#2207).
+# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds, the
+# optional launcher music with its Ogg Vorbis decoder (#2207), and a highlighted game's
+# SND0.AT3 clip, whose ATRAC decoder is the nakagawa_player_atrac object library.
 set(NK_UI_PLAYER_HOST_SOURCES
     src/player/ui/player_ui_art.c
     src/player/ui/player_ui_sound.c
     src/player/ui/player_ui_music.c
+    src/player/ui/player_ui_snd0.c
     src/player/ui/player_ui_vorbis.c
+)
+# The runtime's ATRAC import (FFmpeg n4.4, src/rt/atrac3p/). The runtime builds it, and the
+# player builds it again on its own for a highlighted game's SND0.AT3 clip.
+set(NK_RUNTIME_ATRAC3P_SOURCES
+    src/rt/atrac3p/atrac3p_api.c
+    src/rt/atrac3p/libavcodec/atrac.c
+    src/rt/atrac3p/libavcodec/atrac3.c
+    src/rt/atrac3p/libavcodec/atrac3plus.c
+    src/rt/atrac3p/libavcodec/atrac3plusdec.c
+    src/rt/atrac3p/libavcodec/atrac3plusdsp.c
+    src/rt/atrac3p/libavcodec/bitstream.c
+    src/rt/atrac3p/libavcodec/fft_float.c
+    src/rt/atrac3p/libavcodec/fft_init_table.c
+    src/rt/atrac3p/libavcodec/mdct_float.c
+    src/rt/atrac3p/libavcodec/sinewin.c
+    src/rt/atrac3p/libavutil/float_dsp.c
+    src/rt/atrac3p/libavutil/intmath.c
+    src/rt/atrac3p/libavutil/log2_tab.c
+    src/rt/atrac3p/libavutil/mem.c
+    src/rt/atrac3p/libavutil/reverse.c
 )
 # The overlay pages built so far (C9c, and the developer pages of #314), SDL-free; overlay_host.c builds only into the runtime.
 set(NK_UI_OVERLAY_C9C_SOURCES
@@ -947,6 +969,19 @@ if(BUILD_PLAYER)
             NK_PLAYER_BUILD_EPOCH=${NK_PLAYER_BUILD_EPOCH}LL)
     endif()
     target_link_libraries(nakagawa_player PRIVATE nakagawa_core nk_libchdr nk_update_sig)
+    # A highlighted game's SND0.AT3 clip is decoded with the runtime's ATRAC import. It and the
+    # player's wrapper over it (player_ui_at3.c) build on their own with the import's include
+    # paths, which no other player unit sees, at the runtime's level for them, as the
+    # Makefile's PLAYER_ATRAC_OBJS (mk/pipeline.mk).
+    add_library(nakagawa_player_atrac OBJECT ${NK_RUNTIME_ATRAC3P_SOURCES}
+        src/player/ui/player_ui_at3.c)
+    target_include_directories(nakagawa_player_atrac PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/player/ui
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/rt/atrac3p
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/rt/atrac3p/libavcodec
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/rt/atrac3p/libavutil)
+    target_compile_options(nakagawa_player_atrac PRIVATE -O2 -fno-strict-aliasing -Wno-error)
+    target_sources(nakagawa_player PRIVATE $<TARGET_OBJECTS:nakagawa_player_atrac>)
     if(NK_UPDATE_KEY_DEFINITIONS)
         target_compile_definitions(nakagawa_player PRIVATE ${NK_UPDATE_KEY_DEFINITIONS})
     endif()
@@ -1176,24 +1211,6 @@ set(NK_RUNTIME_SOURCES
     src/core/nk_shared_helpers.c
 )
 set(NK_RUNTIME_GE_SOURCE src/rt/ge.c)
-set(NK_RUNTIME_ATRAC3P_SOURCES
-    src/rt/atrac3p/atrac3p_api.c
-    src/rt/atrac3p/libavcodec/atrac.c
-    src/rt/atrac3p/libavcodec/atrac3.c
-    src/rt/atrac3p/libavcodec/atrac3plus.c
-    src/rt/atrac3p/libavcodec/atrac3plusdec.c
-    src/rt/atrac3p/libavcodec/atrac3plusdsp.c
-    src/rt/atrac3p/libavcodec/bitstream.c
-    src/rt/atrac3p/libavcodec/fft_float.c
-    src/rt/atrac3p/libavcodec/fft_init_table.c
-    src/rt/atrac3p/libavcodec/mdct_float.c
-    src/rt/atrac3p/libavcodec/sinewin.c
-    src/rt/atrac3p/libavutil/float_dsp.c
-    src/rt/atrac3p/libavutil/intmath.c
-    src/rt/atrac3p/libavutil/log2_tab.c
-    src/rt/atrac3p/libavutil/mem.c
-    src/rt/atrac3p/libavutil/reverse.c
-)
 set(NK_RUNTIME_ATRAC3P_BRIDGE_SOURCE src/rt/atrac3p_bridge.c)
 set(NK_RUNTIME_H264_SUB_SOURCES
     src/rt/h264_ffmpeg_sub/nk_h264_api.c
