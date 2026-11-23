@@ -918,7 +918,13 @@ Semantic handler census: **643** handlers across **30** API families, covering *
 - **`h_ReferSystemStatus`** (`sceKernel`): `sceKernelReferSystemStatus` (0x627e6f3a)
   - Limitation: idle-clock, comes-out-of-idle and thread-switch counters: written as zero; hardware reports non-zero, time-dependent values (not cited). VFPU-switch counter: written as zero, not cited. Status word 1: written as zero; hardware read 0 in all three records, uncited. NULL pointer: runtime returns ILLEGAL_ADDR as a safety choice after PSP-3000 hung on ReferSystemStatus(NULL) (PSP-HLE-NULL-OUT-001); no game relies on the output. Other unwritable non-NULL pointers are unmeasured.
 - **`h_ReferThreadStatus`** (`sceKernel`): `sceKernelReferThreadStatus` (0x17c1684e)
-  - Limitation: run clocks use host scheduler time and preemption/release counters are modeled rather than PSP-measured (#311)
+  - The compiled SDK selects the status record size. Through SDK `0x02060010`, the runtime caps the write at 104 bytes.
+    Later SDKs report 108 bytes and return `ILLEGAL_SIZE` for oversized requests. Both limit writes to the requested
+    size and leave size-zero buffers untouched.
+  - Evidence: [PSPAutotests size and lifecycle results][pspautotests-thread-status] at
+    `e37443a681c6a4d562f32b6b48e1f4e36cd69c97`, and `test_refer_thread_status` through production dispatch (#2961).
+  - Limitation: the extra 108-byte layout word is zero in the observed thread states. Its meaning is unknown.
+    Run clocks use host scheduler time. Preemption and release counters are modeled (#311).
 - **`h_ReferTlsplStatus`** (`sceKernel`): `sceKernelReferTlsplStatus` (0x721067f3)
   - Limitation: the recorded fields and sizes are reproduced; index is the pool's slot number, which matches the cells only while pools are created in slot order (#341)
   - Evidence: PSPAutotests tests/threads/tls/refer.expected (a 60-byte record with index at +40; input size 0 is left alone, any other size reads back 0x3c; unknown ids 0x800201D0)
@@ -1868,3 +1874,5 @@ generated census above also remain. Each entry names the lower-level solution th
 ### The Invariant for Each Migration Step
 
 Every migration step must be accompanied by an automated regression test in `tools/` that executes both the positive and negative paths to prove that guest code executes correctly without synthetic intervention.
+
+[pspautotests-thread-status]: https://github.com/hrydgard/pspautotests/blob/e37443a681c6a4d562f32b6b48e1f4e36cd69c97/tests/threads/threads/refer.expected

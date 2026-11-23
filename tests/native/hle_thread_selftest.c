@@ -30321,7 +30321,10 @@ static void test_sysclib_memory_imports(void) {
 }
 
 static void test_refer_thread_status(void) {
+    extern uint32_t sr_hle_test_compiled_sdk_version(void);
     enum {
+        LEGACY_SDK = 0x02060010u,
+        EXTENDED_SDK = 0x02060011u,
         THREAD_NAME = 0x08301000u,
         THREAD_INFO = 0x08302000u,
         THREAD_ENTRY = 0x08001234u,
@@ -30331,9 +30334,15 @@ static void test_refer_thread_status(void) {
         NID_REFER_THREAD_STATUS = 0x17c1684eu,
         TEST_ILLEGAL_ADDR = 0x80000103u,
         TEST_UNKNOWN_THID = 0x80020198u,
+        TEST_ILLEGAL_SIZE = 0x800201bcu,
     };
     reset_fixture();
     sr_hle_init();
+    const uint32_t saved_sdk = sr_hle_test_compiled_sdk_version();
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+               sr_hle_test_compiled_sdk_version() == LEGACY_SDK,
+           "ReferThreadStatus fixture selects the legacy compiled SDK through dispatch");
     title_hle_write_cstr(THREAD_NAME, "showcase-worker");
     s_cpu->r[4] = THREAD_NAME;
     s_cpu->r[5] = THREAD_ENTRY;
@@ -30370,47 +30379,80 @@ static void test_refer_thread_status(void) {
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR,
            "ReferThreadStatus validates the complete output structure span");
 
-    /* The caller's size word selects the write (the PSP-KERNEL-STATUS-001 rule of the sema,
-     * event-flag and mailbox status calls): 0 writes nothing, a smaller size writes only that
-     * many bytes of the 0x68-byte record, and an unmeasured larger one stops by name.
-     * MUTANT: write sizeof(SrThreadInfo) bytes whatever the size word says -- the size-0 and
-     *   size-8 cells see bytes past the caller's struct overwritten. */
-    enum { INFO_GUARD = 0x70u };
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 0u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == 0u && MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 0 succeeds and writes nothing");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 8u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == (uint32_t)sizeof(SrThreadInfo) &&
-               memcmp((const void *)SR_HOST(THREAD_INFO + 4u), "show", 4u) == 0 &&
-               MEM_R32(THREAD_INFO + 8u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 8 writes only the first 8 bytes of the record");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO + 0x64u) != 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x68u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with the full size writes the record and nothing past it");
+    /* The prefix is the live 104-byte status for the same dormant thread. The
+     * SDK split, write sizes, and trailing word are independently recorded in
+     * PSPAutotests threads/threads/refer.expected (see h_ReferThreadStatus).
+     * A full sentinel comparison proves both the returned bytes and the absence
+     * of writes after the smaller of the declared and supported lengths. */
+    uint8_t legacy[sizeof(SrThreadInfo)];
+    uint8_t extended[0x6c] = {0};
+    memcpy(legacy, (const void *)SR_HOST(THREAD_INFO), sizeof(legacy));
+    memcpy(extended, legacy, sizeof(legacy));
+    fixture_wr32(extended, (uint32_t)sizeof(extended));
+    static const struct {
+        uint32_t sdk, input_size, written, result;
+        const char *label;
+    } cases[] = {
+        { LEGACY_SDK, 0, 0, 0, "legacy size zero leaves output untouched" },
+        { LEGACY_SDK, 8, 8, 0, "legacy partial size returns an exact prefix" },
+        { LEGACY_SDK, 0x68, 0x68, 0, "legacy full size writes 104 bytes" },
+        { LEGACY_SDK, 0x6c, 0x68, 0, "legacy size 108 preserves the trailing word" },
+        { LEGACY_SDK, 0x80, 0x68, 0, "legacy size 128 caps the write at 104 bytes" },
+        { LEGACY_SDK, 0x400, 0x68, 0, "legacy size 1024 caps the write at 104 bytes" },
+        { LEGACY_SDK, UINT32_MAX, 0x68, 0, "legacy maximum size caps the write at 104 bytes" },
+        { EXTENDED_SDK, 0, 0, 0, "newer size zero leaves output untouched" },
+        { EXTENDED_SDK, 8, 8, 0, "newer partial size reports 108 and returns an exact prefix" },
+        { EXTENDED_SDK, 0x68, 0x68, 0, "newer size 104 reports 108 without writing the trailing word" },
+        { EXTENDED_SDK, 0x6c, 0x6c, 0, "newer size 108 writes the observed trailing zero" },
+        { EXTENDED_SDK, 0x80, 0, TEST_ILLEGAL_SIZE, "newer size 128 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x400, 0, TEST_ILLEGAL_SIZE, "newer size 1024 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, UINT32_MAX, 0, TEST_ILLEGAL_SIZE, "newer maximum size returns ILLEGAL_SIZE without writing" },
+    };
+    uint8_t expected[0x404];
     const uint32_t stops_before = sr_hle_test_unmodelled_stops();
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo) + 4u);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (i == 0 || cases[i].sdk != cases[i - 1].sdk) {
+            s_cpu->r[4] = cases[i].sdk;
+            expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+                       sr_hle_test_compiled_sdk_version() == cases[i].sdk,
+                   "ReferThreadStatus fixture selects the compiled SDK through dispatch");
+        }
+        memset(expected, 0xa5, sizeof(expected));
+        fixture_wr32(expected, cases[i].input_size);
+        memcpy((void *)SR_HOST(THREAD_INFO), expected, sizeof(expected));
+        const uint8_t *record = cases[i].sdk == LEGACY_SDK ? legacy : extended;
+        memcpy(expected, record, cases[i].written);
+        s_cpu->r[4] = uid;
+        s_cpu->r[5] = THREAD_INFO;
+        expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == cases[i].result &&
+                   memcmp((const void *)SR_HOST(THREAD_INFO), expected, sizeof(expected)) == 0,
+               cases[i].label);
+    }
+    expect(sr_hle_test_unmodelled_stops() == stops_before,
+           "ReferThreadStatus handles both observed SDK layouts without a semantic stop");
+
+    /* Exactly 104 bytes fit. The newer 108-byte write must check the whole span
+     * before modifying the prefix. The legacy write fits despite the request. */
+    const uint32_t end_buffer = 0x0c000000u - (uint32_t)sizeof(legacy);
+    memset(expected, 0xa5, sizeof(legacy));
+    fixture_wr32(expected, (uint32_t)sizeof(extended));
+    memcpy((void *)SR_HOST(end_buffer), expected, sizeof(legacy));
     s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
-               sr_hle_test_unmodelled_stops() == stops_before + 1u &&
-               MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word above 0x68 stops by name and writes nothing");
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR &&
+               memcmp((const void *)SR_HOST(end_buffer), expected, sizeof(legacy)) == 0,
+           "newer ReferThreadStatus rejects a truncated 108-byte span before writing");
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture switches back to the legacy SDK");
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               memcmp((const void *)SR_HOST(end_buffer), legacy, sizeof(legacy)) == 0,
+           "legacy ReferThreadStatus validates the 104-byte write span for a 108-byte request");
+    s_cpu->r[4] = saved_sdk;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture restores the prior compiled SDK");
 }
 
 /* sceKernelReferThreadRunStatus and sceKernelReferCallbackStatus check the whole record span

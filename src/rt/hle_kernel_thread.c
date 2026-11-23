@@ -423,28 +423,33 @@ static uint32_t h_ReferThreadRunStatus(CpuState *s) {
     }
     return 0;
 }
-/* sceKernelReferThreadStatus(thid, SceKernelThreadInfo *info). The caller's size word selects
- * the write, by the rule the sema, event-flag and mailbox status calls share
- * (PSP-KERNEL-STATUS-001), applied here without a thread-specific cite as for VTimer: a size of
- * 0 writes nothing and succeeds; otherwise min(size, 0x68) bytes of a record whose size word is
- * 0x68 reach guest memory, so nothing past the caller's declared struct is written. A size word
- * above 0x68 is not measured for threads and stops the run by name. */
+/* PSPAutotests e37443a681c6a4d562f32b6b48e1f4e36cd69c97,
+ * tests/threads/threads/refer.c and refer.expected: through SDK 0x02060010
+ * the write is capped at 104 bytes. The newer layout reports 108 bytes,
+ * rejects a size above 108, and returns a zero trailing word in the
+ * observed thread states. That word's meaning is unknown. Both layouts
+ * leave a size-zero buffer alone and respect the requested write length. */
 _Static_assert(sizeof(SrThreadInfo) == 0x68u, "SceKernelThreadInfo is 0x68 bytes");
 static uint32_t h_ReferThreadStatus(CpuState *s) {
     if (!A1 || !sr_guest_span_readable(A1, 4u))
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    SrThreadInfo info;
-    if (sched_thread_info(A0, &info) != 0) return SCE_KERNEL_ERROR_UNKNOWN_THID;
+    struct {
+        SrThreadInfo prefix;
+        uint32_t trailing_word;
+    } record = {0};
+    _Static_assert(sizeof(record) == 0x6cu, "Extended SceKernelThreadInfo is 0x6C bytes");
+    if (sched_thread_info(A0, &record.prefix) != 0)
+        return SCE_KERNEL_ERROR_UNKNOWN_THID;
     const uint32_t input_size = MEM_R32(A1);
     if (input_size == 0u) return 0;
-    if (input_size > (uint32_t)sizeof(SrThreadInfo))
-        return hle_unmodelled_stop("ThreadManForUser_17C1684E",
-                                   "with a size word of 0x%x, above the 0x68-byte "
-                                   "SceKernelThreadInfo, is not measured", input_size);
-    if (!sr_guest_span_writable(A1, input_size))
-        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    for (uint32_t i = 0; i < input_size; i++)
-        MEM_W8(A1 + i, ((const uint8_t *)&info)[i]);
+    const int extended = g_sdk_version > 0x02060010u;
+    record.prefix.size = (uint32_t)(extended ? sizeof(record) : sizeof(record.prefix));
+    if (extended && input_size > record.prefix.size)
+        return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    const uint32_t write_size = input_size < record.prefix.size ? input_size : record.prefix.size;
+    if (!sr_guest_span_writable(A1, write_size)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    for (uint32_t i = 0; i < write_size; i++)
+        MEM_W8(A1 + i, ((const uint8_t *)&record)[i]);
     return 0;
 }
 
