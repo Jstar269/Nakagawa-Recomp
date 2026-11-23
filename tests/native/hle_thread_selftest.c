@@ -67406,6 +67406,65 @@ static void test_atrac3plus_refill_after_empty(int streamed) {
     (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
 }
 
+static int au03_refill_loop_frame(uint32_t id, uint32_t read_offset, uint32_t write_address,
+                                  const uint8_t frame[AU03_ALIGN]) {
+    enum { WRITE_PTR = 0x08004118u, WRITABLE = 0x0800411cu, READ_OFFSET = 0x08004120u };
+    uint32_t ret = td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id,
+                                   WRITE_PTR, WRITABLE, READ_OFFSET);
+    if (ret != 0u || MEM_R32(READ_OFFSET) != read_offset || MEM_R32(WRITABLE) < AU03_ALIGN ||
+        MEM_R32(WRITE_PTR) != write_address)
+        return 0;
+    memcpy(&g_mem[write_address - 0x08000000u], frame, AU03_ALIGN);
+    return td24b_dispatch4(0x7db31251u /* sceAtracAddStreamData */, id, AU03_ALIGN, 0u, 0u) == 0u;
+}
+
+static void test_atrac3plus_refill_after_loop_rewind(void) {
+    enum { SAMPLES = 2048u, DATA_OFFSET = 124u, POSITION = 0x08004124u };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(4u, 3u * SAMPLES, 2u * SAMPLES - 1u);
+    const uint32_t ring = size - AU03_ALIGN;
+    uint8_t frame[AU03_ALIGN];
+    memcpy(frame, &g_mem[AU03_TRACK - 0x08000000u + DATA_OFFSET], sizeof(frame));
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, ring, 0u, 0u);
+    expect(id < 8u, "ATRAC3+ loop refill: setup takes the streamed track");
+    if (id >= 8u) return;
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, id, 0xffffffffu, 0u, 0u) == 0u,
+           "ATRAC3+ loop refill: the track is set to loop");
+    for (unsigned i = 0; i < 2u; ++i) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+               "ATRAC3+ loop refill: the initial frames decode and playback loops");
+    }
+
+    int fed_tail = au03_refill_loop_frame(id, ring, AU03_TRACK, frame);
+    expect(fed_tail, "ATRAC3+ loop refill: the remaining frame is supplied before EOF");
+    if (fed_tail) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES,
+               "ATRAC3+ loop refill: the last fed frame decodes after rewind");
+        /* All bytes through EOF have been fed, but the stream's next refill
+         * advertises an earlier file offset because playback is looping. */
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == ATRAC_ERROR_BUFFER_IS_EMPTY && MEM_R32(AU03_OUT_N) == 0u &&
+                   MEM_R32(AU03_OUT_END) == 0u && MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "ATRAC3+ loop refill: a dry ring at fed EOF still needs a refill");
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_NEXT_DECODE_POSITION,
+                              id, POSITION, 0u, 0u) == 0u && MEM_R32(POSITION) == SAMPLES,
+               "ATRAC3+ loop refill: buffer-empty preserves the rewound decode position");
+        int fed_loop = au03_refill_loop_frame(id, DATA_OFFSET, AU03_TRACK + AU03_ALIGN, frame);
+        expect(fed_loop, "ATRAC3+ loop refill: the advertised earlier bytes are accepted");
+        if (fed_loop) {
+            ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+            expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+                   "ATRAC3+ loop refill: decode resumes after feeding the earlier bytes");
+        }
+    }
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
 static void test_atrac3plus_missing_frame_without_refill(void) {
     reset_fixture();
     sr_hle_init();
@@ -68479,6 +68538,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac3plus_decode_after_end();
     test_atrac3plus_refill_after_empty(1);
     test_atrac3plus_refill_after_empty(0);
+    test_atrac3plus_refill_after_loop_rewind();
     test_atrac3plus_missing_frame_without_refill();
     test_atrac_loop_end_follows_loop_num();
     test_atrac_set_loop_num_bad_id();

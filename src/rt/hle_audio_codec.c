@@ -1172,16 +1172,19 @@ static uint32_t atrac3_first_frame_rule(const Atrac *a, int *skip) {
     return 0;
 }
 
-/* The short read must be recoverable through AddStreamData. In a ring the valid
- * bytes are already queued at the decode cursor. In a halfway buffer, the frame
- * uses its file offset. Keep all subtractions bounded by the declared file size. */
+/* The short read must be recoverable through AddStreamData. A ring uses the
+ * refill offset it exposes to the guest, including a reread after a loop rewind.
+ * A halfway buffer uses the missing frame's own file offset. */
 static int atrac_missing_frame_can_refill(const Atrac *a) {
-    if (a->size >= a->fileSize) return 0;
     if (atrac_streamed_state(a)) {
-        return a->bufferValidBytes < a->bytesPerFrame &&
-               a->bytesPerFrame - a->bufferValidBytes <= a->fileSize - a->size;
+        uint32_t writable, read_offset;
+        atrac_calculate_stream_info(a, NULL, &writable, &read_offset);
+        return writable != 0u && read_offset < a->fileSize &&
+               a->bufferValidBytes < a->bytesPerFrame &&
+               a->bytesPerFrame - a->bufferValidBytes <= a->fileSize - read_offset;
     }
-    if (a->bufferState != ATRAC_STATE_HALFWAY_BUFFER || a->fileSize < a->bytesPerFrame)
+    if (a->bufferState != ATRAC_STATE_HALFWAY_BUFFER || a->size >= a->fileSize ||
+        a->fileSize < a->bytesPerFrame)
         return 0;
     return atrac_file_offset_by_sample(a, a->posSample) <= a->fileSize - a->bytesPerFrame;
 }
