@@ -1428,6 +1428,23 @@ def _calls(text: str, names: set[str]):
             yield match.group(1), text[open_at + 1:_balanced(text, open_at) - 1]
 
 
+#: A body of scalar loads and stores for NullPageGuardTests, at an address no HST table names.
+GUARDED_ACCESS = 0x00012000
+
+
+def _guarded_access_body() -> list[int]:
+    a0, t0 = 4, 8
+    return [
+        _itype(0x23, a0, t0, 0),     # lw  t0, 0(a0)
+        _itype(0x2B, a0, t0, 4),     # sw  t0, 4(a0)
+        _itype(0x24, a0, t0, 8),     # lbu t0, 8(a0)
+        _itype(0x28, a0, t0, 9),     # sb  t0, 9(a0)
+        _itype(0x25, a0, t0, 10),    # lhu t0, 10(a0)
+        _itype(0x29, a0, t0, 12),    # sh  t0, 12(a0)
+        JR_RA, NOP,
+    ]
+
+
 class NullPageGuardTests(unittest.TestCase):
     """A zero-based image occupies the range the PSP leaves unmapped, so a null base plus a
     field offset reaches real image bytes instead of faulting (#363)."""
@@ -1483,11 +1500,17 @@ class NullPageGuardTests(unittest.TestCase):
         # guarded HST body makes to one must carry a checked address. A bulk shortcut that
         # forms its own host pointer is caught the same way as a scalar access. The last
         # hand-written bulk bodies (the native copy and fill) were retired under #363, so the
-        # bodies checked here are the translated ones and what the profile still emits.
+        # specimen carries a translated body of scalar loads and stores of its own: the check
+        # must not pass because no body touches memory.
         cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if cc is None:
             self.skipTest("TOOLCHAIN_MISSING: no C compiler")
-        bodies = _CodegenRun.functions("hst")
+        self.assertNotIn(GUARDED_ACCESS, COVERED)
+        bodies = _codegen_functions(
+            _build_specimen_words({GUARDED_ACCESS: _guarded_access_body()}), "hst")
+        access = bodies[f"f_{GUARDED_ACCESS:08x}"]
+        for form in ("MEM_R32(", "MEM_W32_PC(", "MEM_R8(", "MEM_W8_PC(", "MEM_R16(", "MEM_W16_PC("):
+            self.assertIn(form, access, "the specimen's access body lost a load or store")
         marker = "int nk_guarded_bodies_start;"
         source = ('#define SR_NULL_PAGE_GUARD 1\n#include "recomp.h"\n' + marker + "\n"
                   + "\n".join(bodies.values()) + "\n")
@@ -1511,7 +1534,7 @@ class NullPageGuardTests(unittest.TestCase):
             if re.fullmatch(r"[\s(]*0x[0-9a-fA-F]+u?[\s)]*", args.split(",")[0]):
                 continue  # a translation-time address: the body reading its own code
             unchecked.append(f"{name}({' '.join(args.split())[:120]})")
-        self.assertGreater(checked, 0, "no guarded body reaches guest memory: nothing was checked")
+        self.assertGreaterEqual(checked, 6, "the access body's loads and stores were not checked")
         self.assertEqual(sorted(set(unchecked)), [],
                          "these guarded calls reach guest memory with no null-page check")
 
