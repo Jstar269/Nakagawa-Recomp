@@ -1,6 +1,6 @@
 # PROVENANCE.md — `tests/fixtures/homebrew_corpus/`
 
-The public PSP homebrew corpus (#2144): open-source PSPSDK sample programs that the no-title-hacks smoke builds and runs. **No upstream source is copied into this repository.** The programs ship in the PSPDEV release archive that [`assets/upstream/pspdev.lock.json`](../../../assets/upstream/pspdev.lock.json) already pins by SHA-256 (the same pinned download CI uses for the showcase and profile-zero builds), and `corpus.json` names each file by its Git blob ID. A test (`tools/test_homebrew_corpus.py`) recomputes those IDs from an installed PSPDEV, so a toolchain carrying other bytes fails instead of being used.
+The public PSP homebrew corpus (#2144) lists open-source PSPSDK sample programs for a smoke test without title patches. **No upstream source is copied into this repository.** The programs ship in the PSPDEV release archive that [`assets/upstream/pspdev.lock.json`](../../../assets/upstream/pspdev.lock.json) already pins by SHA-256 (the same pinned download CI uses for the showcase and profile-zero builds), and `corpus.json` names each file by its Git blob ID. A test (`tools/test_homebrew_corpus.py`) recomputes those IDs from an installed PSPDEV, so a toolchain carrying other bytes fails instead of being used.
 
 ## Upstream source
 
@@ -9,7 +9,7 @@ The public PSP homebrew corpus (#2144): open-source PSPSDK sample programs that 
 - Pin: commit `687501d09733390ad75d855f73d69a0672b93a12` (the commit `assets/upstream/pspdev.lock.json` records for `pspsdk`)
 - License: BSD-3-Clause. The root `LICENSE` (Git blob `6a7c199bb9063529bbb70c1387122adf88c96c42`) is a 3-clause BSD grant; every sample file carries the header "Licensed under the BSD license, see LICENSE in PSPSDK root for details". The BSD licence is GPL-3.0-or-later compatible (AGENTS.md Section 4). The separately GPL-3.0-only `tools/PrxEncrypter` is not part of the corpus.
 - Delivery: PSPDEV release `v20261101`, asset `pspdev-ubuntu-latest-x86_64.tar.gz`, SHA-256 `5dc9d785a5fd490ee9d5204b90f715efb6c46940ba3944036bbef9c993c17713`, installed under `psp/sdk/samples`.
-- Verification: all 12 files below were checked byte-identical to the pinned PSPSDK commit by comparing the Git blob ID of the installed file with the blob ID GitHub reports for `src/samples/...` at that commit (2026-11-08). An installed sample `Makefile` is upstream's `Makefile.sample`.
+- Verification: all nine files below were checked byte-identical to the pinned PSPSDK commit by comparing the Git blob ID of the installed file with the blob ID GitHub reports for `src/samples/...` at that commit (2026-11-08). An installed sample `Makefile` is upstream's `Makefile.sample`.
 
 ## File manifest
 
@@ -26,16 +26,15 @@ Kind for every row: **referenced byte-identical**, not copied. Local deltas: non
 | `controller-basic` | `controller/basic/main.c` | `src/samples/controller/basic/main.c` | `5df7169a3c7f6a664e0f026af79e960311e9af2e` |
 | `audio-polyphonic` | `audio/polyphonic/Makefile` | `src/samples/audio/polyphonic/Makefile.sample` | `db3c90119d57ff0a6b21042ba2f111eb963130b5` |
 | `audio-polyphonic` | `audio/polyphonic/main.c` | `src/samples/audio/polyphonic/main.c` | `1be775f1ea919698420343fe8b2035c7ee6d0c9f` |
-| `savedata-utility` | `savedata/utility/Makefile` | `src/samples/savedata/utility/Makefile.sample` | `93404bbf20a07761ba0b69ad9b8dc807f72c1eae` |
-| `savedata-utility` | `savedata/utility/main.c` | `src/samples/savedata/utility/main.c` | `bd90e36f96cdb9b9007055e79a30ccfe1ecaab16` |
-| `savedata-utility` | `savedata/utility/data.h` | `src/samples/savedata/utility/data.h` | `1e627adcec724e1f88365345049686dd5dd5aa13` |
 
 ## Programs and copyright holders
 
 - `gu-cube` (Cube Sample): copyright 2005 Jesper Svennevid.
 - `controller-basic` (Basic controller sample): copyright 2005 Donour Sizemore; 2005 James Forshaw; 2005 John Kelley; 2005 Marcus R. Brown.
 - `audio-polyphonic` (Polyphonic sample by Shine): copyright 2005 Frank Buss.
-- `savedata-utility` (PSPSDK Savedata Sample): copyright 2005 weltall.
+
+The former Savedata Sample candidate by weltall is absent from the locked PSPDEV archive. Savedata smoke
+coverage still needs a source that can be verified against its delivery pin.
 
 ## Project-authored files
 

@@ -579,6 +579,16 @@ class Flash0ConfiguredRootSourceContractTests(unittest.TestCase):
 FONT_DIR_HARNESS_C = r'''
 #include "@FLASH0_FONT_SOURCES_FILE@"
 
+#include <stdlib.h>
+
+/* The absolute SR_USER_DATA_ROOT set by each case keeps this fallback unreachable. */
+bool nk_platform_get_path(NkPathType type, char *out_path, size_t max_len) {
+    (void)type;
+    (void)out_path;
+    (void)max_len;
+    abort();
+}
+
 int main(void) {
     Flash0Sources first;
     Flash0Sources second;
@@ -782,10 +792,10 @@ class Flash0FontDirRefusalNativeTests(unittest.TestCase):
     """A refused SR_FONTDIR is named once on stderr, and the project source is skipped, on every host with a
     C compiler (WSL and hosted Linux included). Elsewhere the class is skipped by name.
 
-    The harness #includes the runtime HLE source that defines flash0_font_sources, compiles the other runtime
-    HLE sources beside it, and leaves the rest of the runtime unresolved. That is safe here:
-    flash0_font_sources reaches only SR_USER_DATA_ROOT (set absolute, so nk_platform_get_path is never
-    called), SR_FONTDIR (always set in these cases), and the wide helpers.
+    The harness #includes the runtime HLE source that defines flash0_font_sources and compiles the other runtime
+    HLE sources beside it. Function and data sections let the linker discard unrelated runtime code.
+    Each case sets an absolute SR_USER_DATA_ROOT. The harness aborts if flash0_font_sources calls the
+    platform path fallback anyway.
     """
     exe: Path
     scratch: scratch_dir.TemporaryDirectory
@@ -814,8 +824,8 @@ class Flash0FontDirRefusalNativeTests(unittest.TestCase):
              f"-I{ROOT / 'src' / 'core'}", f"-I{ROOT / 'src' / 'core' / 'generated'}",
              f"-I{ROOT / 'src' / 'rt' / 'atrac3p'}", f"-I{ROOT / 'src' / 'rt' / 'atrac3p' / 'libavcodec'}",
              f"-I{ROOT / 'src' / 'rt' / 'atrac3p' / 'libavutil'}",
-             str(source), *others, "-o", str(cls.exe), "-Wl,--unresolved-symbols=ignore-all",
-             "-lpthread", "-lm"],
+             "-ffunction-sections", "-fdata-sections", str(source), *others, "-o", str(cls.exe),
+             "-Wl,--gc-sections", "-lpthread", "-lm"],
             capture_output=True, text=True, check=False, timeout=600,
         )
         if build.returncode != 0:

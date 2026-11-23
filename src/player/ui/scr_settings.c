@@ -2370,12 +2370,12 @@ static void settings_online_play_keep_focus_in_view(NkUi *ui, const char *const 
    it a view less one line, so its first lines and the server's name can be read by keyboard or
    controller before choosing; the wheel, a drag and touch scroll it as any card does. Returns
    whether the card scrolls, so it can say how. */
-static bool settings_online_play_card_scroll(NkUi *ui) {
+static bool settings_card_scroll(NkUi *ui, NkUiId scroller) {
     NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
     float line = nk_ui_line_height(ui, &body);
     NkUiScrollState state;
     NkUiNavDir page;
-    const bool known = nk_ui_scroll_state(ui, FLOW_ID_CARD, &state);
+    const bool known = nk_ui_scroll_state(ui, scroller, &state);
     float offset = known ? state.offset : 0.0f;
     const float start = offset;
     while (nk_ui_take_event(ui, NK_UI_EV_PAGE, &page)) {
@@ -2384,8 +2384,31 @@ static bool settings_online_play_card_scroll(NkUi *ui) {
     }
     if (known && offset > state.max_offset) offset = state.max_offset;
     if (offset < 0.0f) offset = 0.0f;
-    if (fabsf(offset - start) >= 0.5f) nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
+    if (fabsf(offset - start) >= 0.5f) nk_ui_scroll_to(ui, scroller, offset);
     return known && state.max_offset > 0.5f;
+}
+
+static bool settings_online_play_card_scroll(NkUi *ui) {
+    return settings_card_scroll(ui, FLOW_ID_CARD);
+}
+
+/* The most a consent card's scrolling text may take: what the card, at most the room between
+   the bars (scr_flow_begin), leaves after its fixed lines and buttons, as the last layout
+   measured them (the card's content less the text's own height). Before a first layout, half
+   the card; never under three lines, so a window too small for that scrolls the card too. */
+static float settings_consent_text_max(NkUi *ui, NkUiId text, float height) {
+    const NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    const float least = 3.0f * nk_ui_line_height(ui, &body);
+    const float card = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
+                       2.0f * NK_UI_SPACE_4;
+    NkUiScrollState card_state;
+    NkUiScrollState text_state;
+    float room = card * 0.5f;
+    if (nk_ui_scroll_state(ui, FLOW_ID_CARD, &card_state) &&
+        nk_ui_scroll_state(ui, text, &text_state)) {
+        room = card - (card_state.viewport + card_state.max_offset - text_state.viewport);
+    }
+    return room > least ? floorf(room) : least;
 }
 
 static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float width,
@@ -2832,6 +2855,165 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 nk_ui_end_container(ui);
             }
         }
+        break;
+    }
+    case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD: {
+        /* RetroAchievements' consent card (#1316): the only way the Achievements switch turns
+           on. It names both hosts and everything sent (docs/SETUP.md "Network use"); nothing
+           is created or sent while it is open. Its text wraps at any window and text size and
+           scrolls in its own box, with Page Up and Page Down too, between the title and the
+           buttons: AGREE AND TURN ON and NOT NOW always show whole, so neither is chosen
+           unseen (the message box it replaced ran its buttons off the screen, and Enter
+           agreed). */
+        const NkUiId consent_text = PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT;
+        const bool scrolls = settings_card_scroll(ui, consent_text);
+        NkUiLayout text_box = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
+                                          NK_UI_DIALOG_GAP);
+        text_box.height.max = settings_consent_text_max(ui, consent_text, height);
+        text_box.scroll = true;
+        static const char *const sends[] = {
+            "- Your RetroAchievements username and its sign-in token.",
+            "- Your password, once, when you sign in, to get that token. It is never saved; "
+            "the token is kept in Windows Credential Manager.",
+            "- The game's RetroAchievements hash, which tells it which game you play.",
+            "- The achievements you unlock.",
+            "- Every two minutes while a game runs, its Rich Presence text: what the game's "
+            "achievement set says you are doing.",
+            "- With each request: this player's name and version, your operating system and "
+            "the rcheevos version."
+        };
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, SCR_ACHIEVEMENTS_HOST, theme->info);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, "RetroAchievements", NK_UI_TYPE_TITLE, theme->paper);
+        if (!nk_ui_begin_container(ui, consent_text, &text_box, NULL)) break;
+        if (scrolls) {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7AEu,
+                            "Page Up and Page Down, or the triggers, scroll this card.",
+                            NK_UI_TYPE_CAPTION, theme->muted);
+        }
+        nk_ui_text_role(ui, FLOW_ID_LEAD,
+                        "RetroAchievements lets you earn achievements in games that have an "
+                        "achievement set. It is a community service hosted at "
+                        "https://" SCR_ACHIEVEMENTS_HOST ". Nakagawa does not run it.",
+                        NK_UI_TYPE_BODY_S, theme->paper);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7A0u,
+                            "What Nakagawa sends to " SCR_ACHIEVEMENTS_HOST, NK_UI_TYPE_BODY,
+                            theme->paper);
+            for (size_t i = 0u; i < sizeof(sends) / sizeof(sends[0]); ++i) {
+                nk_ui_text_role(ui, (NkUiId)(SET_ID_TEXT + 0x7A1u + (NkUiId)i), sends[i],
+                                NK_UI_TYPE_BODY_S, theme->paper);
+            }
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7A8u, "Badge pictures", NK_UI_TYPE_BODY,
+                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7A9u,
+                            "While you are signed in, the achievements' badge pictures are "
+                            "downloaded from " SCR_ACHIEVEMENTS_BADGE_HOST ", the only other "
+                            "host. Those requests send no username, token or console ID, only the "
+                            "same player, version and system names. The pictures are kept on this "
+                            "PC until you sign out.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7AAu, "Casual Mode only", NK_UI_TYPE_BODY,
+                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7ABu,
+                            "Hardcore is not available. Achievements are off while cheats are on "
+                            "or with 60 FPS game logic.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7ACu,
+                            "Nakagawa never sends your game files, your saves, the game's memory "
+                            "or anything else from your PC.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7ADu,
+                            "RetroAchievements stays off until you choose AGREE AND TURN ON. You "
+                            "can turn it off again at any time in Settings > Online and developer "
+                            "options > Achievements.",
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_end_container(ui);
+        }
+        nk_ui_end_container(ui); /* consent_text */
+        {
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_3);
+            row.padding_top = NK_UI_SPACE_1;
+            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_AGREE, "Agree and turn on",
+                                 NK_UI_BUTTON_PRIMARY)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_AGREE);
+                }
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW, "Not now", 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_NOT_NOW);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+        break;
+    }
+    case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN: {
+        /* RetroAchievements' sign-in form (#1316). Username and Password each open the
+           on-screen keyboard editor (a physical keyboard types there too); SIGN IN sends them
+           once. The model carries the password's length only, never the password. */
+        char stars[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        const char *username = safe_text(model->achievements_username, "");
+        const size_t star_count = model->achievements_password_chars < sizeof(stars) - 1u
+                                      ? model->achievements_password_chars
+                                      : sizeof(stars) - 1u;
+        const bool ready = username[0] != '\0' && star_count > 0u &&
+                           !model->achievements_sign_in_pending;
+        memset(stars, '*', star_count);
+        stars[star_count] = '\0';
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "RetroAchievements", theme->info);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, "Sign in", NK_UI_TYPE_TITLE, theme->paper);
+        nk_ui_text_role(ui, FLOW_ID_LEAD,
+                        "Enter your RetroAchievements.org username and password. SIGN IN sends "
+                        "them once to " SCR_ACHIEVEMENTS_HOST " over HTTPS to get a sign-in "
+                        "token. Nakagawa keeps only the token, in Windows Credential Manager, "
+                        "until you sign out; the password is never saved.",
+                        NK_UI_TYPE_BODY_S, theme->paper);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            const WizardRow rows[2] = {
+                {"Username", username[0] ? username : "Enter",
+                 "Your RetroAchievements.org username."},
+                {"Password", star_count ? stars : "Enter",
+                 "Shown as stars. Sent once, never saved."}
+            };
+            WizardColumn column = scr_wizard_column(ui, rows, 2u, inner - 32.0f, true);
+            if (scr_wizard_value(ui, PLAYER_UI_ID_ACHIEVEMENTS_USERNAME, SET_ID_TEXT + 0x7C0u,
+                                 rows[0].name, rows[0].value, rows[0].sentence, false,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_USERNAME);
+            }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_ACHIEVEMENTS_PASSWORD, SET_ID_TEXT + 0x7C4u,
+                                 rows[1].name, rows[1].value, rows[1].sentence, false,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_PASSWORD);
+            }
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7C8u,
+                            safe_text(model->achievements_status, "Sign in to connect."),
+                            NK_UI_TYPE_BODY_S,
+                            model->achievements_sign_in_pending ? theme->info : theme->muted);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7C9u,
+                            "RetroAchievements has no sign-in web page for other apps, so the "
+                            "password is entered here, as in other emulators. No account yet? "
+                            "Create one at retroachievements.org.",
+                            NK_UI_TYPE_BODY_S, theme->muted);
+            nk_ui_end_container(ui);
+        }
+        {
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_3);
+            row.padding_top = NK_UI_SPACE_1;
+            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN, "Sign in",
+                                 ready ? NK_UI_BUTTON_PRIMARY
+                                       : NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_DISABLED)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT);
+                }
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN_CANCEL, "Cancel", 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_SIGN_IN_CANCEL);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+        memset(stars, 0, sizeof(stars));
         break;
     }
     case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS: {

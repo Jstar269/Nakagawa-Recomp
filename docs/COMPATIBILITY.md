@@ -69,14 +69,35 @@ custom-firmware-only imports are refused later, when code generation reads the p
 
 ## Homebrew corpus
 
-The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) lists four open-source PSPSDK sample programs, pinned to the PSPDEV release, for a smoke run with no per-title patches. Nothing builds or runs them, and no smoke run has measured any of them. The list, pins and licences are in [`tests/fixtures/homebrew_corpus/`](../tests/fixtures/homebrew_corpus/PROVENANCE.md); nothing is copied into the repository. Every result is *unmeasured*. The list accepts a result other than unmeasured only for a known failure, and that entry must name its issue.
+The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) lists
+three PSPSDK samples shipped in the pinned PSPDEV release. Build a guest ELF with the installed release:
 
-| Program | PSPSDK sample | Smoke checks | Result |
+```sh
+python tools/homebrew_corpus.py build gu-cube --pspdev /usr/local/pspdev --out build/cube.elf
+```
+
+Use a new output path for each build. The tool checks the sample's source hashes and builds from a temporary
+copy. The [corpus provenance](../tests/fixtures/homebrew_corpus/PROVENANCE.md) records the source pins, licences
+and the deferred savedata sample.
+
+The Linux native CI player leg exercises `gu-cube`. With the pinned PSPDEV tools, the native player build
+dependencies, Xvfb and a Vulkan device installed, run the same check offline:
+
+```sh
+NK_HOMEBREW_RUNTIME_REQUIRED=1 SDL_VIDEODRIVER=x11 PYTHON="$(command -v python)" \
+  xvfb-run -a python -m unittest -v tools.test_homebrew_corpus.CorpusRuntimeSmokeTests.test_gu_cube_runtime_smoke
+```
+
+Use a supported Python and select the intended Vulkan ICD when several devices are installed. The test imports
+the sample, validates the built package, and requires 120 accepted presents with a moving textured cube on the
+expected background. A fresh profile must refuse the same PBP bytes under the wrong filename. The table below
+shows the results recorded in the versioned corpus manifest; the CI log gives the result for each tested head.
+
+| Program | PSPSDK sample | Smoke checks | Recorded result |
 | :--- | :--- | :--- | :--- |
 | `gu-cube` | `gu/cube` | first_frame, nonblank_frame | unmeasured |
 | `controller-basic` | `controller/basic` | first_frame, scripted_input | unmeasured |
 | `audio-polyphonic` | `audio/polyphonic` | first_frame, audio_output | unmeasured |
-| `savedata-utility` | `savedata/utility` | first_frame, save_round_trip | unmeasured |
 
 ## Title compatibility
 

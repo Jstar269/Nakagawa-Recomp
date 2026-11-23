@@ -11,6 +11,10 @@
  * fails closed gracefully with a clear diagnostic and open-loop guest pacing.
  */
 
+#if defined(SR_AUDIO_SELFTEST) && !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L /* setenv and unsetenv under strict C99 */
+#endif
+
 #define SDL_MAIN_HANDLED 1
 
 #include <assert.h>

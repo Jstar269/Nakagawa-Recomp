@@ -485,6 +485,11 @@ gate runs in exactly one part with the command it had in the serial job:
 - `player`: present pacing, the player UI tests and regressions, the CMake player, the
   showcase and the two player smokes that stage its ISO.
 
+The `player` part also builds the pinned PSPSDK `gu-cube` sample offline and runs it through a fresh
+native player profile under Xvfb and lavapipe. It checks the refused filename, package validation,
+120 accepted presents and changing cube pixels. The environment requires the test to run.
+[Homebrew corpus](COMPATIBILITY.md#homebrew-corpus) gives the local command.
+
 Steps that read what an earlier step built share its part. `needs.native_tools.result`
 aggregates the parts, so `CI required` fails when any part fails.
 `tools/test_public_ci_wiring.py` (`NativeToolsPartitionTests`) fails if a serial gate is

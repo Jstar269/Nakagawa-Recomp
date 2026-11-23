@@ -1567,7 +1567,7 @@ runtime can make is listed below, and each is opt-in and off by default.
 | Online play (ad hoc relay) | The shipped servers `socom.cc`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, `relay-sa.arenaanywhere.site` and `relay-asia.arenaanywhere.site`, a relay server you pick from PPSSPP's list (any host it names), or a server you enter yourself (`27312` lobby, `27313` data, plain TCP) | Only after you select **TURN ON** on the Online play card, which names that exact server, and only while a game that starts PSP ad hoc networking runs | The Online play card; **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) turns it off and ends the connection |
 | Online play server list | `metadata.ppsspp.org` (HTTPS) | Only while Online play is on, when you open the server picker or select **Refresh** in it | Online play being on; no download starts at start, in the background, or while Online play is off, and one already under way when you turn it off finishes but its list is thrown away |
 
-**RetroAchievements** is off by default. Its consent screen names `retroachievements.org` and
+**RetroAchievements** is off by default. Its consent card, a launcher page, names `retroachievements.org` and
 `media.retroachievements.org` and the data sent:
 your RetroAchievements user name and API token, the game hash, achievement unlocks and Rich Presence text,
 which a running game sends every two minutes. Leaderboard entries are not sent. Every request goes to
@@ -1599,8 +1599,12 @@ the game's page says why. Turning the switch off sends nothing more: a request w
 Its requests identify themselves in the form RetroAchievements documents:
 `NakagawaRecomp/<version> (<operating system and version>) rcheevos/<version>`, such as
 `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. No telemetry is sent.
-To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read and accept the consent screen,
-then choose **Sign in**. The game's page lists the core achievements after the set loads.
+To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read the consent card and
+choose **Agree and turn on**. The launcher's sign-in page opens: choose **Username** and **Password** (each opens the
+on-screen keyboard, which a keyboard, mouse or controller can use; the password shows as stars), then **Sign in**.
+RetroAchievements offers no sign-in web page or OAuth for other apps (rcheevos signs in only with a password or a token
+it issued), so the password is entered in the launcher, as in other emulators. The game's page lists the core
+achievements after the set loads.
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).

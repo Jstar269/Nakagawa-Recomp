@@ -1504,6 +1504,8 @@ _NATIVE_SERIAL_GATES = {
     "Reproduce the GLSL shaders with the pinned glslc":
         'python tools/shader_embed.py verify --shader-set psp --recompile --glslc "$sdk_dir/1.4.363.0/x86_64/bin/glslc"',
     "Configure, build, and test CMake Linux player": 'ctest --test-dir "$player_build" --output-on-failure',
+    "Run the pinned gu-cube player smoke":
+        "python -m unittest -v tools.test_homebrew_corpus.CorpusRuntimeSmokeTests.test_gu_cube_runtime_smoke",
     "Build and run the Linux showcase headlessly": "make CC=gcc showcase-linux",
     "Build and run the profile-zero production route on Linux":
         "run: make --no-print-directory CC=gcc profile-zero-e2e",
@@ -1622,6 +1624,17 @@ class NativeToolsPartitionTests(unittest.TestCase):
         match = re.fullmatch(r"if: matrix\.part == '([A-Za-z0-9_-]+)'" + suffix, conditions[0])
         self.assertIsNotNone(match, f"{name}: a part condition must name exactly one part")
         return _matched(match).group(1)
+
+    def test_pinned_cube_uses_the_real_presenter_in_the_player_leg(self) -> None:
+        name = "Run the pinned gu-cube player smoke"
+        self.assertEqual(self.part_of(name), "player")
+        step = "\n".join(_required(self.steps[name], "missing gu-cube smoke"))
+        for required in ('NK_HOMEBREW_RUNTIME_REQUIRED: "1"', "SDL_VIDEODRIVER: x11",
+                         'export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', "xvfb-run -a",
+                         "set -euo pipefail", "grep -Eq '^GU_CUBE_RUNTIME_SMOKE presents=120 "):
+            self.assertIn(required, step)
+        for prerequisite in ("Install PSPDEV from the checked-in lock", "Select the lavapipe Vulkan ICD"):
+            self.assertLess(self.names.index(prerequisite), self.names.index(name))
 
     def test_every_serial_gate_runs_in_exactly_one_declared_part_with_its_command(self) -> None:
         self.assertEqual(len(self.parts), len(set(self.parts)))
@@ -2869,6 +2882,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Run the parser mutation fuzzers under ASan and UBSan":
             "sanitizer builds; native-core-tests measures the same harness",
         "Configure, build, and test CMake Linux player": "an end-to-end player route",
+        "Run the pinned gu-cube player smoke": "an end-to-end player route",
         "Build and run the Linux showcase headlessly": "an end-to-end player route",
         "Build and run the profile-zero production route on Linux": "an end-to-end route",
         "Smoke the CMake Linux player headlessly": "an end-to-end player route",

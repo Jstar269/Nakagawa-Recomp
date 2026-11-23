@@ -937,6 +937,7 @@ def _check_record_path(record: Path, zip_path: Path, stage: Path) -> Path:
 
 _VERSION = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?"
 _PLAYER_ZIP = re.compile(rf"nakagawa-recomp-({_VERSION})-(windows-x64)\.zip")
+_PLAYER_TAR = re.compile(rf"nakagawa-recomp-({_VERSION})-(linux-x64)\.tar\.gz")
 _SOURCE_ZIP = re.compile(rf"nakagawa-recomp-({_VERSION})-prerequisite-sources\.zip")
 # The Windows installer (#2208): a second file for the platform that sits beside the ZIP, never in place of it.
 _SETUP_EXE = re.compile(rf"nakagawa-recomp-({_VERSION})-(windows-x64)-setup\.exe")
@@ -957,8 +958,9 @@ def is_auxiliary_asset(name: str) -> bool:
 def check_release_assets(names) -> list[str]:
     """Return the problems with a release's file names; empty when the contract holds (#1876).
 
-    Exactly one player archive per platform, ``nakagawa-recomp-<version>-<os>-<arch>.zip``, with its
-    ``.sha256`` (and optionally that file's ``.minisig``); the prerequisite source archive with its
+    One ``nakagawa-recomp-<version>-windows-x64.zip`` and optionally one
+    ``nakagawa-recomp-<version>-linux-x64.tar.gz``, each with its ``.sha256`` (and optionally that
+    file's ``.minisig``); the prerequisite source archive with its
     ``.sha256``; optionally the platform's installer ``nakagawa-recomp-<version>-windows-x64-setup.exe``
     with its ``.sha256`` (and optionally ``.minisig``), only beside that platform's ZIP; one version
     throughout; and nothing else a launcher's name filter would keep as a second candidate.
@@ -973,7 +975,7 @@ def check_release_assets(names) -> list[str]:
     setups: list[re.Match[str]] = []
     versions: set[str] = set()
     for name in names:
-        player = _PLAYER_ZIP.fullmatch(name)
+        player = _PLAYER_ZIP.fullmatch(name) or _PLAYER_TAR.fullmatch(name)
         source = _SOURCE_ZIP.fullmatch(name)
         setup = _SETUP_EXE.fullmatch(name)
         if player:
@@ -984,18 +986,19 @@ def check_release_assets(names) -> list[str]:
         if matched:
             versions.add(matched[1])
             continue
-        checked = re.fullmatch(r"(nakagawa-recomp-.+\.(?:zip|exe))\.sha256(\.minisig)?", name)
-        if checked and (_PLAYER_ZIP.fullmatch(checked[1]) or _SOURCE_ZIP.fullmatch(checked[1])
-                        or _SETUP_EXE.fullmatch(checked[1])):
+        checked = re.fullmatch(r"(nakagawa-recomp-.+\.(?:zip|exe|tar\.gz))\.sha256(\.minisig)?", name)
+        if checked and any(pattern.fullmatch(checked[1]) for pattern in
+                           (_PLAYER_ZIP, _PLAYER_TAR, _SOURCE_ZIP, _SETUP_EXE)):
             # A signature signs the checksum file, so it needs the checksum and the archive both.
             needed = [checked[1]] + ([f"{checked[1]}.sha256"] if checked[2] else [])
             problems += [f"ASSET_ORPHAN: {name} has no {other}" for other in needed if other not in names]
         elif name.lower().endswith(_ARCHIVE_SUFFIXES) and not is_auxiliary_asset(name):
             problems.append(f"ASSET_SECOND_ARCHIVE: {name} would compete with the player archive; name it "
-                            "nakagawa-recomp-<version>-<os>-<arch>.zip, or as a source, checksum or debug file")
+                            "nakagawa-recomp-<version>-windows-x64.zip or nakagawa-recomp-<version>-linux-x64.tar.gz, "
+                            "or name it as a source, checksum or debug file")
         else:
             problems.append(f"ASSET_NAME_UNKNOWN: {name} is not a name the release contract lists")
-    if not players:
+    if "windows-x64" not in players:
         problems.append("ASSET_PLAYER_MISSING: no nakagawa-recomp-<version>-windows-x64.zip")
     for platform, found in players.items():
         if len(found) > 1:
