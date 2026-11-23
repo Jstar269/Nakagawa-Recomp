@@ -7083,6 +7083,87 @@ static void test_preempt_timer_deadline_is_a_host_time_after_fast_forward(void) 
     s_host_ns_fn = NULL;
 }
 
+/* #2960: the idle pacer's deadline is separate from the display source. The
+ * serviced callbacks give the readout its clock even when every third edge
+ * is the only one that changes the displayed buffer. */
+typedef enum { READOUT_STALE_IDLE, READOUT_HELD_SERVICE, READOUT_GUEST_MASK } ReadoutCase;
+
+static void test_ace_readout_display_service(ReadoutCase scenario) {
+    const int hold_service = scenario == READOUT_HELD_SERVICE;
+    const int guest_mask = scenario == READOUT_GUEST_MASK;
+    static const char line[] =
+        "v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;"
+        "smooth=off;sas=off;tess=off;twin=off";
+    AceReadoutView view = {0};
+    AceCounters before = {0}, after = {0};
+    unsigned callbacks = 0;
+    uint64_t idle_deadline = 0;
+
+    reset_sched();
+    begin_clock_fixture(1, 0u);
+    (void)ace_init_spec(line, NULL);
+    g_test_vblank_handler = 0x00001234u;
+    g_test_vblank_no = 0u;
+
+    for (unsigned edge = 0; edge <= 300u; ++edge) {
+        if (guest_mask && edge == 283u)
+            expect(sched_suspend_interrupts() == 1u, "#2960 guest masks the source after 42 episodes");
+        g_test_host_ns = (uint64_t)edge * 1001000000ull / 60u;
+        /* A positive control holds the last 18 real service episodes. The
+         * other case omits only two visits to the idle pacer. */
+        if (hold_service && edge > 282u && edge < 300u) continue;
+        scheduler_progress_time();
+        if (!hold_service || edge != 300u) scheduler_service_pending();
+        if (edge < 298u) {
+            vblank_pace();
+        } else if (edge == 300u) {
+            idle_deadline = s_vbl_next_ns;
+            vblank_pace();
+        }
+        if (edge % 3u == 0 && (!(hold_service || guest_mask) || edge <= 282u))
+            ace_note_target_draw(0u);
+        (void)ace_flip(0u, 0x22000u, g_test_vcount, host_now_ns());
+        if (edge == 240u) {
+            expect(ace_readout_view(&view) && strcmp(view.text, "100%  20 FPS") == 0,
+                   "#2960 on-time 20 FPS baseline");
+            ace_counters(&before);
+            callbacks = g_test_handler_calls;
+        }
+    }
+    ace_counters(&after);
+    expect(ace_readout_view(&view), "#2960 final window judged");
+    expect(idle_deadline < host_now_ns(), "#2960 replay exercised an expired idle deadline");
+    if (hold_service) {
+        expect(g_test_handler_calls - callbacks == 42u && s_pending_vblanks == 18u &&
+               after.new_frames - before.new_frames == 14u,
+               "#2960 held-service control really is behind");
+        expect(view.pc_limited && !view.gpu_limited &&
+               strcmp(view.text, "\xE2\x96\xB2 70%  14 FPS  PC LIMITED") == 0,
+               "#2960 real service shortfall is PC LIMITED");
+        scheduler_service_pending();
+        expect(g_test_handler_calls - callbacks == 60u && s_pending_vblanks == 0u,
+               "#2960 held episodes are delivered normally at recovery");
+    } else if (guest_mask) {
+        expect(g_test_handler_calls - callbacks == 42u && s_pending_vblanks == 0u &&
+               s_vblank_masked_pending && after.new_frames - before.new_frames == 14u,
+               "#2960 masked source does not owe 18 unserviced interrupts");
+        expect(!view.pc_limited && strcmp(view.text, "\xE2\x80\x94 14 FPS") == 0,
+               "#2960 guest masking has no host-shortfall verdict");
+        sched_resume_interrupts(1u);
+        expect(g_test_handler_calls - callbacks == 43u && s_pending_vblanks == 0u,
+               "#2960 resume still delivers one coalesced masked episode");
+    } else {
+        expect(g_test_handler_calls - callbacks == 60u && s_pending_vblanks == 0u &&
+               after.new_frames - before.new_frames == 20u,
+               "#2960 all 60 episodes serviced over 20 new frames");
+        if (view.pc_limited) fprintf(stderr, "#2960 stale idle deadline readout: %s\n", view.text);
+        expect(!view.pc_limited && strcmp(view.text, "100%  20 FPS") == 0,
+               "#2960 a stale idle deadline cannot qualify as a host shortfall");
+    }
+    (void)ace_init_spec("off", NULL);
+}
+
+
 int main(int argc, char **argv) {
     g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
@@ -7235,6 +7316,9 @@ int main(int argc, char **argv) {
     test_display_wait_nid_split();
     test_display_wait_late_owes_no_edges();
     test_display_vcount_observation_latches_due_edge();
+    test_ace_readout_display_service(READOUT_STALE_IDLE);
+    test_ace_readout_display_service(READOUT_HELD_SERVICE);
+    test_ace_readout_display_service(READOUT_GUEST_MASK);
     test_display_isvblank_uses_live_edge_time();
     test_display_wait_uses_live_window_before_blocking();
     test_display_wait_ignores_late_delivery_anchor();

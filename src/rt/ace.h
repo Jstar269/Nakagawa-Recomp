@@ -388,14 +388,10 @@ const char *ace_rate_name(AceRate rate);   /* "60 Hz", "30 Hz", ..., "static", "
 /* One one-second window of observations. */
 typedef struct {
     uint64_t wall_ns;          /* the window's length */
-    uint32_t new_frames;       /* F's numerator */
-    uint64_t idle_ns;          /* host time in the scheduler's two waits */
-    uint64_t gpu_wait_ns;      /* host time the scheduler's thread was blocked on the GPU's fences
-                                * (ace_note_gpu_wait) */
-    uint32_t skipped_slots;    /* VBLANK deadlines vblank_pace had to skip */
-    AceRate stable;            /* the detector's class at the window's end */
-    int ever_stable;
-    AceRate last_rate;         /* the last stable K class */
+    uint32_t new_frames;       /* observed new display frames */
+    uint32_t display_vblanks;  /* actual guest service episodes */
+    int display_clock_valid;   /* paced, with no guest-masked deadlines */
+    uint64_t gpu_wait_ns;      /* host time blocked on the GPU's fences */
     int smooth;                /* Smooth motion is on for the run */
     uint32_t betweens;         /* in-betweens that reached the screen in the window */
     uint32_t shown;            /* distinct pictures that reached the screen: those, the held
@@ -405,19 +401,10 @@ typedef struct {
 } AceWindow;
 
 typedef struct {
-    int in_stretch;            /* inside a PC-limited stretch */
-    int stretch_k;             /* the K class that was stable when it began (0: none yet) */
-} AceReadoutState;
-
-typedef struct {
-    double fps;                /* F: new frames per second */
-    double idle_share;         /* I: host idle time over wall time */
-    int pc_limited;            /* the host could not keep up: PC LIMITED or GPU LIMITED (both in
-                                * the warning colour) */
-    int gpu_limited;           /* of those, the GPU was the limit: the text says GPU LIMITED */
-    int have_target;           /* a percentage can be shown */
-    double target_fps;         /* T = 59.94 / k */
-    int speed_pct;             /* F / T while PC limited, else 100 */
+    double fps;                /* new frames per second */
+    int pc_limited;            /* either limit verdict uses the warning colour */
+    int gpu_limited;           /* measured GPU waits cover the display-clock shortfall */
+    int speed_pct;             /* paced display progress, 0 when timing is unavailable */
     int smooth_on;             /* Smooth motion is on: the text says whether it added frames */
     double shown_fps;          /* with it on, pictures that reached the screen per second */
     double motion_fps;         /* with it on, the real pictures per second plus each in-between's
@@ -425,23 +412,14 @@ typedef struct {
     char text[64];             /* "100%  30 FPS", "\xE2\x96\xB2 87%  26 FPS  PC LIMITED", "\xE2\x80\x94 27 FPS" */
 } AceReadoutView;
 
-void ace_readout_reset(AceReadoutState *s);
-/* Judges one window; limited when a slot was skipped, or when the host idled under 2% while
- * frames came slower than the class allows. A limited window is GPU LIMITED when the scheduler's
- * thread waited on the GPU for at least as long as the window fell behind (ace_readout_behind_ns),
- * so without those waits the game would have kept up; else it is PC LIMITED (the CPU, or anything
- * else on the host). The target keeps the class stable when the stretch
- * began, so a steady slowdown does not redefine it. With Smooth motion on, the text ends with
- * "SMOOTH n" or, in a window it showed no in-between in (the game was not at a steady 30 FPS),
- * "SMOOTH OFF": it is never off without saying so. n counts what moved, not what was presented:
- * the real pictures that reached the screen in a second, plus each in-between by its measured
- * motion weight. An in-between that repeats the old frame adds nothing, so a scene the
- * in-betweens cannot follow reads SMOOTH 30 however many presents there were. */
-void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out);
-/* How far a window fell behind, in host nanoseconds: the larger of its skipped VBLANK slots
- * (each 1001/60 ms) and, against a class of k VBLANKs a frame, the window's length less the time
- * its new frames should have taken (k VBLANKs each). 0 for a window that kept up. */
-uint64_t ace_readout_behind_ns(const AceWindow *w, int k);
+/* Judge display service against wall time, independently of the game's frame
+ * cadence. A shortfall must exceed 3% and one VBLANK of sampling uncertainty.
+ * Missing or guest-masked clock evidence gives FPS with no speed verdict.
+ * Smooth motion still reports the real and weighted in-between pictures
+ * that reached the display, or SMOOTH OFF when none did. */
+void ace_readout_judge(const AceWindow *w, AceReadoutView *out);
+/* Host nanoseconds beyond the time covered by the serviced display periods. */
+uint64_t ace_readout_behind_ns(const AceWindow *w);
 
 /* ---- observation feed (Ace on only; callers check g_ace_on) ---------------------------------- */
 
@@ -451,17 +429,21 @@ void ace_note_target_draw(uint32_t fb);
 /* A CPU write (a store, a movie frame, a software-raster result) reached VRAM offsets
  * [off, off + bytes): every flipped buffer it overlaps has changed. */
 void ace_note_vram_write(uint32_t off, uint32_t bytes);
-/* Host time the scheduler spent waiting (vblank_pace, sleep_until_us), and slots it skipped. */
-void ace_note_host_wait(uint64_t ns);
-void ace_note_skipped_slots(uint32_t slots);
+/* Count one actual service episode on the scheduler's current clock. */
+void ace_note_display_vblank(int host_paced);
+/* A source edge fell under guest interrupt masking, so this window's
+ * delivery count cannot supply a host-speed verdict. */
+void ace_note_display_masked(void);
+/* Discard a partial readout window when the guest clock stops for a pause. */
+void ace_pause_readout(void);
 /* Host time the scheduler's thread was blocked on a GPU fence: the GE renderer's submissions
  * (a slot reused, a drain at a CPU-visible boundary, a readback) and the presenter's frame. Read
  * only by the readout's verdict and the report; nothing guest-visible depends on it. */
 void ace_note_gpu_wait(uint64_t ns);
 /* Fast forward started (1) or stopped (0) (sched.c; recomp.h, sched_fast_forward_on). The
  * readout's window is a second of wall time, so time at the fast-forward speed is never judged:
- * the readout hides, skipped slots are not counted, no window counts towards the report, and the
- * first full second at normal speed brings the readout back. */
+ * the readout hides, no window counts towards the report, and the first full second at normal
+ * speed brings the readout back. */
 void ace_note_fast_forward(int on);
 /* The display flipped to the `bytes`-long buffer at VRAM offset `fb` at `vcount`
  * (display_present_active, before the presenter's own slot rule). Feeds the detector and,
@@ -474,7 +456,7 @@ int ace_readout_view(AceReadoutView *out);
 AceRate ace_rate_stable(void);
 /* Observation counters (presenter cell A3: all zero with Ace off). */
 typedef struct {
-    uint64_t draws, flips, new_frames, host_wait_ns, skipped_slots, windows, gpu_wait_ns;
+    uint64_t draws, flips, new_frames, windows, gpu_wait_ns;
 } AceCounters;
 void ace_counters(AceCounters *out);
 

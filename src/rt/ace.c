@@ -465,21 +465,23 @@ typedef char ace_feature_keys_complete[sizeof(k_feature_key) / sizeof(k_feature_
 
 /* The run's observation state. */
 static AceDetector s_det;
-static AceReadoutState s_readout;
 static AceReadoutView s_view;
 static int s_have_view;
 static AceCounters s_counters;
 static uint64_t s_win_start_ns;
 static int s_win_started;
-static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown, s_win_motion_milli;
+static uint32_t s_win_frames, s_win_betweens, s_win_shown, s_win_motion_milli;
+static uint32_t s_win_display_vblanks;
+static int s_display_host_paced, s_win_display_masked;
 static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
-static uint64_t s_win_idle_ns;
 static uint64_t s_win_gpu_wait_ns;   /* ace_note_gpu_wait in the window */
 
 /* A readout window starts at now_ns with nothing counted: every per-window counter is here. */
 static void win_reset(uint64_t now_ns) {
     s_win_start_ns = now_ns;
-    s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
+    s_win_frames = 0; s_win_betweens = 0; s_win_shown = 0;
+    s_win_display_vblanks = 0;
+    s_win_display_masked = 0;
     s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
 }
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
@@ -502,7 +504,7 @@ static uint32_t s_target_clock;
 
 static void observation_reset(void) {
     ace_det_reset(&s_det);
-    ace_readout_reset(&s_readout);
+    s_display_host_paced = 0;
     memset(&s_view, 0, sizeof(s_view));
     s_have_view = 0;
     memset(&s_counters, 0, sizeof(s_counters));
@@ -1058,69 +1060,39 @@ int ace_det_flip(AceDetector *d, uint32_t vcount, int new_frame) {
 
 #define ACE_VBLANK_HZ (60000.0 / 1001.0)
 
-void ace_readout_reset(AceReadoutState *s) {
-    if (s) memset(s, 0, sizeof(*s));
+/* 60000/1001 Hz, or 1001000000 nanoseconds per 60 source periods. */
+#define ACE_DISPLAY_60_NS 1001000000ull
+
+uint64_t ace_readout_behind_ns(const AceWindow *w) {
+    if (!w || !w->display_clock_valid) return 0;
+    uint64_t covered = (uint64_t)w->display_vblanks * ACE_DISPLAY_60_NS / 60u;
+    return w->wall_ns > covered ? w->wall_ns - covered : 0u;
 }
 
-static int rate_k(AceRate r) {
-    return r >= ACE_RATE_K1 && r <= ACE_RATE_K4 ? (int)r : 0;
-}
-
-uint64_t ace_readout_behind_ns(const AceWindow *w, int k) {
-    if (!w) return 0;
-    const double vblank_ns = 1e9 / ACE_VBLANK_HZ;
-    double behind = (double)w->skipped_slots * vblank_ns;
-    if (k > 0) {
-        double due = (double)w->new_frames * (double)k * vblank_ns;
-        double short_ns = (double)w->wall_ns - due;
-        if (short_ns > behind) behind = short_ns;
-    }
-    return behind > 0.0 ? (uint64_t)behind : 0u;
-}
-
-void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out) {
+void ace_readout_judge(const AceWindow *w, AceReadoutView *out) {
     AceReadoutView v;
     memset(&v, 0, sizeof(v));
-    if (!s || !w || !out) return;
+    if (!w || !out) return;
     double secs = w->wall_ns ? (double)w->wall_ns / 1e9 : 1.0;
     v.fps = (double)w->new_frames / secs;
-    v.idle_share = w->wall_ns ? (double)w->idle_ns / (double)w->wall_ns : 0.0;
-    if (v.idle_share > 1.0) v.idle_share = 1.0;
-    /* The class frames are judged against: the stretch's while inside one, else the one now
-     * stable, else the last stable one. */
-    int k_now = rate_k(w->stable) ? rate_k(w->stable) : rate_k(w->last_rate);
-    int k_ref = s->in_stretch && s->stretch_k ? s->stretch_k : k_now;
-    int slow = k_ref && v.fps < (ACE_VBLANK_HZ / (double)k_ref) * 0.97;
-    v.pc_limited = w->skipped_slots > 0 || (v.idle_share < 0.02 && slow);
-    /* Which part of the host: the GPU when the scheduler's thread waited on it for at least as
-     * long as the window fell behind, so without those waits the game would have kept up. */
-    v.gpu_limited = v.pc_limited && w->gpu_wait_ns > 0 &&
-                    w->gpu_wait_ns >= ace_readout_behind_ns(w, k_ref);
-    const char *limit = v.gpu_limited ? "GPU LIMITED" : "PC LIMITED";
-    if (v.pc_limited && !s->in_stretch) {
-        s->in_stretch = 1;
-        s->stretch_k = w->ever_stable ? k_now : 0;
-    } else if (!v.pc_limited) {
-        s->in_stretch = 0;
-        s->stretch_k = 0;
-    }
     int fps_shown = (int)(v.fps + 0.5);
-    if (!w->ever_stable || (v.pc_limited && !s->stretch_k)) {
-        v.have_target = 0;
-        v.speed_pct = 100;
-        if (v.pc_limited) snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 \xE2\x80\x94  %d FPS  %s", fps_shown, limit);
-        else snprintf(v.text, sizeof(v.text), "\xE2\x80\x94 %d FPS", fps_shown);
-    } else if (v.pc_limited) {
-        v.have_target = 1;
-        v.target_fps = ACE_VBLANK_HZ / (double)s->stretch_k;
-        double pct = 100.0 * v.fps / v.target_fps;
-        v.speed_pct = pct >= 100.0 ? 100 : (int)pct;
-        snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 %d%%  %d FPS  %s", v.speed_pct, fps_shown, limit);
+    if (!w->display_clock_valid || !w->wall_ns) {
+        snprintf(v.text, sizeof(v.text), "\xE2\x80\x94 %d FPS", fps_shown);
     } else {
-        v.have_target = 1;
-        v.target_fps = k_now ? ACE_VBLANK_HZ / (double)k_now : 0.0;
-        v.speed_pct = 100;
-        snprintf(v.text, sizeof(v.text), "100%%  %d FPS", fps_shown);
+        uint64_t behind = ace_readout_behind_ns(w);
+        /* The flips at the two ends need not fall exactly on source edges. */
+        v.pc_limited = behind > (ACE_DISPLAY_60_NS + 59u) / 60u &&
+                       (double)behind > 0.03 * (double)w->wall_ns;
+        v.gpu_limited = v.pc_limited && w->gpu_wait_ns >= behind;
+        if (v.pc_limited) {
+            v.speed_pct = (int)(100.0 * (double)(w->wall_ns - behind) / (double)w->wall_ns);
+            const char *limit = v.gpu_limited ? "GPU LIMITED" : "PC LIMITED";
+            snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 %d%%  %d FPS  %s",
+                     v.speed_pct, fps_shown, limit);
+        } else {
+            v.speed_pct = 100;
+            snprintf(v.text, sizeof(v.text), "100%%  %d FPS", fps_shown);
+        }
     }
     if (w->smooth) {
         v.smooth_on = 1;
@@ -1186,10 +1158,23 @@ void ace_note_vram_write(uint32_t off, uint32_t bytes) {
     }
 }
 
-void ace_note_host_wait(uint64_t ns) {
+void ace_pause_readout(void) {
     if (!g_ace_on) return;
-    s_win_idle_ns += ns;
-    s_counters.host_wait_ns += ns;
+    s_have_view = 0;
+    s_win_started = 0;
+}
+
+void ace_note_display_vblank(int host_paced) {
+    if (!g_ace_on || s_ff_running) return;
+    if (s_display_host_paced != host_paced) {
+        s_display_host_paced = host_paced;
+        ace_pause_readout();
+    }
+    if (host_paced && s_win_display_vblanks < UINT32_MAX) s_win_display_vblanks++;
+}
+
+void ace_note_display_masked(void) {
+    if (g_ace_on) s_win_display_masked = 1;
 }
 
 void ace_note_gpu_wait(uint64_t ns) {
@@ -1201,14 +1186,7 @@ void ace_note_gpu_wait(uint64_t ns) {
 void ace_note_fast_forward(int on) {
     if (!g_ace_on) return;
     s_ff_running = on != 0;
-    s_have_view = 0;
-    s_win_started = 0;   /* the first flip at normal speed starts a new window */
-}
-
-void ace_note_skipped_slots(uint32_t slots) {
-    if (!g_ace_on || !slots || s_ff_running) return;
-    s_win_skipped += slots;
-    s_counters.skipped_slots += slots;
+    ace_pause_readout();   /* the first flip at normal speed starts a new window */
 }
 
 int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
@@ -1249,17 +1227,14 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         AceWindow w;
         w.wall_ns = now_ns - s_win_start_ns;
         w.new_frames = s_win_frames;
-        w.idle_ns = s_win_idle_ns;
+        w.display_vblanks = s_win_display_vblanks;
+        w.display_clock_valid = s_display_host_paced && !s_win_display_masked;
         w.gpu_wait_ns = s_win_gpu_wait_ns;
-        w.skipped_slots = s_win_skipped;
-        w.stable = s_det.stable;
-        w.ever_stable = s_det.ever_stable;
-        w.last_rate = s_det.last_rate;
         w.smooth = s_req.smooth != 0;  /* asked for: off for the run (no GPU) still says so */
         w.betweens = s_win_betweens;
         w.shown = s_win_shown;
         w.motion_milli = s_win_motion_milli;
-        ace_readout_judge(&s_readout, &w, &s_view);
+        ace_readout_judge(&w, &s_view);
         s_have_view = 1;
         s_counters.windows++;
         if (s_view.pc_limited) s_limited_windows++;

@@ -1904,7 +1904,10 @@ static void scheduler_latch_due_events(void) {
             break;
         }
     }
-    if (masked) sr_perf_vblank_latch(0u, masked, 1);
+    if (masked) {
+        sr_perf_vblank_latch(0u, masked, 1);
+        if (g_ace_on) ace_note_display_masked();
+    }
     if (!due) return;
     /* Accumulate across latches: each elapsed period is owed its own episode, and
      * an undelivered episode is never dropped to make room for a later one. */
@@ -1945,14 +1948,11 @@ void sr_hle_refresh(void) {
 /* Sleep (host) until the virtual clock reaches target_us. Real-time mode only. */
 static void sleep_until_us(uint64_t target_us) {
     sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
-    /* Ace Mode's speed readout counts host idle in both waits (ace.h); off, nothing is read. */
-    uint64_t ace_from = g_ace_on ? host_now_ns() : 0u;
     for (;;) {
         uint64_t now = host_us();
         if (now >= target_us) break;
         SDL_DelayPrecise(pace_to_host_ns((target_us - now) * 1000u));
     }
-    if (g_ace_on) ace_note_host_wait(host_now_ns() - ace_from);
     sr_rt_phase = SR_RT_PHASE_SCHED;
     vtime_refresh();
 }
@@ -1982,15 +1982,12 @@ static void vblank_pace(void) {
         uint64_t wait_started = sr_perf_now_ns();
         uint64_t exec_wait_started = sr_exec_now_ns();
         sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
-        const uint64_t host_from = g_ace_on ? host_now_ns() : 0u;
         SDL_DelayPrecise(pace_to_host_ns(s_vbl_next_ns - now));
         sr_perf_guest_idle_wait(wait_started);
         sr_exec_idle(exec_wait_started);
         sr_rt_phase = SR_RT_PHASE_SCHED;
         now = pace_ns();
-        if (g_ace_on) ace_note_host_wait(host_now_ns() - host_from);
     }
-    uint32_t slots = 0u;
     /* 59.94 Hz is 60000/1001 Hz. Carry the fractional nanoseconds so the
      * accumulated deadline has no floating-point or per-frame rounding drift. */
     do {
@@ -2000,10 +1997,8 @@ static void vblank_pace(void) {
             s_vbl_next_ns++;
             s_vbl_period_rem -= 60000u;
         }
-        slots++;
-        /* Skip missed presentation slots while retaining the rational phase/carry. */
+        /* Advance the idle deadline while retaining the rational phase/carry. */
     } while (now > s_vbl_next_ns);
-    if (g_ace_on && slots > 1u) ace_note_skipped_slots(slots - 1u);
     vtime_refresh();
 }
 
@@ -2132,6 +2127,7 @@ static void deliver_vblank(void) {
     vblank_pace_quantum_init();
     vblank_clock_reset();
     s_vbl_count++;
+    if (g_ace_on) ace_note_display_vblank(s_pace_on > 0);
     s_vbl_last_us = s_vtime_us;   /* start edge: the vblank interval runs from here */
     sr_perf_vblank();
 
@@ -5938,6 +5934,7 @@ static uint64_t sched_pause_begin(void) {
     const uint64_t latency_us = t0 >= s_pause_request_ns
         ? (t0 - s_pause_request_ns) / 1000u : 0u;
     s_pause_active = 1;
+    if (g_ace_on) ace_pause_readout();
     s_pause_exit_reason = SR_PAUSE_EXIT_NONE;
     sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
     if (sr_sched_pause_host && sr_sched_pause_host->audio_enter)
