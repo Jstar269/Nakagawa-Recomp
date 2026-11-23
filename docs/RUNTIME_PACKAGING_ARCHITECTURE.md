@@ -596,8 +596,11 @@ before packaging falls back to the stage's stub report.
 
 A user who updates Nakagawa keeps every library entry, setting, mapping and
 save, and rebuilds a package only when something the package was built from has
-changed. Every file the player keeps for the user carries its own version, and
-one rule (`src/core/nk_user_data_schema.h`) governs each writer:
+changed. The files Nakagawa writes for the user carry a version where Nakagawa
+owns the format. `library.json`, `settings.json` and `input_profile.json` share
+one writer rule (`src/core/nk_user_data_schema.h`); the runtime's
+`registry/system.json` overlay is versioned separately and is the exception to
+it:
 
 * An **older** file is read and carried forward one version at a time
   (v1 to v2 to the current version). It is not rewritten on load; the first save
@@ -633,6 +636,75 @@ The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 | `<data>/fonts/v2/manifest.json` | `schema_version` 2, also named by the folder | n/a (v0.0.1 wrote `v2`) | A later layout gets a folder of its own and leaves `v2` as it is |
 | `<data>/experimental/<DISC_ID>/profile.json` | `schema_version` 1 | n/a | Not accepted: the package check fails closed |
 | `<data>/registry/system.json` (the PSP system settings a game changes; `src/rt/hle.c`, `SR_SYSTEM_REGISTRY` overrides the path) | `schema_version` 1, the only version so far (v0.0.1 and later) | (none exist) | Ignored: the game sees the modeled defaults, and the next registry flush (at start-up, when the launcher's host time zone is seeded) moves the file to `system.json.corrupt` (kept, not deleted) before writing a fresh one |
+
+### The four files in detail
+
+The table above is the summary. This one separates what each reader does for a
+file that is older, newer, missing or invalid, and names the live constant and
+reader. A **refusal** is an error the writer will not replace (a newer or
+unreadable file); a **fallback** is defaults in memory, after which a later save
+may replace the file. A **backup** is a copy the writer makes before replacing
+it. The `library.json` row is the player's C reader; `tools/nk_core/library.py`
+reads the same schema version and refuses a newer file, but it has no `.bak`
+recovery and makes no versioned backup.
+
+| File and source | Version | An older file | A newer file | A missing file | An invalid file |
+| --- | --- | --- | --- | --- | --- |
+| `library.json` (`nk_library_load`, `library_load` and `nk_library_save` in `src/core/nk_library.c`; `NK_LIBRARY_SCHEMA_VERSION` in `src/core/nk_library.h`) | 1, the first and only version (v0.0.1 and later). `source_image_path`, `content_sha1`, `content_crc32` and `disc_verification` are optional members an older reader skips | No older version exists and there is no migration table. A version below 1 is not carried forward: it fails as invalid, so the `.bak` recovery in the last column applies | `NK_ERROR_NEWER_SCHEMA`, an empty library, and `newer_schema_version` set. The `.bak` is not read in its place, and `nk_library_save` writes nothing while the primary or its `.bak` is newer | `NK_OK` with an empty library. When the primary is missing, a `.bak` beside it is read as the library | A parse failure, a missing `games` array, or a version below 1: the `.bak` is read; if that fails too, an error and an empty library. A file that is there but cannot be opened or read is not damaged: the `.bak` is not used instead, and nothing is written over it |
+| `settings.json` (`player_app_load_settings` and `player_app_save_settings` in `src/player/player_state.c`; `NK_PLAYER_SETTINGS_SCHEMA_VERSION` in `src/player/player_state.h`) | 2 (v0.0.1 and later); 1 is the format before v0.0.1 | 1 to 2 in memory: an `fps_cap` of 30 or 60 becomes PSP timing (`-1`), and an explicit 0 stays uncapped. The file is not rewritten on load; the first save keeps it as `settings.json.v1.bak` | Defaults in memory, `settings_newer_schema` set, and a notice naming the format; the shared writer refuses the save with `NK_ERROR_NEWER_SCHEMA` | Defaults, no notice, `NK_OK` | A missing, non-integer or below-1 `schema_version`: defaults and "Unsupported settings schema version; defaults restored." A corrupt or non-object file: defaults and "Settings file is corrupt; defaults restored." A zero-byte or over-1 MiB file: defaults and "Settings file has invalid size; defaults restored." A file that cannot be opened or read: defaults, `settings_unreadable`, and no save over it in that session |
+| `input_profile.json` (`nk_input_profile_file_load` and `nk_input_profile_file_save` in `src/core/nk_input_profile.c`; `NK_INPUT_PROFILE_SCHEMA_VERSION` and the per-member constants in `src/core/nk_input_profile.h`) | 6 (mouse buttons, #1791); 5 added `aim` (#1791), 4 stick keys, 3 keyboard keys (#1299), 2 the per-title map (#520), 1 the first global mapping | 1 to 6 load in memory, one step at a time: v1 gets no per-title map, v2 the default keyboard keys, v3 the default stick keys (a direction stays unbound when its default key is already one of that file's button keys), v4 aiming off, and v5 changes nothing. The file is not rewritten on load; the first save keeps it as `input_profile.json.v<n>.bak`. A version that carries a member introduced later, such as `per_title` in v1 or mouse buttons in v5, refuses the whole document | `NK_ERROR_NEWER_SCHEMA`, defaults, and a diagnostic that names the version and says the file is kept as it is; the save path refuses it | `NK_ERROR_FILE_NOT_FOUND`; the player treats that as no profile and uses the defaults | Missing, non-numeric or non-whole `schema_version`, a version below 1, invalid JSON, or any invalid entry: defaults and `NK_ERROR_GENERIC`. The Controls page's first save moves a file that exists but did not load for any reason except a newer version to `input_profile.json.unreadable.bak`, and does not save if that move fails. A zero-byte or over-1 MiB file, or one that cannot be opened or read, takes the same `.unreadable.bak` route |
+| `registry/system.json` (the PSP system settings a game changes; `sreg_ensure_loaded`, `sreg_overlay_apply` and `sreg_persist` in `src/rt/hle.c`; `SREG_OVERLAY_VERSION` in `src/rt/hle.c`; `SR_SYSTEM_REGISTRY` overrides the path) | 1, with `"schema": "nakagawa.psp-system-registry-overlay"`; the only version so far (v0.0.1 and later) | No older version exists and there is no migration: any version other than 1 is invalid | Not preserved as a newer file: a later version fails the same `schema_version` check, so it is ignored like any invalid overlay and moved to `system.json.corrupt` on the next flush, then replaced | First run: the modeled defaults. The host time-zone seed may write a fresh overlay at start-up | Unparseable JSON, a wrong or missing `schema`, a version other than 1, a wrong shape, or a file over 1 MiB: reported, ignored, and the modeled defaults are served; the next flush (at start-up when the host time zone is seeded, or a game's `sceRegFlush*`) renames it to `system.json.corrupt` (kept, not deleted) before writing a fresh one; if the rename fails, it is not written over. A file that cannot be opened or read is reported and left in place, and no flush writes over it |
+
+### Backups, and what is not one
+
+The shared writer's versioned backup is made only when the file on disk carries
+a readable integer version older than the build's. A readable version below 1
+is not migrated, but it is still older to the writer: the first save keeps a
+`settings.json` or `library.json` at `schema_version` 0 as `<file>.v0.bak`. A
+missing, non-numeric or unreadable version gets no versioned backup.
+
+`.unreadable.bak` is the shared writer's name for a file over the reader's size
+bound, not for every file that fails to parse. `input_profile.json` adds a
+second use: the Controls page moves any file it could not load, except a newer
+one, to that name before its first save, so the mappings it holds are not lost
+to one bad entry.
+
+`library.json` has a second backup beside the versioned one: a successful save
+keeps the previous file as `library.json.bak`, and that file is read when the
+primary is missing or invalid, not when it is newer or cannot be read.
+`settings.json` and `input_profile.json` have no such fallback; when their
+primary cannot be loaded, the player runs on defaults.
+
+`registry/system.json` has neither a versioned backup nor an `.unreadable.bak`.
+An invalid or newer overlay is moved to `system.json.corrupt` on the next flush;
+one that cannot be read is left in place. No file is rewritten on load: a
+migration stays in memory until a save, and the original stays on disk until
+then.
+
+### Pending for the stability policy (#2745)
+
+This section records the files' behavior. The policy itself
+([#2745](https://github.com/Jstar269/nakagawa-recomp/issues/2745)) still has to
+say, and this section does not promise:
+
+* which player flags are user-facing. `--launch-title` is written into Steam
+  shortcuts ([`SETUP.md`](SETUP.md)) and `--user-data-root` selects the whole
+  per-user folder; both are parsed in `src/player/main.c`, but no flag is
+  classed yet.
+* which environment variables are user-facing and which are developer-only.
+  [`SETUP.md`](SETUP.md) documents many `SR_*` and `NK_*` variables; the
+  overrides the code reads (`SR_USER_DATA_ROOT`, `SR_SYSTEM_REGISTRY`,
+  `NK_INPUT_PROFILE`/`SR_INPUT_PROFILE`) are implementation behavior, not a
+  stability promise.
+* how a change is announced. The issue's target is release notes, with at least
+  one release's notice before a user-facing flag, variable or format is removed;
+  no such rule exists yet.
+* the remaining contracts in the issue's table: save data, whose migration is
+  #2744 and outside this slice; user title manifests; enhancement packages;
+  built game packages; cheat files; texture packs; where user data lives; and
+  release asset names, tags and signing.
+* a test that fails when a player flag or documented variable is added without
+  a class, so the list cannot drift.
 
 Logs, the update download (kept only when its SHA-256 matches) and the
 content-addressed package cache (section 6) hold no state a user could lose.
