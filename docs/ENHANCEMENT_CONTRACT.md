@@ -2451,13 +2451,13 @@ The runtime says over the picture when it draws the game a slower way than the r
 shows in Authentic mode too and that the user can dismiss it. It is not an enhancement and no play mode turns it on
 or off: it is a host-window fact, and it changes no guest byte, no capture and no recording (section 10.2).
 
-- **When.** Only for the two start-up fallbacks the `render_path` boot event names
-  ([`docs/DEBUGGING.md`](DEBUGGING.md#performance-issues)): `gdi_presenter` (SDL3/Vulkan did not start, so the
-  Windows GDI window shows a software-drawn picture) and `software_ge` (the GPU renderer was asked for and did not
-  start). A path that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is no fallback and shows nothing. The
-  notice has the heading the player's game page uses for the same fact, "Drawn in software", one sentence that says
-  what did not start, that the game may run slower and that updating the graphics driver may help, and the way to
-  hide it.
+- **When.** The start-up fallback is named in the `render_path` boot event
+  ([debugging guide](DEBUGGING.md#performance-issues)). `gdi_presenter` means SDL3/Vulkan did not start and the
+  Windows GDI window shows a software-drawn picture. `software_ge` means the requested Vulkan GE renderer did
+  not start. `vulkan_cpu` means the Vulkan presenter selected a CPU device and takes precedence over
+  `software_ge`. An explicitly selected GDI or software GE path alone does not trigger the notice.
+  The notice shares the player's "Drawn in software" heading and explains why the game may run slower and
+  how to hide the notice.
 - **Not in the window.** An effect the GPU renderer hands to the software rasterizer while the game runs (a
   `render_fallback` event) is named on the game's page in the player, not over the picture: the in-game UI is made
   at start so that no present pays for it, an authentic run with nothing to say at start makes none, and the notice

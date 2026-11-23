@@ -347,17 +347,19 @@ void nk_shared_boot_event_vwrite(FILE *stderr_stream, uint64_t timestamp_ns,
 }
 
 static const char *const k_render_fallback_names[NK_RENDER_FALLBACK_COUNT] = {
-    "none", "gdi_presenter", "software_ge"
+    "none", "gdi_presenter", "software_ge", "vulkan_cpu"
 };
 
 NkRenderPath nk_render_path_from_init(bool vulkan_asked, bool vulkan_started,
-                                      bool gpu_ge_asked, bool gpu_ge_started) {
+                                      bool gpu_ge_asked, bool gpu_ge_started, bool vulkan_cpu) {
     NkRenderPath path;
     /* The GPU GE renderer draws only into the Vulkan presenter. */
     path.vulkan = vulkan_asked && vulkan_started;
     path.gpu_ge = path.vulkan && gpu_ge_asked && gpu_ge_started;
     if (vulkan_asked && !vulkan_started) {
         path.fallback = NK_RENDER_FALLBACK_GDI_PRESENTER;
+    } else if (path.vulkan && vulkan_cpu) {
+        path.fallback = NK_RENDER_FALLBACK_VULKAN_CPU;
     } else if (path.vulkan && gpu_ge_asked && !gpu_ge_started) {
         path.fallback = NK_RENDER_FALLBACK_SOFTWARE_GE;
     } else {

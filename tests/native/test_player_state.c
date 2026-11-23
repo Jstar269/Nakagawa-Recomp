@@ -21038,14 +21038,15 @@ int main(int argc, char **argv) {
            hidden for the rest of the session, and the next launch reads its own path. */
         {
             static const struct {
-                bool vulkan_started, gpu_ge_started;
+                bool vulkan_started, gpu_ge_started, vulkan_cpu;
                 NkRenderFallback fallback;
                 const char *names;
             } forced[] = {
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
-                {true, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
-                {true, true, NK_RENDER_FALLBACK_NONE, NULL},
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
+                {true, false, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
+                {true, true, true, NK_RENDER_FALLBACK_VULKAN_CPU, "Vulkan is running on the CPU"},
+                {true, true, false, NK_RENDER_FALLBACK_NONE, NULL},
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
             };
             bool render_ok = true;
             for (size_t f = 0; f < sizeof(forced) / sizeof(forced[0]); ++f) {
@@ -21056,7 +21057,8 @@ int main(int argc, char **argv) {
                 char line[160];
                 char timed[192];
                 NkRenderPath path = nk_render_path_from_init(true, forced[f].vulkan_started,
-                                                             true, forced[f].gpu_ge_started);
+                                                             true, forced[f].gpu_ge_started,
+                                                             forced[f].vulkan_cpu);
                 set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
                 bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
                                 rep->boot_event_file_path[0] != '\0';
@@ -21087,7 +21089,8 @@ int main(int argc, char **argv) {
                             shown && heading == want_heading && text == want_text &&
                             strcmp(heading, "Drawn in software") == 0 &&
                             strstr(text, forced[f].names) != NULL &&
-                            strstr(text, "Internal resolution setting has no effect") != NULL;
+                            (strstr(text, "Internal resolution setting has no effect") != NULL) ==
+                                (forced[f].fallback != NK_RENDER_FALLBACK_VULKAN_CPU);
                         /* Another game's page has no notice for this launch. */
                         render_ok = render_ok && rep->game_count > 1 &&
                             !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
@@ -21137,8 +21140,8 @@ int main(int argc, char **argv) {
             char words[384];
             bool effects_ok = true;
             int failed_pass = -1;
-            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
-            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false);
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true, false);
+            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false, false);
             assert(rep->game_count > 1);
             assert(player_render_effects_text(0x1FFu, words, sizeof(words)) &&
                    strcmp(words, all_effects) == 0);
