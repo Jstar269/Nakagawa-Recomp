@@ -896,6 +896,7 @@ static uint64_t s_ssaa_test_budget = 0;
 static uint32_t s_ssaa_test_dim = 0;
 /* gegpu_selftest_init_fail: gegpu_init fails at its last step that can fail. */
 static int s_selftest_init_fail = 0;
+static int s_selftest_pipeline_create_fail = 0;   /* fail the next pipeline creation */
 /* tex-make-fail: the next image memory allocation fails, as vkAllocateMemory out of memory. */
 static int s_selftest_alloc_fail = 0;
 #endif
@@ -2227,6 +2228,16 @@ static void pcache_close(int save) {
 
 /* ---- pipelines ------------------------------------------------------------------------ */
 
+static PipeKey pipe_clear_key(uint32_t clear_mode, uint32_t rgb_bits, int write_alpha) {
+    /* Bit 10 enables unconditional depth fill for both clear sprites and triangles. */
+    const uint8_t depth = (clear_mode & 0x400u) != 0;
+    return (PipeKey) {
+        .ztest = depth, .zwrite = depth, .zfunc = VK_COMPARE_OP_ALWAYS,
+        .cmask = ((clear_mode & 0x100u) ? rgb_bits : 0u)
+               | ((clear_mode & 0x200u) && write_alpha ? VK_COLOR_COMPONENT_A_BIT : 0u),
+    };
+}
+
 /* `rmw`: the RMW variant (#2109): psp_frag_rmw with the write mask as its specialization
  * constant, no colour attachment, the depth-only pass and the storage-image set 2. 1 tests depth
  * in the pipeline, early; 2 (a shader-depth run) leaves the pipeline's depth test off and gives
@@ -2349,7 +2360,11 @@ static VkPipeline pipe_create(const PipeKey *k, int rmw) {
 #else
     const VkPipelineCache cache = s_pcache;
 #endif
-    VkResult r = vkCreateGraphicsPipelines(s_dev, cache, 1, &pci, NULL, &p);
+    VkResult r =
+#ifdef SR_GPU_COHERENCE_SELFTEST
+        s_selftest_pipeline_create_fail ? (s_selftest_pipeline_create_fail = 0, VK_ERROR_OUT_OF_HOST_MEMORY) :
+#endif
+        vkCreateGraphicsPipelines(s_dev, cache, 1, &pci, NULL, &p);
     s_pcache_create_ns += SDL_GetTicksNS() - create_started;
     if (r == VK_SUCCESS) {
         s_pcache_creates++;
@@ -7640,8 +7655,7 @@ static void build_state(int persp, int sprite, Batch *b) {
     const uint32_t rgb_bits = (mr >= 0x80 ? 0 : VK_COLOR_COMPONENT_R_BIT) | (mg >= 0x80 ? 0 : VK_COLOR_COMPONENT_G_BIT)
                             | (mb >= 0x80 ? 0 : VK_COLOR_COMPONENT_B_BIT);
     if (clear) {
-        k->cmask = ((g->clear_mode & 0x100) ? rgb_bits : 0)
-                 | ((g->clear_mode & 0x200) && ma < 0x80 ? VK_COLOR_COMPONENT_A_BIT : 0);
+        *k = pipe_clear_key(g->clear_mode, rgb_bits, ma < 0x80);
     } else {
         /* Outside clear mode PSP alpha is the stencil plane: a draw without the stencil
          * test preserves destination alpha, and one with it stores the shader's stencil
@@ -7728,11 +7742,7 @@ static void build_state(int persp, int sprite, Batch *b) {
         VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_NOT_EQUAL,
         VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL,
     };
-    if (clear) {
-        /* clear mode (sprites AND triangles): bit 10 = unconditional depth fill, no test */
-        k->ztest = k->zwrite = (g->clear_mode & 0x400) ? 1 : 0;
-        k->zfunc = VK_COMPARE_OP_ALWAYS;
-    } else {
+    if (!clear) {
         k->ztest = g->ztest_enable ? 1 : 0;
         k->zwrite = (k->ztest && !g->zwrite_disable) ? 1 : 0;
         k->zfunc = k->ztest ? zmap[g->ztest & 7] : VK_COMPARE_OP_ALWAYS;
@@ -10388,9 +10398,14 @@ static int gegpu_init_parts(void) {
 #endif
     /* Last, so a failed init leaves no query pool and the switch off. */
     if (sr_perf_gpu_timestamps_requested()) (void)ts_setup(vi.queue_family);
-    /* After every step that can fail, and before the first pipeline (pipe_get runs only once
-     * the renderer is ready), so the cache is either used for every pipeline or not made. */
+    /* Open the driver cache before creating any pipelines. */
     pcache_open((VkPhysicalDevice)vi.physical);
+    /* The unmasked color, alpha and depth clear uses this regular pipeline (#2361).
+     * Create it before guest lists run so their first clear need not compile it. */
+    const PipeKey clear_key = pipe_clear_key(0x701u,
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT, 1);
+    if (!pipe_get(&clear_key))
+        fprintf(stderr, "gegpu: clear pipeline warmup failed; first use will retry\n");
     s_readback_commit_failures = 0;
     /* Registered only now, after the last step that can fail: a failed init registers nothing
      * (ge_gpu.h), so the Ace report never confirms a part the software rasterizer stood in for. */

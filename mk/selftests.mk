@@ -1267,6 +1267,9 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
+	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test/prewarm --case pipeline-clear-prewarm-cold
+	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test/prewarm --case pipeline-clear-prewarm-warm
+	$(GPU_COHERENCE_RUN) --case pipeline-clear-prewarm-retry
 	$(GPU_COHERENCE_RUN) --case tex-evict-fail
 	$(GPU_COHERENCE_RUN) --case submit-fail
 	$(GPU_COHERENCE_RUN) --depth 32 --init-fail

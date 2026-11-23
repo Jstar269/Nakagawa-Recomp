@@ -427,6 +427,53 @@ def _run_generated_fixture(test, name, words, harness_main, codegen_path=None):
         )
 
 
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: gcc is required for the generated-C conversion regression")
+class GeneratedVi2fScaleTests(unittest.TestCase):
+    def test_vi2f_applies_the_encoded_scale(self):
+        words = [
+            0xD2800001,  # vi2f.s s001, s000, 0
+            0xD2880002,  # vi2f.s s002, s000, 8
+            0xD29F0003,  # vi2f.s s003, s000, 31
+            0x03E00008, 0x00000000,  # jr ra; nop
+        ]
+        _run_generated_fixture(self, "vi2f_scale", words, r'''
+#include <fenv.h>
+#include <stdio.h>
+
+int main(void) {
+    /* PSP-VFPU-CONVERT-001 (#326): INT32_MAX rounds to 0x4f000000.
+     * The other words follow from the published nearest-rounding and scaling rule. */
+    static const struct {
+        uint32_t input;
+        uint32_t expected[3];
+    } cases[] = {
+        {0x7fffffffu, {0x4f000000u, 0x4b000000u, 0x3f800000u}},
+        {0x80000000u, {0xcf000000u, 0xcb000000u, 0xbf800000u}},
+        {0x00000100u, {0x43800000u, 0x3f800000u, 0x34000000u}},
+        {0xffffffffu, {0xbf800000u, 0xbb800000u, 0xb0000000u}},
+    };
+    static const unsigned scales[] = {0u, 8u, 31u};
+    if (fesetround(FE_TONEAREST) != 0) return 2;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CpuState s = {0};
+        s.vi[0] = cases[i].input;
+        s.vfpuCtrl[0] = s.vfpuCtrl[1] = 0xe4u;
+        f_00001000(&s);
+        for (unsigned j = 0; j < sizeof(scales) / sizeof(scales[0]); j++) {
+            const uint32_t actual = s.vi[4 * (j + 1)];
+            const uint32_t expected = cases[i].expected[j];
+            if (actual != expected) {
+                fprintf(stderr, "vi2f scale %u input %08x: got %08x, expected %08x\n",
+                        scales[j], cases[i].input, actual, expected);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+''')
+
+
 # Guest FCR31 field layout pinned by the PSP_HARDWARE-captured pspautotests fpu
 # suite: RM bits [1:0], FCC0 bit 23, FS bit 24. Fixture expectations are exact
 # correctly-rounded binary32 words derived independently with rational
