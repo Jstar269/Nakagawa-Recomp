@@ -482,15 +482,14 @@ class ProfileHstLegacyTests(unittest.TestCase):
             "sr_newlib_free(s->r[5], owner_ra)",
             "sr_newlib_memalign",
             "sr_newlib_realloc",
-            "sr_native_memmove(dest, s->r[5], s->r[6], 0x00011090u)",
-            "sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x000114c0u)",
         )
         missing = [s for s in expected if s not in self.combined]
         self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
         # Retired under #363: the guest's own loops and abort() run as written.
         # The native sprintf went on 2026-11-11: the title's own formatter runs.
+        # The native copy and fill went on 2026-11-23: the title's own routines run.
         for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)",
-                        "sr_guest_sprintf"):
+                        "sr_guest_sprintf", "sr_native_memmove", "sr_native_memset"):
             self.assertNotIn(retired, self.combined, f"profile=hst still emits {retired}")
 
     def test_diagnostic_probes_stay_compiled_out_in_production(self):
@@ -1177,6 +1176,10 @@ class RetiredAddressGuardTests(unittest.TestCase):
 RETIRED_363_STUB_ADDRESSES: tuple[int, ...] = (
     0x00015F98, 0x0001034C, 0x0001C010, 0x0001C0FC, 0x0001C104, 0x0001C560,
     0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0, 0x000143B0,
+) + (
+    # The native copy (sr_native_memmove) and fill (sr_native_memset) bodies, retired on
+    # 2026-11-23: the title's own copy and fill routines translate as written.
+    0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
 )
 
 
@@ -1478,12 +1481,13 @@ class NullPageGuardTests(unittest.TestCase):
         # Generic over emitters: every runtime helper that reaches the arena (g_mem), directly
         # or through another helper, is found from the preprocessed header, and every call a
         # guarded HST body makes to one must carry a checked address. A bulk shortcut that
-        # forms its own host pointer is caught the same way as a scalar access.
+        # forms its own host pointer is caught the same way as a scalar access. The last
+        # hand-written bulk bodies (the native copy and fill) were retired under #363, so the
+        # bodies checked here are the translated ones and what the profile still emits.
         cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if cc is None:
             self.skipTest("TOOLCHAIN_MISSING: no C compiler")
         bodies = _CodegenRun.functions("hst")
-        self.assertIn("sr_native_memmove(", "".join(bodies.values()))
         marker = "int nk_guarded_bodies_start;"
         source = ('#define SR_NULL_PAGE_GUARD 1\n#include "recomp.h"\n' + marker + "\n"
                   + "\n".join(bodies.values()) + "\n")
@@ -1499,12 +1503,15 @@ class NullPageGuardTests(unittest.TestCase):
         self.assertIn("sr_host_address", helpers)
         self.assertIn("sr_guest_fill", helpers)
         unchecked = []
+        checked = 0
         for name, args in _calls(generated, helpers):
             if "sr_null_page_checked(" in args or "sr_null_span_checked(" in args:
+                checked += 1
                 continue
             if re.fullmatch(r"[\s(]*0x[0-9a-fA-F]+u?[\s)]*", args.split(",")[0]):
                 continue  # a translation-time address: the body reading its own code
             unchecked.append(f"{name}({' '.join(args.split())[:120]})")
+        self.assertGreater(checked, 0, "no guarded body reaches guest memory: nothing was checked")
         self.assertEqual(sorted(set(unchecked)), [],
                          "these guarded calls reach guest memory with no null-page check")
 

@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import codegen_hst_stubs  # noqa: E402
 import hle_sources  # noqa: E402
 
 
@@ -87,19 +88,22 @@ def _blank_vram_decoder_cli(text: str) -> str:
 
 class TestGuestSpanRouting(unittest.TestCase):
     def test_generated_bulk_stubs_use_complete_span_helpers(self) -> None:
-        # The native memcpy/memset stub bodies are data in codegen_hst_stubs.py ("@ADDR@" is the
-        # stub's own address); the span helpers in codegen.py's own emitters stay in its source.
-        stubs = (ROOT / "tools" / "codegen_hst_stubs.py").read_text(encoding="utf-8")
-        self.assertIn("sr_native_memmove(dest, s->r[5], s->r[6], 0x@ADDR@u);", stubs)
-        self.assertIn("sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x@ADDR@u);", stubs)
+        # The native memcpy/memset stub bodies were retired under #363: no generated body
+        # calls the bulk helpers now, and none may form a host pointer of its own instead. The
+        # span helpers in codegen.py's own emitters stay in its source.
+        for body in codegen_hst_stubs.HST_CUSTOM_STUBS.values():
+            self.assertNotIn("sr_native_mem", body)
+            self.assertNotIn("SR_HOST(", body)
         text = (ROOT / "tools" / "codegen.py").read_text(encoding="utf-8")
+        self.assertNotIn("sr_native_mem", text)
         # The title-specific MEMSET_FASTPATH emission site is retired (#363); the bulk stores
         # codegen.py still emits (the sv.q quad store) keep the whole-span check before any write.
         self.assertIn("(_a&15u)==0 && sr_guest_span_writable(_a,16u)", text)
         self.assertNotIn("memmove(SR_HOST(dest), SR_HOST(src), size)", text)
         self.assertNotIn("memset(SR_HOST(dest), val, size)", text)
-        # The stubs' bodies live in recomp.h (#1170): whole-span checks, the
-        # VRAM read-back before the source pointer, and the write notification.
+        # The bulk helpers in recomp.h (#1170) keep their contract for the code that still
+        # calls them (the native selftests): whole-span checks, the VRAM read-back before the
+        # source pointer, and the write notification.
         header = (ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
         # #1049: the bodies copy through sr_guest_memmove/sr_guest_fill, which
         # split swizzled VRAM mirror spans into measured-contiguous pieces.

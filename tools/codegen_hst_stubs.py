@@ -23,30 +23,14 @@ shadow real, fully translatable code: 0x1c008 is ``jr ra; sw a1,0x4028(a0)`` (th
 the delay-slot store) and 0x1a5f8 is a computed-goto resume point reached through .data pointer
 tables.  Both are discovered entries and translate faithfully;
 ``tools/test_codegen_no_shadow_stubs.py`` keeps them so.
+
+0x00011090 and 0x000110dc (a native copy, ``sr_native_memmove``) and 0x000114c0 and 0x000114a8
+(a native fill, ``sr_native_memset``) were retired under #363 on 2026-11-23.  They stood in for
+the title's own copy and fill routines for speed.  The copy had memmove semantics whatever the
+routine at its address does with overlapping spans, and both left every register but v0 as the
+caller set it.  The title's own instructions now run at all four
+(``tools/test_codegen_hst_stubs.py``, ``RetiredCopyAndFillBodiesRunAsWrittenTests``).
 """
-
-# One body shared by 0x00011090, 0x000110DC; "@ADDR@" is the address in
-# lower-case hex, as in the function name.
-_MEMCPY_NATIVE = """void f_@ADDR@(CpuState *s) {  /* custom stub: memcpy native */
-    uint32_t dest = s->r[4];
-    sr_native_memmove(dest, s->r[5], s->r[6], 0x@ADDR@u);
-    s->r[2] = dest;
-    s->pc = s->r[31];
-}"""
-
-# One body shared by 0x000114C0, 0x000114A8; "@ADDR@" is the address in
-# lower-case hex, as in the function name.
-_MEMSET_NATIVE = """void f_@ADDR@(CpuState *s) {  /* custom stub: sceKernelMemset native */
-    uint32_t dest = s->r[4];
-    sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x@ADDR@u);
-    s->r[2] = dest;
-    s->pc = s->r[31];
-}"""
-
-
-def _per_address(template, addresses):
-    return {a: template.replace("@ADDR@", f"{a:08x}") for a in addresses}
-
 
 HST_CUSTOM_STUBS = {
 
@@ -93,7 +77,4 @@ HST_CUSTOM_STUBS = {
     s->pc = s->r[31];
 }""",
 
-
-    **_per_address(_MEMCPY_NATIVE, (0x00011090, 0x000110DC)),
-    **_per_address(_MEMSET_NATIVE, (0x000114C0, 0x000114A8)),
 }

@@ -989,11 +989,13 @@ static inline void sr_w8 (uint32_t a, uint8_t v) { sr_w8_pc(a, v, 0); }
 static inline void sr_w16(uint32_t a, uint16_t v) { sr_w16_pc(a, v, 0); }
 static inline void sr_w32(uint32_t a, uint32_t v) { sr_w32_pc(a, v, 0); }
 
-/* Native bulk copy/fill bodies for generated stubs that replace a title's own
- * memmove/memset (#1170).  They keep the same VRAM coherence contract as the
- * MEM_* accessors and h_Memcpy/h_Memset: a renderer-owned source is read back
- * before the host pointer is formed, and the destination is prepared and
- * committed so GPU targets and cached textures observe the store.  A span
+/* Native bulk copy/fill bodies (#1170).  The generated stubs that called them in
+ * place of a title's own copy and fill routines were retired under #363, so no
+ * generated code reaches them now; the native selftests still do.  They keep
+ * the same VRAM coherence contract as the MEM_* accessors and
+ * h_Memcpy/h_Memset: a renderer-owned source is read back before the host
+ * pointer is formed, and the destination is prepared and committed so GPU
+ * targets and cached textures observe the store.  A span
  * through a swizzled VRAM mirror is copied in measured-contiguous pieces
  * (sr_guest_memmove/sr_guest_fill, #1049), as the translated body's scalar
  * stores would land it. */
@@ -1060,8 +1062,8 @@ static inline uint32_t sr_null_span_checked(uint32_t address, uint32_t size, con
 #endif
 
 /* Generated bulk code forms a host pointer only through SR_HOST(SR_DATA_SPAN(a, n)), and the
- * native memmove/memset stubs check both spans the same way, so a null base stops as it would
- * in the translated loop it replaces. */
+ * native memmove/memset bodies check both spans the same way, so a null base stops as it would
+ * in a translated loop. */
 #ifdef SR_NULL_PAGE_GUARD
 #define SR_DATA_SPAN(a, n) sr_null_span_checked((uint32_t)(a), (uint32_t)(n), __func__)
 static inline void sr_native_memmove_checked(uint32_t dest, uint32_t src, uint32_t size, uint32_t pc,
