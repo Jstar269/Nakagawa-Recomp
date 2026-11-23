@@ -59,6 +59,7 @@ import nk_cli  # noqa: E402
 import nk_powershell  # noqa: E402
 import scratch_dir  # noqa: E402
 from test_build_truth import _class_scratch_build_root  # noqa: E402
+from test_nk_core import launcher_c_source, launcher_english_catalog  # noqa: E402
 from nk_core import package_cache  # noqa: E402
 from nk_core import report_bundle  # noqa: E402
 import prxload  # noqa: E402
@@ -663,15 +664,21 @@ class TestReleaseDocumentation(unittest.TestCase):
         # The default launcher adds later games through the library's add tile,
         # not the legacy renderer's ADD ANOTHER ISO button.
         self.assertIn("Add a disc image you own", readme)
-        self.assertIn(
-            '"Add a disc image you own"',
-            (ROOT / "src" / "player" / "ui" / "scr_library.c").read_text(encoding="utf-8"),
-        )
+        english = launcher_english_catalog(ROOT)
+        library = launcher_c_source(ROOT / "src/player/ui/scr_library.c")
+        self.assertRegex(library,
+                         r"\bnk_ui_add_tile\(ui,\s*PLAYER_UI_ID_LIBRARY_ADD,\s*"
+                         r"NK_UI_STR\(LIBRARY_ADD_DISC_TITLE\)\s*,")
+        self.assertEqual(english["LIBRARY_ADD_DISC_TITLE"], '"Add a disc image you own"')
         # The player decrypts the user's disc itself (#295), so the setup wizard asks for
         # a disc image, not a decrypted one.
-        wizard = (ROOT / "src" / "player" / "ui" / "scr_wizard.c").read_text(encoding="utf-8")
-        self.assertIn('"A disc image (.iso) of a PSP game you own"', wizard)
-        self.assertNotIn("A decrypted .iso", wizard)
+        wizard = launcher_c_source(ROOT / "src/player/ui/scr_wizard.c")
+        self.assertRegex(wizard, r"\bwizard_text\(ui,\s*3u,\s*"
+                                  r"NK_UI_STR\(WIZARD_DISC_REQUIREMENT\)\s*,")
+        self.assertEqual(english["WIZARD_DISC_REQUIREMENT"],
+                         '"A disc image (.iso) of a PSP game you own"')
+        wizard_copy = re.sub(r"\bNK_UI_STR\((\w+)\)", lambda match: english[match[1]], wizard)
+        self.assertNotIn("A decrypted .iso", wizard_copy)
         self.assertNotIn("click **Add Game**", readme)
         self.assertNotIn("No second verified title.", readme)
         self.assertIn("consent once", readme.lower())

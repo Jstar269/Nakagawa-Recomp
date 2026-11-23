@@ -11,6 +11,7 @@
    existing renderer's wizard buttons call. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -44,8 +45,10 @@ static void wizard_text(NkUi *ui, uint32_t k, const char *text, NkUiTypeRole rol
    copying the files ends on the library card, so no Fonts or Ready chip
    promises a step that never comes. */
 static void wizard_steps(NkUi *ui, int step) {
-    static const char *const names[PLAYER_UI_WIZARD_ROUTE_STEPS] = {"Welcome", "Options",
-                                                                    "Game", "Verify"};
+    static const char *const names[PLAYER_UI_WIZARD_ROUTE_STEPS] = {
+        NK_UI_STR(WIZARD_STEP_WELCOME), NK_UI_STR(WIZARD_STEP_OPTIONS),
+        NK_UI_STR(WIZARD_STEP_GAME), NK_UI_STR(WIZARD_STEP_VERIFY)
+    };
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_2);
     if (!nk_ui_begin_container(ui, WIZ_ID_STEPS, &row, NULL)) return;
@@ -65,9 +68,9 @@ static void wizard_steps(NkUi *ui, int step) {
         chip.align_x = NK_UI_ALIGN_CENTER;
         chip.align_y = NK_UI_ALIGN_CENTER;
         if (done) {
-            (void)snprintf(label, sizeof(label), FLOW_MARK_CHECK "%s", names[i]);
+            (void)snprintf(label, sizeof(label), NK_UI_STR(WIZARD_STEP_COMPLETE_FORMAT), names[i]);
         } else {
-            (void)snprintf(label, sizeof(label), "%d  %s", i + 1, names[i]);
+            (void)snprintf(label, sizeof(label), NK_UI_STR(WIZARD_STEP_NUMBER_FORMAT), i + 1, names[i]);
         }
         if (nk_ui_begin_container(ui, (NkUiId)(WIZ_ID_STEPS + 1u + (NkUiId)i), &chip, &style)) {
             nk_ui_text_role(ui, (NkUiId)(WIZ_ID_STEP_LABELS + (NkUiId)i),
@@ -101,8 +104,9 @@ static void wizard_buttons(NkUi *ui, NkUiId row_id, const WizardButton *buttons,
 
 PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(WIZARD_PROMPT_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(WIZARD_PROMPT_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(WIZARD_BACK)}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
@@ -117,42 +121,40 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
     switch (model->step) {
     case 0: {
         static const WizardButton buttons[] = {
-            {PLAYER_UI_ID_WIZARD_PRIMARY, "Get started", NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_LARGE,
+            {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_GET_STARTED),
+             NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_LARGE,
              PLAYER_UI_WIZARD_NEXT},
-            {PLAYER_UI_ID_WIZARD_CANCEL, "Skip to library", NK_UI_BUTTON_LARGE,
+            {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_SKIP_TO_LIBRARY), NK_UI_BUTTON_LARGE,
              PLAYER_UI_WIZARD_CANCEL}
         };
-        wizard_text(ui, 0u, "Set up your first game", NK_UI_TYPE_TITLE_XL, theme->paper);
+        wizard_text(ui, 0u, NK_UI_STR(WIZARD_WELCOME_TITLE), NK_UI_TYPE_TITLE_XL, theme->paper);
         wizard_text(ui, 1u,
-                    "This wizard checks a disc image of a PSP game you own, stages its files on "
-                    "this PC, and gets it ready to build and play.",
+                    NK_UI_STR(WIZARD_WELCOME_INTRO),
                     NK_UI_TYPE_BODY_L, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
-            nk_ui_eyebrow(ui, WIZ_ID_TEXT + 2u, "What you need");
-            wizard_text(ui, 3u, "A disc image (.iso) of a PSP game you own", NK_UI_TYPE_BODY_S,
+            nk_ui_eyebrow(ui, WIZ_ID_TEXT + 2u, NK_UI_STR(WIZARD_REQUIREMENTS_HEADING));
+            wizard_text(ui, 3u, NK_UI_STR(WIZARD_DISC_REQUIREMENT), NK_UI_TYPE_BODY_S,
                         theme->paper);
-            wizard_text(ui, 4u, "A PC with a recent graphics driver", NK_UI_TYPE_BODY_S,
+            wizard_text(ui, 4u, NK_UI_STR(WIZARD_GRAPHICS_REQUIREMENT), NK_UI_TYPE_BODY_S,
                         theme->paper);
-            wizard_text(ui, 5u, "Keyboard and mouse, or a controller", NK_UI_TYPE_BODY_S,
+            wizard_text(ui, 5u, NK_UI_STR(WIZARD_INPUT_REQUIREMENT), NK_UI_TYPE_BODY_S,
                         theme->paper);
             nk_ui_end_container(ui);
         }
         wizard_text(ui, 6u,
-                    "Your games stay on this PC. Nakagawa never uploads anything, and downloads "
-                    "only the build tools you approve. It decrypts your own disc here and never "
-                    "touches firmware.",
+                    NK_UI_STR(WIZARD_PRIVACY_NOTE),
                     NK_UI_TYPE_CAPTION, theme->muted);
         wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 2u, &result);
         break;
     }
     case 1: {
         static const WizardButton buttons[] = {
-            {PLAYER_UI_ID_WIZARD_PRIMARY, "Continue", NK_UI_BUTTON_PRIMARY,
+            {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_CONTINUE), NK_UI_BUTTON_PRIMARY,
              PLAYER_UI_WIZARD_NEXT},
-            {PLAYER_UI_ID_WIZARD_SECOND, "Skip", 0u, PLAYER_UI_WIZARD_SKIP_OPTIONS},
-            {PLAYER_UI_ID_WIZARD_BACK, "Back", 0u, PLAYER_UI_WIZARD_BACK}
+            {PLAYER_UI_ID_WIZARD_SECOND, NK_UI_STR(WIZARD_SKIP), 0u, PLAYER_UI_WIZARD_SKIP_OPTIONS},
+            {PLAYER_UI_ID_WIZARD_BACK, NK_UI_STR(WIZARD_BACK), 0u, PLAYER_UI_WIZARD_BACK}
         };
-        wizard_text(ui, 0u, "Online and developer options", NK_UI_TYPE_TITLE_XL, theme->paper);
+        wizard_text(ui, 0u, NK_UI_STR(WIZARD_OPTIONS_TITLE), NK_UI_TYPE_TITLE_XL, theme->paper);
         wizard_text(ui, 1u, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             WizardColumn column = scr_online_developer_column(ui, model->online_mode,
@@ -160,48 +162,47 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
                                                               inner - 32.0f);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_WIZARD_ONLINE, WIZ_ID_TEXT + 0x80u,
-                                  "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
+                                  NK_UI_STR(WIZARD_ONLINE_MODE), SCR_ONLINE_STORED_ON_SENTENCE, true,
                                   inner - 32.0f, &column)) {
                 result = wizard_op(PLAYER_UI_WIZARD_TOGGLE_ONLINE);
             }
             if (scr_wizard_switch(ui, PLAYER_UI_ID_WIZARD_DEVELOPER, WIZ_ID_TEXT + 0x90u,
-                              "Developer mode", WIZARD_DEVELOPER_SENTENCE,
+                              NK_UI_STR(WIZARD_DEVELOPER_MODE), WIZARD_DEVELOPER_SENTENCE,
                               model->developer_mode, inner - 32.0f, &column)) {
                 result = wizard_op(PLAYER_UI_WIZARD_TOGGLE_DEVELOPER);
             }
             nk_ui_end_container(ui);
         }
-        wizard_text(ui, 2u, "Developer mode starts off. You can change it later in Settings.",
+        wizard_text(ui, 2u, NK_UI_STR(WIZARD_DEVELOPER_DEFAULT),
                     NK_UI_TYPE_CAPTION, theme->muted);
         wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 3u, &result);
         break;
     }
     case 2: {
         static const WizardButton choose[] = {
-            {PLAYER_UI_ID_WIZARD_PRIMARY, "Choose a disc image", NK_UI_BUTTON_PRIMARY,
+            {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_CHOOSE_DISC), NK_UI_BUTTON_PRIMARY,
              PLAYER_UI_WIZARD_CHOOSE_ISO},
-            {PLAYER_UI_ID_WIZARD_BACK, "Back", 0u, PLAYER_UI_WIZARD_BACK},
-            {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+            {PLAYER_UI_ID_WIZARD_BACK, NK_UI_STR(WIZARD_BACK), 0u, PLAYER_UI_WIZARD_BACK},
+            {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
         };
         static const WizardButton proceed[] = {
-            {PLAYER_UI_ID_WIZARD_PRIMARY, "Verify this disc", NK_UI_BUTTON_PRIMARY,
+            {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_VERIFY_DISC), NK_UI_BUTTON_PRIMARY,
              PLAYER_UI_WIZARD_NEXT},
-            {PLAYER_UI_ID_WIZARD_SECOND, "Choose a different one", 0u,
+            {PLAYER_UI_ID_WIZARD_SECOND, NK_UI_STR(WIZARD_CHOOSE_ANOTHER_DISC), 0u,
              PLAYER_UI_WIZARD_CHOOSE_DIFFERENT},
-            {PLAYER_UI_ID_WIZARD_BACK, "Back", 0u, PLAYER_UI_WIZARD_BACK},
-            {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+            {PLAYER_UI_ID_WIZARD_BACK, NK_UI_STR(WIZARD_BACK), 0u, PLAYER_UI_WIZARD_BACK},
+            {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
         };
-        wizard_text(ui, 0u, "Choose your disc image", NK_UI_TYPE_TITLE_XL, theme->paper);
+        wizard_text(ui, 0u, NK_UI_STR(WIZARD_CHOOSE_DISC_TITLE), NK_UI_TYPE_TITLE_XL, theme->paper);
         wizard_text(ui, 1u,
-                    "Pick the .iso of a PSP game you own. Nakagawa reads its file system and "
-                    "PARAM.SFO to find out which game it is.",
+                    NK_UI_STR(WIZARD_CHOOSE_DISC_INTRO),
                     NK_UI_TYPE_BODY, theme->muted);
         /* Chosen only while the pick stands: a refused pick or a cancelled
            conversion clears iso_selected but leaves the last disc's path. */
         bool chosen = model->has_iso && model->iso_selected;
         if (scr_wizard_box_begin(ui, chosen ? theme->ready : 0u)) {
             if (chosen) {
-                nk_ui_status_pill(ui, WIZ_ID_TEXT + 2u, FLOW_MARK_DOT, "Disc image chosen",
+                nk_ui_status_pill(ui, WIZ_ID_TEXT + 2u, FLOW_MARK_DOT, NK_UI_STR(WIZARD_DISC_CHOSEN),
                                   theme->ready);
                 wizard_text(ui, 3u, model->iso_detail, NK_UI_TYPE_DATA, theme->muted);
                 {
@@ -210,17 +211,18 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
                                nk_ui_text_clamp(ui, safe_text(model->iso_path, ""), &path,
                                                 inner - 32.0f, 2), &path);
                 }
-                wizard_text(ui, 5u, safe_text(model->status_message, "Ready to verify."),
+                wizard_text(ui, 5u, safe_text(model->status_message, NK_UI_STR(WIZARD_READY_TO_VERIFY)),
                             NK_UI_TYPE_BODY_S, theme->ready);
             } else {
-                nk_ui_status_pill(ui, WIZ_ID_TEXT + 2u, FLOW_MARK_TRIANGLE, "No file chosen",
+                nk_ui_status_pill(ui, WIZ_ID_TEXT + 2u, FLOW_MARK_TRIANGLE,
+                                  NK_UI_STR(WIZARD_DISC_NOT_CHOSEN),
                                   theme->warning);
                 if (model->status_message != NULL && model->status_message[0] != '\0') {
                     wizard_text(ui, 5u, model->status_message,
                                 NK_UI_TYPE_BODY_S, theme->warning);
                 } else {
                     wizard_text(ui, 5u,
-                                "Choose a disc image below, or drop an .iso file onto this window.",
+                                NK_UI_STR(WIZARD_DROP_DISC_HINT),
                                 NK_UI_TYPE_BODY_S, theme->muted);
                 }
             }
@@ -238,10 +240,12 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
                        model->blocked_reason[0] != '\0';
         /* Encrypted program files the user can supply (#308). */
         bool guided = blocked && scr_input_guide_present(&model->input_guide);
-        const char *badge = guided ? "Needs your files" : blocked ? "Not playable yet"
-            : model->recorded ? "On the list"
-            : (model->experimental ? "Not tested yet"
-               : (model->supported ? "Known game" : "Not recognised"));
+        const char *badge = guided ? NK_UI_STR(WIZARD_DISC_BADGE_NEEDS_FILES)
+            : blocked ? NK_UI_STR(WIZARD_DISC_BADGE_BLOCKED)
+            : model->recorded ? NK_UI_STR(WIZARD_DISC_BADGE_RECORDED)
+            : (model->experimental ? NK_UI_STR(WIZARD_DISC_BADGE_EXPERIMENTAL)
+               : (model->supported ? NK_UI_STR(WIZARD_DISC_BADGE_KNOWN)
+                                   : NK_UI_STR(WIZARD_DISC_BADGE_UNKNOWN)));
         uint32_t tone = guided ? theme->warning : blocked ? theme->error
             : model->recorded ? theme->ready
             : (model->experimental ? theme->warning
@@ -249,58 +253,58 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
         const char *note;
         uint32_t note_tone = theme->muted;
         if (model->extracting) {
-            badge = model->converting_package ? "Converting package" : "Copying files";
+            badge = model->converting_package ? NK_UI_STR(WIZARD_DISC_BADGE_CONVERTING)
+                                              : NK_UI_STR(WIZARD_DISC_BADGE_COPYING);
             tone = theme->warning;
         } else if (model->extraction_complete) {
-            badge = "Files staged";
+            badge = NK_UI_STR(WIZARD_DISC_BADGE_STAGED);
         } else if (model->extraction_failed) {
-            badge = "Copy failed";
+            badge = NK_UI_STR(WIZARD_DISC_BADGE_COPY_FAILED);
             tone = theme->error;
         }
         if (model->extracting && model->converting_package) {
-            note = "The PSN package is being turned back into its disc image on this PC. "
-                   "This happens once.";
+            note = NK_UI_STR(WIZARD_DISC_CONVERTING_NOTE);
         } else if (model->extracting) {
-            note = "The disc's files are being copied into a local staging folder.";
+            note = NK_UI_STR(WIZARD_DISC_COPYING_NOTE);
         } else if (model->extraction_failed && model->extraction_error != NULL &&
                    model->extraction_error[0] != '\0') {
             /* Why the copy failed and what to do next, in place of the catalog note. */
             note = model->extraction_error;
             note_tone = theme->error;
         } else if (guided) {
-            note = "This game needs files from your own disc before Nakagawa can use it.";
+            note = NK_UI_STR(WIZARD_DISC_NEEDS_FILES_NOTE);
             note_tone = theme->warning;
         } else if (blocked) {
-            note = "This game can't be played in this version of Nakagawa yet.";
+            note = NK_UI_STR(WIZARD_DISC_BLOCKED_NOTE);
             note_tone = theme->error;
         } else if (model->recorded) {
-            note = "On Nakagawa's compatibility list. Add it to your library, then build it "
-                   "there to play.";
+            note = NK_UI_STR(WIZARD_DISC_RECORDED_NOTE);
         } else if (model->experimental) {
-            note = "Nakagawa hasn't been tested with this game, so it may not start or may "
-                   "stop early. You can add it and try.";
+            note = NK_UI_STR(WIZARD_DISC_EXPERIMENTAL_NOTE);
             note_tone = theme->warning;
         } else if (model->supported) {
-            note = "Nakagawa recognises this disc.";
+            note = NK_UI_STR(WIZARD_DISC_KNOWN_NOTE);
         } else {
-            note = "Nakagawa doesn't recognise this disc.";
+            note = NK_UI_STR(WIZARD_DISC_UNKNOWN_NOTE);
             note_tone = theme->warning;
         }
-        wizard_text(ui, 0u, model->converting_package ? "Converting the PSN package"
-                            : (model->extracting ? "Copying the game's files" : "Check the disc"),
+        wizard_text(ui, 0u, model->converting_package ? NK_UI_STR(WIZARD_DISC_CONVERTING_TITLE)
+                            : (model->extracting ? NK_UI_STR(WIZARD_DISC_COPYING_TITLE)
+                                                 : NK_UI_STR(WIZARD_VERIFY_TITLE)),
                     NK_UI_TYPE_TITLE_XL, theme->paper);
         if (scr_wizard_box_begin(ui, tone)) {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_2);
             if (nk_ui_begin_container(ui, WIZ_ID_TEXT + 0x20u, &row, NULL)) {
                 nk_ui_status_pill(ui, WIZ_ID_TEXT + 0x21u, NULL, badge, tone);
-                nk_ui_tag(ui, WIZ_ID_TEXT + 0x22u, safe_text(model->disc_id, "Unknown"));
+                nk_ui_tag(ui, WIZ_ID_TEXT + 0x22u,
+                          safe_text(model->disc_id, NK_UI_STR(WIZARD_DISC_ID_UNKNOWN)));
                 nk_ui_end_container(ui);
             }
             /* A guided step on a short window gives the name's line to the
                files; the disc ID chip above still says which disc it is. */
             if (!guided || model->logical_height >= 680.0f) {
-                wizard_text(ui, 1u, safe_text(model->title_name, "PlayStation Portable title"),
+                wizard_text(ui, 1u, safe_text(model->title_name, NK_UI_STR(WIZARD_TITLE_FALLBACK)),
                             NK_UI_TYPE_TITLE, theme->paper);
             }
             /* A guided step says it in the guide itself. */
@@ -309,9 +313,10 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
                 wizard_text(ui, 6u, model->blocked_reason, NK_UI_TYPE_BODY_S, theme->paper);
             }
             if (model->extracting && model->converting_package) {
-                (void)snprintf(line, sizeof(line), "Converted %d%%", model->extraction_percent);
+                (void)snprintf(line, sizeof(line), NK_UI_STR(WIZARD_DISC_CONVERSION_PROGRESS_FORMAT),
+                               model->extraction_percent);
             } else if (model->extracting) {
-                (void)snprintf(line, sizeof(line), "Copied %d of %d files" FLOW_MIDDOT "%d%%",
+                (void)snprintf(line, sizeof(line), NK_UI_STR(WIZARD_DISC_COPY_PROGRESS_FORMAT),
                                model->files_extracted, model->total_files,
                                model->extraction_percent);
             }
@@ -323,7 +328,7 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
                     NkUiTextStyle file = nk_ui_type(NK_UI_TYPE_DATA, theme->dim);
                     nk_ui_text(ui, WIZ_ID_TEXT + 4u,
                                nk_ui_text_clamp(ui, safe_text(model->current_file,
-                                                              "Preparing the disc image…"),
+                                                              NK_UI_STR(WIZARD_DISC_FILE_FALLBACK)),
                                                 &file, inner - 32.0f, 1), &file);
                 }
             } else if (guided) {
@@ -371,11 +376,11 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
         }
         if (model->extracting) {
             static const WizardButton copying[] = {
-                {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel copying", NK_UI_BUTTON_DANGER,
+                {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL_COPY), NK_UI_BUTTON_DANGER,
                  PLAYER_UI_WIZARD_CANCEL}
             };
             static const WizardButton converting[] = {
-                {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel converting", NK_UI_BUTTON_DANGER,
+                {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL_CONVERSION), NK_UI_BUTTON_DANGER,
                  PLAYER_UI_WIZARD_CANCEL}
             };
             wizard_buttons(ui, WIZ_ID_BUTTONS,
@@ -384,13 +389,13 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
             /* Check again reads the same disc again once the files are in
                the folder; nothing is imported again (#308). */
             WizardButton buttons[4] = {
-                {PLAYER_UI_ID_WIZARD_PRIMARY, "Check again", NK_UI_BUTTON_PRIMARY,
+                {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_CHECK_AGAIN), NK_UI_BUTTON_PRIMARY,
                  PLAYER_UI_WIZARD_CHECK_AGAIN},
-                {PLAYER_UI_ID_WIZARD_OPEN_FOLDER, "Open folder", 0u,
+                {PLAYER_UI_ID_WIZARD_OPEN_FOLDER, NK_UI_STR(WIZARD_OPEN_FOLDER), 0u,
                  PLAYER_UI_WIZARD_OPEN_INPUT_FOLDER},
-                {PLAYER_UI_ID_WIZARD_SECOND, "Choose a different one", 0u,
+                {PLAYER_UI_ID_WIZARD_SECOND, NK_UI_STR(WIZARD_CHOOSE_ANOTHER_DISC), 0u,
                  PLAYER_UI_WIZARD_CHOOSE_DIFFERENT},
-                {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+                {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
             };
             if (model->input_guide.folder != NULL && model->input_guide.folder[0] != '\0') {
                 wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 4u, &result);
@@ -402,36 +407,36 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
         } else if (blocked) {
             /* Adding it would only fail later, at build time (#1280). */
             static const WizardButton buttons[] = {
-                {PLAYER_UI_ID_WIZARD_PRIMARY, "Choose a different one", NK_UI_BUTTON_PRIMARY,
+                {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_CHOOSE_ANOTHER_DISC), NK_UI_BUTTON_PRIMARY,
                  PLAYER_UI_WIZARD_CHOOSE_DIFFERENT},
-                {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+                {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
             };
             wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 2u, &result);
         } else if (model->experimental) {
             static const WizardButton buttons[] = {
-                {PLAYER_UI_ID_WIZARD_PRIMARY, "Add to library", NK_UI_BUTTON_PRIMARY,
+                {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_ADD_TO_LIBRARY), NK_UI_BUTTON_PRIMARY,
                  PLAYER_UI_WIZARD_ADD_EXPERIMENTAL},
-                {PLAYER_UI_ID_WIZARD_SECOND, "Choose a different one", 0u,
+                {PLAYER_UI_ID_WIZARD_SECOND, NK_UI_STR(WIZARD_CHOOSE_ANOTHER_DISC), 0u,
                  PLAYER_UI_WIZARD_CHOOSE_DIFFERENT},
-                {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+                {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
             };
             wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 3u, &result);
         } else if (model->supported) {
             WizardButton buttons[3] = {
-                {PLAYER_UI_ID_WIZARD_PRIMARY, "Copy files and continue", NK_UI_BUTTON_PRIMARY,
-                 PLAYER_UI_WIZARD_NEXT},
-                {PLAYER_UI_ID_WIZARD_BACK, "Back", 0u, PLAYER_UI_WIZARD_BACK},
-                {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+                {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_COPY_FILES_AND_CONTINUE),
+                 NK_UI_BUTTON_PRIMARY, PLAYER_UI_WIZARD_NEXT},
+                {PLAYER_UI_ID_WIZARD_BACK, NK_UI_STR(WIZARD_BACK), 0u, PLAYER_UI_WIZARD_BACK},
+                {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
             };
-            if (model->extraction_complete) buttons[0].label = "Continue";
-            else if (model->extraction_failed) buttons[0].label = "Try copying again";
+            if (model->extraction_complete) buttons[0].label = NK_UI_STR(WIZARD_CONTINUE);
+            else if (model->extraction_failed) buttons[0].label = NK_UI_STR(WIZARD_RETRY_COPY);
             wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 3u, &result);
         } else {
             static const WizardButton buttons[] = {
-                {PLAYER_UI_ID_WIZARD_PRIMARY, "Choose a different one", NK_UI_BUTTON_PRIMARY,
+                {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_CHOOSE_ANOTHER_DISC), NK_UI_BUTTON_PRIMARY,
                  PLAYER_UI_WIZARD_CHOOSE_DIFFERENT},
-                {PLAYER_UI_ID_WIZARD_BACK, "Back", 0u, PLAYER_UI_WIZARD_BACK},
-                {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+                {PLAYER_UI_ID_WIZARD_BACK, NK_UI_STR(WIZARD_BACK), 0u, PLAYER_UI_WIZARD_BACK},
+                {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
             };
             wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 3u, &result);
         }
@@ -439,28 +444,28 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
     }
     case 4: {
         static const WizardButton buttons[] = {
-            {PLAYER_UI_ID_WIZARD_PRIMARY, "Accept and continue", NK_UI_BUTTON_PRIMARY,
+            {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_ACCEPT_AND_CONTINUE), NK_UI_BUTTON_PRIMARY,
              PLAYER_UI_WIZARD_ACCEPT_FONTS},
-            {PLAYER_UI_ID_WIZARD_SECOND, "Change resolution", 0u,
+            {PLAYER_UI_ID_WIZARD_SECOND, NK_UI_STR(WIZARD_CHANGE_RESOLUTION), 0u,
              PLAYER_UI_WIZARD_CYCLE_RESOLUTION},
-            {PLAYER_UI_ID_WIZARD_BACK, "Back", 0u, PLAYER_UI_WIZARD_BACK},
-            {PLAYER_UI_ID_WIZARD_CANCEL, "Cancel", 0u, PLAYER_UI_WIZARD_CANCEL}
+            {PLAYER_UI_ID_WIZARD_BACK, NK_UI_STR(WIZARD_BACK), 0u, PLAYER_UI_WIZARD_BACK},
+            {PLAYER_UI_ID_WIZARD_CANCEL, NK_UI_STR(WIZARD_CANCEL), 0u, PLAYER_UI_WIZARD_CANCEL}
         };
         static const WizardButton font_buttons[] = {
-            {PLAYER_UI_ID_WIZARD_PSP_FONTS, "Get fonts from my PSP", NK_UI_BUTTON_SMALL,
+            {PLAYER_UI_ID_WIZARD_PSP_FONTS, NK_UI_STR(WIZARD_GET_PSP_FONTS), NK_UI_BUTTON_SMALL,
              PLAYER_UI_WIZARD_PSP_FONTS},
-            {PLAYER_UI_ID_WIZARD_IMPORT_FONTS, "Choose font files", NK_UI_BUTTON_SMALL,
+            {PLAYER_UI_ID_WIZARD_IMPORT_FONTS, NK_UI_STR(WIZARD_CHOOSE_FONTS), NK_UI_BUTTON_SMALL,
              PLAYER_UI_WIZARD_IMPORT_FONTS},
-            {PLAYER_UI_ID_WIZARD_REMOVE_FONTS, "Remove imported fonts", NK_UI_BUTTON_SMALL,
+            {PLAYER_UI_ID_WIZARD_REMOVE_FONTS, NK_UI_STR(WIZARD_REMOVE_IMPORTED_FONTS), NK_UI_BUTTON_SMALL,
              PLAYER_UI_WIZARD_REMOVE_FONTS}
         };
-        wizard_text(ui, 0u, "Fonts and display", NK_UI_TYPE_TITLE_XL, theme->paper);
+        wizard_text(ui, 0u, NK_UI_STR(WIZARD_FONTS_TITLE), NK_UI_TYPE_TITLE_XL, theme->paper);
         if (scr_wizard_box_begin(ui, 0u)) {
             wizard_text(ui, 1u, model->resolution_line, NK_UI_TYPE_BODY, theme->paper);
             wizard_text(ui, 2u, model->controller_line, NK_UI_TYPE_BODY_S, theme->ready);
             wizard_text(ui, 6u, model->font_summary, NK_UI_TYPE_BODY_S,
                         model->fonts_all_own ? theme->ready : theme->warning);
-            nk_ui_eyebrow(ui, WIZ_ID_TEXT + 3u, "PSP font slots (fallbacks shown)");
+            nk_ui_eyebrow(ui, WIZ_ID_TEXT + 3u, NK_UI_STR(WIZARD_FONT_SLOT_HEADING));
             {
                 NkUiLayout cols = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
                                               NK_UI_SPACE_4);
@@ -488,9 +493,7 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
             }
             wizard_text(ui, 4u,
                         safe_text(model->font_message,
-                                  "To get your PSP's own fonts, connect it by USB (docs/SETUP.md, "
-                                  "\"Copying the fonts from your PSP\") and choose Get fonts "
-                                  "from my PSP."),
+                                  NK_UI_STR(WIZARD_PSP_FONT_IMPORT_HELP)),
                         NK_UI_TYPE_CAPTION,
                         model->font_message != NULL && model->font_message[0] != '\0'
                             ? note_rgba(theme, model->font_message_kind) : theme->muted);
@@ -503,15 +506,15 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
     case 5:
     default: {
         WizardButton buttons[3] = {
-            {PLAYER_UI_ID_WIZARD_PRIMARY, "Play",
+            {PLAYER_UI_ID_WIZARD_PRIMARY, NK_UI_STR(WIZARD_PLAY),
              NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_LARGE, PLAYER_UI_WIZARD_FINISH},
-            {PLAYER_UI_ID_WIZARD_SECOND, "Go to library", NK_UI_BUTTON_LARGE,
+            {PLAYER_UI_ID_WIZARD_SECOND, NK_UI_STR(WIZARD_GO_TO_LIBRARY), NK_UI_BUTTON_LARGE,
              PLAYER_UI_WIZARD_GO_TO_LIBRARY},
-            {PLAYER_UI_ID_WIZARD_BACK, "Back", NK_UI_BUTTON_LARGE, PLAYER_UI_WIZARD_BACK}
+            {PLAYER_UI_ID_WIZARD_BACK, NK_UI_STR(WIZARD_BACK), NK_UI_BUTTON_LARGE, PLAYER_UI_WIZARD_BACK}
         };
-        if (!model->runtime_ready) buttons[0].label = "Save to library";
-        wizard_text(ui, 0u, model->runtime_ready ? "Ready to play"
-                                                 : "Files staged: build the package next",
+        if (!model->runtime_ready) buttons[0].label = NK_UI_STR(WIZARD_SAVE_TO_LIBRARY);
+        wizard_text(ui, 0u, model->runtime_ready ? NK_UI_STR(WIZARD_READY_TO_PLAY)
+                                                 : NK_UI_STR(WIZARD_FILES_STAGED_TITLE),
                     NK_UI_TYPE_TITLE_XL, theme->paper);
         if (scr_wizard_box_begin(ui, model->runtime_ready ? theme->ready : theme->warning)) {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
@@ -519,21 +522,21 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
             if (nk_ui_begin_container(ui, WIZ_ID_TEXT + 0x20u, &row, NULL)) {
                 nk_ui_status_pill(ui, WIZ_ID_TEXT + 0x21u,
                                   model->runtime_ready ? FLOW_MARK_DOT : FLOW_MARK_TRIANGLE,
-                                  model->runtime_ready ? "Ready to play" : "Files staged",
+                                  model->runtime_ready ? NK_UI_STR(WIZARD_READY_TO_PLAY)
+                                                       : NK_UI_STR(WIZARD_DISC_BADGE_STAGED),
                                   model->runtime_ready ? theme->ready : theme->warning);
                 if (model->disc_id != NULL && model->disc_id[0] != '\0') {
                     nk_ui_tag(ui, WIZ_ID_TEXT + 0x22u, model->disc_id);
                 }
                 nk_ui_end_container(ui);
             }
-            wizard_text(ui, 1u, safe_text(model->title_name, "PlayStation Portable title"),
+            wizard_text(ui, 1u, safe_text(model->title_name, NK_UI_STR(WIZARD_TITLE_FALLBACK)),
                         NK_UI_TYPE_TITLE, theme->paper);
             wizard_text(ui, 2u, model->summary_line, NK_UI_TYPE_DATA, theme->muted);
             wizard_text(ui, 3u,
                         model->runtime_ready
-                            ? "Play starts the game; the library keeps it for next time."
-                            : "The game is saved to your library. Open it there and choose BUILD "
-                              "PACKAGE to make it playable.",
+                            ? NK_UI_STR(WIZARD_READY_NOTE)
+                            : NK_UI_STR(WIZARD_FILES_STAGED_NOTE),
                         NK_UI_TYPE_BODY_S, theme->muted);
             nk_ui_end_container(ui);
         }

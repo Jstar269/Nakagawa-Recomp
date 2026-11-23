@@ -7,17 +7,18 @@
    the second choice, so nothing is rebuilt by accident. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
 PlayerUiAction player_ui_screen_rebuild(NkUi *ui, const PlayerUiRebuildModel *model) {
     static const NkUiPromptItem prompts_update[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Later"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(REBUILD_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(REBUILD_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(REBUILD_LATER)}
     };
     static const NkUiPromptItem prompts_launch[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Play anyway"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(REBUILD_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(REBUILD_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(REBUILD_PLAY_ANYWAY)}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
@@ -29,9 +30,9 @@ PlayerUiAction player_ui_screen_rebuild(NkUi *ui, const PlayerUiRebuildModel *mo
     inner = scr_flow_begin(ui, model->logical_width > 80.0f ? model->logical_width : 1280.0f,
                        model->logical_height > 80.0f ? model->logical_height : 800.0f, 640.0f);
     if (inner <= 0.0f) return result;
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Older build", theme->info);
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(REBUILD_OLDER_BUILD), theme->info);
     nk_ui_text_role(ui, FLOW_ID_TITLE,
-                    launch ? nk_ui_frame_text(ui, model->title) : "Rebuild your games",
+                    launch ? nk_ui_frame_text(ui, model->title) : NK_UI_STR(REBUILD_REBUILD_YOUR_GAMES),
                     NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD, safe_text(model->text, ""), NK_UI_TYPE_BODY_S,
                     theme->muted);
@@ -41,13 +42,13 @@ PlayerUiAction player_ui_screen_rebuild(NkUi *ui, const PlayerUiRebuildModel *mo
         row.padding_top = NK_UI_SPACE_1;
         if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
             if (nk_ui_button(ui, PLAYER_UI_ID_REBUILD_PRIMARY,
-                             launch ? "Rebuild now" : "Rebuild all", NK_UI_BUTTON_PRIMARY)) {
+                             launch ? NK_UI_STR(REBUILD_REBUILD_NOW) : NK_UI_STR(REBUILD_REBUILD_ALL), NK_UI_BUTTON_PRIMARY)) {
                 result = action(PLAYER_UI_ACTION_REBUILD, 0u,
                                 (PlayerUiPrimaryAction)(launch ? PLAYER_UI_REBUILD_NOW
                                                                : PLAYER_UI_REBUILD_ALL));
             }
             if (nk_ui_button(ui, PLAYER_UI_ID_REBUILD_SECOND,
-                             launch ? "Play anyway" : "Later", NK_UI_BUTTON_NOT_DEFAULT)) {
+                             launch ? NK_UI_STR(REBUILD_PLAY_ANYWAY) : NK_UI_STR(REBUILD_LATER), NK_UI_BUTTON_NOT_DEFAULT)) {
                 result = action(PLAYER_UI_ACTION_REBUILD, 0u,
                                 (PlayerUiPrimaryAction)(launch ? PLAYER_UI_REBUILD_PLAY_ANYWAY
                                                                : PLAYER_UI_REBUILD_LATER));

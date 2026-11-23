@@ -847,6 +847,7 @@ typedef struct {
     /* Every play mode the play mode row steps through, in order. */
     const char *const *enhanced_modes;
     int enhanced_mode_count;
+    int enhanced_mode_index;       /* index in enhanced_modes, or -1 if unavailable */
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];

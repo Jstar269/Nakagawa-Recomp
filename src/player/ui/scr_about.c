@@ -6,6 +6,7 @@
    project is independent. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -42,9 +43,9 @@ static void about_lines(NkUi *ui, NkUiId base, const char *const *lines, size_t 
 
 PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model) {
     static const char *const credits[] = {
-        "Began as a fork of sal063's PSP Recompilation Project (GPL-2.0-or-later).",
-        "Carries PPSSPP lineage, FFmpeg's ATRAC3 decoders and the Clay layout library.",
-        "Drawn with SDL and SDL_ttf, and set in Chakra Petch, Geist and Noto Sans JP."
+        NK_UI_STR(ABOUT_ORIGIN_CREDIT),
+        NK_UI_STR(ABOUT_RUNTIME_CREDIT),
+        NK_UI_STR(ABOUT_UI_CREDIT)
     };
     const NkUiTheme *theme;
     NkUiLayout layout;
@@ -85,7 +86,7 @@ PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model)
                 nk_ui_shapes(ui, ABOUT_ID_MARK, sizing_fixed(72.0f), sizing_fixed(72.0f),
                              nk_ui_art_n1_mark());
                 if (nk_ui_begin_container(ui, ABOUT_ID_NAMES, &names, NULL)) {
-                    nk_ui_text_role(ui, ABOUT_ID_NAME, "NAKAGAWA RECOMP", NK_UI_TYPE_DISPLAY_XL,
+                    nk_ui_text_role(ui, ABOUT_ID_NAME, NK_UI_STR(ABOUT_TITLE), NK_UI_TYPE_DISPLAY_XL,
                                     theme->paper);
                     nk_ui_text_role(ui, ABOUT_ID_VERSION,
                                     safe_text(model->version_line, "v" NK_PLAYER_VERSION),
@@ -95,52 +96,47 @@ PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model)
                 nk_ui_end_container(ui);
             }
             nk_ui_text_role(ui, ABOUT_ID_LEAD,
-                            "A PSP static recompiler: your own game, recompiled to run natively. "
-                            "Your games stay on this PC. Nakagawa never uploads "
-                            "anything, and downloads only the build tools you approve.",
+                            NK_UI_STR(ABOUT_INTRO),
                             NK_UI_TYPE_BODY_L, theme->muted);
             row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_4);
             if (nk_ui_begin_container(ui, ABOUT_ID_CARDS, &row, NULL)) {
                 /* 300 px, or wide enough for its button at a larger text size. */
-                float licence = nk_ui_button_width(ui, "Third-party notices", 0u) +
+                float licence = nk_ui_button_width(ui, NK_UI_STR(ABOUT_NOTICES), 0u) +
                                 2.0f * NK_UI_SPACE_5;
                 if (licence < 300.0f) licence = 300.0f;
                 if (nk_ui_card_begin(ui, ABOUT_ID_LICENSE, sizing_fixed(licence), sizing_grow(),
                                      NK_UI_SPACE_3)) {
-                    nk_ui_eyebrow(ui, 0x50000200u, "Licence");
-                    nk_ui_text_role(ui, 0x50000201u, "GNU GPL version 3",
+                    nk_ui_eyebrow(ui, 0x50000200u, NK_UI_STR(ABOUT_LICENCE_HEADING));
+                    nk_ui_text_role(ui, 0x50000201u, NK_UI_STR(ABOUT_LICENCE_VERSION),
                                     NK_UI_TYPE_HEADING, theme->paper);
                     nk_ui_text_role(ui, 0x50000202u,
-                                    "Free software. Nakagawa's own code also allows later GPL "
-                                    "versions; two included parts are version 3 only. "
-                                    "Third-party parts keep their own licences.",
+                                    NK_UI_STR(ABOUT_LICENCE_SUMMARY),
                                     NK_UI_TYPE_CAPTION, theme->muted);
-                    if (nk_ui_button(ui, PLAYER_UI_ID_ABOUT_NOTICES, "Third-party notices", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_ABOUT_NOTICES, NK_UI_STR(ABOUT_NOTICES), 0u)) {
                         result = action(PLAYER_UI_ACTION_OPEN_NOTICES, 0u, PLAYER_UI_PRIMARY_NONE);
                     }
                     /* The hidden credits, once the classic cheat code has been found. */
                     if (model->love_all &&
-                        nk_ui_button(ui, PLAYER_UI_ID_ABOUT_LOVE_ALL, "Love All", 0u)) {
+                        nk_ui_button(ui, PLAYER_UI_ID_ABOUT_LOVE_ALL, NK_UI_STR(ABOUT_LOVE_ALL), 0u)) {
                         result = action(PLAYER_UI_ACTION_OPEN_LOVE_ALL, 0u, PLAYER_UI_PRIMARY_NONE);
                     }
                     nk_ui_end_container(ui);
                 }
                 if (nk_ui_card_begin(ui, ABOUT_ID_CREDITS, sizing_grow(), sizing_grow(),
                                      NK_UI_SPACE_2)) {
-                    nk_ui_eyebrow(ui, 0x50000300u, "Credits");
+                    nk_ui_eyebrow(ui, 0x50000300u, NK_UI_STR(ABOUT_CREDITS_HEADING));
                     about_lines(ui, 0x50000310u, credits,
                                 sizeof(credits) / sizeof(credits[0]), NK_UI_TYPE_BODY_S,
                                 theme->paper);
                     nk_ui_text_role(ui, 0x500003F0u,
-                                    "The full list is in CREDITS.md and NOTICE.md.",
+                                    NK_UI_STR(ABOUT_CREDITS_FILES),
                                     NK_UI_TYPE_FOOTNOTE, theme->dim);
                     nk_ui_end_container(ui);
                 }
                 nk_ui_end_container(ui);
             }
             nk_ui_text_role(ui, ABOUT_ID_NOTICE,
-                            "Not affiliated with or endorsed by Sony Interactive Entertainment. "
-                            "PSP is a trademark of its owner. No game data is included.",
+                            NK_UI_STR(ABOUT_TRADEMARK_NOTICE),
                             NK_UI_TYPE_CAPTION, theme->muted);
             /* The project link and the source commit share one line, so the
                page fits the 1280 x 720 design size. */
@@ -151,7 +147,8 @@ PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model)
                                 NK_UI_TYPE_DATA, theme->paper);
                 if (model->build_commit != NULL && model->build_commit[0] != '\0') {
                     char build[64];
-                    (void)snprintf(build, sizeof(build), "Source commit %s", model->build_commit);
+                    (void)snprintf(build, sizeof(build), NK_UI_STR(ABOUT_SOURCE_COMMIT_FORMAT),
+                                   model->build_commit);
                     nk_ui_text_role(ui, ABOUT_ID_BUILD, build, NK_UI_TYPE_FOOTNOTE, theme->dim);
                 }
                 nk_ui_end_container(ui);
@@ -166,9 +163,9 @@ PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model)
     }
     {
         static const NkUiPromptItem prompts[] = {
-            {NK_UI_PROMPT_ACT_MOVE, "Move"},
-            {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-            {NK_UI_PROMPT_ACT_BACK, "Back"}
+            {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(ABOUT_PROMPT_MOVE)},
+            {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(ABOUT_PROMPT_SELECT)},
+            {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(ABOUT_PROMPT_BACK)}
         };
         nk_ui_prompt_bar(ui, ABOUT_ID_PROMPTS, "", prompts,
                          sizeof(prompts) / sizeof(prompts[0]));

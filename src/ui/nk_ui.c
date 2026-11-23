@@ -17,6 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+void nk_ui_pseudo_clamped(const char *source, size_t retained_bytes);
+#endif
+
 typedef struct {
     bool active;
     NkUiRect rect;
@@ -1151,6 +1155,9 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
         memcpy(out + end, ellipsis, sizeof(ellipsis));
         if (nk_ui_measure_logical(ui, style, out + line_start,
                                   end - line_start + sizeof(ellipsis) - 1u) <= max_width) {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+            nk_ui_pseudo_clamped(text, end);
+#endif
             return nk_ui_frame_text(ui, out);
         }
         --used;
@@ -1158,6 +1165,9 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     }
     memcpy(out, text, line_start);
     memcpy(out + line_start, ellipsis, sizeof(ellipsis));
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+    nk_ui_pseudo_clamped(text, line_start);
+#endif
     return nk_ui_frame_text(ui, out);
 }
 
@@ -1357,21 +1367,24 @@ const char *nk_ui_list_line(NkUi *ui, const char **rest, const NkUiTextStyle *st
     if (last && list[next] != '\0') {
         /* Items are left over: the line gives up its own from the end until
            the count of all it leaves out fits after the rest. */
+        static const char prefix[] = "\xC2\xA0" NK_UI_STR(SHARED_LIST_REMAINDER_AND) "\xC2\xA0";
+        static const char suffix[] = "\xC2\xA0" NK_UI_STR(SHARED_LIST_REMAINDER_MORE);
         int left = nk_ui_list_items(list + next);
         bool fits = false;
         *rest = "";
         for (;;) {
-            char more[48] = "\xC2\xA0" "and\xC2\xA0";
             char digits[12];
-            size_t used = strlen(more);
+            char more[sizeof(prefix) - 1u + sizeof(digits) + sizeof(suffix)];
+            size_t used = sizeof(prefix) - 1u;
             int n = 0;
             int value = left;
             do {
                 digits[n++] = (char)('0' + value % 10);
                 value /= 10;
             } while (value > 0 && n < (int)sizeof(digits));
+            memcpy(more, prefix, sizeof(prefix) - 1u);
             while (n > 0) more[used++] = digits[--n];
-            memcpy(more + used, "\xC2\xA0" "more", sizeof("\xC2\xA0" "more"));
+            memcpy(more + used, suffix, sizeof(suffix));
             fits = nk_ui_list_run(list, fit, items > 0 ? more : more + 2, run, sizeof(run)) &&
                    nk_ui_text_width(ui, run, style) <= max_width;
             if (fits || items == 0) break;

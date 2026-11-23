@@ -259,6 +259,22 @@ labelled [`no-disc-needed`](https://github.com/Jstar269/nakagawa-recomp/labels/n
 - For project-authored source, use `GPL-3.0-or-later`; for inherited/upstream-derived source, preserve the SPDX identifier and notices required by its provenance record.
 - Prefer general behavior/correctness fixes over address-specific compatibility overrides. Any unavoidable game-specific behavior needs evidence, a regression/route, and a retirement criterion.
 
+### Launcher strings
+
+Keep text written by launcher screens and shared widgets in the English catalog in
+[`src/ui/nk_ui_text.h`](src/ui/nk_ui_text.h). Give each message a stable ID that describes its purpose.
+For example, the Library's move prompt is `NK_UI_EN_LIBRARY_MOVE`; the screen uses
+`NK_UI_STR(LIBRARY_MOVE)`. The macro expands to a string literal, including in static menu descriptors.
+Keep a whole formatted sentence together and preserve the type and order of its format arguments.
+Use model values and control IDs for decisions. Labels can change with the language.
+
+A translation header defines `NK_UI_LOCAL_<ID>` for every English ID. A build selects that header with
+`NK_UI_TRANSLATION_HEADER`. English is the only catalog shipped to players. Run
+`mingw32-make nk-ui-player-screens-selftest` for the English snapshots.
+`mingw32-make nk-ui-player-pseudo-selftest` compares English and longer, accented strings across
+screen sizes and reports clipping and truncation. `mingw32-make player-ui-pseudo-smoke` starts a
+separate SDL launcher build and checks its translated Enhanced settings text.
+
 ## Verify
 
 ### The fast path: one command

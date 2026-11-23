@@ -9,22 +9,30 @@
 
 #include "nk_ui_assets.h"
 #include "nk_ui_input.h"
+#include "nk_ui_text.h"
 
 #include <math.h>
 #include <string.h>
 
 /* Prompt text per style, indexed by action up to MENU. NULL means pure geometry. */
 static const char *const g_letters_a_south[NK_UI_PROMPT_ACT_MENU + 1] = {
-    "A", "B", "X", "Y", "L", "R", NULL
+    NK_UI_STR(SHARED_PROMPT_BUTTON_A), NK_UI_STR(SHARED_PROMPT_BUTTON_B),
+    NK_UI_STR(SHARED_PROMPT_BUTTON_X), NK_UI_STR(SHARED_PROMPT_BUTTON_Y),
+    NK_UI_STR(SHARED_PROMPT_BUTTON_L), NK_UI_STR(SHARED_PROMPT_BUTTON_R), NULL
 };
 static const char *const g_letters_a_east[NK_UI_PROMPT_ACT_MENU + 1] = {
-    "B", "A", "Y", "X", "L", "R", NULL
+    NK_UI_STR(SHARED_PROMPT_BUTTON_B), NK_UI_STR(SHARED_PROMPT_BUTTON_A),
+    NK_UI_STR(SHARED_PROMPT_BUTTON_Y), NK_UI_STR(SHARED_PROMPT_BUTTON_X),
+    NK_UI_STR(SHARED_PROMPT_BUTTON_L), NK_UI_STR(SHARED_PROMPT_BUTTON_R), NULL
 };
 static const char *const g_neutral[NK_UI_PROMPT_ACT_MENU + 1] = {
-    NULL, NULL, NULL, NULL, "L", "R", NULL
+    NULL, NULL, NULL, NULL, NK_UI_STR(SHARED_PROMPT_BUTTON_L), NK_UI_STR(SHARED_PROMPT_BUTTON_R), NULL
 };
 static const char *const g_keycaps[NK_UI_PROMPT_ACT_MENU + 1] = {
-    "ENTER", "ESC", "SPACE", "D", "Q", "E", "F1"
+    NK_UI_STR(SHARED_PROMPT_KEY_ENTER), NK_UI_STR(SHARED_PROMPT_KEY_ESCAPE),
+    NK_UI_STR(SHARED_PROMPT_KEY_SPACE), NK_UI_STR(SHARED_PROMPT_KEY_D),
+    NK_UI_STR(SHARED_PROMPT_KEY_Q), NK_UI_STR(SHARED_PROMPT_KEY_E),
+    NK_UI_STR(SHARED_PROMPT_KEY_F1)
 };
 
 /* The Kenney file per action (CONFIRM, BACK, OPTIONS, DETAILS, TAB_PREV,

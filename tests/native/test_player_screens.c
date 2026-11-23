@@ -10,9 +10,15 @@
 #include "scr_shared.h"
 #include "player_enhanced_fixture.h"
 #include "nk_ui_image.h"
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+#include "launcher_secret.h"
+#endif
 
 #include <ctype.h>
 #include <math.h>
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+#include <stdarg.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -401,6 +407,9 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                /* Mouse aiming (#1791): its settings off and at their defaults, on with the
                   widest value every row can show, and the keyboard keys with aiming on. */
                FLOW_CONTROLLER_AIM, FLOW_CONTROLLER_AIM_ON, FLOW_CONTROLLER_KEYS_AIM_ON,
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+               FLOW_PAGE_LOVE_ALL,
+#endif
                FLOW_COUNT,
                /* Not a screen: the build card with a container left open, so its frame
                   fails (nk_ui_end returns NULL) after drawing most of the card. Kept past
@@ -415,6 +424,11 @@ static float g_flow_width = 1280.0f;
 static float g_flow_height = 800.0f;
 /* The text size flow_case_layout lays a case out at (NkUiViewport.text_size_pct). */
 static int g_flow_text_size_pct = 100;
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+/* Count formatting events from the second frame, after layout and focus settle. */
+static bool g_pseudo_report_frame;
+static bool g_pseudo_report_text;
+#endif
 /* A player's own server for the Online play page and card (#1139), or NULL for socom.cc. */
 static const char *g_online_play_host = NULL;
 /* The picker's PPSSPP list is its shipped copy (the download unavailable). */
@@ -585,6 +599,13 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.enhanced_modes = title ? k_enhanced_title_modes : k_enhanced_library_modes;
         settings.enhanced_mode_count =
             !title ? 2 : g_enhanced_mode_count > 0 ? g_enhanced_mode_count : 4;
+        settings.enhanced_mode_index = -1;
+        for (int i = 0; i < settings.enhanced_mode_count; ++i) {
+            if (strcmp(settings.enhanced_mode, settings.enhanced_modes[i]) == 0) {
+                settings.enhanced_mode_index = i;
+                break;
+            }
+        }
         settings.enhanced_mode_sentence =
             title ? "Enhanced adds the parts below. Ace needs a package made for this game."
                   : "The default for every game; each game's page can choose its own.";
@@ -1112,6 +1133,12 @@ static PlayerUiPrereqItem g_full_prereqs[35];
    a title page, About, and the remove dialog. */
 static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
     PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+    if (which == FLOW_PAGE_LOVE_ALL) {
+        PlayerUiLoveAllModel credits = {g_flow_width, g_flow_height, false, 0.0f};
+        return player_ui_screen_love_all(ui, &credits);
+    }
+#endif
     if (which == FLOW_PAGE_LIBRARY || which == FLOW_PAGE_LIBRARY_FIND) {
         PlayerUiLibraryModel library;
         memset(&library, 0, sizeof(library));
@@ -3062,6 +3089,9 @@ static const NkUiDrawList *flow_case_layout(FlowCase which, int width, int heigh
     g_flow_width = scale.logical_w;
     g_flow_height = scale.logical_h;
     for (int frame = 0; frame < 2; ++frame) {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+        g_pseudo_report_text = g_pseudo_report_frame && frame == 1;
+#endif
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
         draw = end_frame(ui);
@@ -3070,6 +3100,9 @@ static const NkUiDrawList *flow_case_layout(FlowCase which, int width, int heigh
             nk_ui_focus(ui, g_enhanced_focus_id);
         }
     }
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+    g_pseudo_report_text = false;
+#endif
     g_flow_width = 1280.0f;
     g_flow_height = 800.0f;
     return draw;
@@ -3182,6 +3215,227 @@ static bool flow_case_fits(FlowCase which, int width, int height, char *dump, si
     nk_ui_destroy(ui);
     return inside;
 }
+
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+typedef struct {
+    unsigned frames;
+    unsigned runs;
+    unsigned accented;
+    unsigned scroll_clips;
+    unsigned clamps;
+    unsigned findings;
+} PseudoLayoutResult;
+
+static PseudoLayoutResult g_pseudo_result;
+static FlowCase g_pseudo_case;
+static int g_pseudo_width;
+static int g_pseudo_height;
+
+static void pseudo_report_run(const char *kind, const NkUiDrawCmd *cmd,
+                              const NkUiTextRun *run, int lost_pixels) {
+    fprintf(stderr, "PSEUDO %s case=%d window=%dx%d text=%d%% id=%08X "
+                    "lost=%d bounds=[%d,%d,%d,%d] clip=[%d,%d,%d,%d] run=\"%.*s\"\n",
+            kind, (int)g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, (unsigned)cmd->element_id, lost_pixels,
+            cmd->bounds[0], cmd->bounds[1], cmd->bounds[2], cmd->bounds[3],
+            cmd->clip[0], cmd->clip[1], cmd->clip[2], cmd->clip[3],
+            (int)(run->length > 120u ? 120u : run->length), run->text);
+}
+
+/* These probes are linked only by the pseudo-layout build. A deliberate
+   ellipsis and a buffer that loses bytes before layout are separate events. */
+void nk_ui_pseudo_clamped(const char *source, size_t retained_bytes) {
+    if (!g_pseudo_report_text) return;
+    ++g_pseudo_result.clamps;
+    fprintf(stderr, "PSEUDO CLAMP case=%d window=%dx%d text=%d%% kept=%zu source=\"%.120s\"\n",
+            (int)g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, retained_bytes, source);
+}
+
+void nk_ui_pseudo_buffer_truncated(const char *source) {
+    if (!g_pseudo_report_text) return;
+    ++g_pseudo_result.findings;
+    fprintf(stderr, "PSEUDO BUFFER_TRUNCATED case=%d window=%dx%d text=%d%% "
+                    "id=widget-caps lost=0 source=\"%.120s\"\n",
+            (int)g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, source);
+}
+
+/* Preserve snprintf semantics and check its output before layout loses the
+   original length. The generated test header keeps the compiler format check. */
+int nk_ui_pseudo_snprintf(const char *file, int line, char *dest, size_t cap,
+                          const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(dest, cap, format, args);
+    va_end(args);
+    if (g_pseudo_report_text && cap != 0u && written >= 0 && (size_t)written >= cap) {
+        ++g_pseudo_result.findings;
+        fprintf(stderr, "PSEUDO BUFFER_TRUNCATED case=%d window=%dx%d text=%d%% "
+                        "id=%s:%d lost=%zu output=\"%.120s\"\n",
+                (int)g_pseudo_case, g_pseudo_width, g_pseudo_height, g_flow_text_size_pct,
+                file, line, (size_t)written - (cap - 1u), dest);
+    }
+    return written;
+}
+
+static bool pseudo_has_accent(const NkUiTextRun *run) {
+    /* The generated catalog substitutes Latin-1 letters. Count them as
+       rendered UTF-8 rather than counting the bytes of an unrelated symbol. */
+    for (size_t i = 1; i < run->length; ++i) {
+        unsigned char byte = (unsigned char)run->text[i];
+        if ((unsigned char)run->text[i - 1u] == 0xC3u &&
+            byte >= 0x80u && byte <= 0xBFu && byte != 0x97u && byte != 0xB7u) return true;
+    }
+    return false;
+}
+
+static int pseudo_worst_edge(int left, int top, int right, int bottom) {
+    int worst = left > right ? left : right;
+    int vertical = top > bottom ? top : bottom;
+    return worst > vertical ? worst : vertical;
+}
+
+static void pseudo_check_draw(const NkUi *ui, const NkUiDrawList *draw) {
+    /* Track scissors belonging to an actual vertical scroller. A clipped
+       first or last line can scroll into view. Report geometry outside that
+       scroller's edge and horizontal clipping as layout findings. */
+    const NkUiDrawCmd *scrolls[NK_UI_DRAW_CLIP_DEPTH];
+    size_t depth = 0u;
+    ++g_pseudo_result.frames;
+    for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        if (cmd->kind == NK_UI_DRAW_SCISSOR_START) {
+            NkUiScrollState state;
+            scrolls[depth++] = nk_ui_scroll_state(ui, cmd->element_id, &state) &&
+                                state.max_offset > 0.0f ? cmd : NULL;
+        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_END) {
+            --depth;
+        }
+        if (cmd->kind != NK_UI_DRAW_TEXT || cmd->custom == NULL) continue;
+        const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
+        if (run->length == 0u) continue;
+        ++g_pseudo_result.runs;
+        if (pseudo_has_accent(run)) ++g_pseudo_result.accented;
+
+        const int *bounds = cmd->bounds;
+        const int *clip = cmd->clip;
+        const bool top_cut = clip[1] > bounds[1] + 1;
+        const bool bottom_cut = clip[3] < bounds[3] - 1;
+        bool scroll_top = !top_cut;
+        bool scroll_bottom = !bottom_cut;
+        for (size_t j = 0u; j < depth; ++j) {
+            const NkUiDrawCmd *scroll = scrolls[j];
+            if (scroll == NULL) continue;
+            if (clip[1] <= scroll->clip[1] + 1) scroll_top = true;
+            if (clip[3] >= scroll->clip[3] - 1) scroll_bottom = true;
+        }
+        int crop = pseudo_worst_edge(clip[0] - bounds[0], scroll_top ? 0 : clip[1] - bounds[1],
+                                     bounds[2] - clip[2], scroll_bottom ? 0 : bounds[3] - clip[3]);
+        if (crop > 1) {
+            pseudo_report_run("CLIPPED", cmd, run, crop);
+            ++g_pseudo_result.findings;
+        } else if (top_cut || bottom_cut) {
+            ++g_pseudo_result.scroll_clips;
+        }
+
+        int off_window = pseudo_worst_edge(-clip[0], -clip[1], clip[2] - g_pseudo_width,
+                                           clip[3] - g_pseudo_height);
+        if (command_shows(cmd) && off_window > 1) {
+            pseudo_report_run("OFF_WINDOW", cmd, run, off_window);
+            ++g_pseudo_result.findings;
+        }
+
+        /* Clay keeps a line's declared rectangle even when the measured
+           run is wider, including centred keycaps drawn by the widgets. */
+        NkUiTextSize size = screen_test_wide_measure(NULL, run->font, run->size_px,
+                                                     run->text, run->length);
+        if (run->letter_spacing > 0.0f && run->size_px > 0) {
+            const float glyphs = size.width / ((float)run->size_px * 0.62f);
+            size.width += run->letter_spacing * (glyphs - 1.0f);
+        }
+        const float excess = size.width - (float)(bounds[2] - bounds[0]);
+        if (excess > 2.0f) {
+            pseudo_report_run("RUN_OVERFLOW", cmd, run, (int)ceilf(excess));
+            ++g_pseudo_result.findings;
+        }
+    }
+}
+
+static bool pseudo_checker_detects_clipping(void) {
+    static const char translated[] = "P\303\240\303\240ck\303\240ge";
+    NkUiDrawBuffer buffer = {0};
+    char small[4];
+    bool ok = nk_ui_draw_add_scissor(&buffer, true, (NkUiPixelRect){0, 0, 35, 40}, 1u) &&
+              nk_ui_draw_add_text(&buffer, (NkUiPixelRect){2, 10, 85, 28}, translated,
+                                  sizeof(translated) - 1u, 0, 16, 0xFFFFFFFFu, 2u) &&
+              nk_ui_draw_add_scissor(&buffer, false, (NkUiPixelRect){0, 0, 35, 40}, 1u) &&
+              nk_ui_draw_list_valid(&buffer.list);
+    fprintf(stderr, "PSEUDO SELF_CHECK expecting CLIPPED and BUFFER_TRUNCATED diagnostics\n");
+    if (ok) pseudo_check_draw(NULL, &buffer.list);
+    g_pseudo_report_text = true;
+    int written = nk_ui_pseudo_snprintf(__FILE__, __LINE__, small, sizeof(small), "%s", translated);
+    g_pseudo_report_text = false;
+    ok = ok && g_pseudo_result.findings == 2u && g_pseudo_result.accented == 1u &&
+         written == (int)sizeof(translated) - 1 && small[sizeof(small) - 1u] == '\0';
+    nk_ui_draw_buffer_destroy(&buffer);
+    memset(&g_pseudo_result, 0, sizeof(g_pseudo_result));
+    return ok;
+}
+
+static int pseudo_layout_report(bool pseudo) {
+    static const struct { int width; int height; } windows[] = {
+        {960, 540}, {1280, 720}, {1366, 705}, {853, 480}
+    };
+    static const int text_sizes[] = {100, 125, 150};
+    g_pseudo_width = 96;
+    g_pseudo_height = 60;
+    if (!pseudo_checker_detects_clipping()) {
+        fprintf(stderr, "PSEUDO SELF_CHECK_FAILED\n");
+        return 2;
+    }
+    g_pseudo_report_frame = true;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t w = 0u; w < sizeof(windows) / sizeof(windows[0]); ++w) {
+            g_pseudo_width = windows[w].width;
+            g_pseudo_height = windows[w].height;
+            for (int which = FLOW_BUILD; which < FLOW_COUNT; ++which) {
+                g_pseudo_case = (FlowCase)which;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw = flow_case_layout(g_pseudo_case, g_pseudo_width,
+                                                           g_pseudo_height, &ui);
+                if (draw != NULL && nk_ui_draw_list_valid(draw)) {
+                    pseudo_check_draw(ui, draw);
+                } else {
+                    fprintf(stderr, "PSEUDO FRAME_FAILED case=%d window=%dx%d text=%d%% "
+                                    "id=00000000 lost=0\n",
+                            which, g_pseudo_width, g_pseudo_height, g_flow_text_size_pct);
+                    ++g_pseudo_result.findings;
+                }
+                nk_ui_destroy(ui);
+            }
+        }
+    }
+    printf("PSEUDO SUMMARY locale=%s frames=%u text_runs=%u accented_runs=%u "
+           "scroll_clips=%u clamps=%u findings=%u\n", pseudo ? "pseudo" : "english",
+           g_pseudo_result.frames, g_pseudo_result.runs, g_pseudo_result.accented,
+           g_pseudo_result.scroll_clips, g_pseudo_result.clamps, g_pseudo_result.findings);
+#ifndef NK_UI_PSEUDO_CATALOG_COUNT
+    if (pseudo) {
+        fprintf(stderr, "PSEUDO CATALOG_MISSING\n");
+        return 2;
+    }
+#else
+    if (!pseudo || NK_UI_PSEUDO_CATALOG_COUNT == 0 || g_pseudo_result.accented == 0u) {
+        fprintf(stderr, "PSEUDO CATALOG_UNUSED\n");
+        return 2;
+    }
+#endif
+    if (failures != 0) return 2;
+    return g_pseudo_result.findings != 0u ? 1 : 0;
+}
+#endif /* NK_UI_PSEUDO_LAYOUT_TEST */
 
 /* A dump the flow helpers hand to "X is absent" checks is a whole frame: a frame that
    failed, or a dump cut at the buffer's end, is no dump, since the text it dropped would
@@ -12161,6 +12415,10 @@ int main(int argc, char **argv) {
     bool write = false;
     const char *capture_dir = NULL;
     for (int i = 1; i < argc; ++i) {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+        if (strcmp(argv[i], "--pseudo-layout") == 0) return pseudo_layout_report(true);
+        if (strcmp(argv[i], "--english-layout") == 0) return pseudo_layout_report(false);
+#endif
         if (strcmp(argv[i], "--write-goldens") == 0) {
             write = true;
         } else if (strncmp(argv[i], "--capture-dir=", 14u) == 0) {

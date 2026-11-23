@@ -315,7 +315,7 @@ endif
 endif
 NK_UPDATE_KEY_DEFS := $(if $(NK_UPDATE_KEY_LINE),-DNK_UPDATE_SIGNING_KEY=\"$(NK_UPDATE_KEY_LINE)\",)
 PLAYER_SRCS := src/player/main.c src/player/player_host.c src/player/player_state.c src/player/input_settings.c src/player/iso_reader.c src/player/setup_staging.c src/player/package_builder.c src/player/update_check.c src/player/discord_presence.c $(PLAYER_ACHIEVEMENTS_SOURCES) src/player/cover_art.c src/player/adhoc_servers.c $(UPDATE_SIG_SRCS) $(PLAYER_NK_UI_SRCS) $(PLAYER_CORE_SRCS)
-# The UI regression tests' scripted-event harness; only $(PLAYER_UI_TEST_EXE) links it.
+# The UI regression tests and pseudo launcher use the same scripted-event harness.
 PLAYER_UI_TEST_SRCS := src/player/player_ui_test.c
 PLAYER_INCLUDES := -Isrc/player -Isrc/player/ui -Isrc/ui -Ithird_party/clay -Isrc/core -Isrc/core/generated -Isrc/rt -Ithird_party/monocypher -Ithird_party/rcheevos/include -Ithird_party/rcheevos/src $(SDL3_INC_FLAGS) $(PLAYER_VULKAN_INC)
 # Adding a compressed disc image or a PSN package reads every byte of it for its SHA-256
@@ -368,7 +368,7 @@ endif
 
 $(PLAYER_EXE): | player-vulkan-check sdl3-check
 
-$(PLAYER_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE)) $(PLAYER_ICON_OBJ)
+$(PLAYER_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/nk_ui_text.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE)) $(PLAYER_ICON_OBJ)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(RUNTIME_OPT) -Wall -Wextra $(PLAYER_NK_UI_DEFS) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(PLAYER_GUI_LDFLAGS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(PLAYER_LINK_SRCS) $(PLAYER_ICON_OBJ) -lSDL3 $(LIBCHDR_LIB) $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
 
@@ -379,11 +379,28 @@ $(PLAYER_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLA
 player: $(PLAYER_EXE)
 	"$(PYTHON)" tools/stage_runtime_dlls.py --target $(patsubst %/,%,$(dir $(PLAYER_EXE))) --include-ui-fonts --refresh
 
-$(PLAYER_UI_TEST_EXE): | player-vulkan-check sdl3-check
+PLAYER_UI_TEST_DEPS := $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/player/player_ui_test.h src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/nk_ui_text.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE))
+PLAYER_UI_TEST_LINK = $(CC) $(RUNTIME_OPT) -Wall -Wextra -DNK_PLAYER_UI_REGRESSION_TEST $(PLAYER_NK_UI_DEFS) $(2) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(1) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(LIBCHDR_LIB) -lSDL3 $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
+PLAYER_UI_PSEUDO_EXE := $(BUILD_ROOT)/nakagawa_player_ui_pseudo_test$(EXE_EXT)
+PLAYER_UI_PSEUDO_DIR := $(BUILD_ROOT)/player-ui-pseudo
+PLAYER_UI_PSEUDO_CATALOG := $(PLAYER_UI_PSEUDO_DIR)/nk_ui_pseudo_text.h
 
-$(PLAYER_UI_TEST_EXE): $(PLAYER_SRCS) $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/player/player_ui_test.h src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE))
+$(PLAYER_UI_TEST_EXE) $(PLAYER_UI_PSEUDO_EXE): | player-vulkan-check sdl3-check
+
+$(PLAYER_UI_TEST_EXE): $(PLAYER_SRCS) $(PLAYER_UI_TEST_DEPS)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
-	$(CC) $(RUNTIME_OPT) -Wall -Wextra -DNK_PLAYER_UI_REGRESSION_TEST $(PLAYER_NK_UI_DEFS) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(PLAYER_LINK_SRCS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(LIBCHDR_LIB) -lSDL3 $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
+	$(call PLAYER_UI_TEST_LINK,$(PLAYER_LINK_SRCS))
+
+$(PLAYER_UI_PSEUDO_CATALOG): src/ui/nk_ui_text.h tests/native/test_player_ui.py
+	"$(PYTHON)" tests/native/test_player_ui.py --write-pseudo-catalog "$@"
+
+$(PLAYER_UI_PSEUDO_EXE): $(PLAYER_SRCS) $(PLAYER_UI_TEST_DEPS) $(PLAYER_UI_PSEUDO_CATALOG)
+	$(call PLAYER_UI_TEST_LINK,$(PLAYER_LINK_SRCS),-I"$(PLAYER_UI_PSEUDO_DIR)" -DNK_UI_TRANSLATION_HEADER=\"nk_ui_pseudo_text.h\")
+
+.PHONY: player-ui-pseudo-smoke
+player-ui-pseudo-smoke: private export NAKAGAWA_PLAYER_UI_TEST_EXE := $(PLAYER_UI_PSEUDO_EXE)
+player-ui-pseudo-smoke: $(PLAYER_UI_PSEUDO_EXE)
+	"$(PYTHON)" -X utf8 tests/native/test_player_ui.py --check-pseudo-launcher
 
 # The regressions are independent player processes, so they run as parallel shards
 # (tests/native/test_player_ui.py, NAKAGAWA_PLAYER_UI_SHARD): every shard runs side by
