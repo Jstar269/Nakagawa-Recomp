@@ -380,7 +380,7 @@ player: $(PLAYER_EXE)
 	"$(PYTHON)" tools/stage_runtime_dlls.py --target $(patsubst %/,%,$(dir $(PLAYER_EXE))) --include-ui-fonts --refresh
 
 PLAYER_UI_TEST_DEPS := $(PLAYER_DISC_EXPAND_O) $(PLAYER_ATRAC_OBJS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_LIB) $(LIBCHDR_PUBLIC_HDRS) $(PLAYER_IDENTITY_STAMP) src/player/player_ui_test.h src/core/nk_disc_expand.h src/core/nk_disc_chd.h src/player/player_state.h src/player/player_host.h src/player/input_settings.h src/player/iso_reader.h src/player/setup_staging.h src/player/ui/player_ui_nk.h src/ui/nk_ui.h src/ui/nk_ui_text.h src/ui/backend/nk_ui_sdlr.h src/player/package_builder.h src/player/update_check.h src/player/discord_presence.h src/player/cover_art.h src/player/adhoc_servers.h src/core/nk_types.h src/core/nk_font.h src/core/nk_iso.h src/core/nk_library.h src/core/nk_launch.h src/core/nk_title_manifest.h src/core/nk_xb.h src/core/nk_input_profile.h src/core/nk_json.h src/core/generated/nk_title_catalog.h src/core/nk_user_data_schema.h src/core/nk_sig.h $(wildcard $(NK_UPDATE_KEY_FILE))
-PLAYER_UI_TEST_LINK = $(CC) $(RUNTIME_OPT) -Wall -Wextra -DNK_PLAYER_UI_REGRESSION_TEST $(PLAYER_NK_UI_DEFS) $(2) $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(1) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(LIBCHDR_LIB) -lSDL3 $(PLAYER_EXTRA_LIBS) $(REPRODUCIBLE_LINK_FLAG) -o $@
+PLAYER_UI_TEST_LINK_INPUTS = $(NK_UPDATE_KEY_DEFS) $(PLAYER_INCLUDES) $(LDFLAGS) $(PLAYER_VULKAN_LIB) $(PLAYER_LINK_SRCS) $(PLAYER_UI_TEST_SRCS) $(PLAYER_CHD_SRCS) $(LIBCHDR_INC) $(LIBCHDR_LIB) -lSDL3 $(PLAYER_EXTRA_LIBS)
 PLAYER_UI_PSEUDO_EXE := $(BUILD_ROOT)/nakagawa_player_ui_pseudo_test$(EXE_EXT)
 PLAYER_UI_PSEUDO_DIR := $(BUILD_ROOT)/player-ui-pseudo
 PLAYER_UI_PSEUDO_CATALOG := $(PLAYER_UI_PSEUDO_DIR)/nk_ui_pseudo_text.h
@@ -389,13 +389,16 @@ $(PLAYER_UI_TEST_EXE) $(PLAYER_UI_PSEUDO_EXE): | player-vulkan-check sdl3-check
 
 $(PLAYER_UI_TEST_EXE): $(PLAYER_SRCS) $(PLAYER_UI_TEST_DEPS)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
-	$(call PLAYER_UI_TEST_LINK,$(PLAYER_LINK_SRCS))
+	$(CC) $(RUNTIME_OPT) -Wall -Wextra -DNK_PLAYER_UI_REGRESSION_TEST $(PLAYER_NK_UI_DEFS) \
+		$(PLAYER_UI_TEST_LINK_INPUTS) $(REPRODUCIBLE_LINK_FLAG) -o $@
 
 $(PLAYER_UI_PSEUDO_CATALOG): src/ui/nk_ui_text.h tests/native/test_player_ui.py
 	"$(PYTHON)" tests/native/test_player_ui.py --write-pseudo-catalog "$@"
 
 $(PLAYER_UI_PSEUDO_EXE): $(PLAYER_SRCS) $(PLAYER_UI_TEST_DEPS) $(PLAYER_UI_PSEUDO_CATALOG)
-	$(call PLAYER_UI_TEST_LINK,$(PLAYER_LINK_SRCS),-I"$(PLAYER_UI_PSEUDO_DIR)" -DNK_UI_TRANSLATION_HEADER=\"nk_ui_pseudo_text.h\")
+	$(CC) $(RUNTIME_OPT) -Wall -Wextra -DNK_PLAYER_UI_REGRESSION_TEST $(PLAYER_NK_UI_DEFS) \
+		-I"$(PLAYER_UI_PSEUDO_DIR)" -DNK_UI_TRANSLATION_HEADER=\"nk_ui_pseudo_text.h\" \
+		$(PLAYER_UI_TEST_LINK_INPUTS) $(REPRODUCIBLE_LINK_FLAG) -o $@
 
 .PHONY: player-ui-pseudo-smoke
 player-ui-pseudo-smoke: private export NAKAGAWA_PLAYER_UI_TEST_EXE := $(PLAYER_UI_PSEUDO_EXE)
