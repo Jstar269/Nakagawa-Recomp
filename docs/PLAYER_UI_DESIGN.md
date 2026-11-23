@@ -131,8 +131,9 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
 - **Pending.** A long value that wraps inside the Settings options detail panel, and a panel whose text scrolls when
   it is taller than its room, are in [#2754](https://github.com/Jstar269/nakagawa-recomp/pull/2754), a Draft
   that is not on `main`; this page describes `main`.
-- Launcher text is English only and lives in the screen sources; moving it to a string table is
-  [#2747](https://github.com/Jstar269/nakagawa-recomp/issues/2747).
+- The launcher ships one English catalog for screen and shared-widget text.
+  [Adding launcher strings](../CONTRIBUTING.md#launcher-strings) describes the catalog and the pseudo-translation check.
+  [#2953](https://github.com/Jstar269/Nakagawa-Recomp/issues/2953) tracks the in-game overlay and messages produced outside the launcher screens.
 
 ### Focus
 
@@ -1033,8 +1034,8 @@ wording, do not exist yet.
 - Colour never carries meaning alone: a status is a marker shape and a word, a selected value has an edge or a fill
   as well as its text colour, and a key the on-screen keyboard cannot type loses its outline as well as dimming.
 - Not there yet: no screen-reader support
-  ([#2748](https://github.com/Jstar269/nakagawa-recomp/issues/2748)); English only, with no string table
-  ([#2747](https://github.com/Jstar269/nakagawa-recomp/issues/2747)); no light theme and no colour-blind palette;
+  ([#2748](https://github.com/Jstar269/nakagawa-recomp/issues/2748)); English is the only shipped language;
+  no light theme and no colour-blind palette;
   a Windows contrast theme changes the focus ring only. The full list, with workarounds, is in
   [`ACCESSIBILITY.md`](../ACCESSIBILITY.md#known-limitations).
 

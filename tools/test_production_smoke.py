@@ -44,6 +44,7 @@ from test_iso_parity import (  # noqa: E402
     create_test_iso_with_executables,
 )
 from test_import_name_safety import build_synthetic_import_prx  # noqa: E402
+from test_nk_core import launcher_c_source, launcher_english_catalog  # noqa: E402
 from import_fixtures import SYSLIB_EXPORT, build_module_elf  # noqa: E402
 from nk_core import package_cache  # noqa: E402
 from nk_core.iso_inspect import PBP_BOUNDARY_CODES, runtime_registered_nids  # noqa: E402
@@ -4569,35 +4570,55 @@ class TestProductStatusCopy(unittest.TestCase):
     def _source(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
 
-    def _c_text(self, relative: str) -> str:
-        """A C source with adjacent string literals joined, as the compiler joins them."""
-        return re.sub(r'"\s*\n\s*"', "", self._source(relative))
+    def _assert_ui_copy(self, screen: str, draw: str, key: str, expected: str,
+                        english: dict[str, str]) -> None:
+        self.assertRegex(screen, draw + rf"\s*NK_UI_STR\({key}\)\s*,")
+        self.assertEqual(english[key], f'"{expected}"')
 
     def test_about_screen_carries_the_licence_and_no_endorsement_notice(self):
         # The launcher's notices page (Settings > Third-party notices) and its About page. The
         # licence words are the maintainer's (2026-11-19): the program is GNU GPL version 3,
         # since two included parts are version 3 only; its own code also allows later versions.
-        notices = self._c_text("src/player/ui/scr_settings.c")
-        self.assertIn("Nakagawa Recomp is free software under the GNU GPL version 3. Its own "
-                      "code also allows later versions; see LICENSE and NOTICE.md. Not "
-                      "affiliated with or endorsed by Sony Interactive Entertainment; "
-                      "PlayStation and PSP are its trademarks.", notices)
-        about = self._c_text("src/player/ui/scr_about.c")
-        self.assertIn('"GNU GPL version 3"', about)
-        self.assertIn("Free software. Nakagawa's own code also allows later GPL versions; two "
-                      "included parts are version 3 only. Third-party parts keep their own "
-                      "licences.", about)
-        self.assertIn("Not affiliated with or endorsed by Sony Interactive Entertainment. "
-                      "PSP is a trademark of its owner. No game data is included.", about)
+        english = launcher_english_catalog(ROOT)
+        settings = launcher_c_source(ROOT / "src/player/ui/scr_settings.c")
+        notices = settings.split("case PLAYER_UI_SETTINGS_PAGE_NOTICES:", 1)[1].split("\n    case ", 1)[0]
+        self._assert_ui_copy(
+            notices, r"\bnk_ui_text_role\(ui,\s*FLOW_ID_LEAD,", "SETTINGS_NOTICES_LICENCE_SUMMARY",
+            "Nakagawa Recomp is free software under the GNU GPL version 3. Its own "
+            "code also allows later versions; see LICENSE and NOTICE.md. Not "
+            "affiliated with or endorsed by Sony Interactive Entertainment; "
+            "PlayStation and PSP are its trademarks.", english,
+        )
+        about = launcher_c_source(ROOT / "src/player/ui/scr_about.c")
+        self._assert_ui_copy(
+            about, r"\bnk_ui_text_role\(ui,\s*0x50000201u,", "ABOUT_LICENCE_VERSION",
+            "GNU GPL version 3", english,
+        )
+        self._assert_ui_copy(
+            about, r"\bnk_ui_text_role\(ui,\s*0x50000202u,", "ABOUT_LICENCE_SUMMARY",
+            "Free software. Nakagawa's own code also allows later GPL versions; two "
+            "included parts are version 3 only. Third-party parts keep their own licences.",
+            english,
+        )
+        self._assert_ui_copy(
+            about, r"\bnk_ui_text_role\(ui,\s*ABOUT_ID_NOTICE,", "ABOUT_TRADEMARK_NOTICE",
+            "Not affiliated with or endorsed by Sony Interactive Entertainment. "
+            "PSP is a trademark of its owner. No game data is included.", english,
+        )
 
     def test_wizard_states_the_open_boundaries(self):
-        wizard = self._c_text("src/player/ui/scr_wizard.c")
-        self.assertIn("Your games stay on this PC. Nakagawa never uploads anything, and "
-                      "downloads only the build tools you approve. It decrypts your own disc "
-                      "here and never touches firmware.", wizard)
-        self.assertNotIn("key file", wizard)
-        self.assertNotIn("or create runtime packages", wizard)
-        self.assertNotIn("draw_issue_links", wizard)
+        wizard = launcher_c_source(ROOT / "src/player/ui/scr_wizard.c")
+        english = launcher_english_catalog(ROOT)
+        self._assert_ui_copy(
+            wizard, r"\bwizard_text\(ui,\s*6u,", "WIZARD_PRIVACY_NOTE",
+            "Your games stay on this PC. Nakagawa never uploads anything, and "
+            "downloads only the build tools you approve. It decrypts your own disc "
+            "here and never touches firmware.", english,
+        )
+        wizard_copy = re.sub(r"\bNK_UI_STR\((\w+)\)", lambda match: english[match[1]], wizard)
+        self.assertNotIn("key file", wizard_copy)
+        self.assertNotIn("or create runtime packages", wizard_copy)
+        self.assertNotIn("draw_issue_links", wizard_copy)
 
     def test_library_checklist_points_at_the_library_package_builder(self):
         inspect = self._source("tools/nk_core/iso_inspect.py")

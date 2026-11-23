@@ -7,6 +7,7 @@
    folders in the lines as %USERPROFILE%. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -57,8 +58,9 @@ static PlayerUiAction developer_log_op(PlayerUiDeveloperLogOp op) {
 
 PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperLogModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Close"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(DEVLOG_PROMPT_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(DEVLOG_PROMPT_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(DEVLOG_CLOSE)}
     };
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     const NkUiTheme *theme;
@@ -123,11 +125,10 @@ PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperL
                              NK_UI_SPACE_3)) {
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
             NkUiTextStyle eyebrow = nk_ui_type(NK_UI_TYPE_EYEBROW, theme->warning);
-            nk_ui_text(ui, DEV_ID_TEXT + 0u, nk_ui_caps(ui, FLOW_MARK_TRIANGLE " Developer mode"),
+            nk_ui_text(ui, DEV_ID_TEXT + 0u, nk_ui_caps(ui, NK_UI_STR(DEVLOG_TITLE)),
                        &eyebrow);
             nk_ui_text(ui, DEV_ID_TEXT + 1u,
-                       nk_ui_text_clamp(ui, "Developer log: on this PC only. Paths show as "
-                                            "%USERPROFILE%.", &text, inner, 1), &text);
+                       nk_ui_text_clamp(ui, NK_UI_STR(DEVLOG_PRIVACY_NOTE), &text, inner, 1), &text);
             {
                 NkUiLayout box = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(),
                                              sizing_fixed(lines_height + 20.0f), 0.0f);
@@ -148,7 +149,7 @@ PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperL
                     nk_ui_spacer(ui, DEV_ID_TEXT + 5u, sizing_fixed(1.0f),
                                  sizing_fixed((float)(count - last) * line_h));
                     if (model->line_count == 0u) {
-                        nk_ui_text(ui, DEV_ID_TEXT + 2u, "Nothing logged yet.", &data);
+                        nk_ui_text(ui, DEV_ID_TEXT + 2u, NK_UI_STR(DEVLOG_NO_ENTRIES), &data);
                     }
                     nk_ui_end_container(ui);
                 }
@@ -156,18 +157,18 @@ PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperL
             layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
             layout.align_y = NK_UI_ALIGN_CENTER;
             if (nk_ui_begin_container(ui, DEV_ID_ACTIONS, &layout, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_DEVELOPER_LOG_COPY, "Copy", 0u)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_DEVELOPER_LOG_COPY, NK_UI_STR(DEVLOG_COPY), 0u)) {
                     result = developer_log_op(PLAYER_UI_DEVELOPER_LOG_COPY);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_DEVELOPER_LOG_SAVE, "Save", 0u)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_DEVELOPER_LOG_SAVE, NK_UI_STR(DEVLOG_SAVE), 0u)) {
                     result = developer_log_op(PLAYER_UI_DEVELOPER_LOG_SAVE);
                 }
                 if (nk_ui_button(ui, PLAYER_UI_ID_DEVELOPER_LOG_INSPECT,
-                                 model->inspecting ? "Layout inspector: On"
-                                                   : "Layout inspector: Off", 0u)) {
+                                 model->inspecting ? NK_UI_STR(DEVLOG_INSPECTOR_ON)
+                                                   : NK_UI_STR(DEVLOG_INSPECTOR_OFF), 0u)) {
                     result = developer_log_op(PLAYER_UI_DEVELOPER_LOG_INSPECT);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_DEVELOPER_LOG_CLOSE, "Close",
+                if (nk_ui_button(ui, PLAYER_UI_ID_DEVELOPER_LOG_CLOSE, NK_UI_STR(DEVLOG_CLOSE),
                                  NK_UI_BUTTON_PRIMARY)) {
                     result = developer_log_op(PLAYER_UI_DEVELOPER_LOG_CLOSE);
                 }
@@ -175,10 +176,10 @@ PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperL
                     NkUiTextStyle note = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
                     /* The four buttons take about 480 px of the row, more at a
                        larger text size. */
-                    float buttons = nk_ui_button_width(ui, "Copy", 0u) +
-                                    nk_ui_button_width(ui, "Save", 0u) +
-                                    nk_ui_button_width(ui, "Layout inspector: Off", 0u) +
-                                    nk_ui_button_width(ui, "Close", NK_UI_BUTTON_PRIMARY) +
+                    float buttons = nk_ui_button_width(ui, NK_UI_STR(DEVLOG_COPY), 0u) +
+                                    nk_ui_button_width(ui, NK_UI_STR(DEVLOG_SAVE), 0u) +
+                                    nk_ui_button_width(ui, NK_UI_STR(DEVLOG_INSPECTOR_OFF), 0u) +
+                                    nk_ui_button_width(ui, NK_UI_STR(DEVLOG_CLOSE), NK_UI_BUTTON_PRIMARY) +
                                     4.0f * NK_UI_SPACE_3;
                     float room = inner - (buttons > 500.0f ? buttons : 500.0f);
                     nk_ui_text(ui, DEV_ID_TEXT + 3u,

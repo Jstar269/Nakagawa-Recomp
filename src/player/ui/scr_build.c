@@ -5,6 +5,7 @@
    outcome, in one centred dialog card; and the build queue's card. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -12,12 +13,12 @@
 #include <string.h>
 
 PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model) {
-    static const char *const stages[4] = {"Preflight", "Extract", "Compile", "Package"};
+    static const char *const stages[4] = {NK_UI_STR(BUILD_PREFLIGHT), NK_UI_STR(BUILD_EXTRACT), NK_UI_STR(BUILD_COMPILE), NK_UI_STR(BUILD_PACKAGE)};
     static const NkUiPromptItem prompts_running[] = {
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"}, {NK_UI_PROMPT_ACT_BACK, "Cancel build"}
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(BUILD_SELECT)}, {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(BUILD_CANCEL_BUILD)}
     };
     static const NkUiPromptItem prompts_done[] = {
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"}, {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(BUILD_SELECT)}, {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(BUILD_BACK)}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
@@ -29,9 +30,9 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
                        model->logical_height > 80.0f ? model->logical_height : 800.0f, 720.0f);
     if (inner <= 0.0f) return result;
     scr_flow_eyebrow(ui, model->built ? FLOW_MARK_DOT : FLOW_MARK_DIAMOND,
-                 model->built ? "Package built" : "Building the package",
+                 model->built ? NK_UI_STR(BUILD_PACKAGE_BUILT) : NK_UI_STR(BUILD_BUILDING_PACKAGE),
                  model->built ? theme->ready : theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, safe_text(model->title_line, "Package build"),
+    nk_ui_text_role(ui, FLOW_ID_TITLE, safe_text(model->title_line, NK_UI_STR(BUILD_PACKAGE_BUILD)),
                     NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
@@ -52,7 +53,7 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
                                             : done ? theme->ready : theme->line_strong;
                 chip.align_x = NK_UI_ALIGN_CENTER;
                 chip.align_y = NK_UI_ALIGN_CENTER;
-                (void)snprintf(label, sizeof(label), "%s%s", done ? FLOW_MARK_CHECK : "",
+                (void)snprintf(label, sizeof(label), NK_UI_STR(BUILD_STAGE_LABEL_FORMAT), done ? FLOW_MARK_CHECK : "",
                                stages[i]);
                 if (nk_ui_begin_container(ui, (NkUiId)(FLOW_ID_STAGES + 1u + (NkUiId)i),
                                           &chip, &style)) {
@@ -76,11 +77,11 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text(ui, FLOW_ID_MESSAGE,
                        nk_ui_text_clamp(ui, model->built
-                           ? "Package written. Checking it before PLAY is offered."
-                           : safe_text(model->message, "Building the package…"),
+                           ? NK_UI_STR(BUILD_CHECKING_PACKAGE)
+                           : safe_text(model->message, NK_UI_STR(BUILD_PROGRESS_FALLBACK)),
                            &text, inner - 140.0f, 2), &text);
             nk_ui_spacer(ui, FLOW_ID_STATUS_SPACER, sizing_grow(), sizing_fixed(1.0f));
-            (void)snprintf(elapsed, sizeof(elapsed), "%u.%u s",
+            (void)snprintf(elapsed, sizeof(elapsed), NK_UI_STR(BUILD_ELAPSED_SECONDS_FORMAT),
                            model->elapsed_ms / 1000u, (model->elapsed_ms % 1000u) / 100u);
             nk_ui_text_role(ui, FLOW_ID_ELAPSED, elapsed, NK_UI_TYPE_DATA, theme->muted);
             nk_ui_end_container(ui);
@@ -121,7 +122,7 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
                                             inner - 28.0f, 1), &text);
             }
             if (model->line_count == 0u) {
-                nk_ui_text(ui, FLOW_ID_LOG + 8u, "Waiting for the first build output…", &text);
+                nk_ui_text(ui, FLOW_ID_LOG + 8u, NK_UI_STR(BUILD_WAITING_FOR_OUTPUT), &text);
             }
             nk_ui_end_container(ui);
         }
@@ -131,7 +132,7 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
         row.padding_top = NK_UI_SPACE_1;
         if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
             if (nk_ui_button(ui, PLAYER_UI_ID_BUILD_ACTION,
-                             model->built ? "Back to library" : "Cancel build",
+                             model->built ? NK_UI_STR(BUILD_BACK_TO_LIBRARY) : NK_UI_STR(BUILD_CANCEL_BUILD),
                              model->built ? NK_UI_BUTTON_PRIMARY : NK_UI_BUTTON_DANGER)) {
                 result = action(model->built ? PLAYER_UI_ACTION_LEAVE_BUILD
                                              : PLAYER_UI_ACTION_CANCEL_BUILD,
@@ -140,7 +141,7 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
             nk_ui_end_container(ui);
         }
     }
-    scr_flow_end(ui, "The game is translated and compiled on this PC. The first build takes a while.",
+    scr_flow_end(ui, NK_UI_STR(BUILD_BUILD_HELP),
              model->built ? prompts_done : prompts_running, 2u);
     return result;
 }
@@ -153,8 +154,8 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
    that runs finish. */
 PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(BUILD_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(BUILD_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(BUILD_BACK)}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
@@ -172,30 +173,28 @@ PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model)
                            model->logical_height > 80.0f ? model->logical_height : 800.0f,
                            720.0f);
     if (inner <= 0.0f) return result;
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Build queue", theme->accent_dark);
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(BUILD_QUEUE_HEADING), theme->accent_dark);
     if (model->total == 0u) {
-        (void)snprintf(text, sizeof(text), "%s", "Nothing waits to build");
+        (void)snprintf(text, sizeof(text), NK_UI_STR(BUILD_QUEUE_EMPTY_FORMAT), NK_UI_STR(BUILD_QUEUE_EMPTY));
     } else if (model->total == 1u) {
-        (void)snprintf(text, sizeof(text), "%s",
-                       stopped ? "Paused: 1 game in the queue" : "1 game in the queue");
+        (void)snprintf(text, sizeof(text), NK_UI_STR(BUILD_QUEUE_SINGLE_FORMAT),
+                       stopped ? NK_UI_STR(BUILD_QUEUE_PAUSED_SINGLE) : NK_UI_STR(BUILD_QUEUE_SINGLE));
     } else {
-        (void)snprintf(text, sizeof(text), "%s%lu games in the queue",
-                       stopped ? "Paused: " : "", (unsigned long)model->total);
+        (void)snprintf(text, sizeof(text), NK_UI_STR(BUILD_QUEUE_COUNT_FORMAT),
+                       stopped ? NK_UI_STR(BUILD_QUEUE_PAUSED_PREFIX) : "", (unsigned long)model->total);
     }
     nk_ui_text_role(ui, FLOW_ID_TITLE, nk_ui_frame_text(ui, text), NK_UI_TYPE_TITLE,
                     theme->paper);
     if (model->total == 0u) {
-        lead = "Add to queue on a game's page puts it here.";
+        lead = NK_UI_STR(BUILD_QUEUE_ADD_HELP);
     } else if (model->paused) {
-        lead = "A build could not start. Resume goes on with the next game.";
+        lead = NK_UI_STR(BUILD_QUEUE_START_FAILED);
     } else if (model->held && model->building) {
-        lead = "The current build finishes, then the queue waits. It stays paused "
-               "after Nakagawa restarts.";
+        lead = NK_UI_STR(BUILD_QUEUE_ACTIVE_PAUSE_HELP);
     } else if (model->held) {
-        lead = "No game starts until Resume. It stays paused after Nakagawa restarts.";
+        lead = NK_UI_STR(BUILD_QUEUE_PAUSED_HELP);
     } else {
-        lead = "One game builds at a time, in this order. The queue goes on after "
-               "Nakagawa restarts.";
+        lead = NK_UI_STR(BUILD_QUEUE_RUNNING_HELP);
     }
     nk_ui_text_role(ui, FLOW_ID_LEAD, lead, NK_UI_TYPE_BODY_S,
                     model->total > 0u && model->paused ? theme->warning : theme->muted);
@@ -212,9 +211,9 @@ PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model)
                 NkUiTextStyle name = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
                 uint32_t small = NK_UI_BUTTON_SMALL | NK_UI_BUTTON_ROW;
                 float buttons = row->building ? 0.0f
-                    : nk_ui_button_width(ui, "Up", small) +
-                      nk_ui_button_width(ui, "Down", small) +
-                      nk_ui_button_width(ui, "Remove", small) + 3.0f * NK_UI_SPACE_3;
+                    : nk_ui_button_width(ui, NK_UI_STR(BUILD_QUEUE_MOVE_UP), small) +
+                      nk_ui_button_width(ui, NK_UI_STR(BUILD_QUEUE_MOVE_DOWN), small) +
+                      nk_ui_button_width(ui, NK_UI_STR(BUILD_QUEUE_REMOVE), small) + 3.0f * NK_UI_SPACE_3;
                 float name_width = inner - 28.0f - buttons - 120.0f;
                 line.align_y = NK_UI_ALIGN_CENTER;
                 if (name_width < 80.0f) name_width = 80.0f;
@@ -223,28 +222,28 @@ PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model)
                     continue;
                 }
                 nk_ui_text(ui, (NkUiId)(FLOW_ID_ITEMS + 0x10u + (NkUiId)i),
-                           nk_ui_text_clamp(ui, safe_text(row->title, "A game"), &name,
+                           nk_ui_text_clamp(ui, safe_text(row->title, NK_UI_STR(BUILD_QUEUE_GAME_FALLBACK)), &name,
                                             name_width, 1), &name);
                 nk_ui_text_role(ui, (NkUiId)(FLOW_ID_ITEMS + 0x20u + (NkUiId)i),
-                                nk_ui_caps(ui, safe_text(row->status, "Waiting")),
+                                nk_ui_caps(ui, safe_text(row->status, NK_UI_STR(BUILD_QUEUE_STATUS_FALLBACK))),
                                 NK_UI_TYPE_LABEL_S,
                                 row->building ? theme->accent_dark : theme->muted);
                 nk_ui_spacer(ui, (NkUiId)(FLOW_ID_ITEMS + 0x30u + (NkUiId)i), sizing_grow(),
                              sizing_fixed(1.0f));
                 if (!row->building) {
-                    if (nk_ui_button(ui, (NkUiId)(PLAYER_UI_ID_QUEUE_UP_BASE + (NkUiId)i), "Up",
+                    if (nk_ui_button(ui, (NkUiId)(PLAYER_UI_ID_QUEUE_UP_BASE + (NkUiId)i), NK_UI_STR(BUILD_QUEUE_MOVE_UP),
                                      small | (row->can_move_up ? 0u : NK_UI_BUTTON_DISABLED))) {
                         result = action(PLAYER_UI_ACTION_QUEUE, row->title_index,
                                         (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_EARLIER);
                     }
                     if (nk_ui_button(ui, (NkUiId)(PLAYER_UI_ID_QUEUE_DOWN_BASE + (NkUiId)i),
-                                     "Down",
+                                     NK_UI_STR(BUILD_QUEUE_MOVE_DOWN),
                                      small | (row->can_move_down ? 0u : NK_UI_BUTTON_DISABLED))) {
                         result = action(PLAYER_UI_ACTION_QUEUE, row->title_index,
                                         (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_LATER);
                     }
                     if (nk_ui_button(ui, (NkUiId)(PLAYER_UI_ID_QUEUE_REMOVE_BASE + (NkUiId)i),
-                                     "Remove", small)) {
+                                     NK_UI_STR(BUILD_QUEUE_REMOVE), small)) {
                         result = action(PLAYER_UI_ACTION_QUEUE, row->title_index,
                                         (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_REMOVE);
                     }
@@ -254,7 +253,7 @@ PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model)
             nk_ui_end_container(ui);
         }
         if (model->total > shown) {
-            (void)snprintf(text, sizeof(text), "Games %lu-%lu of %lu, in build order",
+            (void)snprintf(text, sizeof(text), NK_UI_STR(BUILD_QUEUE_PAGE_FORMAT),
                            (unsigned long)(model->first_row + 1u),
                            (unsigned long)(model->first_row + shown),
                            (unsigned long)model->total);
@@ -271,7 +270,7 @@ PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model)
         if (nk_ui_flow_begin(ui, &flow, FLOW_ID_ACTIONS, &row, inner)) {
             if (model->total > 0u) {
                 /* One button, so the focus stays on it: Pause, then Resume. */
-                const char *label = stopped ? "Resume" : "Pause";
+                const char *label = stopped ? NK_UI_STR(BUILD_QUEUE_RESUME) : NK_UI_STR(BUILD_QUEUE_PAUSE);
                 uint32_t look = stopped ? NK_UI_BUTTON_PRIMARY : 0u;
                 nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, label, look));
                 if (nk_ui_button(ui, PLAYER_UI_ID_QUEUE_PAUSE, label, look)) {
@@ -283,28 +282,28 @@ PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model)
             if (earlier || later) {
                 uint32_t back = earlier ? 0u : NK_UI_BUTTON_DISABLED;
                 uint32_t next = later ? 0u : NK_UI_BUTTON_DISABLED;
-                nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Earlier games", back));
-                if (nk_ui_button(ui, PLAYER_UI_ID_QUEUE_PAGE_BACK, "Earlier games", back)) {
+                nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(BUILD_QUEUE_EARLIER), back));
+                if (nk_ui_button(ui, PLAYER_UI_ID_QUEUE_PAGE_BACK, NK_UI_STR(BUILD_QUEUE_EARLIER), back)) {
                     result = action(PLAYER_UI_ACTION_QUEUE, 0u,
                                     (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_PAGE_BACK);
                 }
-                nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Later games", next));
-                if (nk_ui_button(ui, PLAYER_UI_ID_QUEUE_PAGE_NEXT, "Later games", next)) {
+                nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(BUILD_QUEUE_LATER), next));
+                if (nk_ui_button(ui, PLAYER_UI_ID_QUEUE_PAGE_NEXT, NK_UI_STR(BUILD_QUEUE_LATER), next)) {
                     result = action(PLAYER_UI_ACTION_QUEUE, 0u,
                                     (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_PAGE_NEXT);
                 }
             }
-            nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Back", 0u));
-            if (nk_ui_button(ui, PLAYER_UI_ID_QUEUE_BACK, "Back", 0u)) {
+            nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(BUILD_BACK), 0u));
+            if (nk_ui_button(ui, PLAYER_UI_ID_QUEUE_BACK, NK_UI_STR(BUILD_BACK), 0u)) {
                 result = action(PLAYER_UI_ACTION_BACK, 0u, PLAYER_UI_PRIMARY_NONE);
             }
             nk_ui_flow_end(ui, &flow);
         }
     }
-    scr_flow_end(ui, !stopped ? "One build at a time, so this PC stays usable."
+    scr_flow_end(ui, !stopped ? NK_UI_STR(BUILD_QUEUE_FOOTER_RUNNING)
                      : model->held && model->building
-                         ? "Paused after this build. Resume starts the next game."
-                         : "Paused. Resume starts the next game.",
+                         ? NK_UI_STR(BUILD_QUEUE_FOOTER_ACTIVE_PAUSE)
+                         : NK_UI_STR(BUILD_QUEUE_FOOTER_PAUSED),
                  prompts, 3u);
     return result;
 }
