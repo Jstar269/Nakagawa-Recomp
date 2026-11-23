@@ -361,7 +361,15 @@ int main(void) {
     if (!arena) return 2;
     memset(arena, 0, ARENA);
     g_mem = arena + 0x08000000u;
+#ifdef _WIN32
     putenv((char *)"SR_MEMSTICK=./sfo_selftest_ms");
+#else
+    if (setenv("SR_MEMSTICK", "./sfo_selftest_ms", 1) != 0) {
+        perror("setenv SR_MEMSTICK");
+        free(arena);
+        return 2;
+    }
+#endif
 
     /* 1. Each fixed field driven to exactly its capacity in non-NUL guest bytes.
      *    Before the fix this made SfoEnt.len exceed maxlen and the emission
