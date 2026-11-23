@@ -30403,13 +30403,20 @@ static void test_refer_thread_status(void) {
         { EXTENDED_SDK, 0, 0, 0, "newer size zero leaves output untouched" },
         { EXTENDED_SDK, 8, 8, 0, "newer partial size reports 108 and returns an exact prefix" },
         { EXTENDED_SDK, 0x68, 0x68, 0, "newer size 104 reports 108 without writing the trailing word" },
-        { EXTENDED_SDK, 0x6c, 0x6c, 0, "newer size 108 writes the observed trailing zero" },
         { EXTENDED_SDK, 0x80, 0, TEST_ILLEGAL_SIZE, "newer size 128 returns ILLEGAL_SIZE without writing" },
         { EXTENDED_SDK, 0x400, 0, TEST_ILLEGAL_SIZE, "newer size 1024 returns ILLEGAL_SIZE without writing" },
         { EXTENDED_SDK, UINT32_MAX, 0, TEST_ILLEGAL_SIZE, "newer maximum size returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x6c, 0x6c, 0, "newer size 108 still succeeds after a rejected size" },
     };
     uint8_t expected[0x404];
     const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    sr_flight_test_disable();
+    expect(!sr_flight_class_enabled(SR_FLIGHT_CLASS_ALL),
+           "ReferThreadStatus diagnostic is tested with flight recording disabled");
+    FILE *capture = NULL;
+    int saved_stderr = -1;
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_stderr);
+    expect(capturing, "ReferThreadStatus fixture captures normal stderr");
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         if (i == 0 || cases[i].sdk != cases[i - 1].sdk) {
             s_cpu->r[4] = cases[i].sdk;
@@ -30428,6 +30435,15 @@ static void test_refer_thread_status(void) {
                    memcmp((const void *)SR_HOST(THREAD_INFO), expected, sizeof(expected)) == 0,
                cases[i].label);
     }
+    char log[1024] = {0};
+    if (capturing) hle_data_stderr_capture_end(capture, saved_stderr, log, sizeof(log));
+    expect(count_occurrences(log, "HLE: sceKernelReferThreadStatus ILLEGAL_SIZE (0x800201bc)") == 3 &&
+               strstr(log, "requested=0x00000080 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0x00000400 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0xffffffff max=0x6c sdk=0x02060011"),
+           "ReferThreadStatus logs only the three newer SDK oversized requests");
+    expect(strstr(log, "UNSUPPORTED_IMPORT:") == NULL,
+           "ReferThreadStatus diagnostic never claims an unsupported import");
     expect(sr_hle_test_unmodelled_stops() == stops_before,
            "ReferThreadStatus handles both observed SDK layouts without a semantic stop");
 

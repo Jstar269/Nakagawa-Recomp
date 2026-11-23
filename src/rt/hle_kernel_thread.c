@@ -444,8 +444,12 @@ static uint32_t h_ReferThreadStatus(CpuState *s) {
     if (input_size == 0u) return 0;
     const int extended = g_sdk_version > 0x02060010u;
     record.prefix.size = (uint32_t)(extended ? sizeof(record) : sizeof(record.prefix));
-    if (extended && input_size > record.prefix.size)
+    if (extended && input_size > record.prefix.size) {
+        fprintf(stderr, "HLE: sceKernelReferThreadStatus ILLEGAL_SIZE (0x800201bc): "
+                        "requested=0x%08x max=0x%x sdk=0x%08x\n",
+                input_size, record.prefix.size, g_sdk_version);
         return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    }
     const uint32_t write_size = input_size < record.prefix.size ? input_size : record.prefix.size;
     if (!sr_guest_span_writable(A1, write_size)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     for (uint32_t i = 0; i < write_size; i++)
