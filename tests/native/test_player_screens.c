@@ -389,7 +389,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
-               FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
+               FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED, FLOW_PAGE_QUEUE_HELD,
                FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, FLOW_PAGE_TITLE_LONGEST_ENHANCED,
                FLOW_PAGE_TITLE_LONGEST_ACE,
                FLOW_CONSENT_FULL, FLOW_NICKNAME_FIRST, FLOW_NICKNAME_FULL,
@@ -1473,9 +1473,11 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         steam.logical_height = g_flow_height;
         return player_ui_screen_steam(ui, &steam);
     }
-    if (which == FLOW_PAGE_QUEUE || which == FLOW_PAGE_QUEUE_PAUSED) {
+    if (which == FLOW_PAGE_QUEUE || which == FLOW_PAGE_QUEUE_PAUSED ||
+        which == FLOW_PAGE_QUEUE_HELD) {
         /* The build queue: the one building, a full page of games that wait,
-           the page line and its buttons, and (paused) Resume. */
+           the page line and its buttons, and Pause, or Resume when paused (a
+           build that could not start, or the person's Pause while one builds). */
         static const PlayerUiQueueRow rows[PLAYER_UI_QUEUE_ROW_CAP] = {
             {"Synthetic Showcase Scene with a Long Name That Has to Be Cut Short",
              "Building 40%", 0u, true, false, false},
@@ -1483,13 +1485,19 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
             {"Synthetic Experimental Fixture", "Waiting", 2u, false, true, true},
             {"Synthetic Untested Fixture", "Waiting", 3u, false, true, true}
         };
+        PlayerUiQueueRow page[PLAYER_UI_QUEUE_ROW_CAP];
         PlayerUiQueueModel queue;
+        memcpy(page, rows, sizeof(page));
+        /* As the launcher labels it: a paused queue's next game reads Paused. */
+        if (which != FLOW_PAGE_QUEUE) page[1].status = "Paused";
         memset(&queue, 0, sizeof(queue));
-        queue.rows = rows;
+        queue.rows = page;
         queue.row_count = PLAYER_UI_QUEUE_ROW_CAP;
         queue.first_row = 0u;
         queue.total = 9u;
         queue.paused = which == FLOW_PAGE_QUEUE_PAUSED;
+        queue.held = which == FLOW_PAGE_QUEUE_HELD;
+        queue.building = true;
         queue.logical_width = g_flow_width;
         queue.logical_height = g_flow_height;
         return player_ui_screen_queue(ui, &queue);
@@ -2544,7 +2552,8 @@ static bool build_title_golden(char *out, size_t cap, size_t *used) {
             {FLOW_WIZ_FONTS, "wizard-fonts"}, {FLOW_WIZ_READY, "wizard-ready"},
             {FLOW_WIZ_STAGED, "wizard-staged"}, {FLOW_WIZ_OPTIONS, "wizard-options"},
             {FLOW_PAGE_QUEUE, "flow-build-queue"},
-            {FLOW_PAGE_QUEUE_PAUSED, "flow-build-queue-paused"}
+            {FLOW_PAGE_QUEUE_PAUSED, "flow-build-queue-paused"},
+            {FLOW_PAGE_QUEUE_HELD, "flow-build-queue-held"}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
@@ -9299,6 +9308,8 @@ static int capture_screens(const char *directory) {
             {FLOW_CONSENT, "flow-prereq-consent", PLAYER_UI_ID_PREREQ_ACCEPT},
             {FLOW_PROGRESS, "flow-prereq-progress", PLAYER_UI_ID_PREREQ_CANCEL},
             {FLOW_ERROR, "flow-error", PLAYER_UI_ID_ERROR_RECOVER},
+            {FLOW_PAGE_QUEUE, "flow-build-queue", PLAYER_UI_ID_QUEUE_PAUSE},
+            {FLOW_PAGE_QUEUE_HELD, "flow-build-queue-held", PLAYER_UI_ID_QUEUE_PAUSE},
             {FLOW_WIZ_WELCOME, "wizard-welcome", PLAYER_UI_ID_WIZARD_PRIMARY},
             {FLOW_WIZ_CHOSEN, "wizard-chosen", PLAYER_UI_ID_WIZARD_PRIMARY},
             {FLOW_WIZ_COPYING, "wizard-copying", PLAYER_UI_ID_WIZARD_CANCEL},
@@ -10796,8 +10807,8 @@ static bool queue_op_is(PlayerUiAction action, PlayerUiQueueOp op, size_t title_
 }
 
 /* The build queue: the queue screen lists the one building first, then the
-   games that wait with Up, Down and Remove, a page at a time, and Resume when
-   paused; the library line opens it; the title page offers Add to queue beside
+   games that wait with Up, Down and Remove, a page at a time, and one Pause or
+   Resume button; the library line opens it; the title page offers Add to queue beside
    BUILD PACKAGE and Remove from queue while the game waits; the build card
    says how many follow. */
 static void test_build_queue_screens(void) {
@@ -10852,7 +10863,40 @@ static void test_build_queue_screens(void) {
     CHECK(strstr(dump, "\"PAGE\"") == NULL && strstr(dump, "\"RESUME\"") == NULL &&
               strstr(dump, "\"LATER GAMES\"") == NULL,
           "one page and a running queue need no pager and no Resume");
+    CHECK(strstr(dump, "\"PAUSE\"") != NULL, "a running queue offers Pause");
+    CHECK(strstr(dump, "One build at a time, so this PC stays usable.") != NULL,
+          "a running queue's hint says one build runs at a time");
     nk_ui_destroy(ui);
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAUSE, &queue),
+                      PLAYER_UI_QUEUE_PAUSE, 0u), "Pause pauses a running queue");
+
+    /* Paused by the person while a game builds: the title, the lead and the
+       hint say so, and the same button resumes. */
+    queue.held = true;
+    queue.building = true;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the held build queue UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_queue(ui, &queue);
+        (void)end_frame(ui);
+    }
+    (void)dump_frame(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"Paused: 3 games in the queue\"") != NULL,
+          "a paused queue says so in its title");
+    CHECK(strstr(dump, "The current build finishes, then the queue waits.") != NULL,
+          "a paused queue says the current build finishes first");
+    CHECK(strstr(dump, "Paused after this build. Resume starts the next game.") != NULL,
+          "a paused queue's hint says so");
+    CHECK(strstr(dump, "\"RESUME\"") != NULL && strstr(dump, "\"PAUSE\"") == NULL,
+          "a paused queue's one button is Resume");
+    nk_ui_destroy(ui);
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAUSE, &queue),
+                      PLAYER_UI_QUEUE_RESUME, 0u), "Resume goes on with a paused queue");
+    queue.held = false;
+    queue.building = false;
 
     CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_DOWN_BASE + 1u, &queue),
                       PLAYER_UI_QUEUE_LATER, 5u), "Down moves that game one place later");
@@ -10875,7 +10919,7 @@ static void test_build_queue_screens(void) {
     queue.paused = true;
     queue.first_row = 4u;
     queue.total = 9u;
-    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_RESUME, &queue),
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAUSE, &queue),
                       PLAYER_UI_QUEUE_RESUME, 0u), "Resume starts a paused queue");
     CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAGE_BACK, &queue),
                       PLAYER_UI_QUEUE_PAGE_BACK, 0u), "Earlier games turns back a page");
@@ -10893,7 +10937,7 @@ static void test_build_queue_screens(void) {
     (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "\"GAMES 5-7 OF 9, IN BUILD ORDER\"") != NULL,
           "a page names which games it shows");
-    (void)snprintf(expect, sizeof(expect), "%08X \"Paused: a build could not start.",
+    (void)snprintf(expect, sizeof(expect), "%08X \"A build could not start.",
                    (unsigned)theme->warning);
     CHECK(strstr(dump, expect) != NULL, "a paused queue says why, in the warning colour");
     CHECK(strstr(dump, "\"RESUME\"") != NULL, "a paused queue offers Resume");
