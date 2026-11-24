@@ -212,7 +212,15 @@ void sr_enhancement_update_waits(void) {
     g_test_update_waits_blocked = s_cur >= 0 && s_tcb[s_cur].wait_obj == VBLANK_WAIT_OBJ;
 }
 static unsigned g_test_vblank_delivered;
-void sr_vblank_tick(void) { g_test_vblank_delivered++; }
+static int g_test_readout_flip_on_vblank;
+void sr_vblank_tick(void) {
+    g_test_vblank_delivered++;
+    if (g_test_readout_flip_on_vblank) {
+        g_test_readout_flip_on_vblank = 0;
+        ace_note_target_draw(0u);
+        (void)ace_flip(0u, 0x22000u, sr_display_vcount(), g_test_host_ns);
+    }
+}
 /* Guest VCOUNT is advanced only through this seam (hle.c owns the real counter), so
  * the harness counts it to observe what a display wait does to VCOUNT. */
 static uint64_t g_test_vcount;
@@ -374,6 +382,8 @@ static void reset_sched(void) {
     s_servicing_interrupts = 0;
     s_guest_reset_requested = 0;
     s_pending_vblanks = 0;          /* owed VBLANK episodes, since the count change */
+    s_readout_old_vblanks = 0;
+    s_readout_old_clock_us = 0;
     s_vblank_masked_pending = 0;
     s_vbl_event_period_rem = 0;
     s_vbl_next_us = 0;
@@ -389,6 +399,7 @@ static void reset_sched(void) {
     s_vbl_latch_ns = 0;
     s_dispatches_since_time = 0;
     g_test_vblank_delivered = 0;
+    g_test_readout_flip_on_vblank = 0;
     g_test_vcount = 0;
     g_test_savedata_busy = 0;
     g_test_gui_on = 0;
@@ -7196,6 +7207,165 @@ static void test_preempt_timer_deadline_is_a_host_time_after_fast_forward(void) 
     s_host_ns_fn = NULL;
 }
 
+/* #2960: the idle pacer's deadline is separate from the display source. The
+ * serviced callbacks give the readout its clock even when every third edge
+ * is the only one that changes the displayed buffer. */
+typedef enum { READOUT_STALE_IDLE, READOUT_HELD_SERVICE, READOUT_GUEST_MASK } ReadoutCase;
+
+static void test_ace_readout_display_service(ReadoutCase scenario) {
+    const int hold_service = scenario == READOUT_HELD_SERVICE;
+    const int guest_mask = scenario == READOUT_GUEST_MASK;
+    static const char line[] =
+        "v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;"
+        "smooth=off;sas=off;tess=off;twin=off";
+    AceReadoutView view = {0};
+    AceCounters before = {0}, after = {0};
+    unsigned callbacks = 0;
+    uint64_t idle_deadline = 0;
+
+    reset_sched();
+    begin_clock_fixture(1, 0u);
+    (void)ace_init_spec(line, NULL);
+    g_test_vblank_handler = 0x00001234u;
+    g_test_vblank_no = 0u;
+
+    for (unsigned edge = 0; edge <= 300u; ++edge) {
+        if (guest_mask && edge == 283u)
+            expect(sched_suspend_interrupts() == 1u, "#2960 guest masks the source after 42 episodes");
+        g_test_host_ns = (uint64_t)edge * 1001000000ull / 60u;
+        /* A positive control holds the last 18 real service episodes. The
+         * other case omits only two visits to the idle pacer. */
+        if (hold_service && edge > 282u && edge < 300u) continue;
+        scheduler_progress_time();
+        if (!hold_service || edge != 300u) scheduler_service_pending();
+        if (edge < 298u) {
+            vblank_pace();
+        } else if (edge == 300u) {
+            idle_deadline = s_vbl_next_ns;
+            vblank_pace();
+        }
+        if (edge % 3u == 0 && (!(hold_service || guest_mask) || edge <= 282u))
+            ace_note_target_draw(0u);
+        (void)ace_flip(0u, 0x22000u, g_test_vcount, host_now_ns());
+        if (edge == 240u) {
+            expect(ace_readout_view(&view) && strcmp(view.text, "100%  20 FPS") == 0,
+                   "#2960 on-time 20 FPS baseline");
+            ace_counters(&before);
+            callbacks = g_test_handler_calls;
+        }
+    }
+    ace_counters(&after);
+    expect(ace_readout_view(&view), "#2960 final window judged");
+    expect(idle_deadline < host_now_ns(), "#2960 replay exercised an expired idle deadline");
+    if (hold_service) {
+        expect(g_test_handler_calls - callbacks == 42u && s_pending_vblanks == 18u &&
+               after.new_frames - before.new_frames == 14u,
+               "#2960 held-service control really is behind");
+        expect(view.pc_limited && !view.gpu_limited &&
+               strcmp(view.text, "\xE2\x96\xB2 70%  14 FPS  PC LIMITED") == 0,
+               "#2960 real service shortfall is PC LIMITED");
+        scheduler_service_pending();
+        expect(g_test_handler_calls - callbacks == 60u && s_pending_vblanks == 0u,
+               "#2960 held episodes are delivered normally at recovery");
+    } else if (guest_mask) {
+        expect(g_test_handler_calls - callbacks == 42u && s_pending_vblanks == 0u &&
+               s_vblank_masked_pending && after.new_frames - before.new_frames == 14u,
+               "#2960 masked source does not owe 18 unserviced interrupts");
+        expect(!view.pc_limited && strcmp(view.text, "\xE2\x80\x94 14 FPS") == 0,
+               "#2960 guest masking has no host-shortfall verdict");
+        sched_resume_interrupts(1u);
+        expect(g_test_handler_calls - callbacks == 43u && s_pending_vblanks == 0u,
+               "#2960 resume still delivers one coalesced masked episode");
+    } else {
+        expect(g_test_handler_calls - callbacks == 60u && s_pending_vblanks == 0u &&
+               after.new_frames - before.new_frames == 20u,
+               "#2960 all 60 episodes serviced over 20 new frames");
+        if (view.pc_limited) fprintf(stderr, "#2960 stale idle deadline readout: %s\n", view.text);
+        expect(!view.pc_limited && strcmp(view.text, "100%  20 FPS") == 0,
+               "#2960 a stale idle deadline cannot qualify as a host shortfall");
+    }
+    (void)ace_init_spec("off", NULL);
+}
+
+
+/* A NEXTFRAME flip can open the new readout window within a batch
+ * whose earlier deadlines passed before returning to 1x. */
+static void test_ace_readout_fast_forward_backlog(int mixed_latch) {
+    static const char line[] =
+        "v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;"
+        "smooth=off;sas=off;tess=off;twin=off";
+    AceReadoutView view = {0};
+    const uint32_t prev_speed = s_ff_speed;
+    const uint32_t prev_epoch = s_ff_epoch;
+    const uint64_t prev_host_anchor = s_ff_host_anchor_ns;
+    const uint64_t prev_pace_anchor = s_ff_pace_anchor_ns;
+    reset_sched();
+    begin_clock_fixture(1, 0u);
+    s_ff_speed = 1u;
+    s_ff_epoch = 0u;
+    s_ff_pace_anchor_ns = 0;
+    s_ff_host_anchor_ns = 0;
+    (void)ace_init_spec(line, NULL);
+    pace_set_speed(SCHED_FAST_FORWARD_SPEED);
+    g_test_host_ns = 21u * 1001000000ull / (60u * SCHED_FAST_FORWARD_SPEED) + 5000u;
+    scheduler_progress_time();
+    const uint32_t queued = s_pending_vblanks;
+    expect(queued >= 20u && queued <= 22u, "#2960 accelerated source accrued real owed episodes");
+
+    if (mixed_latch) {
+        /* Let a few more source edges pass at 3x before the next clock
+         * refresh. That refresh happens after 1x has accrued a new edge. */
+        g_test_host_ns += 3u * 1001000000ull / (60u * SCHED_FAST_FORWARD_SPEED);
+        pace_set_speed(1u);
+        g_test_host_ns += 1001000000ull / 60u;
+        scheduler_progress_time();
+        expect(s_pending_vblanks > queued + 3u,
+               "#2960 one latch includes unsampled accelerated edges and a new 1x edge");
+    } else {
+        vblank_pace();
+    }
+    expect(!sched_fast_forward_on(), "#2960 the production transition restored normal speed");
+    g_test_readout_flip_on_vblank = 1;
+    const unsigned before = g_test_vblank_delivered;
+    scheduler_service_pending();
+    const unsigned start = g_test_vblank_delivered;
+    expect(start - before >= queued && s_pending_vblanks == 0u,
+           "#2960 restoring 1x still delivers the old batch");
+    const uint64_t first_ns = g_test_host_ns;
+    for (unsigned edge = 1u; edge <= 60u; ++edge) {
+        g_test_host_ns = first_ns + (uint64_t)edge * 1001000000ull / 60u;
+        scheduler_progress_time();
+        if (edge <= 40u) scheduler_service_pending();
+        if (edge % 3u == 0) {
+            if (edge <= 40u) ace_note_target_draw(0u);
+            (void)ace_flip(0u, 0x22000u, sr_display_vcount(), g_test_host_ns);
+        }
+    }
+    expect(g_test_vblank_delivered - start == 40u && s_pending_vblanks == 20u,
+           "#2960 normal-speed service actually fell 20 episodes short");
+    expect(ace_readout_view(&view) && strcmp(view.text, "\xE2\x80\x94 13 FPS") == 0,
+           "#2960 accelerated debt cannot qualify the overlapping window's speed");
+    scheduler_service_pending();
+    for (unsigned edge = 61u; edge <= 120u; ++edge) {
+        g_test_host_ns = first_ns + (uint64_t)edge * 1001000000ull / 60u;
+        scheduler_progress_time();
+        scheduler_service_pending();
+        if (edge % 3u == 0) {
+            ace_note_target_draw(0u);
+            (void)ace_flip(0u, 0x22000u, sr_display_vcount(), g_test_host_ns);
+        }
+    }
+    expect(s_pending_vblanks == 0u && g_test_vblank_delivered - start == 120u,
+           "#2960 the receiver still gets every normal-speed episode");
+    expect(ace_readout_view(&view) && strcmp(view.text, "100%  20 FPS") == 0,
+           "#2960 a full normal-speed window requalifies after old debt");
+    (void)ace_init_spec("off", NULL);
+    s_ff_speed = prev_speed;
+    s_ff_epoch = prev_epoch;
+    s_ff_host_anchor_ns = prev_host_anchor;
+    s_ff_pace_anchor_ns = prev_pace_anchor;
+}
+
 int main(int argc, char **argv) {
     g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
@@ -7349,6 +7519,11 @@ int main(int argc, char **argv) {
     test_display_wait_nid_split();
     test_display_wait_late_owes_no_edges();
     test_display_vcount_observation_latches_due_edge();
+    test_ace_readout_display_service(READOUT_STALE_IDLE);
+    test_ace_readout_display_service(READOUT_HELD_SERVICE);
+    test_ace_readout_display_service(READOUT_GUEST_MASK);
+    test_ace_readout_fast_forward_backlog(0);
+    test_ace_readout_fast_forward_backlog(1);
     test_display_isvblank_uses_live_edge_time();
     test_display_wait_uses_live_window_before_blocking();
     test_display_wait_ignores_late_delivery_anchor();

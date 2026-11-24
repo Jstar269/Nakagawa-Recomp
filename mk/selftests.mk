@@ -56,8 +56,9 @@ selftest-repeat:
 
 # heap-selftest — white-box unit tests for the guest heap allocator's boundary-tag
 # coalescing (tests/native/heap_selftest.c). No game inputs needed; #includes recomp.c for
-# direct access to the allocator statics and sr_heap_stats(), and drives the same
-# sr_newlib_malloc/free entry points the generated code calls. Asserts forward and
+# direct access to the allocator statics and sr_heap_stats(), and drives the
+# sr_newlib_malloc/free entry points (no generated code calls them since the Hot Shots
+# Tennis allocator bridges were retired, #363). Asserts forward and
 # backward merges, the #122 regression (a large allocation must succeed after the
 # arena is fragmented and released), refusal to merge across a live block even with
 # a forged boundary tag, clean payload across merge seams, bounded free-list growth

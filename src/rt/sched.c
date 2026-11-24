@@ -596,6 +596,10 @@ static void vtime_refresh(void);
  * made the guest observe fewer VBLANK episodes than display periods while guest
  * VCOUNT (which has always advanced by the full elapsed count) said otherwise. */
 static uint32_t s_pending_vblanks;
+/* Readout-only prefix of service episodes owed under a previous pace.
+ * It can include episodes in the batch currently being serviced. */
+static uint64_t s_readout_old_vblanks;
+static uint64_t s_readout_old_clock_us;
 
 static void scheduler_service_pending(void);
 static void sched_auto_load_reset(void);
@@ -1068,6 +1072,7 @@ void sched_resume_interrupts(uint32_t state) {
          * when multiple crossed, and +0 at 4 ms where none did.  Never N, and
          * never zero when a period did become pending. */
         sr_display_advance_vcount(1u);
+        if (g_ace_on) ace_note_display_masked();
         /* ... and the measured interrupt-conformance record is one coalesced
          * VBLANK handler delivery on resume, not a VCOUNT credit with no event.
          * Owe that episode explicitly instead of leaving it to the source bit:
@@ -1616,6 +1621,13 @@ static void pace_set_speed(uint32_t speed) {
     const uint64_t host = host_now_ns();
     s_ff_pace_anchor_ns = pace_ns_at(host);
     s_ff_host_anchor_ns = host;
+    if (g_ace_on && speed == 1u) {
+        /* Owed episodes and any as-yet unlatched edges through this
+         * virtual time came from the old pace. Delivery still runs normally. */
+        s_readout_old_vblanks = s_pending_vblanks;
+        s_readout_old_clock_us = s_ff_pace_anchor_ns >= s_clock_epoch_ns
+            ? (s_ff_pace_anchor_ns - s_clock_epoch_ns) / 1000u : 0u;
+    }
     if (speed > 1u && s_ff_speed == 1u) s_ff_epoch++;
     s_ff_speed = speed;
     /* The preemption timer's deadline is a host time converted at the old speed. */
@@ -1939,6 +1951,9 @@ static void scheduler_latch_due_events(void) {
     if (!(s_vtime_us >= s_vbl_next_us && s_vbl_next_us != UINT64_MAX)) return;
     uint32_t due = 0;
     uint32_t masked = 0;
+    /* A single latch can straddle the speed transition. Its delivery
+     * count cannot supply a speed sample for that mixed window. */
+    int old_clock = s_readout_old_clock_us && s_vbl_next_us <= s_readout_old_clock_us;
     uint64_t latch_ns = host_now_ns();
     while (s_vtime_us >= s_vbl_next_us && s_vbl_next_us != UINT64_MAX) {
         sched_raise_interrupt(SCHED_INTR_VBLANK);
@@ -2011,16 +2026,24 @@ static void scheduler_latch_due_events(void) {
                 sr_perf_vblank_collapse(s_pending_vblanks, due - 1u);
                 due = 1u;
                 s_pending_vblanks = 0;
+                s_readout_old_vblanks = 0;
+                old_clock = 1;
             }
             break;
         }
     }
-    if (masked) sr_perf_vblank_latch(0u, masked, 1);
+    if (masked) {
+        sr_perf_vblank_latch(0u, masked, 1);
+        if (g_ace_on) ace_note_display_masked();
+    }
+    if (old_clock && s_vbl_next_us > s_readout_old_clock_us)
+        s_readout_old_clock_us = 0;
     if (!due) return;
     /* Accumulate across latches: each elapsed period is owed its own episode, and
      * an undelivered episode is never dropped to make room for a later one. */
-    s_pending_vblanks = due > UINT32_MAX - s_pending_vblanks
-                          ? UINT32_MAX : s_pending_vblanks + due;
+    const uint32_t before = s_pending_vblanks;
+    s_pending_vblanks = due > UINT32_MAX - before ? UINT32_MAX : before + due;
+    if (old_clock && g_ace_on) s_readout_old_vblanks += s_pending_vblanks - before;
     uint64_t gap_us = latch_ns > s_vbl_latch_ns
                         ? (latch_ns - s_vbl_latch_ns) / 1000u : 0u;
     s_vbl_latch_ns = latch_ns;
@@ -2056,14 +2079,11 @@ void sr_hle_refresh(void) {
 /* Sleep (host) until the virtual clock reaches target_us. Real-time mode only. */
 static void sleep_until_us(uint64_t target_us) {
     sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
-    /* Ace Mode's speed readout counts host idle in both waits (ace.h); off, nothing is read. */
-    uint64_t ace_from = g_ace_on ? host_now_ns() : 0u;
     for (;;) {
         uint64_t now = host_us();
         if (now >= target_us) break;
         SDL_DelayPrecise(pace_to_host_ns((target_us - now) * 1000u));
     }
-    if (g_ace_on) ace_note_host_wait(host_now_ns() - ace_from);
     sr_rt_phase = SR_RT_PHASE_SCHED;
     vtime_refresh();
 }
@@ -2096,15 +2116,12 @@ static void vblank_pace(void) {
         uint64_t wait_started = sr_perf_now_ns();
         uint64_t exec_wait_started = sr_exec_now_ns();
         sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
-        const uint64_t host_from = g_ace_on ? host_now_ns() : 0u;
         SDL_DelayPrecise(pace_to_host_ns(s_vbl_next_ns - now));
         sr_perf_guest_idle_wait(wait_started);
         sr_exec_idle(exec_wait_started);
         sr_rt_phase = SR_RT_PHASE_SCHED;
         now = pace_ns();
-        if (g_ace_on) ace_note_host_wait(host_now_ns() - host_from);
     }
-    uint32_t slots = 0u;
     /* 59.94 Hz is 60000/1001 Hz. Carry the fractional nanoseconds so the
      * accumulated deadline has no floating-point or per-frame rounding drift. */
     do {
@@ -2114,10 +2131,8 @@ static void vblank_pace(void) {
             s_vbl_next_ns++;
             s_vbl_period_rem -= 60000u;
         }
-        slots++;
-        /* Skip missed presentation slots while retaining the rational phase/carry. */
+        /* Advance the idle deadline while retaining the rational phase/carry. */
     } while (now > s_vbl_next_ns);
-    if (g_ace_on && slots > 1u) ace_note_skipped_slots(slots - 1u);
     vtime_refresh();
 }
 
@@ -2246,6 +2261,11 @@ static void deliver_vblank(void) {
     vblank_pace_quantum_init();
     vblank_clock_reset();
     s_vbl_count++;
+    if (g_ace_on) {
+        const int normal_epoch = s_readout_old_vblanks == 0;
+        if (!normal_epoch) s_readout_old_vblanks--;
+        ace_note_display_vblank(s_pace_on > 0, normal_epoch);
+    }
     s_vbl_last_us = s_vtime_us;   /* start edge: the vblank interval runs from here */
     sr_perf_vblank();
 
@@ -6059,6 +6079,7 @@ static uint64_t sched_pause_begin(void) {
     const uint64_t latency_us = t0 >= s_pause_request_ns
         ? (t0 - s_pause_request_ns) / 1000u : 0u;
     s_pause_active = 1;
+    if (g_ace_on) ace_pause_readout();
     s_pause_exit_reason = SR_PAUSE_EXIT_NONE;
     sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
     if (sr_sched_pause_host && sr_sched_pause_host->audio_enter)
