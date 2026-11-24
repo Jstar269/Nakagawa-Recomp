@@ -1157,10 +1157,13 @@ def _is_pointer_array_walker(elf, entry, memo=None, depth=0):
                     slots.pop(simm, None)
                 else:
                     slots[simm] = value(rt)
-        elif op in (0x02, 0x03):  # j / jal: a call, or a tail jump that ends the function
+        elif op in (0x02, 0x03):  # j / jal: a call or one of the linked or tail continuations
             target = jump_target(pc, word)
             if op == 0x03:
                 write(31, None)
+                if is_jal_pc_read(pc, word) and _relocated_as(_relocated_jumps(elf), pc, "jump26"):
+                    pc += 4
+                    continue  # same body, including the slot and every subsequent word
             else:
                 stop_at = pc + 8
             pending = (pc + 8, target, op == 0x02)
@@ -1247,7 +1250,8 @@ def _constant_arguments_at_calls(elf, covered, relocated):
             consts = {}
             continue
         if op in (0x02, 0x03):
-            pending = (address, jump_target(address, word))
+            target = None if is_jal_pc_read(address, word) else jump_target(address, word)
+            pending = (address, target)
         elif (op == 0 and (word & 0x3F) in (0x08, 0x09)) or branch_target(address, word) is not None:
             pending = (address, None)
 
@@ -1388,7 +1392,9 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                 continue
             if op == 3:  # jal: direct call, returns -> continue past delay slot
                 target = jump_target(pc, word)
-                if in_ranges(target, ranges) or in_ranges(target, file_exec_ranges):
+                if not is_jal_pc_read(pc, word) and (
+                    in_ranges(target, ranges) or in_ranges(target, file_exec_ranges)
+                ):
                     if target not in calls:
                         calls.add(target)
                         new_calls.append(target)
@@ -1651,6 +1657,11 @@ def _iter_code_words(elf, ranges):
 def jump_target(source, word):
     """Pseudo-direct j/jal target, using the region bits of the delay-slot PC (PC+4)."""
     return ((source + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2)
+
+
+def is_jal_pc_read(source, word):
+    """Whether a pseudo-direct JAL targets the next instruction after its delay slot."""
+    return word >> 26 == 3 and jump_target(source, word) == ((source + 8) & 0xFFFFFFFF)
 
 
 def branch_target(source, word):
@@ -1940,7 +1951,7 @@ def code_pointer_evidence(elf, ranges):
             clear_next = False
         op = word >> 26
         rs, rt = (word >> 21) & 0x1F, (word >> 16) & 0x1F
-        if op == 3:  # jal
+        if op == 3 and not is_jal_pc_read(addr, word):
             target = jump_target(addr, word)
             if in_ranges(target, ranges) and _relocated_as(jumps, addr, "jump26"):
                 evidence["jal"].add(target)
@@ -3240,7 +3251,9 @@ class _BodyWalk:
         if word is None:
             return True
         op, funct = word >> 26, word & 0x3F
-        if op == 3 or (op == 0 and funct == 0x09 and (word >> 11) & 0x1F):  # jal, linked jalr
+        if op == 3:
+            return not (_relocated_as(self.jumps, pc, "jump26") and is_jal_pc_read(pc, word))
+        if op == 0 and funct == 0x09 and (word >> 11) & 0x1F:             # linked jalr
             return True
         if op == 0 and funct == 0x0D:                                       # break
             return True
