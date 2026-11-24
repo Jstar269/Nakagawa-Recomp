@@ -5986,6 +5986,11 @@ bool player_app_retry_from_error(PlayerApp *app) {
     return player_app_start_package_build(app, index);
 }
 
+/* The runtime's last-resort reporter's header (src/rt/driver.c, sr_crash_filter). A
+   problem report says the runtime reported a native crash only for this complete line at
+   a line boundary in the run's own log. */
+static const char k_player_native_crash_header[] = "=== PSP RECOMPILER CRASH REPORT ===";
+
 static void player_report_append(char *out, size_t out_size, size_t *used,
                                  const char *label, const char *value) {
     if (!value || !value[0] || *used + 1u >= out_size) return;
@@ -6092,6 +6097,7 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
     size_t event_count = 0;
     size_t event_next = 0;
     char renderer[32] = "";
+    bool native_crash_reported = false;
     FILE *run_log = error->log_file_path[0]
         ? nk_fopen_utf8(error->log_file_path, "rb") : NULL;
     if (run_log) {
@@ -6102,6 +6108,19 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
         while (fgets(chunk, sizeof(chunk), run_log)) {
             size_t len = strlen(chunk);
             bool line_ends = len > 0 && chunk[len - 1] == '\n';
+            if (at_line_start) {
+                /* The runtime's last-resort reporter (src/rt/driver.c, sr_crash_filter)
+                   writes this exact header before its fault and register lines. Only a
+                   complete line is its record: the same words inside a longer line, a
+                   bare nonzero exit or an exception-looking status are not one. */
+                size_t header_len = len;
+                while (header_len > 0 && (chunk[header_len - 1] == '\n' ||
+                                          chunk[header_len - 1] == '\r'))
+                    header_len--;
+                if (header_len == sizeof(k_player_native_crash_header) - 1u &&
+                    memcmp(chunk, k_player_native_crash_header, header_len) == 0)
+                    native_crash_reported = true;
+            }
             if (at_line_start && strncmp(chunk, event_prefix, sizeof(event_prefix) - 1u) == 0) {
                 while (len > 0 && (chunk[len - 1] == '\n' || chunk[len - 1] == '\r')) {
                     chunk[--len] = '\0';
@@ -6124,6 +6143,8 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
         }
         fclose(run_log);
     }
+    if (native_crash_reported)
+        player_report_append(raw, sizeof(raw), &used, "Runtime: ", "reported a native crash");
     player_report_append(raw, sizeof(raw), &used, "Renderer: ", renderer);
     if (event_count > 0) {
         player_report_append(raw, sizeof(raw), &used, "", "Last boot events:");
