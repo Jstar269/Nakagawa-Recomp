@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **715** (dedicated **668**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **643** handlers across **30** API families, covering **675** handler-associated NID registrations.
+Registered NIDs: **717** (dedicated **670**, fake_success **3**, controlled_unsupported **44**).
+Semantic handler census: **645** handlers across **30** API families, covering **677** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 388 | 400 |
+| `partial` | 390 | 402 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 237 | 244 |
@@ -76,7 +76,7 @@ Semantic handler census: **643** handlers across **30** API families, covering *
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
-| `sceNet` | 0 | 44 | 0 | 0 | 13 | 57 | 57 |
+| `sceNet` | 0 | 46 | 0 | 0 | 13 | 59 | 59 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `scePower` | 0 | 19 | 0 | 0 | 0 | 19 | 24 |
@@ -89,7 +89,7 @@ Semantic handler census: **643** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **388** | **1** | **3** | **237** | **643** | **675** |
+| **Total** | **14** | **390** | **1** | **3** | **237** | **645** | **677** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1327,12 +1327,20 @@ Semantic handler census: **643** handlers across **30** API families, covering *
   - Limitation: always 0x80410180, because no ad hoc group and no access point connection ever starts with no network; the address a PSP returns once one has started is not modelled; the answer before sceNetInit is UNMEASURED
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
   - Evidence: PSPAutotests tests/net (70e72391, recorded on a PSP): 0x80410180 with the buffer untouched before, during and after sceNetApctlInit (net/adhoc/apctlinit) and before an ad hoc group (net/adhoc/adhocctl, net/adhoc/pdp)
+- **`h_NetInetInit`** (`sceNet`): `sceNetInetInit` (0x17943399)
+  - Limitation: models only Inet lifecycle state after core Net and both COMMON and INET modules are ready; duplicate Init and unmet setup stop by name; guest pool and thread effects beyond core Net are unmeasured, and sockets, access-point control, DNS, and host transport are not enabled
+  - Evidence: tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network
+  - Evidence: PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): fresh sceNetInetInit returns 0 after utility module and core Net setup
+- **`h_NetInetTerm`** (`sceNet`): `sceNetInetTerm` (0xa9ed66b9)
+  - Limitation: clears active Inet state before core Net teardown; early or repeated Term stops by name; LoadExec clears Inet with the process's core Net and module state
+  - Evidence: tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network
+  - Evidence: PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): active sceNetInetTerm returns 0 before core Net Term and module unload
 - **`h_NetInit`** (`sceNet`): `sceNetInit` (0x39af39a6)
-  - Limitation: the library's state and its pool (from the user partition) only: no network stack, no socket and no host network API; the SceNetCallout and SceNetNetintr threads are not created; the PSP results were recorded with the WLAN switch on, and with the console profile's switch off sceNetInit still returns 0 (UNMEASURED; PPSSPP does not consult the switch either); the pool-size and priority codes, the pool's placement and the Init failure codes follow PPSSPP (a behaviour reference, UNMEASURED); a second Init without Term starts over with one pool, but checks its arguments before releasing the first pool, unlike PPSSPP (the PSP's order is UNMEASURED); a pool size whose 256-byte rounding passes 4 GB is refused with NO_MEMORY
+  - Limitation: the library's state and its pool (from the user partition) only: no network stack, no socket and no host network API; the SceNetCallout and SceNetNetintr threads are not created; the PSP results were recorded with the WLAN switch on, and with the console profile's switch off sceNetInit still returns 0 (UNMEASURED; PPSSPP does not consult the switch either); the pool-size and priority codes, the pool's placement and the Init failure codes follow PPSSPP (a behaviour reference, UNMEASURED); a second Init without Term starts over with one pool, but checks its arguments before releasing the first pool, unlike PPSSPP (the PSP's order is UNMEASURED); a pool size whose 256-byte rounding passes 4 GB is refused with NO_MEMORY; core re-Init while Inet is active stops by name
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
   - Evidence: PSPAutotests tests/net (70e72391, recorded on a PSP): sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0 in every net test with no access point connected, and again after sceNetTerm (net/adhoc/socketids)
 - **`h_NetTerm`** (`sceNet`): `sceNetTerm` (0x281928a9)
-  - Limitation: frees the pool and clears the library state; sceNetTerm before sceNetInit returns 0 as PPSSPP does (UNMEASURED)
+  - Limitation: frees the pool and clears the library state; sceNetTerm before sceNetInit returns 0 as PPSSPP does (UNMEASURED); core Term while Inet is active stops by name
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
   - Evidence: PSPAutotests tests/net (70e72391, recorded on a PSP): sceNetTerm returns 0 after sceNetInit (net/adhoc/apctl, apctlinit, loopback)
 - **`h_NpDrmClearLicenseeKey`** (`sceNp`): `sceNpDrmClearLicenseeKey` (0x9b745542)
@@ -1609,15 +1617,15 @@ Semantic handler census: **643** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_av_module_state
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_module_table
 - **`h_UtilityLoadNetModule`** (`sceUtility`): `sceUtilityLoadNetModule` (0x1579a159)
-  - Limitation: maps net-module numbers 1..7 onto utility IDs 0x100..0x106 and their shared state; the status codes for a bad number or a repeated call are the generic module ones, unmeasured on a PSP; makes no connection, and the net libraries stay refused
+  - Limitation: maps net-module numbers 1..7 onto utility IDs 0x100..0x106 and their shared state; the status codes for a bad number or a repeated call are the generic module ones, unmeasured on a PSP; makes no connection and does not enable socket operations
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_av_module_state
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_module_table
 - **`h_UtilityUnloadModule`** (`sceUtility`): `sceUtilityUnloadModule` (0xe49bfe92)
-  - Limitation: records utility module state only; does not check whether a loaded module still depends on the one unloaded (PPSSPP does not either); not measured on this project's PSP
+  - Limitation: records utility module state only; unloading COMMON or INET while Inet is active stops by name; other module dependencies are not checked on unload (PPSSPP does not either); not measured on this project's PSP
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_av_module_state
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_module_table
 - **`h_UtilityUnloadNetModule`** (`sceUtility`): `sceUtilityUnloadNetModule` (0x64d50c56)
-  - Limitation: maps net-module numbers 1..7 onto utility IDs 0x100..0x106; the status codes for a bad number or a module that is not loaded are the generic module ones, unmeasured on a PSP
+  - Limitation: maps net-module numbers 1..7 onto utility IDs 0x100..0x106; the status codes for a bad number or a module that is not loaded are the generic module ones, unmeasured on a PSP; unloading COMMON or INET while Inet is active stops by name
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_av_module_state
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_module_table
 - **`h_VaudioChRelease`** (`sceVaudio`): `sceVaudioChRelease` (0x67585dfd)

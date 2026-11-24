@@ -187,8 +187,8 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;stick=64;stick=32", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate stick");
     }
-    /* load (contract 11.3.10): optional like cull; load=fast needs an Ace line, any other value
-       is refused, and a line without it formats as before. */
+    /* An absent load slot formats as before. The title's fast waits need Ace,
+       while automatic disc-load fast-forward is available in either tier. */
     {
         static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
         char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
@@ -212,6 +212,14 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=enhanced;load=fast", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "load needs tier=ace") == 0,
               "load=fast in an Enhanced line is refused (%s)", why);
+        static const char *const tiers[] = { "enhanced", "ace" };
+        for (size_t i = 0; i < sizeof(tiers) / sizeof(tiers[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;tier=%s;load=auto", base, tiers[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.load == 2,
+                  "load=auto is the shared third load value in tier=%s (%s)", tiers[i], why);
+            CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, ";load=auto") != NULL,
+                  "load=auto round-trips in tier=%s (%s)", tiers[i], out);
+        }
         static const char *const bad[] = { "on", "1", "x2", "faster", "FAST" };
         for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
             snprintf(spec, sizeof(spec), "%s;tier=ace;load=%s", base, bad[i]);
@@ -3115,6 +3123,54 @@ static void cell_pad_plan(void) {
     CHECK(ace_latency_percentile_ns(&l, 100) == ACE_LAT_BINS * ACE_LAT_BIN_NS, "the last bin holds the rest");
 }
 
+static int set_ace_test_env(const char *name, const char *value) {
+#ifdef _WIN32
+    return _putenv_s(name, value ? value : "") == 0;
+#else
+    return (value ? setenv(name, value, 1) : unsetenv(name)) == 0;
+#endif
+}
+
+static void cell_load_transport(void) {
+    static const char base[] = "v1;af=8;text=on;readout=on;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off";
+    static const struct { const char *tail, *flag; int on, load; } cells[] = {
+        { ";tier=enhanced", "1", 1, ACE_LOAD_AUTO },
+        { ";tier=ace", "1", 1, ACE_LOAD_AUTO },
+        { "", "1", 1, ACE_LOAD_AUTO },
+        { "", "0", 1, ACE_LOAD_OFF },
+        { "", "on", 1, ACE_LOAD_OFF },
+        { "", NULL, 1, ACE_LOAD_OFF },
+        { ";load=off", "1", 1, ACE_LOAD_OFF },
+        { ";tier=ace;load=fast", "1", 1, ACE_LOAD_FAST },
+        { ";load=auto", "0", 1, ACE_LOAD_AUTO },
+        { ";load=fast", "1", 0, ACE_LOAD_OFF },
+        { ";load=off;load=auto", "1", 0, ACE_LOAD_OFF },
+        { ";unknown=on", "1", 0, ACE_LOAD_OFF },
+        { NULL, "1", 0, ACE_LOAD_OFF },
+    };
+    CHECK(set_ace_test_env("SR_ACE_REPORT", NULL), "isolate the load transport report path");
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); ++i) {
+        char spec[ACE_SPEC_MAX];
+        if (cells[i].tail) snprintf(spec, sizeof(spec), "%s%s", base, cells[i].tail);
+        else snprintf(spec, sizeof(spec), "off");
+        CHECK(set_ace_test_env("SR_ACE", spec) && set_ace_test_env("SR_ACE_LOAD_AUTO", cells[i].flag),
+              "set the load transport environment (cell %zu)", i);
+        CHECK(ace_init_from_env() == cells[i].on && ace_requested()->load == cells[i].load &&
+              ace_effective()->load == cells[i].load, "resolve the load transport (cell %zu)", i);
+        if (cells[i].on) {
+            CHECK(ace_effective()->af == 8 && ace_effective()->text && ace_effective()->readout,
+                  "the base v1 selections survive the transport (cell %zu)", i);
+            CHECK((strstr(ace_spec_text(), ";load=auto") != NULL) == (cells[i].load == ACE_LOAD_AUTO),
+                  "the normalized line reports Automatic (cell %zu)", i);
+        }
+    }
+    CHECK(set_ace_test_env("SR_ACE", NULL) && set_ace_test_env("SR_ACE_LOAD_AUTO", "1"),
+          "set the Automatic transport without a base line");
+    CHECK(!ace_init_from_env() && !g_ace_on && ace_effective()->load == ACE_LOAD_OFF,
+          "Automatic does not enable an unset base line");
+    CHECK(set_ace_test_env("SR_ACE_LOAD_AUTO", NULL), "clear the load transport test environment");
+}
+
 int main(int argc, char **argv) {
     /* `--retired-env VALUE [NAME]`: set NAME (SR_GLYPHS when not given) to VALUE, clear the other retired
        variables, set SR_ACE off, and start Ace Mode the way a run does.
@@ -3146,6 +3202,7 @@ int main(int argc, char **argv) {
         return 3;
     }
     cell_parse();
+    cell_load_transport();
     cell_stick_curve();
     cell_stick_host_dead_zone_at_or_above_g();
     cell_stick_round_host();

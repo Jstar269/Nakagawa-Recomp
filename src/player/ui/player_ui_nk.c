@@ -4,6 +4,7 @@
 #include "player_ui_nk.h"
 
 #include "player_state.h"
+#include "../../rt/ace.h"
 #include "cover_art.h"
 #include "player_ui_art.h"
 #include "player_ui_music.h"
@@ -1232,6 +1233,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         row->sentence = info->sentence;
         row->labels = info->labels;
         row->label_count = info->value_count;
+        row->unavailable_label = 0;
         row->library_value = NULL;
         row->selected_index = player_ui_enhanced_value_index(p, library);
         row->inherited = false;
@@ -1261,6 +1263,15 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             } else {
                 row->value = player_enhanced_part_label(p, own);
                 row->on = own != 0;
+            }
+            if (p == PLAYER_PART_LOAD && !player_app_title_can_choose_short_waits(app, title)) {
+                row->unavailable_label = player_ui_enhanced_value_index(p, ACE_LOAD_FAST) + 1;
+                /* Keep the saved choice visible so it can be changed. In a title
+                   without Ace it does not take effect on launch. */
+                if ((own < 0 ? library : own) == ACE_LOAD_FAST) {
+                    row->on = false;
+                    row->sentence = NK_UI_STR(ADAPTER_LOADING_ACE_REQUIRED);
+                }
             }
             /* The launch line carries smooth=off while the game runs its 60 FPS game logic:
                this build interpolates only a 30 Hz source (docs/ENHANCEMENT_CONTRACT.md 10.5).

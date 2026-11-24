@@ -2767,6 +2767,7 @@ uint64_t s_exit_request_deadline_us;
  * valid callback is registered, the notification failed, or the window has passed. */
 int sr_exit_request_quit(void) {
     if (s_exit_request_pending) return !sr_exit_request_expired();
+    sched_auto_load_quit();
     if (!s_exit_cb_uid || !sr_callback_is_valid(s_exit_cb_uid)) return 0;
     if (sr_callback_notify(s_exit_cb_uid, 0u) != 0u) return 0;
     s_exit_request_pending = 1;

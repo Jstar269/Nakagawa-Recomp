@@ -1105,12 +1105,15 @@ static bool settings_enhanced_chip(NkUi *ui, NkUiId id, const char *label, bool 
     style.border_width = NK_UI_BORDER_HAIRLINE;
     if (selected && dimmed) text.rgba = theme->muted;
     if (selected && inherited && !dimmed) text.rgba = theme->muted;
-    if (live) nk_ui_register_button(ui, id, NK_UI_BUTTON_POINTER_ONLY);
+    /* A dimmed choice stays inert, but its hit box keeps a click from stepping
+       the row behind it. It is not part of the keyboard focus order. */
+    nk_ui_register_button(ui, id, NK_UI_BUTTON_POINTER_ONLY);
     if (nk_ui_begin_container(ui, id, &chip, &style)) {
         nk_ui_text(ui, nk_ui_child_id(id, 1u), label, &text);
         nk_ui_end_container(ui);
     }
-    return live && nk_ui_take_activation(ui, id);
+    const bool activated = nk_ui_take_activation(ui, id);
+    return live && activated;
 }
 
 static void settings_enhanced_choice_action(PlayerUiAction *result, int part, bool title,
@@ -1137,6 +1140,8 @@ static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *mo
     const NkUiTheme *theme = nk_ui_theme(ui);
     const bool title = model->enhanced_title != NULL;
     const int choice_count = row->label_count + (title ? 1 : 0);
+    const int unavailable = row->unavailable_label > 0
+        ? row->unavailable_label - 1 + (title ? 1 : 0) : -1;
     const bool boxed = choice_count <= PLAYER_ENHANCED_PART_MAX_CHOICES;
     const NkUiId id = PLAYER_UI_ID_ENHANCED_PART(row->part);
     const char *labels[PLAYER_ENHANCED_PART_MAX_CHOICES];
@@ -1195,7 +1200,8 @@ static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *mo
             for (int choice = 0; choice < choice_count; ++choice) {
                 NkUiId chip = SET_ID_ENHANCED_CHOICES(row->part, choice);
                 if (settings_enhanced_chip(ui, chip, labels[choice], choice == selected,
-                                           title && choice == 0, row->disabled, row->on)) {
+                                           title && choice == 0,
+                                           row->disabled || choice == unavailable, row->on)) {
                     picked = choice;
                 }
                 /* The keys stay with the row: a clicked value hands focus back to it. */
@@ -1214,8 +1220,9 @@ static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *mo
     if (picked >= 0) {
         settings_enhanced_choice_action(result, row->part, title, picked);
     } else if (step != 0) {
-        settings_enhanced_choice_action(result, row->part, title,
-                                        (selected + step + choice_count) % choice_count);
+        int choice = (selected + step + choice_count) % choice_count;
+        if (choice == unavailable) choice = (choice + step + choice_count) % choice_count;
+        settings_enhanced_choice_action(result, row->part, title, choice);
     } else if (activated) {
         *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
         result->title_index = (size_t)row->part;

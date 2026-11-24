@@ -11,6 +11,8 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 
 ## Other upstreams
 
+- **Yakumo — TeamGDB** — MIT. Yakumo's automatic fast loading and presentation pacing inspired Nakagawa's
+  project-written detector for silent disc loads. [Upstream revision `0a506b81`](https://github.com/TeamGDB/Yakumo/tree/0a506b81af44f4c70a3a197e81795891f5567968).
 - **FFmpeg n4.4 — the FFmpeg developers** — LGPL-2.1-or-later. The ATRAC3 and ATRAC3+ decoder subsets in [`src/rt/atrac3p/`](src/rt/atrac3p/) and the H.264 video decoder subset in [`src/rt/h264_ffmpeg_sub/`](src/rt/h264_ffmpeg_sub/); two imported ATRAC files also carry a MIPS Technologies, Inc. BSD-3-Clause notice.
 - **pspdecrypt — John Kelley (John-K) and contributors** — GNU GPL version 3, pinned at
   `c156627db7634d395c380c0a9589130f603307fc`. The ported `~PSP` container, KIRK, AES, SHA-1 and KL4E/KL3E code of the
@@ -26,6 +28,7 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   `Core/FileSystems/tlzrc.cpp` (based on benhur's code, rewritten by tpu; Copyright (c) 2012- PPSSPP Project,
   GPL-2.0-or-later) and the block reader from `Core/FileSystems/BlockDevices.cpp` (GPL-2.0-or-later).
 - **PPSSPP SAS envelope** — the sceSasCore voice envelope (ADSR) model in [`src/rt/sas_envelope.h`](src/rt/PROVENANCE.md) is adapted from PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`Core/HW/SasAudio.cpp`, `Core/HW/SasAudio.h` and `Core/HLE/sceSas.cpp`, Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later).
+- **PPSSPP ATRAC3+ refill behavior** — the `sceAtracDecodeData` refill result in [`src/rt/hle_audio_codec.c`](src/rt/PROVENANCE.md) follows PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`Core/HLE/AtracCtx2.cpp`, `Core/HLE/sceAtrac.cpp` and `Core/HLE/ErrorCodes.h`, GPL-2.0-or-later). The refill result is PPSSPP-derived, not PSP-measured.
 - **JPCSP — the jpcsp authors** — GPL-3.0-or-later. The Media Engine video boundary (sceVideocodec, sceMpegbase) in [`src/rt/hle_videocodec.c`](src/rt/PROVENANCE.md) is adapted from JPCSP at `00ac4d6daedd89c0492093ae83fb0d3d819af414` (`sceVideocodec.java`, `sceMpegbase.java`, `SceMp4AvcCscStruct.java`, `mediaengine/MEMemory.java` and `mediaengine/MEEmulator.java`); none of JPCSP's Media Engine code emulation is used. The sceAudiocodec handlers in the same file also take the ATRAC3plus work-area words from JPCSP's `sceMeAudio.java` and `sceAudiocodec.java`.
 - **uOFW — the uOFW team** — MIT. The sceAudiocodec wrapper checks in [`src/rt/hle_videocodec.c`](src/rt/PROVENANCE.md) (codec range, EDRAM words and error codes, the output-size rule) are adapted from uOFW at `28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9` (`src/kd/avcodec/audiocodec.c`, Copyright (c) 2011, 2012 The uOFW team).
 - **PPSSPP texture replacement** — the quick texture hash and the replacement-pack key and lookup order in [`src/rt/texrepl.c`](src/rt/texrepl.c) are translated from PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp` and `GPU/Common/TextureCacheCommon.cpp`, Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later); the texture pack layout is PPSSPP's.

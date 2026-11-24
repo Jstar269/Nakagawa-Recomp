@@ -142,10 +142,11 @@ typedef struct {
     const char *name;
     uint16_t deps[5];
 } UtilityModuleInfo;
+enum { UTILITY_NET_COMMON = 0x100u, UTILITY_NET_INET = 0x102u };
 static const UtilityModuleInfo s_utility_modules[] = {
-    {0x100, "net_common", {0}},
+    {UTILITY_NET_COMMON, "net_common", {0}},
     {0x101, "net_adhoc", {0}},
-    {0x102, "net_inet", {0}},
+    {UTILITY_NET_INET, "net_inet", {0}},
     {0x103, "net_parse_uri", {0}},
     {0x104, "net_parse_http", {0}},
     {0x105, "net_http", {0x102, 0x103, 0x104, 0}},
@@ -185,6 +186,13 @@ static int utility_module_index(uint32_t module) {
     return -1;
 }
 
+int hle_utility_inet_modules_loaded(void) {
+    const int common = utility_module_index(UTILITY_NET_COMMON);
+    const int inet = utility_module_index(UTILITY_NET_INET);
+    return common >= 0 && inet >= 0 &&
+           s_utility_module_loaded[common] && s_utility_module_loaded[inet];
+}
+
 static uint32_t utility_module_load(const char *api, uint32_t module, int av_api) {
     int index = utility_module_index(module);
     if (index < 0)
@@ -208,6 +216,8 @@ static uint32_t utility_module_unload(const char *api, uint32_t module, int av_a
         return av_api ? SCE_ERROR_AV_MODULE_BAD_ID : SCE_ERROR_MODULE_BAD_ID;
     if (!s_utility_module_loaded[index])
         return av_api ? SCE_ERROR_AV_MODULE_NOT_LOADED : SCE_ERROR_MODULE_NOT_LOADED;
+    if ((module == UTILITY_NET_COMMON || module == UTILITY_NET_INET) && hle_net_inet_initialized())
+        return hle_unmodelled_stop(api, "while sceNetInet is initialized (UNMEASURED teardown order)");
     s_utility_module_loaded[index] = 0u;
     fprintf(stderr, "%s: recognized %s (utility module state unloaded)\n", api,
             s_utility_modules[index].name);
@@ -1175,7 +1185,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     s_exit_request_deadline_us = 0u;
     memset(s_utility_module_loaded, 0, sizeof(s_utility_module_loaded));
     s_utility_usb_loaded = 0u;
-    hle_net_reset();                     /* the new program starts with sceNet uninitialized */
+    hle_net_reset();                     /* the new program starts with network libraries uninitialized */
     hle_sysreg_loadexec_reset();         /* no sceReg handle of the old program */
     s_volatile_locked = 0;
     g_sdk_version = 0u;

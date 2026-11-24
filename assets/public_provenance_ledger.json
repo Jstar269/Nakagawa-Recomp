@@ -12750,6 +12750,54 @@
       }
     },
     {
+      "path": "tests/fixtures/user_data/v0.0.2/input_profile.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.2/library.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.2/settings.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.3/input_profile.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.3/library.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.3/settings.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
       "path": "tests/fixtures/verify/generate.py",
       "classification": "project_authored_attested",
       "evidence": {

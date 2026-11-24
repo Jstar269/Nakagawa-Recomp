@@ -88,6 +88,9 @@ static struct {
     int inited;
     uint32_t pool_uid;  /* the user-partition block holding the pool */
 } s_netlib;
+static int s_netinet_inited;
+
+int hle_net_inet_initialized(void) { return s_netinet_inited; }
 
 #define NET_POOL_NONE 0xffffffffu
 
@@ -112,6 +115,8 @@ static uint32_t h_NetInit(CpuState *s) {
         net_derived_note(NET_NOTE_PRIORITY, "refuses a thread priority outside 0x08-0x77 with ILLEGAL_PRIORITY");
         return SCE_KERNEL_ERROR_ILLEGAL_PRIORITY;
     }
+    if (s_netinet_inited)
+        return hle_unmodelled_stop("sceNetInit", "while sceNetInet is initialized (UNMEASURED re-init order)");
     if (s_netlib.inited) net_derived_note(NET_NOTE_REINIT, "again without sceNetTerm starts over with one pool");
     sreg_ensure_loaded();
     if (s_console.wlan_switch_set && !s_console.wlan_switch)
@@ -134,9 +139,37 @@ static uint32_t h_NetTerm(CpuState *s) {
     if (adhocctl_inited())
         return hle_unmodelled_stop("sceNetTerm", "while sceNetAdhocctl is initialized (UNMEASURED: every "
                                    "recording ends it first)");
+    if (s_netinet_inited)
+        return hle_unmodelled_stop("sceNetTerm", "while sceNetInet is initialized (UNMEASURED teardown order)");
     if (s_netlib.inited && s_netlib.pool_uid != NET_POOL_NONE) free_block(s_netlib.pool_uid);
     s_netlib.inited = 0;
     s_netlib.pool_uid = NET_POOL_NONE;
+    return 0u;
+}
+
+/* ---- Offline sceNetInet lifecycle (#2968). PSPAutotests
+ * e37443a681c6a4d562f32b6b48e1f4e36cd69c97, tests/net/adhoc/apctlinit and
+ * tests/net/inet/apscan: a fresh Init after module and core Net setup returns 0,
+ * and Term before core teardown returns 0. The disconnected apctlinit case
+ * does not connect to an access point. This model owns only Inet's lifecycle
+ * state. Guest pool or thread effects beyond core Net and other call orders
+ * are unmeasured. Socket operations do not acquire support from Init. */
+static uint32_t h_NetInetInit(CpuState *s) {
+    (void)s;
+    if (s_netinet_inited)
+        return hle_unmodelled_stop("sceNetInetInit", "while already initialized (UNMEASURED)");
+    if (!s_netlib.inited || !hle_utility_inet_modules_loaded())
+        return hle_unmodelled_stop("sceNetInetInit", "without core Net initialized and COMMON and INET "
+                                   "modules loaded (UNMEASURED)");
+    s_netinet_inited = 1;
+    return 0u;
+}
+
+static uint32_t h_NetInetTerm(CpuState *s) {
+    (void)s;
+    if (!s_netinet_inited)
+        return hle_unmodelled_stop("sceNetInetTerm", "before a successful sceNetInetInit (UNMEASURED)");
+    s_netinet_inited = 0;
     return 0u;
 }
 
@@ -3814,6 +3847,7 @@ static uint32_t h_NetAdhocMatchingGetPoolStat(CpuState *s) {
  * user partition, which the same reset rebuilds, and the scheduler reset retires the ad hoc
  * control thread, so nothing is freed here. */
 void hle_net_reset(void) {
+    s_netinet_inited = 0;
     adhoc_close_sockets_and_matching();
     adhoc_release_transport();
     s_netlib.inited = 0;
@@ -3858,6 +3892,8 @@ void hle_register_unregistered_import_network_1(void) {
     sr_hle_register(0x89360950u, "sceNetEtherNtostr", h_NetEtherNtostr);
     sr_hle_register(0x39af39a6u, "sceNetInit", h_NetInit);
     sr_hle_register(0x281928a9u, "sceNetTerm", h_NetTerm);
+    sr_hle_register(0x17943399u, "sceNetInetInit", h_NetInetInit);
+    sr_hle_register(0xa9ed66b9u, "sceNetInetTerm", h_NetInetTerm);
     /* The net stack's thread and memory bookkeeping, and ad hoc discovery, which has no peers to
      * find, stay refused with the offline network code 0x80010086 (SCE_KERNEL_ERROR_ERRNO_
      * FUNCTION_NOT_SUPPORTED): their answers with no network are not modelled yet. */
