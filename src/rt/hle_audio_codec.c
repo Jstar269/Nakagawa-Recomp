@@ -6,6 +6,7 @@
 // See NOTICE.md for upstream lineage and modification provenance.
 // Derived from PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later
 // Copyright (c) 2012- PPSSPP Project and contributors
+// Modified by Nakagawa Recomp contributors, 2026-11-23: ATRAC3+ DecodeData refill errors (#2875).
 
 /* Audio decoders: sceAtrac, sceAudiocodec and sceMp3. Extracted from hle.c on 2026-10-31 (#307). */
 
@@ -1171,6 +1172,23 @@ static uint32_t atrac3_first_frame_rule(const Atrac *a, int *skip) {
     return 0;
 }
 
+/* The short read must be recoverable through AddStreamData. A ring uses the
+ * refill offset it exposes to the guest, including a reread after a loop rewind.
+ * A halfway buffer uses the missing frame's own file offset. */
+static int atrac_missing_frame_can_refill(const Atrac *a) {
+    if (atrac_streamed_state(a)) {
+        uint32_t writable, read_offset;
+        atrac_calculate_stream_info(a, NULL, &writable, &read_offset);
+        return writable != 0u && read_offset < a->fileSize &&
+               a->bufferValidBytes < a->bytesPerFrame &&
+               a->bytesPerFrame - a->bufferValidBytes <= a->fileSize - read_offset;
+    }
+    if (a->bufferState != ATRAC_STATE_HALFWAY_BUFFER || a->size >= a->fileSize ||
+        a->fileSize < a->bytesPerFrame)
+        return 0;
+    return atrac_file_offset_by_sample(a, a->posSample) <= a->fileSize - a->bytesPerFrame;
+}
+
 static uint32_t atrac_decode_data(CpuState *s) {
     /* a0=id, a1=outSamples, a2=*decodedSamples, a3=*finishFlag, t0=*remainFrames. */
     s_atrac_last_block_us = 0u;
@@ -1243,6 +1261,30 @@ static uint32_t atrac_decode_data(CpuState *s) {
          * 0x80630023 with 0 samples and end flag 0, and leaves the remaining-frames
          * output as the caller set it (the probe pre-set -1 and read -1 back).
          * Nothing is consumed, so sceAtracAddStreamData resumes decoding. */
+        if (decAddr) MEM_W32(decAddr, 0u);
+        if (finAddr) MEM_W32(finAddr, 0u);
+        return ATRAC_ERROR_BUFFER_IS_EMPTY;
+    }
+    if (st == 0 && a->codecType == ATRAC_CODEC_AT3PLUS) {
+        if (!atrac_missing_frame_can_refill(a)) {
+            return hle_unmodelled_stop(hle_import_name(sr_last_nid),
+                                       "ATRAC3PLUS_FRAME_NOT_REFILLABLE: ID %u cannot supply "
+                                       "a complete next frame in buffer state %d (#2875)",
+                                       (unsigned)(a - s_atrac), a->bufferState);
+        }
+        /* Derived-translated, PPSSPP-derived, not PSP-measured (#2875).
+         * hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later):
+         * Core/HLE/AtracCtx2.cpp Atrac2::DecodeInternal / DecodeData refuse a missing
+         * ring or halfway frame while the file can supply it. Core/HLE/sceAtrac.cpp
+         * sceAtracDecodeData writes zero samples and finish 0, leaves remain alone,
+         * and takes no decode delay. The existing Nakagawa buffer accounting stays intact. */
+        static int noted;
+        if (!noted) {
+            noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceAtracDecodeData on "
+                            "ATRAC3+ ID %u needs a refill (0x%08x)\n",
+                    (unsigned)(a - s_atrac), ATRAC_ERROR_BUFFER_IS_EMPTY);
+        }
         if (decAddr) MEM_W32(decAddr, 0u);
         if (finAddr) MEM_W32(finAddr, 0u);
         return ATRAC_ERROR_BUFFER_IS_EMPTY;
