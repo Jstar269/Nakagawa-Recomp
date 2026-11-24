@@ -1133,6 +1133,11 @@ void sr_compat_fired(const char *collection, uint32_t anchor, const char *name);
 int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
                          char *buf, int cap);
 
+/* Bounded SysclibForKernel snprintf subset. The caller validates the guest format
+ * string. Returns the rendered length or -1 for an unsupported call. */
+#define SR_SYSCLIB_SNPRINTF_LIMIT 4096
+int sr_guest_format_sysclib_snprintf(CpuState *s, uint32_t fmt, char *buf, int cap);
+
 /* VFPU source/destination prefix application (ARCHITECTURE section 6.4), ported from
  * PPSSPP. sr_vread reads n lanes from physical indices idx[], then applies a source
  * prefix (swizzle/abs/negate/constant). sr_vwrite applies the destination prefix

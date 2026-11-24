@@ -3333,6 +3333,12 @@
     "name": "sceKernelReferLwMutexStatus",
     "status": "partial"
   },
+  "0xc2145e80": {
+    "classification": "dedicated",
+    "handler": "h_SysclibSnprintf",
+    "name": "snprintf",
+    "status": "partial"
+  },
   "0xc2df770e": {
     "classification": "dedicated",
     "handler": "h_CacheInvalidateRangeOther",

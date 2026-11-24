@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **717** (dedicated **670**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **645** handlers across **30** API families, covering **677** handler-associated NID registrations.
+Registered NIDs: **718** (dedicated **671**, fake_success **3**, controlled_unsupported **44**).
+Semantic handler census: **646** handlers across **30** API families, covering **678** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 390 | 402 |
+| `partial` | 391 | 403 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 237 | 244 |
@@ -60,7 +60,7 @@ Semantic handler census: **645** handlers across **30** API families, covering *
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
-| `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
+| `other` | 1 | 2 | 0 | 0 | 0 | 3 | 3 |
 | `sceAtrac` | 0 | 0 | 0 | 0 | 34 | 34 | 35 |
 | `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
@@ -89,7 +89,7 @@ Semantic handler census: **645** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **390** | **1** | **3** | **237** | **645** | **677** |
+| **Total** | **14** | **391** | **1** | **3** | **237** | **646** | **678** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -162,6 +162,11 @@ Semantic handler census: **645** handlers across **30** API families, covering *
   - Limitation: reads the registered exit callback's argument block as {mode, params, common}: no live callback 0x800201a1, NULL argument 0x800200d3, mode 4 or above 0x800200d2, params size below 12 0x800201bc, else clears params->unk1 and sets params->unk2 to -1; an unusable params pointer stops the run by name; the check order when mode and size both fail, and other compiled SDK versions, are not measured
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
   - Evidence: PSPAutotests tests/threads/callbacks/exit.expected (1a9e6c31, recorded on a PSP, compiled SDK 3.95): checkpoints under LoadExecForUser_362A956B
+- **`h_SysclibSnprintf`** (`other`): `snprintf` (0xc2145e80)
+  - Limitation: positive-capacity truncation and the full count are reference-derived, not PSP-measured; handles bounded literal text and one-word integer, character and string fields with space padding and bounded string precision; zero capacity, unreadable arguments, and other format forms stop by name (#341)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sysclib_snprintf
+  - Evidence: uofw/uofw f7b0623168842f02cddbdbf9437ac0c2380c51c8 src/kd/sysmem/sysclib.c prnt/snprintf
+  - Evidence: hrydgard/ppsspp cdf563b85c42c275ec2835a0883f48d63a9c9406 Core/HLE/sceKernelInterrupt.cpp sysclib_snprintf
 - **`h_AudioChRelease`** (`sceAudio`): `sceAudioChRelease` (0x6fc46853)
   - Limitation: the cells release channel 0 after the two valid blocking-output calls and query it after release; a release clears the channel's length, format and volumes; the out-of-range (0x80260003) and not-reserved (0x80260008) refusals follow PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp sceAudioChRelease and are unmeasured, as are other channel-state release results (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
