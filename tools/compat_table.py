@@ -3,9 +3,10 @@
 
 """The public whole-library compatibility summary, from a private library build.
 
-    python tools/compat_table.py <library-build.json> [--release-plan release-plan.json]
-        [--write-doc docs/COMPATIBILITY.md]
-        [--output summary.md] [--json summary.json] [--date YYYY-MM-DD]
+    python tools/compat_table.py <library-build.json> [--output summary.md]
+        [--json summary.json] [--date YYYY-MM-DD]
+    python tools/compat_table.py <library-build.json> --release-plan release-plan.json
+        --write-doc docs/COMPATIBILITY.md
 
 ``tools/library_build.py`` builds every disc in a folder and records each one (private: it
 names the user's discs). This tool turns that record into counts only: how many discs reach
@@ -33,7 +34,8 @@ Use JSON with format ``nakagawa-compat-release-plan``, schema_version 1, a setti
 has the builder's exact relative ``source`` spelling, whole-image ``size_bytes`` and lowercase
 ``sha1``. A builder verification pass with ``--verify-only`` can record whole-image hashes before
 a build. The exporter compares recorded identities and never opens the disc images. Keep the
-plan private. Without ``--release-plan``, historical and partial reports remain available.
+plan private. Updating this checkout's public document requires the plan. Historical and
+partial reports remain available to stdout and other files.
 """
 
 from __future__ import annotations
@@ -514,7 +516,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--release-plan", type=Path, default=None,
                         help="Require candidate settings and the expected private corpus before exporting")
     parser.add_argument("--write-doc", type=Path, default=None,
-                        help="Replace the generated block in this document (docs/COMPATIBILITY.md)")
+                        help="Replace the generated block; docs/COMPATIBILITY.md requires --release-plan")
     parser.add_argument("--output", type=Path, default=None, help="Write the block to this file")
     parser.add_argument("--json", type=Path, default=None, help="Write the counts as JSON")
     parser.add_argument("--date", default=None,
@@ -530,6 +532,14 @@ def main(argv: Iterable[str] | None = None) -> int:
             return first.exists() and second.exists() and os.path.samefile(first, second)
         except OSError:
             return False
+
+    public_doc = ROOT / "docs" / "COMPATIBILITY.md"
+    if any(path is not None and same_file(path, public_doc)
+           for path in (args.output, args.json)):
+        parser.error("use --write-doc for the repository compatibility table")
+    if (args.release_plan is None and args.write_doc is not None
+            and same_file(args.write_doc, public_doc)):
+        parser.error("the repository compatibility table requires --release-plan")
 
     inputs = [args.manifest]
     if args.release_plan is not None:

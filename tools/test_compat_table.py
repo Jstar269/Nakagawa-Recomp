@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parent
 if str(TOOLS) not in sys.path:
@@ -366,6 +367,61 @@ class ReleaseValidationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
         self.assertEqual(self.plan_path.read_bytes(), before)
         self.assertFalse(self.source.exists())
+
+    def test_public_document_requires_release_plan_and_block_replacement(self) -> None:
+        root = self.doc.parent
+        destination = root / "docs" / "COMPATIBILITY.md"
+        destination.parent.mkdir()
+        self.doc = destination
+        before = f"Before\n{compat_table.DOC_BEGIN}\nold\n{compat_table.DOC_END}\n".encode()
+        destination.write_bytes(before)
+        with mock.patch.object(compat_table, "ROOT", root):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                self.run_export(release=False)
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn("the repository compatibility table requires --release-plan",
+                          stderr.getvalue())
+            self.assertEqual(destination.read_bytes(), before)
+            self.assertEqual(self.output.read_bytes(), b"old summary\n")
+
+            for flag in ("--output", "--json"):
+                with self.subTest(flag=flag):
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                        compat_table.main([str(self.source), "--release-plan", str(self.plan_path),
+                                           flag, str(destination)])
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn("use --write-doc for the repository compatibility table",
+                                  stderr.getvalue())
+                    self.assertEqual(destination.read_bytes(), before)
+
+            self.data["titles"][0]["run_settings"]["source_commit"] = "a" * 40
+            self.assert_refuses("release row settings differ from the plan")
+            self.data["titles"][0]["run_settings"] = dict(self.settings)
+            self.assertEqual(self.run_export(), 0)
+            self.assertNotEqual(destination.read_bytes(), before)
+            self.assertEqual(json.loads(self.output.read_text(encoding="utf-8"))["counted"], 2)
+
+    def test_hardlink_to_public_document_requires_release_plan(self) -> None:
+        root = self.doc.parent
+        destination = root / "docs" / "COMPATIBILITY.md"
+        destination.parent.mkdir()
+        self.doc.replace(destination)
+        try:
+            os.link(destination, self.doc)
+        except OSError:
+            self.skipTest("this filesystem makes no hard links")
+        before = destination.read_bytes()
+        with mock.patch.object(compat_table, "ROOT", root):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                self.run_export(release=False)
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn("the repository compatibility table requires --release-plan",
+                          stderr.getvalue())
+            self.assertEqual(destination.read_bytes(), before)
+            self.assertEqual(self.output.read_bytes(), b"old summary\n")
 
     def test_diagnostic_export_can_read_historical_rows(self) -> None:
         self.data["titles"][1].pop("run_settings")
