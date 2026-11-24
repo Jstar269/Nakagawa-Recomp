@@ -397,6 +397,14 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "return codes and the RUNNING to FINISHED step are pspautotests-recorded; the result written (2, SCE_UTILITY_DIALOG_RESULT_ABORT) follows PPSSPP as a behaviour reference (derived, not PSP-measured; queued for the next PSP matrix run), and a button answer the model wrote at the first Update stays",
     },
+    "h_MsgDialogStatus": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)",
+            "tests/native/hle_thread_selftest.c:test_msg_dialog_status_with_no_dialog_started",
+        ],
+        "limitation": "this status covers one cell only: with no InitStart of any utility dialog in the process, GetStatus returns 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so the statuses the handler returns then (INIT 1, RUNNING 2, FINISHED 3, SHUTDOWN 4 and NONE 0 after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this status; the record's Update(1) and ShutdownStart results and the other dialog kinds (savedata, netconf, gamedata install, game sharing, the OSK) belong to separate handlers and are not reviewed here (#2807)",
+    },
     "h_FontGetFontList": {
         "status": "partial",
         "evidence": [
