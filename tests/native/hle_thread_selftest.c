@@ -660,6 +660,24 @@ int sr_audio_host_pull_frames(void) {
     return s_audio_sim_reported_pull >= 0 ? s_audio_sim_reported_pull : s_audio_sim_pull;
 }
 
+static int s_audio_load_queue_silent = 1;
+static int s_audio_load_handoff[9];
+static int s_audio_load_pending_sound;
+
+int sr_audio_load_silent(void) { return s_audio_load_queue_silent; }
+
+int sr_audio_load_pending_sound(int ch) { return ch == 0 && s_audio_load_pending_sound; }
+
+void sr_audio_replace_silent_queue(int ch, int frames, int hold) {
+    (void)hold;
+    if (sr_audio_load_pending_sound(ch)) return;
+    if (ch >= 0 && ch < 9) {
+        s_audio_load_handoff[ch] = frames;
+        s_audio_sim_q[ch] = frames;
+        s_audio_sim_dry[ch] = frames == 0;
+    }
+}
+
 int sr_audio_queued(int ch) {
     if (s_audio_sim_pull > 0 && ch >= 0 && ch < 9) {
         s_audio_queue_calls++;
@@ -676,6 +694,9 @@ int sr_audio_queued(int ch) {
 }
 
 static void audio_fixture_reset(void) {
+    s_audio_load_queue_silent = 1;
+    s_audio_load_pending_sound = 0;
+    memset(s_audio_load_handoff, 0, sizeof(s_audio_load_handoff));
     s_oor_calls = 0;
     s_audio_push_calls = 0;
     s_audio_push_wide_calls = 0;
@@ -18370,6 +18391,178 @@ static void test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue(voi
     sr_hle_test_audio_reset();
     audio_fixture_reset();
     reset_fixture();
+}
+
+static uint64_t s_load_host_ns;
+static uint64_t load_host_clock_fixture(void) { return s_load_host_ns; }
+
+static void load_audio_wait_fixture(uint32_t guest_us) {
+    const unsigned speed = sched_fast_forward_speed();
+    const uint64_t host_ns = ((uint64_t)guest_us * 1000u + speed - 1u) / speed;
+    s_load_host_ns += host_ns;
+    vtime_take_host_sample();
+    audio_sim_advance((uint32_t)((host_ns + 999u) / 1000u));
+}
+
+static void test_auto_load_disc_and_silent_audio(void) {
+    static const char spec[] =
+        "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+        "sas=off;tess=off;twin=off;load=auto";
+    extern int hle_audio_queued(int ch);
+    extern void sr_hle_test_ctrl_sampling_reset(void);
+    extern void sr_hle_test_ctrl_stick(uint8_t lx, uint8_t ly);
+    extern int s_ctrl_test_stick;
+    extern uint8_t s_ctrl_test_lx, s_ctrl_test_ly;
+    enum {
+        PATH_ADDR = 0x08019000u, DISC_ADDR = 0x08019100u, PAD_ADDR = 0x08019400u,
+        PCM = 0x08a00000u, DISC_LBA = 0x1002u
+    };
+    CpuState cpu;
+    const uint32_t saved_disc_sectors = s_umd_synthetic_sectors;
+    const int saved_stick = s_ctrl_test_stick, saved_interactive = s_test_gui_interactive;
+    const uint8_t saved_lx = s_ctrl_test_lx, saved_ly = s_ctrl_test_ly;
+    uint64_t (*const saved_host_clock)(void) = s_host_ns_fn;
+    const int saved_pace = s_pace_on, saved_det_clock = s_det_clock;
+    const uint64_t saved_epoch_ns = s_clock_epoch_ns, saved_latch_ns = s_vbl_latch_ns;
+    const uint64_t saved_ff_host_ns = s_ff_host_anchor_ns, saved_ff_pace_ns = s_ff_pace_anchor_ns;
+    const uint32_t saved_ff_speed = s_ff_speed, saved_ff_epoch = s_ff_epoch;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    audio_fixture_reset();
+    s_test_gui_on = s_test_gui_interactive = 1;
+    s_umd_io_synthetic_enabled = 1;
+    s_umd_synthetic_sectors = DISC_LBA + 1u;
+    s_pace_on = 1;
+    s_det_clock = 0;
+    s_load_host_ns = 1000000u;
+    s_host_ns_fn = load_host_clock_fixture;
+    s_clock_epoch_ns = 0u;
+    s_ff_speed = 1u;
+    s_ff_host_anchor_ns = s_ff_pace_anchor_ns = 0u;
+    sched_auto_load_reset();
+    s_audio_sim_pull = 64;
+    s_audio_sim_reported_pull = 0;
+    s_audio_load_queue_silent = 0;
+    sr_hle_test_audio_wait_hook(load_audio_wait_fixture);
+    memset(&g_mem[PCM - 0x08000000u], 0, 64u * 4u);
+    expect(ace_init_spec(spec, NULL) == 1 && !nk_ace_load_fast("fixture", 0u),
+           "automatic disc load does not skip a title-declared wait");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "automatic load fixture reserves stereo PCM");
+    fd_set_path(&cpu, PATH_ADDR, "disc0:/UMD_DATA.BIN");
+    cpu.r[5] = 1u;
+    const uint32_t fd = sr_syscall(&cpu, 0x109f50bcu); /* sceIoOpen */
+    expect(fd >= 3u && fd < 64u, "automatic load fixture opens a synthetic disc file");
+
+    if (fd >= 3u && fd < 64u) {
+        expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 0u) == 0u,
+               "automatic load: a zero-byte read still returns zero");
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active(), "automatic load: zero bytes do not start it");
+        expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u &&
+                   MEM_R8(DISC_ADDR) == umd_synthetic_byte((uint64_t)DISC_LBA * 2048u),
+               "automatic load fixture processes 16 disc bytes through sceIoRead");
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active(), "automatic load: mixed queued audio blocks entry");
+        s_audio_load_queue_silent = 1;
+        sched_auto_load_vblank();
+        expect(sched_auto_load_active(), "automatic load: silence permits the recent read");
+        sr_hle_test_ctrl_stick(190u, 128u);
+        sr_ctrl_sample();
+        expect(!sched_auto_load_active() && sched_fast_forward_speed() == 1u,
+               "automatic load: a physical stick stops it with PSP digital sampling");
+        expect(audio_dispatch(&cpu, 0x3a622550u, PAD_ADDR, 1u, 0u) == 1u &&
+                   MEM_R8(PAD_ADDR + 8u) == 128u && MEM_R8(PAD_ADDR + 9u) == 128u,
+               "automatic load: the PSP's digital sample still reads centred");
+        sr_hle_test_ctrl_stick(128u, 128u);
+        sr_ctrl_sample();
+        expect(!s_auto_load_input, "automatic load: the next centred host latch clears input");
+        for (unsigned i = 0; i < 3u; ++i) {
+            expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u,
+                   "automatic load: the next disc bytes are delivered");
+            sched_auto_load_vblank();
+            expect(sched_auto_load_active() && sched_fast_forward_speed() == SCHED_AUTO_LOAD_SPEED,
+                   "automatic load: silent PCM and ongoing reads coexist at 16x");
+            expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u &&
+                       hle_audio_queued(0) == 64 && s_audio_push_calls == 0u,
+                   "automatic load: accepted zero PCM is kept in the guest-time queue");
+            if (i != 2u) {
+                s_load_host_ns += 1100000u;
+                scheduler_progress_time();
+            }
+        }
+        ace_ff_hold(1);
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active() && sched_fast_forward_speed() == SCHED_FAST_FORWARD_SPEED &&
+                   hle_audio_queued(0) == 64 && s_audio_load_handoff[0] == 64,
+               "automatic load: manual handoff seeds the same pending guest silence");
+        ace_ff_hold(0);
+        sched_auto_load_disc_read();
+        sched_auto_load_vblank();
+        expect(sched_auto_load_active() && hle_audio_queued(0) == 64,
+               "automatic load: a later silent load starts with the preserved queue");
+        MEM_W16(PCM, 12345u);
+        MEM_W16(PCM + 2u, (uint16_t)(int16_t)-23456);
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u,
+               "automatic load: the first audible PCM submission succeeds");
+        expect(sched_fast_forward_speed() == 1u && !sched_auto_load_active() &&
+                   s_audio_push_calls == 1u && s_audio_push_first_l == 12345 &&
+                   s_audio_push_first_r == -23456,
+               "automatic load: the first audible stereo frame reaches the mixer at 1x");
+        expect(s_audio_load_handoff[0] == 64 && hle_audio_queued(0) == 128,
+               "automatic load: the pending silence remains queued before the incoming PCM");
+
+        /* After the last tone the device played dry. A retained tail is
+         * unavailable for playback until the guest supplies another block. */
+        s_audio_sim_q[0] = 0;
+        s_audio_sim_dry[0] = 1;
+        s_audio_load_pending_sound = 1;
+        s_audio_load_handoff[0] = -1;
+        for (unsigned i = 0u; i <= AUTO_LOAD_RECENT_VBLANKS; ++i) {
+            s_load_host_ns += 16683333u;
+            scheduler_progress_time();
+            expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u,
+                   "automatic load: disc reads continue after the channel drains");
+            sched_auto_load_vblank();
+        }
+        expect(sched_auto_load_active() && s_audio_load_handoff[0] == -1,
+               "automatic load: a dry channel can accelerate without clearing retained samples");
+        memset(&g_mem[PCM - 0x08000000u], 0, 64u * 4u);
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u &&
+                   sched_fast_forward_speed() == 1u && s_audio_push_calls == 2u &&
+                   s_audio_load_handoff[0] == -1,
+               "automatic load: the first resumed block reaches the backend with the retained tail");
+        (void)audio_dispatch(&cpu, 0x810c4bc3u, fd, 0u, 0u); /* sceIoClose */
+    }
+    sched_auto_load_reset();
+    (void)ace_init_spec("off", NULL);
+    s_host_ns_fn = NULL;
+    s_umd_io_synthetic_enabled = 0;
+    s_umd_synthetic_sectors = saved_disc_sectors;
+    sr_hle_test_audio_wait_hook(NULL);
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    s_ctrl_test_stick = saved_stick;
+    s_ctrl_test_lx = saved_lx;
+    s_ctrl_test_ly = saved_ly;
+    s_test_gui_interactive = saved_interactive;
+    audio_fixture_reset();
+    reset_fixture();
+
+    /* Returning to 1x preserves the elapsed guest-time offset. A later
+     * fixture that installs its own host clock must not inherit that offset. */
+    s_host_ns_fn = saved_host_clock;
+    s_pace_on = saved_pace;
+    s_det_clock = saved_det_clock;
+    s_clock_epoch_ns = saved_epoch_ns;
+    s_vbl_latch_ns = saved_latch_ns;
+    s_ff_host_anchor_ns = saved_ff_host_ns;
+    s_ff_pace_anchor_ns = saved_ff_pace_ns;
+    s_ff_speed = saved_ff_speed;
+    s_ff_epoch = saved_ff_epoch;
 }
 
 /* Media telemetry truthfulness on the production audio hand-off.
@@ -68088,6 +68281,14 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--auto-load") == 0) {
+        test_auto_load_disc_and_silent_audio();
+        test_pad_vblank_deadline(); /* the next fixture must see its own clock */
+        fprintf(stderr, "auto-load: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--utility-usb") == 0) {
         test_utility_usb_module_state();
         fprintf(stderr, "utility-usb: %d checks, %d failures\n", s_checks, s_failures);
@@ -68392,6 +68593,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_calls_read_the_guest_queue_under_the_deterministic_clock();
     test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock();
     test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue();
+    test_auto_load_disc_and_silent_audio();
     test_ctrl_live_input_latch_suppresses_phantom_start();
     test_ctrl_pulse_never_synthesises_start_in_a_real_window();
     test_ctrl_read_buffer_contract();

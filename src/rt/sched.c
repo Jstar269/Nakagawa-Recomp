@@ -596,12 +596,15 @@ static void vtime_refresh(void);
  * made the guest observe fewer VBLANK episodes than display periods while guest
  * VCOUNT (which has always advanced by the full elapsed count) said otherwise. */
 static uint32_t s_pending_vblanks;
+/* Undelivered episodes in the batch detached by scheduler_service_pending. */
+static uint32_t s_vblank_batch_remaining;
 /* Readout-only prefix of service episodes owed under a previous pace.
  * It can include episodes in the batch currently being serviced. */
 static uint64_t s_readout_old_vblanks;
 static uint64_t s_readout_old_clock_us;
 
 static void scheduler_service_pending(void);
+static void sched_auto_load_reset(void);
 static void sched_preempt_timer_arm(void);
 static void sched_preempt_timer_rearm(void);
 static void sched_alarm_reset(void);
@@ -896,6 +899,7 @@ void sched_init(CpuState *cpu) {
     s_tick = 0;
     s_guest_reset_requested = 0;
     sched_transfer_reset();
+    sched_auto_load_reset();
     s_pause_requested = 0;
     s_pause_active = 0;
     s_pause_source = SR_PAUSE_SRC_USER;
@@ -1622,7 +1626,7 @@ static void pace_set_speed(uint32_t speed) {
     if (g_ace_on && speed == 1u) {
         /* Owed episodes and any as-yet unlatched edges through this
          * virtual time came from the old pace. Delivery still runs normally. */
-        s_readout_old_vblanks = s_pending_vblanks;
+        s_readout_old_vblanks = (uint64_t)s_pending_vblanks + s_vblank_batch_remaining;
         s_readout_old_clock_us = s_ff_pace_anchor_ns >= s_clock_epoch_ns
             ? (s_ff_pace_anchor_ns - s_clock_epoch_ns) / 1000u : 0u;
     }
@@ -1637,6 +1641,77 @@ static void pace_set_speed(uint32_t speed) {
 int sched_fast_forward_on(void) { return s_ff_speed > 1u; }
 uint32_t sched_fast_forward_speed(void) { return s_ff_speed; }
 uint32_t sched_fast_forward_epoch(void) { return s_ff_epoch; }
+
+/* A completed disc read stays recent for eight serviced guest VBLANKs. The
+ * same window after audible output gives its host-device tail time to drain.
+ * The audio backend also checks queued samples before each entry. */
+enum { AUTO_LOAD_RECENT_VBLANKS = 8 };
+static unsigned s_auto_load_disc_ticks;
+static unsigned s_auto_load_audio_ticks;
+static int s_auto_load_input;
+static int s_auto_load_quitting;
+static int s_auto_load_checked;
+static int s_auto_load_running;
+static int (*s_auto_load_silent)(void);
+static void (*s_auto_load_audio_transition)(int active);
+
+void sched_auto_load_audio_hooks(int (*silent)(void), void (*transition)(int active)) {
+    s_auto_load_silent = silent;
+    s_auto_load_audio_transition = transition;
+}
+
+int sched_auto_load_enabled(void) {
+    return g_ace_on && ace_effective()->load == ACE_LOAD_AUTO;
+}
+
+int sched_auto_load_active(void) { return s_auto_load_running; }
+
+static void sched_auto_load_set(int active) {
+    if (s_auto_load_running == active) return;
+    s_auto_load_running = active;
+    pace_set_speed(active ? SCHED_AUTO_LOAD_SPEED : 1u);
+    if (s_auto_load_audio_transition) s_auto_load_audio_transition(active);
+    if (active) ace_confirm(ACE_FEATURE_LOAD);
+    fprintf(stderr, "AUTO_LOAD: %s\n", active ? "on" : "off");
+}
+
+static void sched_auto_load_reset(void) {
+    sched_auto_load_set(0);
+    s_auto_load_disc_ticks = 0u;
+    s_auto_load_audio_ticks = 0u;
+    s_auto_load_input = 0;
+    s_auto_load_quitting = 0;
+    s_auto_load_checked = 0;
+}
+
+void sched_auto_load_disc_read(void) {
+    if (sched_auto_load_enabled()) s_auto_load_disc_ticks = AUTO_LOAD_RECENT_VBLANKS;
+}
+
+void sched_auto_load_input(int active) {
+    if (!sched_auto_load_enabled()) return;
+    s_auto_load_input = active;
+    if (active) {
+        s_auto_load_disc_ticks = 0u;
+        sched_auto_load_set(0);
+    }
+}
+
+void sched_auto_load_host_input(uint32_t buttons, uint8_t lx, uint8_t ly) {
+    if (buttons || lx != 128u || ly != 128u) sched_auto_load_input(1);
+}
+
+void sched_auto_load_audible(void) {
+    if (!sched_auto_load_enabled()) return;
+    s_auto_load_audio_ticks = AUTO_LOAD_RECENT_VBLANKS;
+    sched_auto_load_set(0);
+}
+
+void sched_auto_load_quit(void) {
+    if (!sched_auto_load_enabled()) return;
+    s_auto_load_quitting = 1;
+    sched_auto_load_set(0);
+}
 
 /* SR_DETERMINISTIC_CLOCK: unset, empty or '0' = off; '1' = on. There is no automatic choice: a
  * scripted run keeps the clock it always had unless its caller names this one (#2037).
@@ -1718,6 +1793,44 @@ int sched_vbl_paced(void) { pace_setup(); return s_pace_on > 0; }
 /* True when guest time is deterministic (#2037): the RTC then starts at a fixed date instead of
  * the host's calendar, so two identical runs see the same time of day. */
 int sched_clock_deterministic(void) { pace_setup(); return s_det_clock; }
+
+/* Manual input can be published by host polling even while guest VBLANKs are
+ * masked. Restore the silent queue before handing the paced clock to manual. */
+static int sched_auto_load_manual_requested(void) {
+    if (!ace_ff_requested()) return 0;
+    sched_auto_load_set(0);
+    if (!s_pause_requested && !s_pause_active && !s_auto_load_quitting)
+        pace_set_speed(SCHED_FAST_FORWARD_SPEED);
+    return 1;
+}
+
+static void sched_auto_load_vblank(void) {
+    if (!sched_auto_load_enabled()) return;
+    if (!s_auto_load_checked) {
+        s_auto_load_checked = 1;
+        pace_setup();
+        const char *online = getenv("SR_ADHOC_ENABLED");
+        if (s_det_clock || !s_pace_on || (online && strcmp(online, "1") == 0)) {
+            ace_feature_unavailable(ACE_FEATURE_LOAD, s_det_clock ? "deterministic clock"
+                : !s_pace_on ? "turbo clock" : "online play enabled");
+            return;
+        }
+    }
+    const int can_run = !s_pause_requested && !s_pause_active && !s_auto_load_quitting;
+    const int recent_disc = s_auto_load_disc_ticks != 0u;
+    const int quiet = s_auto_load_audio_ticks == 0u;
+    if (s_auto_load_disc_ticks) --s_auto_load_disc_ticks;
+    if (s_auto_load_audio_ticks) --s_auto_load_audio_ticks;
+    if (sched_auto_load_manual_requested()) return;
+    if (s_ff_speed == SCHED_FAST_FORWARD_SPEED) pace_set_speed(1u);
+    const int allowed = recent_disc && quiet && !s_auto_load_input && can_run;
+    if (!allowed) {
+        sched_auto_load_set(0);
+    } else if (!s_auto_load_running && s_ff_speed == 1u &&
+               s_auto_load_silent && s_auto_load_silent()) {
+        sched_auto_load_set(1);
+    }
+}
 
 /* Late pad sampling (ace.h, contract 11.3.9) plans on the host clock: this clock, one VBLANK
  * period on it, and the host time at which the next VBLANK source event falls due, 0 when
@@ -1915,7 +2028,8 @@ static void scheduler_latch_due_events(void) {
                 sr_perf_vblank_collapse(s_pending_vblanks, due - 1u);
                 due = 1u;
                 s_pending_vblanks = 0;
-                s_readout_old_vblanks = 0;
+                if (s_readout_old_vblanks > s_vblank_batch_remaining)
+                    s_readout_old_vblanks = s_vblank_batch_remaining;
                 old_clock = 1;
             }
             break;
@@ -1995,8 +2109,11 @@ static void vblank_pace(void) {
         return;
     }
     /* Fast forward (recomp.h): an Enhanced or Ace run on this paced clock, outside the pause. */
-    pace_set_speed(g_ace_on && !s_det_clock && !s_pause_active && ace_ff_requested()
-                       ? SCHED_FAST_FORWARD_SPEED : 1u);
+    if (s_auto_load_running)
+        (void)sched_auto_load_manual_requested();
+    else
+        pace_set_speed(g_ace_on && !s_det_clock && !s_pause_active && ace_ff_requested()
+                           ? SCHED_FAST_FORWARD_SPEED : 1u);
     uint64_t now = pace_ns();
     if (s_vbl_next_ns > now) {
         uint64_t wait_started = sr_perf_now_ns();
@@ -2663,10 +2780,14 @@ static void scheduler_service_pending(void) {
                  * coalesced flag (one more episode and one more VCOUNT at resume) is left to a
                  * period that comes due under the mask. */
                 s_pending_vblanks = episodes - i;
+                if (s_readout_old_vblanks > s_pending_vblanks)
+                    s_readout_old_vblanks = s_pending_vblanks;
                 episodes = i;      /* what the guest actually received */
                 break;
             }
+            s_vblank_batch_remaining = episodes - i - 1u;
             deliver_vblank();
+            sched_auto_load_vblank();
             /* The waiting GE finish callbacks run at this episode's return, before the next
              * owed episode, in interrupt context: the ones its handlers raised, and any a thread
              * raised under the mask before this batch.  Whether a PSP takes a GE finish
@@ -2680,6 +2801,7 @@ static void scheduler_service_pending(void) {
                 sr_cpu_link_clear(s_cpu);
             }
         }
+        s_vblank_batch_remaining = 0u;
         sr_perf_vblank_service(episodes);
     }
     s_servicing_interrupts = 0;
@@ -3461,6 +3583,7 @@ static void sched_promote_expired_waits(void) {
  * host queue running dry meanwhile). Only a non-suspended thread counts, since the pick
  * then always runs it; a due alarm or GE deadline keeps the waits below. */
 static void sched_idle_wait(void) {
+    if (s_auto_load_running) (void)sched_auto_load_manual_requested();
     uint64_t soonest = (uint64_t)-1;
     uint64_t soonest_runnable = (uint64_t)-1;
     int any_waiting = 0;
@@ -4687,6 +4810,7 @@ int sched_reset_for_loadexec(void) {
     s_gp = 0u;
     s_guest_reset_requested = 0;
     sched_transfer_reset();
+    sched_auto_load_reset();
     s_sched_coro = sr_coro_main();
     sr_dispatch_host_stack_remaining = sr_coro_stack_remaining;
     sr_dispatch_host_stack_top = sr_coro_stack_top;
@@ -5789,6 +5913,8 @@ static SrPauseVerdict sched_pause_latch_request(SrPauseSource source,
     s_pause_source = source;
     s_pause_request_ns = request_ns;
     s_pause_requested = 1;
+    s_auto_load_disc_ticks = 0u;
+    sched_auto_load_set(0);
     atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
     if (log_request) {
         fprintf(stderr, "SR_PAUSE: requested source=%s vcount=%u\n",
@@ -5953,6 +6079,8 @@ extern int sr_savedata_pause_busy(void);
 
 static uint64_t sched_pause_begin(void) {
     pace_setup();
+    s_auto_load_disc_ticks = 0u;
+    sched_auto_load_set(0);
     pace_set_speed(1u);
     const uint64_t t0 = host_now_ns();
     const uint64_t latency_us = t0 >= s_pause_request_ns

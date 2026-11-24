@@ -11654,8 +11654,8 @@ static void test_play_mode_load_settings(void) {
     assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 0);
     assert(player_enhanced_part(PLAYER_PART_LOAD)->fresh == 0);
     assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->key, "load") == 0);
-    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->name, "Short loads") == 0);
-    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "Ace only") != NULL);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->name, "Loading speed") == 0);
+    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "Ace package") != NULL);
     assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "changes the game's timing") != NULL);
     app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
     for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
@@ -11722,6 +11722,86 @@ static void test_play_mode_load_settings(void) {
     free(app);
     printf("PASS: short loads are off by default, read and saved at both levels, and only Ace "
            "launches them\n");
+}
+
+static void test_auto_load_player_path(void) {
+    const char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    NkRuntimeConfig config = {0};
+    PlayerPlayResolved play;
+    AceConfig ace;
+    PlayerApp *app = calloc(1, sizeof(*app));
+    PlayerApp *back = calloc(1, sizeof(*back));
+    const PlayerEnhancedPartInfo *load = player_enhanced_part(PLAYER_PART_LOAD);
+    assert(app && back && load->value_count == 3 && !load->ace_only);
+    const int automatic = 0;
+    const int ace_waits = 1;
+    const int off = 2;
+    assert(load->values[automatic] == ACE_LOAD_AUTO && load->values[ace_waits] == ACE_LOAD_FAST &&
+           load->values[off] == ACE_LOAD_OFF);
+    assert(strcmp(load->labels[automatic], "Automatic") == 0);
+    assert(strstr(load->sentence, "Rebuild older game packages") != NULL);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cauto_load_player_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+
+    /* A regular Enhanced title needs neither a timing package nor an Ace package. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"load\": \"auto\"},"
+        " \"title_play\": {\"TEST95002\": {\"mode\": \"ace\", \"load\": \"fast\"},"
+        " \"TEST95003\": {\"mode\": \"authentic\", \"load\": \"auto\"},"
+        " \"TEST95004\": {\"mode\": \"ace\", \"load\": \"auto\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+    player_play_config_session(&app->settings, "TEST95001", false, false, &config, &play);
+    assert(play.mode == PLAYER_PLAY_ENHANCED && play.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+    assert(ace_parse(config.ace_spec, &ace, NULL, 0) == 1 && ace.load == ACE_LOAD_AUTO);
+    assert(strstr(config.ace_spec, ";load=auto") && !strstr(config.ace_spec, ";load=fast"));
+    player_play_config_session(&app->settings, "TEST95004", false, false, &config, &play);
+    assert(play.mode == PLAYER_PLAY_ACE && strstr(config.ace_spec, ";load=auto"));
+    player_play_config_session(&app->settings, "TEST95002", false, false, &config, &play);
+    assert(play.mode == PLAYER_PLAY_ACE && strstr(config.ace_spec, ";load=fast") &&
+           !strstr(config.ace_spec, ";load=auto"));
+    player_play_config_session(&app->settings, "TEST95003", false, false, &config, &play);
+    assert(strcmp(config.ace_spec, "off") == 0);
+    player_play_config_session(&app->settings, "TEST95001", false, true, &config, &play);
+    assert(strcmp(config.ace_spec, "off") == 0);
+
+    /* Use the same app actions as the screen. Both click and cycle skip legacy
+       Ace waits on a game following the Enhanced library. */
+    app->game_count = 1;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "TEST95001");
+    player_app_open_title_enhanced(app, 0);
+    assert(player_app_enhanced_page_title(app) == 0);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_LOAD, ace_waits);
+    assert(player_app_title_part(app, 0, PLAYER_PART_LOAD) == -1);
+    player_app_enhanced_page_cycle_part(app, PLAYER_PART_LOAD);
+    assert(player_app_title_part(app, 0, PLAYER_PART_LOAD) == ACE_LOAD_AUTO);
+    player_app_enhanced_page_cycle_part(app, PLAYER_PART_LOAD);
+    assert(player_app_title_part(app, 0, PLAYER_PART_LOAD) == ACE_LOAD_OFF);
+    player_play_config_session(&app->settings, "TEST95001", false, false, &config, &play);
+    assert(play.on && !strstr(config.ace_spec, ";load="));
+    player_app_close_enhanced_page(app);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_LOAD, off);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == ACE_LOAD_OFF);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_LOAD, automatic);
+
+    assert(player_app_save_settings(app, path) == NK_OK);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+    player_play_resolve(&back->settings, "TEST95001", &play);
+    assert(play.part[PLAYER_PART_LOAD] == ACE_LOAD_OFF);
+    player_play_resolve(&back->settings, "TEST95002", &play);
+    assert(play.part[PLAYER_PART_LOAD] == ACE_LOAD_FAST);
+    player_play_resolve(&back->settings, "TEST95004", &play);
+    assert(play.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    puts("PASS: Automatic loading round-trips and launches in Enhanced or Ace without a package");
 }
 
 /* Supersampling (contract 10.21, #2073): off in a fresh file and in every graphics preset, its row
@@ -13150,7 +13230,9 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.mips == (r->part[PLAYER_PART_MIPS] == 1 ? 1 : 0));
     /* Wider culling, short loads and soft shadows are Ace items: on only in an Ace launch. */
     assert(c.cull == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_CULL] == 1 ? 1 : 0));
-    assert(c.load == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_LOAD] == 1 ? 1 : 0));
+    assert(c.load == (r->part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO ? ACE_LOAD_AUTO
+                      : r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_LOAD] == ACE_LOAD_FAST
+                        ? ACE_LOAD_FAST : ACE_LOAD_OFF));
     assert(c.shadow == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_SHADOW] == 1
                             ? ACE_SHADOW_SOFT : ACE_SHADOW_OFF));
     /* The stick remap is an Ace item that carries the title's declared dead zone, not the part's
@@ -15588,6 +15670,7 @@ int main(int argc, char **argv) {
     test_play_mode_peak_settings();
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
+    test_auto_load_player_path();
     test_play_mode_ssaa_settings();
     test_ssaa_guard();
     test_play_mode_mips_settings();

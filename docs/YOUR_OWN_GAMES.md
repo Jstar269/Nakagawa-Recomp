@@ -289,13 +289,17 @@ The Graphics preset and Play mode stay above six tabs on Settings > Enhanced and
 page: **Picture** (Texture filtering, Widescreen, Sharper enlarging, Texture pack, Full 32-bit colour, Supersampling,
 Smooth far textures, Texture scaling, Smart 2D filter and Crisp system text), **Motion** (Smooth motion and Frame
 pacing), **Sound** (Clean pitched sound and Unclipped sound), **Controls** (Stick dead zone), **On-screen** (Speed
-readout and Game badge), and **Advanced** (Finer patches, Wider culling, Short loads, Late pad sampling and Soft
+readout and Game badge), and **Advanced** (Finer patches, Wider culling, Loading speed, Late pad sampling and Soft
 shadows). Each option is one row: move between rows with Up and Down, change the focused row's value with Left and
 Right, or click the value you want. A panel on the right gives the focused option's value, description and caveats.
 On a game's page, inherited values are shown as `Library (value)` in muted text and an override is highlighted.
 Ace-only options carry a tag; options that cannot apply as the page stands stay visible but dimmed, with the reason
-in the panel. A game's **Texture pack folder** and **Remove texture pack** rows are the last rows of Picture. All
-changes keep the same settings keys and values as before.
+in the panel. A game's **Texture pack folder** and **Remove texture pack** rows are the last rows of Picture.
+
+To speed up silent disc reads, open **Advanced > Loading speed** and choose **Automatic**. Choose it on the library
+page for all games or on a game's page for that game. Enhanced and Ace can both use it. Loading speed defaults
+to **Off**. Older game packages keep their other enhancements and need a rebuild to use Automatic.
+The older **Short loads** setting appears here as **Short waits (Ace)** and keeps its saved value.
 
 | Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging | Full 32-bit colour |
 | --- | --- | --- | --- | --- | --- | --- | --- |
