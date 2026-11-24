@@ -41,7 +41,7 @@ from analyze import (
     canonical_cfg_gate, canonical_cfg_json, canonical_cfg_report,
     check_code_overlay, code_overlay_elf, code_overlay_layout, data_section_words,
     is_code_overlay, is_fixed_overlay, static_coverage, branch_kind, BRANCH_UNCOND,
-    is_cond_branch, seeds_in_analysis, spans_without, _gpr_writes,
+    is_cond_branch, is_jal_pc_read, seeds_in_analysis, spans_without, _gpr_writes,
 )
 from codegen_hst_stubs import HST_CUSTOM_STUBS
 from host_stubs import HST_SIMPLE_STUBS
@@ -1666,6 +1666,10 @@ def _sp_exit_walk(elf, start, insns, labels, work=None):
                 foreign.add(addr)
             reach(addr + 4, *_frame_step(w, regs, slots))
             continue
+        pc_read = is_jal_pc_read(addr, w) and not ADDRESS_SPACE.unrelocated_jump(addr)
+        if pc_read and 31 in regs:
+            # The link write precedes any read in the slot.
+            regs = {reg: offset for reg, offset in regs.items() if reg != 31}
         slot = read32(elf, addr + 4)
         if _loads_foreign_sp(slot, regs, slots):
             foreign.add(addr + 4)
@@ -1687,6 +1691,8 @@ def _sp_exit_walk(elf, start, insns, labels, work=None):
                     hub = after if hub is None else (
                         {k: v for k, v in hub[0].items() if after[0].get(k) == v},
                         {k: v for k, v in hub[1].items() if after[1].get(k) == v})
+        elif pc_read:
+            reach(addr + 8, *after)
         elif op == 3 or (op == 0 and fn == 0x09) or is_link(w):
             kept = {k: v for k, v in after[0].items() if k in _CALL_SAVED_GPRS or k == _OWN_SP}
             reach(addr + 8, kept, after[1])
@@ -4726,7 +4732,7 @@ def _emit_slot_exit(ctx, out, addr, ran="slot already ran inline"):
         out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* {ran}; skip its labelled duplicate */")
 
 
-def _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw):
+def _emit_unrelocated_jal(ctx, out, addr, ds, dsw):
     """``jal`` the loader leaves as linked."""
     resumable = ctx.resumable
     resume = G((addr + 8) & 0xFFFFFFFF)
@@ -4734,7 +4740,9 @@ def _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw):
     out.append(f"      sr_begin(s, {G(addr)}, {code_word_read(32, G(addr), ctx.options)}); s->r[31] = {resume}; sr_end(s, 0u, 0);")
     out.extend(delay_slot_lines(ds, dsw, addr,
                                 resumable=resumable, indent="      ", options=ctx.options))
-    out.append(f"      {emit_checked_dispatch_call('_t', resume)} }}")
+    call = emit_checked_dispatch_call('_t', resume)
+    # Placement can make a link-space external target equal the runtime link.
+    out.append(f"      if (_t != {resume}) {{ {call} }} }}")
     _emit_slot_exit(ctx, out, addr)
 
 
@@ -4748,6 +4756,9 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); s->r[31] = {G((addr + 8) & 0xFFFFFFFF)}; sr_end(s, 0u, 0);")
     out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
                                 options=ctx.options))
+    if is_jal_pc_read(addr, w):
+        _emit_slot_exit(ctx, out, addr)
+        return
     if target in known or target in resume_owners:
         _call_stmt = f"    {emit_checked_body_call(ADDRESS_SPACE.symbol(target, resume_owners), addr)}"
         if lle_cpu:
@@ -5059,7 +5070,7 @@ def _emit_control_transfer(ctx, out, consumed, addr, w):
     if ds not in ctx.labels:
         consumed.add(ds)
     if op == 3 and ADDRESS_SPACE.unrelocated_jump(addr):
-        _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw)
+        _emit_unrelocated_jal(ctx, out, addr, ds, dsw)
     elif op == 3:
         _emit_jal(ctx, out, addr, w, ds, dsw)
     elif op == 0 and fn == 0x09:
@@ -6829,10 +6840,10 @@ def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, 
 
 def _refuse_uncallable_control_sites(sites):
     """Among control transfers, only a jal call site can be rewritten (fail closed)."""
-    for site in sites.values():
+    for addr, site in sites.items():
         stock = site["stock_words"][0]
         if is_control(stock) and not (
-            (stock >> 26) == 3 and site["rewrite"]["kind"] in (
+            (stock >> 26) == 3 and not is_jal_pc_read(addr, stock) and site["rewrite"]["kind"] in (
                 "gate", "clip_x_widen", "gate_phase", "launch_from_rest")
         ):
             raise enhancement_package.EnhancementPackageError(
@@ -7096,7 +7107,11 @@ def _verified_ace_part_sites(elf, pkg_validated, sym_map, read_words, known, bou
         if site["rewrite"]["kind"] != "vblank_wait_skip":
             raise enhancement_package.EnhancementPackageError(
                 f"{where}: transform {site['rewrite']['kind']!r} has no rewrite (fail-closed refusal)")
-        target = jump_target(addr, site["stock_words"][0])
+        stock = site["stock_words"][0]
+        if is_jal_pc_read(addr, stock):
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: a jal PC-read site cannot carry a call rewrite (fail-closed refusal)")
+        target = jump_target(addr, stock)
         import_ = impmap.get(target)
         if import_ is None or import_[1] != enhancement_package.VBLANK_WAIT_SKIP_NID:
             called = (f"import NID 0x{import_[1]:08x}" if import_ is not None
