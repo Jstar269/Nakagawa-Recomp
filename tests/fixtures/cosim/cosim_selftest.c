@@ -1280,6 +1280,16 @@ static int run_case(const CosimCase *test, const char *trace_dir) {
             expect_lane_word(test, lane, "FCR31 FCC0 after final compare",
                              lane->state.fcr31 & 0x00800000u, 0u, &failed);
         }
+    } else if (strcmp(test->name, "jal_pc_read") == 0) {
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned li = 0u; li < 2u; li++) {
+            const CosimLane *lane = lanes[li];
+            expect_lane_word(test, lane, "link visible in the delay slot", lane->state.r[16],
+                             test->address + 12u, &failed);
+            expect_lane_word(test, lane, "one return delay slot", lane->state.r[2], 22u, &failed);
+            expect_lane_word(test, lane, "original sp", lane->state.r[29], COSIM_STACK, &failed);
+            expect_lane_word(test, lane, "original ra", lane->state.r[31], COSIM_RETURN, &failed);
+        }
     } else if (strcmp(test->name, "xcall") == 0) {
         expect_lane_word(test, &aot, "float result from f12 in f0", aot.state.r[16],
                          aot.state.fi[12], &failed);

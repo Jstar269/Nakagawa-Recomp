@@ -23,12 +23,12 @@ Classes are listed strongest first. A path takes the first class whose source na
 
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
-| `hardware-measured` | 64 | 73 |
+| `hardware-measured` | 64 | 74 |
 | `ppsspp-derived` | 180 | 88 |
 | `game-route` | 0 | 0 |
 | `synthetic` | 300 | 183 |
 | `unverified` | 173 | 22 |
-| total | 717 | 366 |
+| total | 717 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -47,7 +47,7 @@ them, so they carry no class; `python tools/vfpu_coverage_report.py` lists them.
   `tools/psp_oracle/manifest.json` links them (its `case_apis` cells); a row ending `unlinked hardware
   note` carries such a note, and a row ending `PSP-measured cells only` names the exact cells measured,
   not the whole function.
-- Measured VFPU oracle rows that no census form cites yet: `PSP-VFPU-CONSTANTS-001`, `PSP-VFPU-MFVMTV-001`, `PSP-VFPU-PREFIX-001`, `PSP-VFPU-RESERVED-001`, `PSP-VFPU-ROUNDSEP-001`, `PSP-VFPU-UNMODELED-001`, `PSP-VFPU-WIDEROPS-001`. Their forms keep the class
+- Measured VFPU oracle rows that no census form cites yet: `PSP-VFPU-CONSTANTS-001`, `PSP-VFPU-MFVMTV-001`, `PSP-VFPU-PREFIX-001`, `PSP-VFPU-ROUNDSEP-001`, `PSP-VFPU-UNMODELED-001`, `PSP-VFPU-WIDEROPS-001`. Their forms keep the class
   their census row gives until the census links them.
 
 At run time `sr_syscall` logs one line the first time each `unverified` NID with a handler is
@@ -1013,6 +1013,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-34-d0380000-a8e1644c3022` | `0x34` | `0xd0380000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS-001 |
 | `vfpu-34-d0390000-01881cbef1ef` | `0x34` | `0xd0390000` | 1 | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS2-001 |
 | `vfpu-34-d03a0000-d9c2f025e1c0` | `0x34` | `0xd03a0000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-VUS2I-001 |
+| `vfpu-34-d03a8000-eabf54a5c23e` | `0x34` | `0xd03a8008` | 3 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-RESERVED-001 |
 | `vfpu-34-d03b0000-5bf1c1e7f497` | `0x34` | `0xd03b0000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-VUS2I-001 |
 | `vfpu-34-d03b0000-695999f072c8` | `0x34` | `0xd03b0084` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-VUS2I-001 |
 | `vfpu-34-d03b8000-65b917bad035` | `0x34` | `0xd03b8084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
