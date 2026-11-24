@@ -1298,6 +1298,38 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers, and error precedence are unmeasured; a channel of 8 or more (0x80260003) and an unreserved channel (0x80260001) are refused following PPSSPP caa91b54b535, corroborated by PSPAutotests output.expected for channel -1 and unreserved channel 5 (#341)",
     },
+    # sceAudioOutputPannedBlocking (#341): no PSP record measures this API. The refusal codes
+    # follow PPSSPP as a behaviour reference; PSPAutotests output.expected corroborates the
+    # volume cells and the reserved-channel length it records for this NID, and nothing more.
+    "h_AudioOutputPannedBlocking": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_audio_output_panned_blocking_unreserved_channel",
+            "tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_channels",
+            "tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_volumes",
+            "PPSSPP caa91b54b53585811b0fd84405ea04aec72a952b Core/HLE/sceAudio.cpp "
+            "sceAudioOutputPannedBlocking and Core/HLE/__sceAudio.cpp __AudioEnqueue (a behaviour "
+            "reference; derived, not PSP-measured): the two volumes ORed and compared unsigned above "
+            "0xFFFF give 0x8026000b first, a channel of 8 or more 0x80260003, a channel not reserved "
+            "0x80260001",
+            "PSPAutotests tests/audio/sceaudio/output.expected "
+            "(ea71108f00933712c4662276261b39cd42249b1e, a third-party expectation file; corroboration "
+            "only): for this API, equal left and right volumes on a reserved channel with NULL data "
+            "give 0x8026000b for -256, -2, -1, -2147483648 and 65536 and up and the length for 0 to "
+            "65535, and a reserved channel at 0x8000 returns its length (0x1040); the bad-channel "
+            "(0x80260003, channel -1) and unreserved-channel (0x80260001, channel 5) cells are "
+            "recorded for sceAudioOutputBlocking only",
+        ],
+        "limitation": "PPSSPP-derived, not PSP-measured: a volume above 0xFFFF or a negative one "
+        "(0x8026000b, checked first), a channel of 8 or more (0x80260003) and a channel 0 to 7 that "
+        "is not reserved (0x80260001, nothing played, the caller not parked, the first refusal of "
+        "a run reported by name) follow PPSSPP caa91b54b535; PSPAutotests output.expected (ea71108f) "
+        "records this API's volume refusals and its length on a reserved channel, but records the "
+        "bad-channel and unreserved-channel cells for sceAudioOutputBlocking only; there is no PSP "
+        "measurement of this API (no docs/HARDWARE_ORACLE.md or tools/psp_oracle/manifest.json "
+        "record); the blocking duration and wake timing, the mixer result, a busy channel, unequal "
+        "left and right volumes and the volume-before-channel order stay unmeasured (#341)",
+    },
     "h_GeEdramGetAddr": {
         "status": "complete",
         "evidence": [
@@ -3278,7 +3310,6 @@ WAIVERS: tuple[FindingWaiver, ...] = ()
 # Never add an entry to make that gate pass: review the handler instead.
 PROFILE_ZERO_ISSUE = "https://github.com/Jstar269/nakagawa-recomp/issues/341"
 PROFILE_ZERO_UNREVIEWED_IMPORTS = {
-    0x13F592BC: {"name": "sceAudioOutputPannedBlocking", "issue": PROFILE_ZERO_ISSUE},  # h_AudioOutputPannedBlocking: output.expected records bad channel 0x80260003, unreserved 0x80260001 (both refused now) and volume over 0xFFFF 0x8026000b (refused now, as by h_AudioOutputBlocking and h_AudioOutputPanned; a negative volume is refused here alone)
     0xD675EBB8: {"name": "sceKernelSelfStopUnloadModule", "issue": PROFILE_ZERO_ISSUE},  # h_SelfStopUnloadModule: PSP-HLE-SELFSTOP-001 measured (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM) from a helper thread; the first two are reproduced (a first argument of 1 only with no argument block), the third is refused with ILLEGAL_ADDR here where the PSP ran module_stop with an argp it chose (#2397)
 }
 

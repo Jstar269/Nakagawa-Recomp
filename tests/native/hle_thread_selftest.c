@@ -303,6 +303,7 @@ extern void sr_hle_test_audio_reset(void);
 extern void sr_hle_test_audio_wait_reset(void);
 extern void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us));
 extern uint64_t sr_hle_test_audio_wait_total_us(void);
+extern void sr_hle_test_audio_refusal_note_reset(void);
 extern void sr_hle_test_audio_lead_reset(void);
 extern uint32_t sr_hle_test_audio_late_wake_us(void);
 extern void sr_hle_test_audio_lead_feed(uint32_t vbl, int ch, int queued);
@@ -19130,6 +19131,116 @@ static void test_audio_regular_output_refuses_bad_volumes(void) {
            "AudioOutputPanned takes a negative volume, as the reference does");
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
            "volume fixture releases its channel");
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* sceAudioOutputPannedBlocking (0x13f592bc) on a channel number 0 to 7 that is not reserved (#341),
+ * entered through the production registration. HOST_TESTED; no PSP record measures this API.
+ * Each cell's evidence class:
+ *  - an unreserved channel with valid volumes returns NOT_INITIALIZED (0x80260001), plays nothing
+ *    and does not park the caller: PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ *    caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/__sceAudio.cpp, __AudioEnqueue).
+ *    PSPAutotests tests/audio/sceaudio/output.expected at ea71108f00933712c4662276261b39cd42249b1e
+ *    records 0x80260001 for sceAudioOutputBlocking on channel 5 only, never for this NID.
+ *  - a volume of 0x10000 on that channel is INVALID_VOL, the volume checked first: the order is
+ *    PPSSPP-derived (Core/HLE/sceAudio.cpp, sceAudioOutputPannedBlocking); output.expected records
+ *    0x8026000b for this NID only on a reserved channel, so the order is not recorded there.
+ *  - a reserved channel still returns its length and hands the host both volumes: output.expected
+ *    records the length for this NID on a reserved channel (corroboration only).
+ *  - the first refusal of a run is reported once, by name.
+ * Channel 8 (INVALID_CH) and a negative volume through this NID are asserted by
+ * test_audio_regular_output_refuses_bad_channels and test_audio_regular_output_refuses_bad_volumes.
+ *
+ * MUTANT: skip the reservation check in h_AudioOutputPannedBlocking -- the unreserved channel
+ *   returns its zero length instead of NOT_INITIALIZED and waits 1 ms open-loop.
+ * MUTANT: check the channel before the volumes -- 0x10000 on the unreserved channel returns
+ *   NOT_INITIALIZED. */
+static void test_audio_output_panned_blocking_unreserved_channel(void) {
+    enum {
+        STEREO_BUF = 0x08a00000u,
+        NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING = 0x13f592bcu,
+        UNRESERVED_CH = 2u,
+        RESERVED_CH = 0u,
+        OUT_OF_RANGE_CH = 8u,
+        FRAMES = 64u,
+        FORMAT_STEREO = 0u,
+        VOL_LEFT = 0x8000u,
+        VOL_RIGHT = 0x4000u,
+        VOL_OVER = 0x10000u,
+    };
+    static const char REPORT[] =
+        "HLE: PPSSPP-derived, not PSP-measured: sceAudioOutputPannedBlocking refuses channel "
+        "0x00000002 with 0x80260001";
+    CpuState cpu;
+    FILE *capture = NULL;
+    int saved_fd = -1, reserved = -1;
+    char log[2048];
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    sr_hle_test_audio_refusal_note_reset();
+    const unsigned long silence_before = s_audio_silence_calls;
+    expect(sr_hle_test_audio_state(UNRESERVED_CH, &reserved, NULL, NULL) && reserved == 0,
+           "PannedBlocking fixture: channel 2 starts unreserved");
+
+    log[0] = '\0';
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = UNRESERVED_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    const uint32_t unreserved = sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = OUT_OF_RANGE_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    const uint32_t out_of_range = sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    expect(unreserved == SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "PPSSPP-derived, not PSP-measured: AudioOutputPannedBlocking refuses a valid, unreserved "
+           "channel with NOT_INITIALIZED");
+    expect(s_audio_push_calls == 0u && s_audio_silence_calls == silence_before,
+           "PPSSPP-derived, not PSP-measured: the unreserved PannedBlocking output plays nothing");
+    expect(sr_hle_test_audio_wait_total_us() == 0u,
+           "PPSSPP-derived, not PSP-measured: the unreserved PannedBlocking output does not park "
+           "the caller");
+    expect(out_of_range == SCE_AUDIO_ERROR_INVALID_CH,
+           "PPSSPP-derived, not PSP-measured: the second refusal (channel 8) is INVALID_CH");
+    size_t reports = 0u;
+    for (const char *at = log; (at = strstr(at, "refuses channel")) != NULL; at++) reports++;
+    expect(capturing && strstr(log, REPORT) != NULL,
+           "the first refusal of a run is reported by name (sceAudioOutputPannedBlocking, channel "
+           "and code)");
+    expect(capturing && reports == 1u, "a second refusal in the same run is not reported again");
+
+    /* Control: the volume is checked before the channel. */
+    const uint32_t over[][2] = {{VOL_LEFT, VOL_OVER}, {VOL_OVER, VOL_RIGHT}};
+    for (size_t i = 0; i < sizeof(over) / sizeof(over[0]); i++) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = UNRESERVED_CH; cpu.r[5] = over[i][0]; cpu.r[6] = over[i][1];
+        cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_VOL,
+               "PPSSPP-derived order, not PSP-measured: a volume of 0x10000 on the unreserved "
+               "channel is INVALID_VOL before the channel check");
+    }
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "PPSSPP-derived, not PSP-measured: a refused PannedBlocking volume plays nothing and "
+           "never waits");
+
+    /* Control: a reserved channel with valid volumes still plays. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, RESERVED_CH, FRAMES, FORMAT_STEREO) ==
+               RESERVED_CH,
+           "PannedBlocking fixture reserves a 64-frame stereo channel 0");
+    s_audio_queue_result = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = RESERVED_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == FRAMES &&
+               s_audio_push_calls == 1u && s_audio_push_frames == (int)FRAMES &&
+               s_audio_push_vol_l == (int)VOL_LEFT && s_audio_push_vol_r == (int)VOL_RIGHT,
+           "PSPAutotests-corroborated, not PSP-measured here: AudioOutputPannedBlocking on a reserved "
+           "channel returns its length and hands the host the left and right volumes");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, RESERVED_CH, 0u, 0u) == 0u,
+           "PannedBlocking fixture releases its channel");
     sr_hle_test_audio_reset();
     audio_fixture_reset();
     reset_fixture();
@@ -69245,6 +69356,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_regular_contract_safety();
     test_audio_regular_output_refuses_bad_channels();
     test_audio_regular_output_refuses_bad_volumes();
+    test_audio_output_panned_blocking_unreserved_channel();
     test_audio_output2_release_refuses_while_queued();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
