@@ -80,6 +80,7 @@ class Transfer:
     Kinds:
       call            jal, or a linked branch to a callable (``cond`` set): a checked
                       native CALL of ``symbol``, or ``dispatch_call_checked`` when it is None
+      pc-read         jal to its own link: write the link and continue after the slot
       call-computed   jalr rd != 0: dispatch the latched ``target_reg``
       tail-computed   jr rs != 31, jalr $zero: TAIL-record the latched ``target_reg``
       return          jr $ra: capture the latched target, host return
@@ -397,6 +398,8 @@ def _transfer(cg, elf, ranges, addr, w, ds, dsw, known, resume_owners, labels, c
 
     if op == 3:                                                    # jal
         cg.ADDRESS_SPACE.check_jump(addr, w)
+        if cg.is_jal_pc_read(addr, w):
+            return Transfer(addr, w, "pc-read", link_reg=31, slot=_slot(cg, ds, dsw, options), **then)
         target = cg.jump_target(addr, w)
         return Transfer(addr, w, "call", target=target, symbol=callee(target), link_reg=31,
                         slot=_slot(cg, ds, dsw, options), **then)

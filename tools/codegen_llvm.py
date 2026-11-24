@@ -592,12 +592,13 @@ class FunctionLowering:
             else:
                 self.checked_dispatch_call(self.c32(t.target), link_value)
 
-        if t.kind == "call" and t.cond is None:                # jal
+        if t.kind == "pc-read" or (t.kind == "call" and t.cond is None):  # jal
             self.begin(t.addr, t.word)
             self.W(t.link_reg, link_value)
             self.end()
             self.instruction(_require_delay_slot(t))
-            call_target()
+            if t.kind == "call":
+                call_target()
             then()
         elif t.kind in ("call-computed", "tail-computed"):     # jalr / jr rs
             latched = self.R(t.target_reg)                     # PR #126: latched at the transfer
