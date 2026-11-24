@@ -403,6 +403,12 @@
     "name": "sceRegSetKeyValue",
     "status": "partial"
   },
+  "0x17943399": {
+    "classification": "dedicated",
+    "handler": "h_NetInetInit",
+    "name": "sceNetInetInit",
+    "status": "partial"
+  },
   "0x17c1684e": {
     "classification": "dedicated",
     "handler": "h_ReferThreadStatus",
@@ -2922,6 +2928,12 @@
     "classification": "dedicated",
     "handler": "h_ReferMutexStatus",
     "name": "sceKernelReferMutexStatus",
+    "status": "partial"
+  },
+  "0xa9ed66b9": {
+    "classification": "dedicated",
+    "handler": "h_NetInetTerm",
+    "name": "sceNetInetTerm",
     "status": "partial"
   },
   "0xaa73c935": {
