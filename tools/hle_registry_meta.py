@@ -1308,7 +1308,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_channels",
             "tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_volumes",
             "PPSSPP caa91b54b53585811b0fd84405ea04aec72a952b Core/HLE/sceAudio.cpp "
-            "sceAudioOutputPannedBlocking and Core/HLE/__sceAudio.cpp __AudioEnqueue (a behaviour "
+            "sceAudioOutputPannedBlocking and `Core/HLE/__sceAudio.cpp` `__AudioEnqueue` (a behaviour "
             "reference; derived, not PSP-measured): the two volumes ORed and compared unsigned above "
             "0xFFFF give 0x8026000b first, a channel of 8 or more 0x80260003, a channel not reserved "
             "0x80260001",
