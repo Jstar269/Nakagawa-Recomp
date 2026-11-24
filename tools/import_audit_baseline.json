@@ -2644,7 +2644,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogStatus",
     "name": "sceUtilityMsgDialogGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x9ac2eeac": {
     "classification": "dedicated",
