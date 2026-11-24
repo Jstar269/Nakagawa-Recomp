@@ -835,11 +835,11 @@ static void cell_switch(void) {
     CHECK(strcmp(ace_spec_text(), "off") == 0, "off run's line");
     /* A3's counter part: with Ace off the feed does nothing. */
     ace_note_target_draw(0x44000u);
-    ace_note_host_wait(1000000u);
-    ace_note_skipped_slots(3u);
+    ace_note_display_vblank(1, 1);
+    ace_note_display_masked();
     CHECK(ace_flip(0x44000u, 0x22000u, 1u, 1000u) == 0, "an off flip reports nothing");
     ace_counters(&n);
-    CHECK(!n.draws && !n.flips && !n.new_frames && !n.host_wait_ns && !n.skipped_slots && !n.windows,
+    CHECK(!n.draws && !n.flips && !n.new_frames && !n.windows,
           "off counters stay zero");
     char words[128];
     CHECK(ace_feature_words(words, sizeof(words)) == 0 && words[0] == '\0', "no words with Ace off");
@@ -1808,14 +1808,26 @@ static void cell_feed(void) {
     (void)ace_init_spec(k_good, NULL);
     uint64_t ns = 0;
     /* Single buffer, 30 Hz: drawn every other VBLANK, flipped every VBLANK. */
-    for (uint32_t vc = 1; vc <= 600; vc++) {
+    for (uint32_t vc = 1; vc <= 601; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_rate_stable() == ACE_RATE_K2, "single-buffered 30 Hz: %s", ace_rate_name(ace_rate_stable()));
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0, "readout '%s'", v.text);
+    /* The clock keeps up while the cadence detector still has the previous
+     * 30 FPS phase in its ring at the start of a 20 FPS scene. */
+    for (uint32_t vc = 602; vc <= 661; vc++) {
+        if (vc % 3 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_display_vblank(1, 1);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    CHECK(ace_rate_stable() != ACE_RATE_K3,
+          "cadence has not settled to K3: %s", ace_rate_name(ace_rate_stable()));
+    CHECK(ace_readout_view(&v) && !v.pc_limited && strcmp(v.text, "100%  20 FPS") == 0,
+          "an on-time display clock through a cadence transition: '%s'", v.text);
     /* Double buffer, 60 Hz with every other flip landing in the slot of the one before. */
     (void)ace_init_spec(k_good, NULL);
     ns = 0;
@@ -1849,16 +1861,12 @@ static void cell_feed(void) {
 
 /* ---- C5: the speed readout ------------------------------------------------------------------ */
 
-static AceWindow window(double fps, double idle, uint32_t skipped, AceRate stable, int ever, AceRate last) {
-    AceWindow w;
-    memset(&w, 0, sizeof(w));
-    w.wall_ns = 1000000000ull;
-    w.new_frames = (uint32_t)(fps + 0.5);
-    w.idle_ns = (uint64_t)(idle * 1e9);
-    w.skipped_slots = skipped;
-    w.stable = stable;
-    w.ever_stable = ever;
-    w.last_rate = last;
+static AceWindow window(uint32_t frames, uint32_t vblanks) {
+    AceWindow w = {0};
+    w.wall_ns = 1001000000ull;
+    w.new_frames = frames;
+    w.display_vblanks = vblanks;
+    w.display_clock_valid = 1;
     return w;
 }
 
@@ -1866,71 +1874,67 @@ static AceWindow window(double fps, double idle, uint32_t skipped, AceRate stabl
  * SMOOTH OFF in a window it showed no in-between in. n is what moved: the real pictures that
  * reached the screen, plus each in-between by its measured motion weight. */
 static void cell_readout_smooth(void) {
-    AceReadoutState s;
     AceReadoutView v;
     AceWindow w;
 
-    ace_readout_reset(&s);
-    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w = window(30, 60u);
     w.smooth = 1;
     w.betweens = 30;
     w.shown = 60;
     w.motion_milli = 30000;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(v.smooth_on && v.shown_fps > 59.9 && v.motion_fps > 59.9 &&
               strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
           "smooth engaged: '%s'", v.text);
     /* Sixty presents a second whose in-betweens all repeat the old frame: 30 pictures moved. */
     w.motion_milli = 0;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(v.shown_fps > 59.9 && v.motion_fps > 29.9 && v.motion_fps < 30.1 &&
               strcmp(v.text, "100%  30 FPS  SMOOTH 30") == 0,
           "in-betweens that repeat the old frame: '%s'", v.text);
     /* In-betweens that carry a sixteenth of what changes add two pictures, not thirty. */
     w.motion_milli = 30u * 64u;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(strcmp(v.text, "100%  30 FPS  SMOOTH 32") == 0, "in-betweens that move little: '%s'", v.text);
     /* Weights read late land in the next window: a window of 2 in-betweens credited with 5 in-betweens'
      * worth of motion still moves no more than the 60 pictures it showed. */
     w.betweens = 2;
     w.motion_milli = 5000;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(v.motion_fps < 60.1 && strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
           "late weights credit no more motion than the window showed: '%s' (%.2f)", v.text, v.motion_fps);
     /* A 60 FPS scene: nothing to add, and the readout says it added nothing. */
-    w = window(60, 0.4, 0, ACE_RATE_K1, 1, ACE_RATE_K1);
+    w = window(60, 60u);
     w.smooth = 1;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(v.smooth_on && strcmp(v.text, "100%  60 FPS  SMOOTH OFF") == 0, "60 FPS scene: '%s'", v.text);
     /* A PC that cannot keep up: uneven frames get no in-between. */
-    ace_readout_reset(&s);
-    w = window(26, 0.0, 4, ACE_RATE_VARIABLE, 1, ACE_RATE_K2);
+    w = window(26u, 52u);
     w.smooth = 1;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(strcmp(v.text, "\xE2\x96\xB2 86%  26 FPS  PC LIMITED  SMOOTH OFF") == 0,
           "PC limited: '%s'", v.text);
     /* Part of a second engaged: the count is what reached the screen. */
-    ace_readout_reset(&s);
-    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w = window(30, 60u);
     w.smooth = 1;
     w.betweens = 12;
     w.shown = 42;
     w.motion_milli = 12000;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(strcmp(v.text, "100%  30 FPS  SMOOTH 42") == 0, "part engaged: '%s'", v.text);
     /* Flips whose present was dropped are not pictures on the screen: 30 new frames and 20
      * in-betweens, but only 37 pictures. */
-    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w = window(30, 60u);
     w.smooth = 1;
     w.betweens = 20;
     w.shown = 37;
     w.motion_milli = 20000;
-    ace_readout_judge(&s, &w, &v);
+    ace_readout_judge(&w, &v);
     CHECK(v.shown_fps > 36.9 && v.shown_fps < 37.1 && strcmp(v.text, "100%  30 FPS  SMOOTH 37") == 0,
           "pictures that reached the screen: '%s'", v.text);
     /* Smooth motion off: the text is as before. */
-    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
+    w = window(30, 60u);
+    ace_readout_judge(&w, &v);
     CHECK(!v.smooth_on && strcmp(v.text, "100%  30 FPS") == 0, "smooth off: '%s'", v.text);
 
     /* The feed: a 30 Hz run with smooth motion asked for counts the pictures that reached the
@@ -1942,7 +1946,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         if (ace_smooth_take() == ACE_SHOW_BETWEEN) {
             ace_smooth_shown_between(ns);
@@ -1962,7 +1966,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         if (ace_smooth_take() == ACE_SHOW_BETWEEN) {
             ace_smooth_shown_between(ns);
@@ -1982,7 +1986,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         int between = ace_smooth_take() == ACE_SHOW_BETWEEN;
         if (between) ace_smooth_shown_between(ns);
@@ -2000,7 +2004,7 @@ static void cell_readout_smooth(void) {
     for (uint32_t vc = 1; vc <= 600; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
         (void)ace_smooth_take();
         ace_smooth_note_present(ACE_PRESENT_REAL, ns);
@@ -2010,125 +2014,89 @@ static void cell_readout_smooth(void) {
 }
 
 static void cell_readout(void) {
-    AceReadoutState s;
     AceReadoutView v;
-    AceWindow w;
+    static const uint32_t cadence[] = {15u, 20u, 30u, 60u};
+    for (size_t i = 0; i < sizeof(cadence) / sizeof(cadence[0]); ++i) {
+        AceWindow w = window(cadence[i], 60u);
+        char want[24];
+        snprintf(want, sizeof(want), "100%%  %u FPS", cadence[i]);
+        ace_readout_judge(&w, &v);
+        CHECK(!v.pc_limited && v.speed_pct == 100 && strcmp(v.text, want) == 0,
+              "on-time display clock at cadence %u: '%s'", cadence[i], v.text);
+    }
 
-    ace_readout_reset(&s);
-    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(!v.pc_limited && v.speed_pct == 100 && strcmp(v.text, "100%  30 FPS") == 0, "30 on time: '%s'", v.text);
-
-    /* A game that slows down on its own while the PC idles is at full speed, as on a PSP. */
-    ace_readout_reset(&s);
-    w = window(20, 0.6, 0, ACE_RATE_VARIABLE, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(!v.pc_limited && strcmp(v.text, "100%  20 FPS") == 0, "slow game, idle PC: '%s'", v.text);
-
-    /* A steady slowdown keeps T: the detector moves to VARIABLE and then to 20 Hz, the target
-     * stays 30. */
-    ace_readout_reset(&s);
-    w = window(26, 0.0, 4, ACE_RATE_K2, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && v.speed_pct == 86 &&
-          strcmp(v.text, "\xE2\x96\xB2 86%  26 FPS  PC LIMITED") == 0, "slowdown begins: '%s'", v.text);
-    w = window(20, 0.0, 10, ACE_RATE_K3, 1, ACE_RATE_K3);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && v.speed_pct == 66 && v.target_fps > 29.9 && v.target_fps < 30.0,
-          "steady slowdown keeps T: '%s' T=%.2f", v.text, v.target_fps);
-    /* A busy PC with no skipped slot is limited when frames come slower than the class allows. */
-    ace_readout_reset(&s);
-    w = window(27, 0.01, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && v.speed_pct == 90, "busy PC, no skip: '%s'", v.text);
-    /* ...and not when they come on time. */
-    ace_readout_reset(&s);
-    w = window(30, 0.01, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(!v.pc_limited, "busy PC on time: '%s'", v.text);
-
-    /* 60 FPS menus, 30 FPS play: one skipped slot in play is judged against 30, not 60. */
-    ace_readout_reset(&s);
-    w = window(60, 0.4, 0, ACE_RATE_K1, 1, ACE_RATE_K1);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(!v.pc_limited && strcmp(v.text, "100%  60 FPS") == 0, "menus at 60: '%s'", v.text);
-    w = window(30, 0.4, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
-    w = window(29, 0.3, 1, ACE_RATE_K2, 1, ACE_RATE_K2);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && v.speed_pct == 96 && v.target_fps < 30.0,
-          "one skipped slot in play: '%s' T=%.2f", v.text, v.target_fps);
-
-    /* Before a class has been stable once, no percentage. */
-    ace_readout_reset(&s);
-    w = window(27, 0.5, 0, ACE_RATE_NONE, 0, ACE_RATE_NONE);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(!v.have_target && strcmp(v.text, "\xE2\x80\x94 27 FPS") == 0, "no class yet: '%s'", v.text);
-    w = window(20, 0.0, 3, ACE_RATE_NONE, 0, ACE_RATE_NONE);
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && !v.have_target &&
-          strcmp(v.text, "\xE2\x96\xB2 \xE2\x80\x94  20 FPS  PC LIMITED") == 0, "limited, no class: '%s'", v.text);
+    AceWindow w = window(20u, 59u);
+    ace_readout_judge(&w, &v);
+    CHECK(!v.pc_limited && strcmp(v.text, "100%  20 FPS") == 0,
+          "one display edge of sampling uncertainty: '%s'", v.text);
+    w.display_vblanks = 61u;
+    ace_readout_judge(&w, &v);
+    CHECK(!v.pc_limited && v.speed_pct == 100, "one edge ahead also reads full speed: '%s'", v.text);
+    w.display_vblanks = 42u;
+    ace_readout_judge(&w, &v);
+    CHECK(v.pc_limited && v.speed_pct == 70 &&
+          strcmp(v.text, "\xE2\x96\xB2 70%  20 FPS  PC LIMITED") == 0,
+          "delay on the display clock with the same game FPS: '%s'", v.text);
+    w.display_clock_valid = 0;
+    ace_readout_judge(&w, &v);
+    CHECK(!v.pc_limited && v.speed_pct == 0 && strcmp(v.text, "\xE2\x80\x94 20 FPS") == 0,
+          "masked or unpaced clock has no slowdown verdict: '%s'", v.text);
 }
 
-/* GPU LIMITED (ace.h, ace_readout_judge): a limited window whose GPU waits are at least as long as
- * it fell behind names the GPU; shorter waits leave it PC LIMITED, and waits alone never mark a
- * window that kept up. Synthetic timing: a second at 26 of 30 FPS with 4 skipped slots fell
- * behind by 1 s - 26 * 2 VBLANKs = 132.5 ms, more than its 66.7 ms of skipped slots.
- *
- * MUTANT: gpu_limited ignores the wait (always 0) -- the 300 ms case reads PC LIMITED.
- * MUTANT: compares the wait with the skipped slots only -- the 100 ms case reads GPU LIMITED.
- * MUTANT: drop "&& v.pc_limited" -- the on-time window with 600 ms of waits is marked. */
-static void cell_readout_gpu_limited(void) {
-    AceReadoutState s;
+static void cell_readout_clock_boundaries(void) {
     AceReadoutView v;
-    AceWindow w;
-    const double vblank_ns = 1e9 * 1001.0 / 60000.0;
+    (void)ace_init_spec(k_good, NULL);
+    for (uint32_t vc = 0; vc <= 120u; vc++) {
+        ace_note_display_vblank(1, 1);
+        if (vc == 30u) ace_note_display_masked();
+        if (vc % 3u == 0) ace_note_target_draw(0u);
+        (void)ace_flip(0u, 0x22000u, vc, (uint64_t)vc * 1001000000ull / 60u);
+        if (vc == 60u)
+            CHECK(ace_readout_view(&v) && !v.pc_limited &&
+                  strcmp(v.text, "\xE2\x80\x94 20 FPS") == 0,
+                  "masked display window shows FPS only: '%s'", v.text);
+    }
+    CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  20 FPS") == 0,
+          "an unmasked window restores the speed readout: '%s'", v.text);
+    ace_pause_readout();
+    CHECK(!ace_readout_view(&v), "pause discards its partial window");
+    ace_note_display_vblank(1, 1);
+    (void)ace_flip(0u, 0x22000u, 121u, 8000000000ull);
+    CHECK(!ace_readout_view(&v), "elapsed pause time cannot trigger a verdict on resume");
+    ace_note_display_vblank(0, 1);
+    (void)ace_flip(0u, 0x22000u, 122u, 8000000000ull);
+    for (uint32_t vc = 123u; vc <= 182u; vc++) {
+        ace_note_display_vblank(0, 1);
+        if ((vc - 122u) % 3u == 0) ace_note_target_draw(0u);
+        (void)ace_flip(0u, 0x22000u, vc, 8000000000ull + (uint64_t)(vc - 122u) * 1001000000ull / 60u);
+    }
+    CHECK(ace_readout_view(&v) && !v.pc_limited && strcmp(v.text, "\xE2\x80\x94 20 FPS") == 0,
+          "unpaced display window shows FPS only: '%s'", v.text);
+}
 
-    w = window(26, 0.0, 4, ACE_RATE_K2, 1, ACE_RATE_K2);
-    uint64_t behind = ace_readout_behind_ns(&w, 2);
-    uint64_t want = (uint64_t)(1e9 - 26.0 * 2.0 * vblank_ns);
-    CHECK(behind + 1u >= want && behind <= want + 1u, "26 of 30 FPS fell %llu ns behind, not %llu",
-          (unsigned long long)behind, (unsigned long long)want);
-    CHECK(ace_readout_behind_ns(&w, 0) == (uint64_t)(4.0 * vblank_ns),
-          "without a class only the 4 skipped slots count: %llu", (unsigned long long)ace_readout_behind_ns(&w, 0));
+static void cell_readout_gpu_limited(void) {
+    AceReadoutView v;
+    AceWindow w = window(20u, 42u);
+    uint64_t behind = ace_readout_behind_ns(&w);
+    CHECK(behind == 300300000u, "18 missing episodes account for %llu ns",
+          (unsigned long long)behind);
 
-    ace_readout_reset(&s);
-    w.gpu_wait_ns = 300000000ull;
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && v.gpu_limited && v.speed_pct == 86 &&
-          strcmp(v.text, "\xE2\x96\xB2 86%  26 FPS  GPU LIMITED") == 0, "300 ms of GPU waits: '%s'", v.text);
-
-    ace_readout_reset(&s);
-    w.gpu_wait_ns = 100000000ull;
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && !v.gpu_limited &&
-          strcmp(v.text, "\xE2\x96\xB2 86%  26 FPS  PC LIMITED") == 0, "100 ms of GPU waits: '%s'", v.text);
-
-    /* The boundary: waits exactly as long as the window fell behind name the GPU; 1 ns less does not. */
-    ace_readout_reset(&s);
     w.gpu_wait_ns = behind;
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.gpu_limited, "waits equal to the shortfall: '%s'", v.text);
-    ace_readout_reset(&s);
+    ace_readout_judge(&w, &v);
+    CHECK(v.pc_limited && v.gpu_limited &&
+          strcmp(v.text, "\xE2\x96\xB2 70%  20 FPS  GPU LIMITED") == 0,
+          "GPU waits cover the clock shortfall: '%s'", v.text);
     w.gpu_wait_ns = behind - 1u;
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.pc_limited && !v.gpu_limited, "1 ns short of the shortfall: '%s'", v.text);
+    ace_readout_judge(&w, &v);
+    CHECK(v.pc_limited && !v.gpu_limited &&
+          strcmp(v.text, "\xE2\x96\xB2 70%  20 FPS  PC LIMITED") == 0,
+          "waits one nanosecond short leave PC LIMITED: '%s'", v.text);
 
-    /* A window on time is never limited, however long it waited on the GPU. */
-    ace_readout_reset(&s);
-    w = window(30, 0.0, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w.display_vblanks = 60u;
     w.gpu_wait_ns = 600000000ull;
-    ace_readout_judge(&s, &w, &v);
-    CHECK(!v.pc_limited && !v.gpu_limited && strcmp(v.text, "100%  30 FPS") == 0,
-          "on time with GPU waits: '%s'", v.text);
-
-    /* Before any class: 3 skipped slots are 50 ms behind; 60 ms of waits name the GPU. */
-    ace_readout_reset(&s);
-    w = window(20, 0.0, 3, ACE_RATE_NONE, 0, ACE_RATE_NONE);
-    w.gpu_wait_ns = 60000000ull;
-    ace_readout_judge(&s, &w, &v);
-    CHECK(v.gpu_limited && strcmp(v.text, "\xE2\x96\xB2 \xE2\x80\x94  20 FPS  GPU LIMITED") == 0,
-          "GPU limited, no class: '%s'", v.text);
+    ace_readout_judge(&w, &v);
+    CHECK(!v.pc_limited && !v.gpu_limited && strcmp(v.text, "100%  20 FPS") == 0,
+          "waits without a display-clock shortfall do not warn: '%s'", v.text);
 }
 
 /* The feed: ace_note_gpu_wait reaches the window ace_flip judges, and the report counts the second
@@ -2159,17 +2127,18 @@ static void cell_readout_gpu_feed(void) {
     for (; vc <= 300; vc++) {             /* five seconds at 30 FPS: the class settles at 30 Hz */
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0, "before: '%s'", v.text);
-    /* A second where every new frame waits 20 ms on the GPU and comes a VBLANK late: 20 FPS,
-     * a skipped slot each frame, no idle. */
+    /* Each new frame comes after three host periods, with two actual service episodes
+     * and 20 ms of GPU waits. The display has fallen one period behind on each frame. */
     uint64_t end_ns = ns + 1100000000ull;
     while (ns < end_ns) {
         ace_note_target_draw(0x0u);
         ace_note_gpu_wait(20000000u);
-        ace_note_skipped_slots(1u);
+        ace_note_display_vblank(1, 1);
+        ace_note_display_vblank(1, 1);
         vc += 3u;
         ns += 3u * 16683333u;
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
@@ -2185,7 +2154,7 @@ static void cell_readout_gpu_feed(void) {
     for (uint32_t end = vc + 150; vc < end; vc++) {    /* back on time, no waits */
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && !v.pc_limited && !v.gpu_limited, "on time again: '%s'", v.text);
@@ -2199,14 +2168,8 @@ static void cell_readout_gpu_feed(void) {
 
 /* ---- the per-run report --------------------------------------------------------------------- */
 
-/* Fast forward (ENHANCEMENT_CONTRACT.md section 10.15): a second of wall time at 3x holds three
- * seconds of frames, and a host that cannot keep up skips slots. Neither reaches the readout or
- * the report: the readout hides while it runs and returns after a full second at normal speed.
- *
- * MUTANT: drop the s_ff_running branch in ace_flip -- windows are judged during fast forward, so
- *   the readout shows and the window count moves.
- * MUTANT: ace_note_skipped_slots counts during fast forward -- the skipped-slot counter moves.
- * Both together also make the windows PC LIMITED, and pc_limited_seconds is not 0. */
+/* Fast forward (ENHANCEMENT_CONTRACT.md section 10.15) hides the readout
+ * and judges no windows until a full second at normal speed. */
 static void cell_fast_forward(void) {
     AceReadoutView v;
     AceCounters c0, c1;
@@ -2217,7 +2180,7 @@ static void cell_fast_forward(void) {
     for (; vc <= 300; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0, "before fast forward '%s'", v.text);
@@ -2227,26 +2190,25 @@ static void cell_fast_forward(void) {
     for (uint32_t end = vc + 900; vc < end; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u / 3u;
-        if (vc % 10 == 0) ace_note_skipped_slots(1u);
+        if (vc % 10 != 0) ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     ace_counters(&c1);
     CHECK(!ace_readout_view(&v), "five seconds of fast forward judge no window");
-    CHECK(c1.windows == c0.windows && c1.skipped_slots == c0.skipped_slots,
-          "fast forward adds no window (%llu to %llu) and no skipped slot (%llu to %llu)",
-          (unsigned long long)c0.windows, (unsigned long long)c1.windows,
-          (unsigned long long)c0.skipped_slots, (unsigned long long)c1.skipped_slots);
+    CHECK(c1.windows == c0.windows, "fast forward adds no window (%llu to %llu)",
+          (unsigned long long)c0.windows, (unsigned long long)c1.windows);
     ace_note_fast_forward(0);
     for (uint32_t end = vc + 30; vc < end; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(!ace_readout_view(&v), "half a second after fast forward the readout is still hidden");
     for (uint32_t end = vc + 60; vc < end; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
-        ace_note_host_wait(8000000u);
+        ace_note_display_vblank(1, 1);
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
     }
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0,
@@ -3194,6 +3156,7 @@ int main(int argc, char **argv) {
     cell_detector();
     cell_feed();
     cell_readout();
+    cell_readout_clock_boundaries();
     cell_readout_gpu_limited();
     cell_readout_gpu_feed();
     cell_readout_smooth();
