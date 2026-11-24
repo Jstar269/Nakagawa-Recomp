@@ -159,13 +159,13 @@ say so.
 A certificate file (`.pfx`) is imported into the store as non-exportable first. The script does not take
 passwords.
 
-**Steps.** Run these on the signing machine, after the binaries are copied into the staged folder and before
-`generate_sbom.py` and `stage_install.py --portable-zip` in
-[`PREVIEW_RELEASE.md`](PREVIEW_RELEASE.md#recreate-the-package), so that the SBOMs, `bin/runtime-manifest.json`
-and `SHA256SUMS.txt` describe the signed bytes:
+**Steps.** On the signing machine, make a copy of the verified attested bundle outside the release layouts.
+Set `$ApprovedBundle` to that copy and sign it before assembling either layout in
+[the portable release recipe](PREVIEW_RELEASE.md#recreate-the-package). Both layouts, their SBOMs and
+checksums, and the content audit then use the same verified signed bytes.
 
 ```powershell
-pwsh tools/sign_release_binaries.ps1 -Stage $Stage -Thumbprint <certificate SHA-1 thumbprint> `
+pwsh tools/sign_release_binaries.ps1 -Stage $ApprovedBundle -Thumbprint <certificate SHA-1 thumbprint> `
     -TimestampUrl <RFC 3161 timestamp service URL>
 ```
 

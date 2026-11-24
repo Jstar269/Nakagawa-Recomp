@@ -17,14 +17,18 @@ import json
 import os
 import posixpath
 import fnmatch
+from functools import partial
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
-from typing import overload
+from typing import BinaryIO, Callable, Iterable, overload
 import unicodedata
+import zipfile
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nk_core.git_isolation import isolated_git_env as _isolated_git_env  # noqa: E402
@@ -1313,6 +1317,349 @@ def _magic_kind(data: bytes | None, path: str = "") -> str | None:
     if len(data) >= 0x8006 and data[0x8001:0x8006] == b"CD001":
         return "ISO9660 image"
     return None
+
+
+class ArtifactAuditError(ValueError):
+    """The portable release archive or its independent reference failed validation."""
+
+
+ARTIFACT_REFERENCE_FORMAT = "nakagawa-release-artifact-reference"
+ARTIFACT_SUMS = "SHA256SUMS.txt"
+_ARTIFACT_SHOWCASE_IDS = frozenset(("TEST00007", "TEST00008"))
+_ARTIFACT_ISOS = frozenset(f"bin/demos/images/{name}.iso" for name in _ARTIFACT_SHOWCASE_IDS)
+_ARTIFACT_PREFIX_BYTES = 0x8006  # includes the ISO volume identifier
+_ARTIFACT_REFERENCE_MAX_BYTES = 16 * 1024 * 1024
+_ARTIFACT_SHA256 = re.compile(r"[0-9a-f]{64}")
+_ARTIFACT_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_ARTIFACT_WINDOWS_DEVICES = re.compile(r"(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)", re.I)
+
+
+@dataclass(frozen=True)
+class ArtifactPin:
+    role: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ArtifactReference:
+    source_commit: str
+    files: dict[str, ArtifactPin]
+    empty_folders: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ArtifactMember:
+    path: str
+    size: int
+    open_bytes: Callable[[], BinaryIO] | None
+
+
+def _artifact_path(name: str, *, directory: bool = False) -> str:
+    path = name.removesuffix("/") if directory else name
+    parts = path.split("/")
+    if (directory and name == path or
+            any(not part or part in (".", "..") or part.lower() == ".git" or
+                part.endswith((" ", ".")) or _ARTIFACT_WINDOWS_DEVICES.match(part) for part in parts) or
+            re.search(r'[\x00-\x1f\x7f\\:<>"|?*]', path)):
+        raise ArtifactAuditError(f"ARTIFACT_MEMBER_PATH: {name!r}")
+    return path
+
+
+def _artifact_role(path: str) -> str:
+    if path.startswith("bin/demos/"):
+        return "showcase"
+    if path.startswith("bin/"):
+        return "runtime"
+    if path.startswith("prereqs/"):
+        return "prerequisite"
+    if path.startswith("source/"):
+        return "source"
+    return "distribution"
+
+
+def _artifact_guest_kind(prefix: bytes) -> str | None:
+    if prefix.startswith(b"\0PSF"):
+        return "PSP PSF"
+    if prefix.startswith(b"\x7fELF") and len(prefix) >= 20 and prefix[5] in (1, 2):
+        byte_order = "little" if prefix[5] == 1 else "big"
+        if int.from_bytes(prefix[18:20], byte_order) == 8:  # EM_MIPS
+            return "MIPS ELF"
+    if prefix.startswith((b"\0PBP", b"~PSP", b"~SCE")) or prefix[0x8001:0x8006] == b"CD001":
+        return _magic_kind(prefix)
+    return None
+
+
+def _artifact_is_pe(prefix: bytes) -> bool:
+    if not prefix.startswith(b"MZ") or len(prefix) < 64:
+        return False
+    offset = int.from_bytes(prefix[60:64], "little")
+    return offset >= 64 and prefix[offset:offset + 4] == b"PE\0\0"
+
+
+def _artifact_check_kind(path: str, prefix: bytes) -> None:
+    guest = _artifact_guest_kind(prefix)
+    if path in _ARTIFACT_ISOS and guest != "ISO9660 image":
+        raise ArtifactAuditError(f"ARTIFACT_MEMBER_FORMAT: {path} is not an ISO9660 image")
+    if guest and (guest != "ISO9660 image" or path not in _ARTIFACT_ISOS):
+        raise ArtifactAuditError(f"ARTIFACT_GUEST_CONTENT: {path} contains {guest}")
+    if _artifact_is_pe(prefix):
+        parts = path.split("/")
+        player = len(parts) == 2 and parts[0] == "bin"
+        showcase = (len(parts) >= 5 and parts[:3] == ["bin", "demos", "packages"] and
+                    parts[3] in _ARTIFACT_SHOWCASE_IDS)
+        toolchain = path.startswith(("prereqs/python/", "prereqs/msys64/ucrt64/"))
+        if not (player or showcase or toolchain):
+            raise ArtifactAuditError(f"ARTIFACT_BINARY_ROLE: unexpected PE location {path}")
+
+
+def _artifact_directory_members(root: Path) -> Iterable[ArtifactMember]:
+    pending = [root]
+    while pending:
+        folder = pending.pop()
+        with os.scandir(folder) as children:
+            entries = sorted(children, key=lambda child: child.name)
+        if not entries and folder != root:
+            yield ArtifactMember(folder.relative_to(root).as_posix() + "/", 0, None)
+        for child in entries:
+            path = Path(child.path)
+            name = path.relative_to(root).as_posix()
+            _artifact_path(name)
+            if child.is_symlink() or path.is_junction():
+                raise ArtifactAuditError(f"ARTIFACT_MEMBER_TYPE: {name} is a link")
+            if child.is_dir(follow_symlinks=False):
+                pending.append(path)
+            elif child.is_file(follow_symlinks=False):
+                yield ArtifactMember(name, child.stat(follow_symlinks=False).st_size, partial(path.open, "rb"))
+            else:
+                raise ArtifactAuditError(f"ARTIFACT_MEMBER_TYPE: {name} is not a regular file")
+
+
+def _artifact_zip_members(archive: zipfile.ZipFile) -> Iterable[ArtifactMember]:
+    for info in archive.infolist():
+        name = info.orig_filename
+        directory = info.is_dir()
+        _artifact_path(name, directory=directory)
+        expected_mode = stat.S_IFDIR if directory else stat.S_IFREG
+        if stat.S_IFMT(info.external_attr >> 16) not in (0, expected_mode) or (directory and info.file_size):
+            raise ArtifactAuditError(f"ARTIFACT_MEMBER_TYPE: {name}")
+        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or info.flag_bits & 1:
+            raise ArtifactAuditError(f"ARTIFACT_MEMBER_ENCODING: {name}")
+        yield ArtifactMember(name, info.file_size, None if directory else partial(archive.open, info))
+
+
+def _artifact_record_name(name: str, directory: bool, seen: dict[str, tuple[str, bool]],
+                          explicit: set[str]) -> str:
+    path = _artifact_path(name, directory=directory)
+    if path in explicit:
+        raise ArtifactAuditError(f"ARTIFACT_MEMBER_DUPLICATE: {path}")
+    explicit.add(path)
+    parts = path.split("/")
+    for count in range(1, len(parts) + 1):
+        prefix = "/".join(parts[:count])
+        entry = (prefix, count < len(parts) or directory)
+        if seen.setdefault(prefix.casefold(), entry) != entry:
+            raise ArtifactAuditError(f"ARTIFACT_MEMBER_COLLISION: {path}")
+    return path
+
+
+def _artifact_read_pin(member: ArtifactMember) -> tuple[ArtifactPin, bytes]:
+    assert member.open_bytes is not None
+    with member.open_bytes() as stream:
+        prefix = stream.read(min(member.size, _ARTIFACT_PREFIX_BYTES))
+        digest = hashlib.sha256(prefix)
+        remaining = member.size - len(prefix)
+        while remaining:
+            block = stream.read(min(remaining, 1024 * 1024))
+            if not block:
+                raise ArtifactAuditError(f"ARTIFACT_MEMBER_SIZE: {member.path} ended early")
+            digest.update(block)
+            remaining -= len(block)
+        if stream.read(1):
+            raise ArtifactAuditError(f"ARTIFACT_MEMBER_SIZE: {member.path} grew during the audit")
+    return ArtifactPin(_artifact_role(member.path), member.size, digest.hexdigest()), prefix
+
+
+def require_separate_artifact_paths(first: Path, second: Path) -> None:
+    """Keep the archive and all verification inputs outside one another."""
+    try:
+        first, second = first.resolve(), second.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ArtifactAuditError(f"ARTIFACT_REFERENCE_PATH: {exc}") from exc
+    if first.is_relative_to(second) or second.is_relative_to(first):
+        raise ArtifactAuditError("ARTIFACT_REFERENCE_NOT_SEPARATE: candidate and reference paths overlap")
+
+
+def _artifact_load_json(path: Path):
+    with path.open("rb") as stream:
+        data = stream.read(_ARTIFACT_REFERENCE_MAX_BYTES + 1)
+    if len(data) > _ARTIFACT_REFERENCE_MAX_BYTES:
+        raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: reference metadata is too large")
+    try:
+        return json.loads(data)
+    except ValueError as exc:
+        raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: expected JSON metadata") from exc
+
+
+def _artifact_reference_file(path: Path) -> ArtifactReference:
+    record = _artifact_load_json(path)
+    if (not isinstance(record, dict) or record.get("format") != ARTIFACT_REFERENCE_FORMAT or
+            type(record.get("schema_version")) is not int or record["schema_version"] != 1 or
+            not isinstance(record.get("files"), list) or not isinstance(record.get("empty_folders"), list)):
+        raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: expected a version 1 release reference")
+    seen: dict[str, tuple[str, bool]] = {}
+    explicit: set[str] = set()
+    files: dict[str, ArtifactPin] = {}
+    for row in record["files"]:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: expected a member pin")
+        name = _artifact_record_name(row["path"], False, seen, explicit)
+        size, digest, role = row.get("size"), row.get("sha256"), row.get("role")
+        if (name == ARTIFACT_SUMS or type(size) is not int or size < 0 or
+                not isinstance(digest, str) or not _ARTIFACT_SHA256.fullmatch(digest) or role != _artifact_role(name)):
+            raise ArtifactAuditError(f"ARTIFACT_REFERENCE_INVALID: invalid pin for {name}")
+        files[name] = ArtifactPin(role, size, digest)
+    directories = set()
+    for name in record["empty_folders"]:
+        if not isinstance(name, str):
+            raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: expected an empty folder path")
+        _artifact_record_name(name, True, seen, explicit)
+        directories.add(name)
+    return _artifact_reference(record.get("source_commit"), files, directories)
+
+
+def _artifact_reference(commit: object, files: dict[str, ArtifactPin], directories: set[str]) -> ArtifactReference:
+    if not isinstance(commit, str) or not _ARTIFACT_COMMIT.fullmatch(commit) or "toolchain.json" not in files:
+        raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: expected frozen source identity and toolchain pin")
+    # The writer produces this file from the same sorted member names. Derive its
+    # expected bytes from the independent pins, never from the candidate's list.
+    sums = "".join(f"{files[name].sha256}  {name}\n" for name in sorted(files, key=lambda name: name.encode("utf-8")))
+    data = sums.encode("utf-8")
+    files[ARTIFACT_SUMS] = ArtifactPin("distribution", len(data), hashlib.sha256(data).hexdigest())
+    return ArtifactReference(commit, files, frozenset(directories))
+
+
+def _artifact_check_approved(path: str, actual: ArtifactPin, approved: Path | None) -> None:
+    if approved is None or approved.is_symlink() or not approved.is_file():
+        raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_UNBOUND: {path}")
+    if approved.stat().st_size != actual.size:
+        raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISMATCH: {path}")
+    with approved.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != actual.sha256:
+        raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISMATCH: {path}")
+
+
+def _artifact_reference_directory(path: Path, approved_bundle: Path | None,
+                                  approved_prereqs: Path | None) -> ArtifactReference:
+    for approved in (approved_bundle, approved_prereqs):
+        if approved is not None:
+            require_separate_artifact_paths(path, approved)
+    seen: dict[str, tuple[str, bool]] = {}
+    explicit: set[str] = set()
+    files: dict[str, ArtifactPin] = {}
+    directories: set[str] = set()
+    for member in _artifact_directory_members(path):
+        _artifact_record_name(member.path, member.open_bytes is None, seen, explicit)
+        if member.open_bytes is None:
+            directories.add(member.path)
+        elif member.path != ARTIFACT_SUMS:
+            pin, prefix = _artifact_read_pin(member)
+            _artifact_check_kind(member.path, prefix)
+            if pin.role == "prerequisite":
+                approved = approved_prereqs / member.path.removeprefix("prereqs/") if approved_prereqs else None
+                _artifact_check_approved(member.path, pin, approved)
+            elif pin.role in ("runtime", "showcase"):
+                approved = approved_bundle / member.path if approved_bundle else None
+                # An older attested bundle can lack this derived runtime inventory.
+                # The portable writer verifies it against the independently bound bin/ files.
+                locally_generated_manifest = (member.path == "bin/runtime-manifest.json" and
+                                              approved is not None and not approved.exists())
+                if not locally_generated_manifest:
+                    _artifact_check_approved(member.path, pin, approved)
+            files[member.path] = pin
+    approved_bin = approved_bundle / "bin" if approved_bundle is not None else None
+    for prefix, approved in (("bin/", approved_bin), ("prereqs/", approved_prereqs)):
+        if approved is None:
+            continue
+        for member in _artifact_directory_members(approved):
+            expected = prefix + member.path
+            if expected not in (directories if member.open_bytes is None else files):
+                raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISSING: {expected}")
+    if approved_bundle is not None and "toolchain.json" in files:
+        _artifact_check_approved("toolchain.json", files["toolchain.json"], approved_bundle / "toolchain.json")
+    return _artifact_reference(_artifact_toolchain_commit(_artifact_load_json(path / "toolchain.json")),
+                               files, directories)
+
+
+def _artifact_toolchain_commit(toolchain: object) -> object:
+    candidate = toolchain.get("candidate") if isinstance(toolchain, dict) else None
+    return candidate.get("commit") if isinstance(candidate, dict) else None
+
+
+def load_artifact_reference(path: Path, *, approved_bundle: Path | None = None,
+                            approved_prereqs: Path | None = None) -> ArtifactReference:
+    """Read a separately approved pin map, or pin an independent reference layout.
+
+    The latter verifies package executable/image and prerequisite members against
+    their separately verified build bundle and reconstructed prerequisite tree.
+    The release orchestrator verifies and supplies those inputs.
+    """
+    try:
+        if path.is_dir():
+            return _artifact_reference_directory(path, approved_bundle, approved_prereqs)
+        if approved_bundle is not None or approved_prereqs is not None:
+            raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: approved input directories require a layout reference")
+        return _artifact_reference_file(path)
+    except OSError as exc:
+        raise ArtifactAuditError(f"ARTIFACT_REFERENCE_UNREADABLE: {exc}") from exc
+
+
+def _audit_artifact_members(members: Iterable[ArtifactMember], reference: ArtifactReference) -> None:
+    seen: dict[str, tuple[str, bool]] = {}
+    explicit: set[str] = set()
+    files = []
+    for member in members:
+        directory = member.open_bytes is None
+        _artifact_record_name(member.path, directory, seen, explicit)
+        expected = reference.empty_folders if directory else reference.files
+        if member.path not in expected:
+            raise ArtifactAuditError(f"ARTIFACT_MEMBER_UNEXPECTED: {member.path}")
+        if not directory:
+            files.append(member)
+    missing = (reference.files.keys() | {name.rstrip("/") for name in reference.empty_folders}) - explicit
+    if missing:
+        raise ArtifactAuditError(f"ARTIFACT_MEMBER_MISSING: {min(missing)}")
+    for member in files:
+        pin = reference.files[member.path]
+        if pin.size != member.size:
+            raise ArtifactAuditError(f"ARTIFACT_MEMBER_SIZE: {member.path}")
+        actual, prefix = _artifact_read_pin(member)
+        _artifact_check_kind(member.path, prefix)
+        if actual != pin:
+            raise ArtifactAuditError(f"ARTIFACT_MEMBER_DIGEST: {member.path}")
+        if member.path == "toolchain.json":
+            try:
+                commit = _artifact_toolchain_commit(json.loads(prefix))
+            except ValueError as exc:
+                raise ArtifactAuditError("ARTIFACT_TOOLCHAIN_INVALID: unreadable source identity") from exc
+            if commit != reference.source_commit:
+                raise ArtifactAuditError("ARTIFACT_TOOLCHAIN_COMMIT: source identity differs from reference")
+
+
+def audit_artifact(path: Path, reference: ArtifactReference) -> None:
+    """Audit the closed portable ZIP or regular-file directory against approved member pins."""
+    try:
+        mode = path.lstat().st_mode
+        if path.is_junction() or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise ArtifactAuditError("ARTIFACT_INPUT_TYPE: expected a ZIP or directory")
+        if stat.S_ISDIR(mode):
+            _audit_artifact_members(_artifact_directory_members(path), reference)
+        else:
+            with zipfile.ZipFile(path) as archive:
+                _audit_artifact_members(_artifact_zip_members(archive), reference)
+    except (OSError, zipfile.BadZipFile, zlib.error, EOFError, RuntimeError) as exc:
+        raise ArtifactAuditError(f"ARTIFACT_UNREADABLE: {exc}") from exc
 
 
 def _assigned_literal(node: ast.AST | None) -> str | None:
@@ -3938,7 +4285,40 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         action="store_true",
         help="Print JSON report to stdout instead of text summary",
     )
+    parser.add_argument("--artifact", type=Path, metavar="ZIP_OR_DIRECTORY",
+                        help="audit a closed portable release artifact instead of a source tree")
+    parser.add_argument("--artifact-reference", type=Path,
+                        help="independently approved release pin JSON or verified reference layout")
+    parser.add_argument("--approved-bundle", type=Path,
+                        help="separately verified candidate bundle for a layout reference")
+    parser.add_argument("--approved-prereqs", type=Path,
+                        help="separately reconstructed pinned prerequisites for a layout reference")
     args = parser.parse_args(argv)
+
+    artifact_options = {"artifact", "artifact_reference", "approved_bundle", "approved_prereqs", "json"}
+    if args.artifact is not None:
+        if args.artifact_reference is None:
+            parser.error("--artifact requires --artifact-reference")
+        if any(val != parser.get_default(name) for name, val in vars(args).items() if name not in artifact_options):
+            parser.error("--artifact cannot be combined with source-tree audit options")
+        try:
+            for approved in (args.artifact_reference, args.approved_bundle, args.approved_prereqs):
+                if approved is not None:
+                    require_separate_artifact_paths(args.artifact, approved)
+            reference = load_artifact_reference(args.artifact_reference, approved_bundle=args.approved_bundle,
+                                                approved_prereqs=args.approved_prereqs)
+            audit_artifact(args.artifact, reference)
+        except ArtifactAuditError as exc:
+            print(f"artifact audit: FAIL: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps({"event": "artifact-audit", "source_commit": reference.source_commit,
+                              "files": len(reference.files), "empty_folders": len(reference.empty_folders)}))
+        else:
+            print(f"artifact audit: OK ({len(reference.files)} files, source {reference.source_commit})")
+        return 0
+    if any(getattr(args, name) is not None for name in ("artifact_reference", "approved_bundle", "approved_prereqs")):
+        parser.error("release reference options require --artifact")
 
     if args.committed_tree and (args.candidate_root or args.worktree):
         print(

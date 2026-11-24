@@ -200,90 +200,109 @@ if ($LASTEXITCODE -ne 0) { throw 'Frozen candidate trusted attestation failed.' 
 # The hashed generation is the content anchor; public_provenance_ledger.json next to it is
 # the committed claims form, which binds no bytes.
 $TrustedLedger = Join-Path $TrustControls 'public_provenance_ledger.hashed.json'
-New-Item -ItemType Directory -Path $ArtifactRoot, $Source -Force | Out-Null
-python tools/build_public_export.py --public-safe-profile --export-dir $Source --trusted-ledger $TrustedLedger
-
-New-Item -ItemType Directory -Path $Bin, $PackageDocs -Force | Out-Null
-Get-ChildItem -LiteralPath $AttestedBin -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $Bin -Recurse -Force
-}
-foreach ($Required in @('nakagawa_player.exe', 'production_smoke.exe', 'SDL3.dll', 'SDL3_ttf.dll',
-                       'assets/fonts/ui/manifest.json')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $Bin $Required) -PathType Leaf)) {
-        throw "The verified binary bundle is missing $Required."
-    }
-}
-# Use the exact toolchain record shipped and attested with the binary bundle.
-Copy-Item -LiteralPath $ToolchainIdentity -Destination (Join-Path $Stage 'toolchain.json')
-Copy-Item LICENSE, NOTICE.md (Join-Path $Stage '.')
-Copy-Item README.md (Join-Path $Stage '.')
-Copy-Item docs\PREVIEW_RELEASE.md, docs\SETUP.md, docs\SMOKE_TEST.md, docs\RELEASE_NOTES_v0.0.3.md $PackageDocs
-# The pictures the root README shows, at the same relative paths, so the packaged README displays them.
-$ReadmeImages = Select-String -LiteralPath README.md -Pattern 'docs/(?:images|media)/[A-Za-z0-9._/-]+' -AllMatches |
-    ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
-foreach ($Image in $ReadmeImages) {
-    $Destination = Join-Path $Stage $Image
-    New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
-    Copy-Item -LiteralPath $Image -Destination $Destination
-}
-# One plain pointer at the top of the extracted folder.
-@(
-    "Nakagawa Recomp $Version",
-    '',
-    'To start: open the bin folder and run nakagawa_player.exe.',
-    'To check the download first, see docs\RELEASE_NOTES_v0.0.3.md, "Checking your download".',
-    'You need your own copy of a PSP game; nothing in this folder contains game data.'
-) | Set-Content -LiteralPath (Join-Path $Stage 'START HERE.txt') -Encoding utf8NoBOM
-Copy-Item (Join-Path $Bin 'THIRD_PARTY_NOTICES') $Stage -Recurse
-Copy-Item (Join-Path $Bin 'THIRD_PARTY_NOTICES.txt'), (Join-Path $Bin 'SOURCE.txt'), (Join-Path $Bin 'RELINK.md') $Stage
-
-# The pinned build prerequisites (#1285): the verified, unpacked tree BUILD PACKAGE uses, checked
-# against the exported manifest the player reads. Archives are cached outside the stage.
+New-Item -ItemType Directory -Path $ArtifactRoot | Out-Null
+# Reconstruct the prerequisite input outside both release layouts. The frozen
+# manifest pins the upstream binary archives before the production tool lays out their files.
+$ApprovedPrereqs = Join-Path $ArtifactRoot 'approved-prereqs'
 $PrereqCache = Join-Path $ArtifactRoot 'prereq-archives'
-python -m tools.nk_core.prereq_fetcher --manifest (Join-Path $Source 'assets/prereq_manifest.json') `
-    --bundle-dest (Join-Path $Stage 'prereqs') --download-cache $PrereqCache
+python -m tools.nk_core.prereq_fetcher --manifest assets/prereq_manifest.json `
+    --bundle-dest $ApprovedPrereqs --download-cache $PrereqCache
 if ($LASTEXITCODE -ne 0) { throw 'Staging the pinned build prerequisites failed.' }
-# Their corresponding source: one archive published next to the zip, never inside it, holding the
-# pinned source file of every bundled prerequisite, each checked against its manifest pin.
 $SourceZip = Join-Path $ArtifactRoot "nakagawa-recomp-$Version-prerequisite-sources.zip"
-python -m tools.nk_core.prereq_fetcher --manifest (Join-Path $Source 'assets/prereq_manifest.json') `
+python -m tools.nk_core.prereq_fetcher --manifest assets/prereq_manifest.json `
     --source-archive $SourceZip --download-cache $PrereqCache
 if ($LASTEXITCODE -ne 0) { throw 'Writing the prerequisite source archive failed.' }
 
-# A signed release signs the two executables here, on the signing machine, before anything below
-# describes them (RELEASE_SIGNING.md, "Sign the Windows binaries"):
-#   pwsh tools/sign_release_binaries.ps1 -Stage $Stage -Thumbprint <thumbprint> -TimestampUrl <RFC 3161 URL>
-# A bundle attested before #324 has no runtime manifest: record it here, from the verified files.
-if (-not (Test-Path -LiteralPath (Join-Path $Bin 'runtime-manifest.json') -PathType Leaf)) {
-    python tools/stage_runtime_dlls.py --target $Bin --write-runtime-manifest-only
-    if ($LASTEXITCODE -ne 0) { throw 'Recording the runtime manifest failed.' }
-}
-# The SBOMs carry the SHA-256 the runtime manifest records for every executable and DLL in bin/;
-# both steps check the manifest against the files first, and stop on any difference.
-python tools/generate_sbom.py --package-dir $Bin `
-    --spdx-out (Join-Path $Stage 'SBOM.spdx.json') `
-    --spdx3-out (Join-Path $Stage 'SBOM.spdx3.jsonld') `
-    --cyclonedx-out (Join-Path $Stage 'SBOM.cyclonedx.json')
-if ($LASTEXITCODE -ne 0) { throw 'Generating the SBOMs failed.' }
-python tools/verify_sbom.py --expected-release-version $Version `
-    --observed-toolchain $ToolchainIdentity `
-    --spdx (Join-Path $Stage 'SBOM.spdx.json') `
-    --spdx3 (Join-Path $Stage 'SBOM.spdx3.jsonld') `
-    --cyclonedx (Join-Path $Stage 'SBOM.cyclonedx.json') `
-    --package-dir $Bin
-if ($LASTEXITCODE -ne 0) { throw 'The SBOMs do not match the package.' }
+$ApprovedBundle = $AttestedBundle
+# For a signed release, make a separate copy of the verified bundle outside both
+# layouts. Point $ApprovedBundle at that copy and sign it once before assembly.
+# The signing record binds the signed derivatives to the verified originals.
+# See RELEASE_SIGNING.md, "Sign the Windows binaries".
+#   pwsh tools/sign_release_binaries.ps1 -Stage $ApprovedBundle -Thumbprint <thumbprint> -TimestampUrl <RFC 3161 URL>
 
-# The source export is a one-commit Git repository whose commit time and index timestamps change on every
-# run, so source/.git would make two builds differ. The installed source/ has no .git either (see below).
-Remove-Item -LiteralPath (Join-Path $Source '.git') -Recurse -Force
-# Writes SHA256SUMS.txt, checks bin/ against its runtime manifest, then writes the ZIP with
-# sorted entries dated at the candidate commit's time, fixed permissions and no extra fields,
-# so the same commit and staged inputs give the same ZIP bytes. Hidden files (.github,
-# .editorconfig) are included; a link or a .git entry anywhere in the stage is refused.
-# The stage's toolchain.json must name $CandidateSha. The record (outside the stage, never published
-# inside the ZIP) names the ZIP with its size and SHA-256, the source commit and the SHA-256 of
-# SHA256SUMS.txt: the release evidence that ties this ZIP to its commit, and what a dry run compares.
-python tools/stage_install.py --portable-zip $Zip --zip-stage $Stage --revision $CandidateSha --record $ZipRecord
+function New-WindowsReleaseLayout([string]$Layout) {
+    $Bin = Join-Path $Layout 'bin'
+    $Source = Join-Path $Layout 'source'
+    $PackageDocs = Join-Path $Layout 'docs'
+    New-Item -ItemType Directory -Path $Source -Force | Out-Null
+    python tools/build_public_export.py --public-safe-profile --export-dir $Source --trusted-ledger $TrustedLedger
+    if ($LASTEXITCODE -ne 0) { throw 'Building the frozen source export failed.' }
+
+    New-Item -ItemType Directory -Path $Bin, $PackageDocs -Force | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $ApprovedBundle 'bin') -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $Bin -Recurse -Force
+    }
+    foreach ($Required in @('nakagawa_player.exe', 'production_smoke.exe', 'SDL3.dll', 'SDL3_ttf.dll',
+                           'assets/fonts/ui/manifest.json')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Bin $Required) -PathType Leaf)) {
+            throw "The verified binary bundle is missing $Required."
+        }
+    }
+    # Use the exact toolchain record shipped and attested with the binary bundle.
+    Copy-Item -LiteralPath (Join-Path $ApprovedBundle 'toolchain.json') -Destination (Join-Path $Layout 'toolchain.json')
+    Copy-Item LICENSE, NOTICE.md (Join-Path $Layout '.')
+    Copy-Item README.md (Join-Path $Layout '.')
+    Copy-Item docs\PREVIEW_RELEASE.md, docs\SETUP.md, docs\SMOKE_TEST.md, docs\RELEASE_NOTES_v0.0.3.md $PackageDocs
+    # The pictures the root README shows, at the same relative paths, so the packaged README displays them.
+    $ReadmeImages = Select-String -LiteralPath README.md -Pattern 'docs/(?:images|media)/[A-Za-z0-9._/-]+' -AllMatches |
+        ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
+    foreach ($Image in $ReadmeImages) {
+        $Destination = Join-Path $Layout $Image
+        New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
+        Copy-Item -LiteralPath $Image -Destination $Destination
+    }
+    # One plain pointer at the top of the extracted folder.
+    @(
+        "Nakagawa Recomp $Version",
+        '',
+        'To start: open the bin folder and run nakagawa_player.exe.',
+        'To check the download first, see docs\RELEASE_NOTES_v0.0.3.md, "Checking your download".',
+        'You need your own copy of a PSP game; nothing in this folder contains game data.'
+    ) | Set-Content -LiteralPath (Join-Path $Layout 'START HERE.txt') -Encoding utf8NoBOM
+    Copy-Item (Join-Path $Bin 'THIRD_PARTY_NOTICES') $Layout -Recurse
+    Copy-Item (Join-Path $Bin 'THIRD_PARTY_NOTICES.txt'), (Join-Path $Bin 'SOURCE.txt'), (Join-Path $Bin 'RELINK.md') $Layout
+    Copy-Item -LiteralPath $ApprovedPrereqs -Destination (Join-Path $Layout 'prereqs') -Recurse
+
+    # A bundle attested before #324 has no runtime manifest: record it here, from the verified files.
+    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'runtime-manifest.json') -PathType Leaf)) {
+        python tools/stage_runtime_dlls.py --target $Bin --write-runtime-manifest-only
+        if ($LASTEXITCODE -ne 0) { throw 'Recording the runtime manifest failed.' }
+    }
+    # The SBOMs carry the SHA-256 the runtime manifest records for every executable and DLL in bin/;
+    # both steps check the manifest against the files first, and stop on any difference.
+    python tools/generate_sbom.py --package-dir $Bin `
+        --spdx-out (Join-Path $Layout 'SBOM.spdx.json') `
+        --spdx3-out (Join-Path $Layout 'SBOM.spdx3.jsonld') `
+        --cyclonedx-out (Join-Path $Layout 'SBOM.cyclonedx.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Generating the SBOMs failed.' }
+    python tools/verify_sbom.py --expected-release-version $Version `
+        --observed-toolchain $ToolchainIdentity `
+        --spdx (Join-Path $Layout 'SBOM.spdx.json') `
+        --spdx3 (Join-Path $Layout 'SBOM.spdx3.jsonld') `
+        --cyclonedx (Join-Path $Layout 'SBOM.cyclonedx.json') `
+        --package-dir $Bin
+    if ($LASTEXITCODE -ne 0) { throw 'The SBOMs do not match the package.' }
+
+    # Strip Git metadata generated by the export before forming its portable layout.
+    $ExportRoot = (Resolve-Path -LiteralPath $Source).Path
+    $ExportGit = (Resolve-Path -LiteralPath (Join-Path $Source '.git')).Path
+    if (-not $ExportGit.StartsWith($ExportRoot + [IO.Path]::DirectorySeparatorChar,
+                                  [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Export metadata is outside the source export folder.'
+    }
+    Remove-Item -LiteralPath $ExportGit -Recurse -Force
+}
+
+# Assemble both layouts from the verified inputs. A copy of $Stage supplies no
+# independent reference. The still-separate bundle and prerequisite inputs bind
+# the protected executable and showcase bytes again at ZIP time.
+$ReferenceLayout = Join-Path $ArtifactRoot 'expected-windows-layout'
+New-WindowsReleaseLayout $ReferenceLayout
+New-WindowsReleaseLayout $Stage
+# The closed temporary ZIP is audited before it can take the final name. Its
+# record, outside both layouts, binds the ZIP and checksum list to the source SHA.
+python tools/stage_install.py --portable-zip $Zip --zip-stage $Stage --revision $CandidateSha --record $ZipRecord `
+    --artifact-reference $ReferenceLayout --approved-bundle $ApprovedBundle --approved-prereqs $ApprovedPrereqs
 if ($LASTEXITCODE -ne 0) { throw 'Writing the portable ZIP failed.' }
 # The ZIP itself is a container, not an attested subject: publish its SHA-256 next to it so a
 # download can be checked before it is extracted. The source archive gets the same.
@@ -303,6 +322,10 @@ Then sign that checksum file on the offline signing machine, as [`RELEASE_SIGNIN
 `prereqs/` carries the pinned build prerequisites from `assets/prereq_manifest.json`, CPython and the MSYS2 UCRT64 packages, unpacked in the layout the per-user download installs, plus `installed.json` and `bundle-inventory.txt` ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)). BUILD PACKAGE uses it without a consent card or a download ([`SETUP.md`](SETUP.md#player-build-package-prerequisites)). The staging step downloads each archive from its pinned host into the cache, or reuses a cached copy, checks its exact size and SHA-256, unpacks it with the per-user installer's path and link rules (a package link becomes a copy of its target, because a ZIP cannot carry links), removes the documentation folders `share/doc`, `share/info` and `share/man`, writes `notices/SOURCES.txt`, and then verifies the whole tree, file contents included. It prints the bundle's `file_count`, `unpacked_bytes` and `stripped_documentation`: record the first two in the release notes. The ZIP's own size and SHA-256 go on the release page, not in the notes, because the notes are inside the ZIP. The bundled third-party executables keep their upstream bytes and are not re-signed. From the source checkout, `python -m tools.nk_core.prereq_fetcher --manifest assets/prereq_manifest.json --verify-bundle <extracted folder>/prereqs` repeats the full check on an extracted copy. A ZIP that contains `prereqs/` is published only together with its prerequisite source archive, in the same release ([policy below](#bundled-prerequisite-licensing-policy)).
 
 The source archive step writes `nakagawa-recomp-<version>-prerequisite-sources.zip` beside the ZIP, outside the stage. It downloads each pinned source file into the same cache, or reuses a cached copy, checks its exact size and SHA-256, stores it unchanged under one top-level folder with `SOURCES.txt`, and verifies the archive again, contents included. It prints `source_count`, `source_bytes`, `archive_bytes` and `archive_sha256`: record the archive size in the release notes next to the ZIP figures, and attach the archive and its `.sha256` to the same release as the ZIP. `python -m tools.nk_core.prereq_fetcher --manifest assets/prereq_manifest.json --verify-source-archive <archive>` repeats the check on a downloaded copy.
+
+The artifact auditor binds all finished ZIP members to their paths, expected roles, sizes, and SHA-256 values. It derives the ZIP's checksum list from the independent layout. It checks the `bin/` tree, including the two source-owned showcase images, directly against the approved bundle. For an older bundle without a runtime manifest, the packer verifies the derived manifest against those same runtime files. It checks the prerequisite subtree against the separate reconstruction from the pinned archives. The toolchain record identifies the frozen source commit in both layouts and the bundle. `--artifact-reference` can also read an independently reviewed pin JSON with `format` set to `nakagawa-release-artifact-reference`, `schema_version` set to 1, `source_commit`, an `empty_folders` list with trailing slashes, and `files` rows containing `path`, `role`, `size` and `sha256`. The roles are `runtime` under `bin/`, `showcase` under `bin/demos/`, `prerequisite` under `prereqs/`, `source` under `source/`, and `distribution` elsewhere. Omit `SHA256SUMS.txt` from the pin rows. Keep both reference forms outside the staged folder and release archive.
+
+Repeating the same layout and ZIP proves reproducibility. The workflow attestation, frozen source export and pinned prerequisite reconstruction establish the origin of the inputs. A matching copy of the candidate supplies no such evidence.
 
 ### Build the Windows installer
 

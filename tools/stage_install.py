@@ -70,7 +70,7 @@ which the source export rewrites on every run) are refused.
 Usage::
 
     python tools/stage_install.py --dest "<install folder>" --desktop-shortcut --start-menu-shortcut
-    python tools/stage_install.py --portable-zip <out.zip> --zip-stage <staged folder>
+    python tools/stage_install.py --portable-zip <out.zip> --zip-stage <staged folder> --artifact-reference <pins>
     python tools/stage_install.py --check-assets <release folder, or file names>
 
 ``--check-assets`` checks the names of a release's files against the one-archive-
@@ -102,6 +102,7 @@ if str(ROOT / "tools") not in sys.path:
 import make_app_icon  # noqa: E402
 from nk_core.package_cache import sha256_file  # noqa: E402
 from nk_powershell import powershell_env, powershell_exe  # noqa: E402
+import publish_audit  # noqa: E402
 import stage_runtime_dlls  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -826,7 +827,9 @@ def staged_source_commit(stage: Path) -> str:
 
 
 def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
-                       verify_runtime=None, expected_commit: str | None = None) -> dict:
+                       verify_runtime=None, expected_commit: str | None = None,
+                       artifact_reference: Path | None = None, approved_bundle: Path | None = None,
+                       approved_prereqs: Path | None = None) -> dict:
     """Write ``stage`` as a byte-reproducible ZIP at ``zip_path``; return its summary.
 
     ``SHA256SUMS.txt`` is rewritten first and ``bin/runtime-manifest.json`` is
@@ -834,7 +837,8 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
     Entries carry no root folder, the layout ``ZipFile.CreateFromDirectory``
     produced for v0.0.1: one per file and one per empty folder. The summary
     names the source commit from the stage's ``toolchain.json``, which must be
-    ``expected_commit`` when that is given.
+    ``expected_commit`` when that is given. The closed ZIP must match the
+    independently approved reference before it is promoted.
     """
     stage = Path(stage).resolve()
     zip_path = Path(zip_path).resolve()
@@ -858,13 +862,26 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
             verify_runtime(bin_dir)
     except stage_runtime_dlls.StageError as exc:
         raise InstallError(f"PORTABLE_RUNTIME_UNVERIFIED: {exc}") from exc
+    if artifact_reference is None:
+        raise InstallError("PORTABLE_ARTIFACT_REFERENCE_REQUIRED: supply an independent release reference")
+    partial = zip_path.with_name(zip_path.name + ".part")
+    try:
+        for approved in (artifact_reference, approved_bundle, approved_prereqs):
+            if approved is not None:
+                for candidate in (stage, zip_path, partial):
+                    publish_audit.require_separate_artifact_paths(candidate, approved)
+        reference = publish_audit.load_artifact_reference(artifact_reference, approved_bundle=approved_bundle,
+                                                          approved_prereqs=approved_prereqs)
+    except publish_audit.ArtifactAuditError as exc:
+        raise InstallError(f"PORTABLE_ARTIFACT_UNVERIFIED: {exc}") from exc
+    if reference.source_commit != source_commit:
+        raise InstallError("PORTABLE_ARTIFACT_REFERENCE_COMMIT: the reference and stage identify different commits")
     write_sha256sums(stage)
     files, empty = _stage_tree(stage)
     date_time = _zip_date_time(source_date_epoch)
     entries = [(name, path) for name, path in files] + [(name, None) for name in empty]
     entries.sort(key=lambda item: item[0].encode("utf-8"))
     zip_path.parent.mkdir(parents=True, exist_ok=True)
-    partial = zip_path.with_name(zip_path.name + ".part")
     total = 0
     try:
         with zipfile.ZipFile(partial, "w", allowZip64=True) as archive:
@@ -877,6 +894,10 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
                         archive.open(_zip_info(name, date_time, directory=False, size=size), "w") as output:
                     shutil.copyfileobj(source, output, 1 << 20)
                 total += size
+        try:
+            publish_audit.audit_artifact(partial, reference)
+        except publish_audit.ArtifactAuditError as exc:
+            raise InstallError(f"PORTABLE_ARTIFACT_UNVERIFIED: {exc}") from exc
         os.replace(partial, zip_path)
     finally:
         partial.unlink(missing_ok=True)
@@ -1244,6 +1265,12 @@ def main(argv=None) -> int:
                              "one-archive-per-platform contract")
     parser.add_argument("--zip-stage", type=Path,
                         help="the staged release folder --portable-zip archives")
+    parser.add_argument("--artifact-reference", type=Path,
+                        help="independently approved pin JSON or verified layout for --portable-zip")
+    parser.add_argument("--approved-bundle", type=Path,
+                        help="separately verified candidate bundle for a layout reference")
+    parser.add_argument("--approved-prereqs", type=Path,
+                        help="separately reconstructed pinned prerequisites for a layout reference")
     parser.add_argument("--record", type=Path,
                         help="with --portable-zip, also write the ZIP's record (file name, size, SHA-256, "
                              "source commit) to this new file, the evidence a release dry run compares")
@@ -1277,6 +1304,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.record is not None and args.portable_zip is None:
         parser.error("--record goes with --portable-zip")
+    if args.portable_zip is None and any(path is not None for path in
+                                         (args.artifact_reference, args.approved_bundle, args.approved_prereqs)):
+        parser.error("release reference options go with --portable-zip")
     if args.dry_run and not args.uninstall:
         parser.error("--dry-run goes with --uninstall")
     if args.uninstall:
@@ -1308,7 +1338,8 @@ def main(argv=None) -> int:
             expected_commit = resolve_commit(args.revision)
             epoch = resolve_source_date_epoch(args.source_date_epoch, revision=args.revision)
             summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch,
-                                         expected_commit=expected_commit)
+                                         expected_commit=expected_commit, artifact_reference=args.artifact_reference,
+                                         approved_bundle=args.approved_bundle, approved_prereqs=args.approved_prereqs)
             if record_path is not None:
                 try:
                     record_path.parent.mkdir(parents=True, exist_ok=True)
