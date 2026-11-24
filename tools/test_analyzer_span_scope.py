@@ -565,15 +565,16 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
 
     def test_a_fixed_address_image_keeps_every_word_as_address_evidence(self) -> None:
         # The same bytes as a fixed-address executable: its words are its addresses as they
-        # stand, so the jal to 0x14 and the data word 8 still count (the legacy rule).
+        # stand, so the ordinary jal to 0x28 and the data word 8 still count.
         image = self.root / "fixed-image.elf"
-        write_zero_based_module(image, relocatable=False)
+        write_zero_based_module(image, relocatable=False, unrelocated_call=0x0C00000A,
+                                data_pointer=0)
         loaded = analyze.Elf(str(image), base=0)
         self.assertIsNone(loaded.relocated_words)
 
         starts, _ = analyze.analyze(loaded)
 
-        self.assertTrue({0x08, 0x14} <= set(starts))
+        self.assertTrue({0x08, 0x28} <= set(starts))
 
     def test_generic_analyzer_source_carries_no_title_constant(self) -> None:
         source = (TOOLS / "analyze.py").read_text(encoding="utf-8")
@@ -932,6 +933,15 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         image = analyze.Elf(str(elf_path), base=0)
         functions, ranges = analyze.analyze(image)
         return image, set(functions), ranges
+
+    def test_jal_pc_read_keeps_executable_bytes_without_seeding_a_call(self) -> None:
+        words = list(self.NOT_A_CALL_WORDS)
+        words[words.index(0x04110001)] = 0x0C000409  # jal from 0x101c to its own link at 0x1024
+        image, starts, ranges = self._analyze_words("jal-pc-read", words)
+        self.assertIn(0x1018, starts)    # ordinary caller target
+        self.assertNotIn(0x1024, starts)
+        self.assertTrue(analyze.in_ranges(0x1024, ranges))
+        self.assertEqual(analyze.code_pointer_evidence(image, ranges)["jal"], {0x1018, 0x1034})
 
     def test_in_body_linked_call_target_is_an_entry_not_the_callers_interior(self) -> None:
         # Before: the caller's trace absorbed 0x1030 and nothing made it an entry.
@@ -1848,15 +1858,11 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         return names
 
     def test_byte_budget_splits_contiguously_in_order_without_duplicates(self) -> None:
-        # Six uniform reachable 8-byte functions. The byte budget must close a chunk
+        # Six uniform reachable functions. The byte budget must close a chunk
         # only on a function boundary, preserve emission order, and never move or
         # duplicate a function across chunks.
-        words: list[int] = []
-        for i in range(6):
-            words.append(0x0C000000 | (((0x1000 + (i + 1) * 8) >> 2) & 0x3FFFFFF) if i < 5 else 0x03E00008)
-            words.append(0x00000000)
         elf = self.root / "budget.elf"
-        write_elf(elf, words=words)
+        write_direct_call_chain_elf(elf, function_count=6)
 
         legacy = self.root / "budget_legacy.c"
         proc = self._run_codegen(elf, legacy)
@@ -1865,7 +1871,7 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         per_func = (len(legacy_text) - legacy_text.index("void f_")) // 6
         self.assertEqual(
             self._chunk_names(self.root, "budget_legacy"),
-            [[f"f_{0x1000 + i * 8:08x}" for i in range(6)]],
+            [[f"f_{0x1000 + i * 20:08x}" for i in range(6)]],
         )
 
         # A budget of three function emissions plus a little slack must yield 2
@@ -1877,20 +1883,16 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         self.assertEqual(
             self._chunk_names(self.root, "budget_split"),
             [
-                [f"f_{0x1000 + i * 8:08x}" for i in range(3)],
-                [f"f_{0x1000 + (i + 3) * 8:08x}" for i in range(3)],
+                [f"f_{0x1000 + i * 20:08x}" for i in range(3)],
+                [f"f_{0x1000 + (i + 3) * 20:08x}" for i in range(3)],
             ],
         )
 
     def test_byte_budget_still_respects_the_function_cap(self) -> None:
         # A huge budget must not turn the cap off: the legacy count bound still
         # applies, so 6 functions with a cap of 2 become 3 chunks of 2.
-        words: list[int] = []
-        for i in range(6):
-            words.append(0x0C000000 | (((0x1000 + (i + 1) * 8) >> 2) & 0x3FFFFFF) if i < 5 else 0x03E00008)
-            words.append(0x00000000)
         elf = self.root / "cap.elf"
-        write_elf(elf, words=words)
+        write_direct_call_chain_elf(elf, function_count=6)
 
         out_c = self.root / "cap_split.c"
         proc = self._run_codegen(elf, out_c, "--funcs-per-chunk=2", "--target-chunk-bytes=1073741824")
@@ -1898,9 +1900,9 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         self.assertEqual(
             self._chunk_names(self.root, "cap_split"),
             [
-                [f"f_{0x1000 + i * 8:08x}" for i in range(2)],
-                [f"f_{0x1000 + (i + 2) * 8:08x}" for i in range(2)],
-                [f"f_{0x1000 + (i + 4) * 8:08x}" for i in range(2)],
+                [f"f_{0x1000 + i * 20:08x}" for i in range(2)],
+                [f"f_{0x1000 + (i + 2) * 20:08x}" for i in range(2)],
+                [f"f_{0x1000 + (i + 4) * 20:08x}" for i in range(2)],
             ],
         )
 
@@ -1908,12 +1910,8 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         # Without the flag the emitted partition must stay purely count-based, so a
         # cap of 2 still yields 3 chunks of 2 -- the byte budget must not leak into
         # the default path.
-        words: list[int] = []
-        for i in range(6):
-            words.append(0x0C000000 | (((0x1000 + (i + 1) * 8) >> 2) & 0x3FFFFFF) if i < 5 else 0x03E00008)
-            words.append(0x00000000)
         elf = self.root / "legacy.elf"
-        write_elf(elf, words=words)
+        write_direct_call_chain_elf(elf, function_count=6)
 
         out_c = self.root / "legacy_split.c"
         proc = self._run_codegen(elf, out_c, "--funcs-per-chunk=2")
@@ -1921,9 +1919,9 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         self.assertEqual(
             self._chunk_names(self.root, "legacy_split"),
             [
-                [f"f_{0x1000 + i * 8:08x}" for i in range(2)],
-                [f"f_{0x1000 + (i + 2) * 8:08x}" for i in range(2)],
-                [f"f_{0x1000 + (i + 4) * 8:08x}" for i in range(2)],
+                [f"f_{0x1000 + i * 20:08x}" for i in range(2)],
+                [f"f_{0x1000 + (i + 2) * 20:08x}" for i in range(2)],
+                [f"f_{0x1000 + (i + 4) * 20:08x}" for i in range(2)],
             ],
         )
 

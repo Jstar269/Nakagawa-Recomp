@@ -771,6 +771,18 @@ def _cell_link() -> list[int]:
     ]
 
 
+def _cell_jal_pc_read() -> list[int]:
+    return [
+        _r(RA, ZERO, T0, 0, 0x21),          # save the incoming return
+        _j(0x03, 0),                        # jal .+8 (patched + relocated)
+        _r(RA, ZERO, S0, 0, 0x21),          # delay slot observes the new link
+        _i(0x09, ZERO, V0, 17),
+        _r(T0, ZERO, RA, 0, 0x21),          # return from this same body
+        JR_RA,
+        _i(0x09, V0, V0, 5),                # return delay slot
+    ]
+
+
 def _cell_rarewrite() -> list[int]:
     """A linked callee rewrites $ra and returns through the new guest target.
 
@@ -1744,6 +1756,7 @@ CELLS: tuple[tuple[str, str, object], ...] = (
     ("link_leaf", "leaf A: the correct call destination", _cell_link_leaf),
     ("link_leaf_b", "leaf B: a late-resolved call destination", _cell_link_leaf_b),
     ("link", "jal link semantics", _cell_link),
+    ("jal_pc_read", "jal to its own link", _cell_jal_pc_read),
     ("rarewrite", "rewritten $ra at an AOT linked-call boundary", _cell_rarewrite),
     ("rarewrite_callee", "callee that rewrites its live $ra", _cell_rarewrite_callee),
     ("rarewrite_target", "guest destination of the rewritten $ra", _cell_rarewrite_target),
@@ -1938,6 +1951,9 @@ def build_text_segment() -> bytes:
         ("rs_tail", 0x04, 0x02, "rs_inner"),
     ):
         struct.pack_into("<I", text, layout[cell][0] + slot, _j(opcode, layout[target][0]))
+
+    jal_pc_read = layout["jal_pc_read"][0]
+    struct.pack_into("<I", text, jal_pc_read + 4, _j(0x03, jal_pc_read + 12))
 
     # Patch every intra-fixture reference that names another cell's address.
     leaf_a = BASE + layout["link_leaf"][0]
@@ -2466,6 +2482,12 @@ def verify(build_dir: Path) -> int:
         problems.append(
             f"link cell jal decodes to 0x{link_target:08x}, expected leaf 0x{leaf:08x}"
         )
+
+    pc_read = layout["jal_pc_read"][0] + 4
+    pc_word = struct.unpack_from("<I", image, pc_read)[0]
+    pc_target = ((BASE + pc_read + 4) & 0xF0000000) | ((pc_word & 0x03FFFFFF) << 2)
+    if pc_word >> 26 != 3 or pc_target != BASE + pc_read + 8:
+        problems.append("jal_pc_read does not target its own link")
 
     jthunk = struct.unpack_from("<I", image, layout["jthunk"][0])[0]
     jthunk_target = ((jthunk & 0x03FFFFFF) << 2) | (BASE & 0xF0000000)
