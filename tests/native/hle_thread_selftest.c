@@ -30514,7 +30514,10 @@ static void test_sysclib_memory_imports(void) {
 }
 
 static void test_refer_thread_status(void) {
+    extern uint32_t sr_hle_test_compiled_sdk_version(void);
     enum {
+        LEGACY_SDK = 0x02060010u,
+        EXTENDED_SDK = 0x02060011u,
         THREAD_NAME = 0x08301000u,
         THREAD_INFO = 0x08302000u,
         THREAD_ENTRY = 0x08001234u,
@@ -30524,9 +30527,15 @@ static void test_refer_thread_status(void) {
         NID_REFER_THREAD_STATUS = 0x17c1684eu,
         TEST_ILLEGAL_ADDR = 0x80000103u,
         TEST_UNKNOWN_THID = 0x80020198u,
+        TEST_ILLEGAL_SIZE = 0x800201bcu,
     };
     reset_fixture();
     sr_hle_init();
+    const uint32_t saved_sdk = sr_hle_test_compiled_sdk_version();
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+               sr_hle_test_compiled_sdk_version() == LEGACY_SDK,
+           "ReferThreadStatus fixture selects the legacy compiled SDK through dispatch");
     title_hle_write_cstr(THREAD_NAME, "showcase-worker");
     s_cpu->r[4] = THREAD_NAME;
     s_cpu->r[5] = THREAD_ENTRY;
@@ -30563,47 +30572,96 @@ static void test_refer_thread_status(void) {
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR,
            "ReferThreadStatus validates the complete output structure span");
 
-    /* The caller's size word selects the write (the PSP-KERNEL-STATUS-001 rule of the sema,
-     * event-flag and mailbox status calls): 0 writes nothing, a smaller size writes only that
-     * many bytes of the 0x68-byte record, and an unmeasured larger one stops by name.
-     * MUTANT: write sizeof(SrThreadInfo) bytes whatever the size word says -- the size-0 and
-     *   size-8 cells see bytes past the caller's struct overwritten. */
-    enum { INFO_GUARD = 0x70u };
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 0u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == 0u && MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 0 succeeds and writes nothing");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 8u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == (uint32_t)sizeof(SrThreadInfo) &&
-               memcmp((const void *)SR_HOST(THREAD_INFO + 4u), "show", 4u) == 0 &&
-               MEM_R32(THREAD_INFO + 8u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 8 writes only the first 8 bytes of the record");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO + 0x64u) != 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x68u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with the full size writes the record and nothing past it");
+    /* The prefix is the live 104-byte status for the same dormant thread. The
+     * SDK split, write sizes, and trailing word are independently recorded in
+     * PSPAutotests threads/threads/refer.expected (see h_ReferThreadStatus).
+     * A full sentinel comparison proves both the returned bytes and the absence
+     * of writes after the smaller of the declared and supported lengths. */
+    uint8_t legacy[sizeof(SrThreadInfo)];
+    uint8_t extended[0x6c] = {0};
+    memcpy(legacy, (const void *)SR_HOST(THREAD_INFO), sizeof(legacy));
+    memcpy(extended, legacy, sizeof(legacy));
+    fixture_wr32(extended, (uint32_t)sizeof(extended));
+    static const struct {
+        uint32_t sdk, input_size, written, result;
+        const char *label;
+    } cases[] = {
+        { LEGACY_SDK, 0, 0, 0, "legacy size zero leaves output untouched" },
+        { LEGACY_SDK, 8, 8, 0, "legacy partial size returns an exact prefix" },
+        { LEGACY_SDK, 0x68, 0x68, 0, "legacy full size writes 104 bytes" },
+        { LEGACY_SDK, 0x6c, 0x68, 0, "legacy size 108 preserves the trailing word" },
+        { LEGACY_SDK, 0x80, 0x68, 0, "legacy size 128 caps the write at 104 bytes" },
+        { LEGACY_SDK, 0x400, 0x68, 0, "legacy size 1024 caps the write at 104 bytes" },
+        { LEGACY_SDK, UINT32_MAX, 0x68, 0, "legacy maximum size caps the write at 104 bytes" },
+        { EXTENDED_SDK, 0, 0, 0, "newer size zero leaves output untouched" },
+        { EXTENDED_SDK, 8, 8, 0, "newer partial size reports 108 and returns an exact prefix" },
+        { EXTENDED_SDK, 0x68, 0x68, 0, "newer size 104 reports 108 without writing the trailing word" },
+        { EXTENDED_SDK, 0x80, 0, TEST_ILLEGAL_SIZE, "newer size 128 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x400, 0, TEST_ILLEGAL_SIZE, "newer size 1024 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, UINT32_MAX, 0, TEST_ILLEGAL_SIZE, "newer maximum size returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x6c, 0x6c, 0, "newer size 108 still succeeds after a rejected size" },
+    };
+    uint8_t expected[0x404];
     const uint32_t stops_before = sr_hle_test_unmodelled_stops();
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo) + 4u);
+    sr_flight_test_disable();
+    expect(!sr_flight_class_enabled(SR_FLIGHT_CLASS_ALL),
+           "ReferThreadStatus diagnostic is tested with flight recording disabled");
+    FILE *capture = NULL;
+    int saved_stderr = -1;
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_stderr);
+    expect(capturing, "ReferThreadStatus fixture captures normal stderr");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (i == 0 || cases[i].sdk != cases[i - 1].sdk) {
+            s_cpu->r[4] = cases[i].sdk;
+            expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+                       sr_hle_test_compiled_sdk_version() == cases[i].sdk,
+                   "ReferThreadStatus fixture selects the compiled SDK through dispatch");
+        }
+        memset(expected, 0xa5, sizeof(expected));
+        fixture_wr32(expected, cases[i].input_size);
+        memcpy((void *)SR_HOST(THREAD_INFO), expected, sizeof(expected));
+        const uint8_t *record = cases[i].sdk == LEGACY_SDK ? legacy : extended;
+        memcpy(expected, record, cases[i].written);
+        s_cpu->r[4] = uid;
+        s_cpu->r[5] = THREAD_INFO;
+        expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == cases[i].result &&
+                   memcmp((const void *)SR_HOST(THREAD_INFO), expected, sizeof(expected)) == 0,
+               cases[i].label);
+    }
+    char log[1024] = {0};
+    if (capturing) hle_data_stderr_capture_end(capture, saved_stderr, log, sizeof(log));
+    expect(count_occurrences(log, "HLE: sceKernelReferThreadStatus ILLEGAL_SIZE (0x800201bc)") == 3 &&
+               strstr(log, "requested=0x00000080 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0x00000400 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0xffffffff max=0x6c sdk=0x02060011"),
+           "ReferThreadStatus logs only the three newer SDK oversized requests");
+    expect(strstr(log, "UNSUPPORTED_IMPORT:") == NULL,
+           "ReferThreadStatus diagnostic never claims an unsupported import");
+    expect(sr_hle_test_unmodelled_stops() == stops_before,
+           "ReferThreadStatus handles both observed SDK layouts without a semantic stop");
+
+    /* Exactly 104 bytes fit. The newer 108-byte write must check the whole span
+     * before modifying the prefix. The legacy write fits despite the request. */
+    const uint32_t end_buffer = 0x0c000000u - (uint32_t)sizeof(legacy);
+    memset(expected, 0xa5, sizeof(legacy));
+    fixture_wr32(expected, (uint32_t)sizeof(extended));
+    memcpy((void *)SR_HOST(end_buffer), expected, sizeof(legacy));
     s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
-               sr_hle_test_unmodelled_stops() == stops_before + 1u &&
-               MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word above 0x68 stops by name and writes nothing");
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR &&
+               memcmp((const void *)SR_HOST(end_buffer), expected, sizeof(legacy)) == 0,
+           "newer ReferThreadStatus rejects a truncated 108-byte span before writing");
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture switches back to the legacy SDK");
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               memcmp((const void *)SR_HOST(end_buffer), legacy, sizeof(legacy)) == 0,
+           "legacy ReferThreadStatus validates the 104-byte write span for a 108-byte request");
+    s_cpu->r[4] = saved_sdk;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture restores the prior compiled SDK");
 }
 
 /* sceKernelReferThreadRunStatus and sceKernelReferCallbackStatus check the whole record span
@@ -67531,6 +67589,154 @@ static void test_atrac3plus_decode_after_end(void) {
     (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
 }
 
+/* Drain two complete frames. For the ring the first encoded frame is the state-loading
+ * frame. For halfway playback the third frame is only partially supplied. */
+static void test_atrac3plus_refill_after_empty(int streamed) {
+    enum {
+        SAMPLES = 2048u, FRAMES = 4u, HEADER = 56u,
+        WRITE_PTR = 0x08004118u, WRITABLE = 0x0800411cu, READ_OFFSET = 0x08004120u,
+        POSITION = 0x08004124u, PCM_BYTES = SAMPLES * 2u * 2u
+    };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(FRAMES, 3u * SAMPLES, 0u);
+    const uint32_t prefix = HEADER + (streamed ? 3u * AU03_ALIGN
+                                               : 2u * AU03_ALIGN + AU03_ALIGN / 2u);
+    uint8_t tail[FRAMES * AU03_ALIGN];
+    const uint32_t tail_bytes = size - prefix;
+    uint8_t *track = &g_mem[AU03_TRACK - 0x08000000u];
+    memcpy(tail, track + prefix, tail_bytes);
+    memset(track + prefix, 0, tail_bytes);
+    uint32_t id = streamed
+        ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, prefix, 0u, 0u)
+        : td24b_dispatch4(NID_SCE_ATRAC_SET_HALFWAY_BUFFER_AND_GET_ID, AU03_TRACK, prefix, size, 0u);
+    expect(id < 8u, "ATRAC3+ refill: the filled prefix configures the decoder");
+    if (id >= 8u) return;
+
+    for (unsigned frame = 0u; frame < 2u; ++frame) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+               "ATRAC3+ refill: ordinary buffered frames decode before starvation");
+    }
+    uint8_t unchanged_pcm[PCM_BYTES];
+    memset(unchanged_pcm, 0xa5, sizeof(unchanged_pcm));
+    uint8_t *pcm = &g_mem[AU03_PCM - 0x08000000u];
+    memcpy(pcm, unchanged_pcm, sizeof(unchanged_pcm));
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret == ATRAC_ERROR_BUFFER_IS_EMPTY &&
+               MEM_R32(AU03_OUT_N) == 0u && MEM_R32(AU03_OUT_END) == 0u,
+           streamed ? "ATRAC3+ drained stream returns 0x80630023, 0 samples, finish 0"
+                    : "ATRAC3+ short halfway prefix returns 0x80630023, 0 samples, finish 0");
+    expect(MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu,
+           streamed ? "ATRAC3+ drained stream leaves remain untouched"
+                    : "ATRAC3+ short halfway prefix leaves remain untouched");
+    expect(memcmp(pcm, unchanged_pcm, sizeof(unchanged_pcm)) == 0 &&
+               sr_hle_test_atrac_last_block_us() == 0u,
+           "ATRAC3+ buffer-empty performs no PCM write or decode wait");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_NEXT_DECODE_POSITION, id, POSITION, 0u, 0u) == 0u &&
+               MEM_R32(POSITION) == 2u * SAMPLES,
+           "ATRAC3+ buffer-empty leaves the decode position at the missing frame");
+
+    ret = td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id, WRITE_PTR, WRITABLE, READ_OFFSET);
+    const uint32_t write = MEM_R32(WRITE_PTR);
+    const uint32_t expected_write = streamed ? AU03_TRACK : AU03_TRACK + prefix;
+    int can_refill = ret == 0u && MEM_R32(READ_OFFSET) == prefix &&
+                     MEM_R32(WRITABLE) >= tail_bytes && write == expected_write;
+    expect(can_refill, "ATRAC3+ refill requests the unfed file bytes at the correct guest address");
+    if (can_refill) {
+        memcpy(&g_mem[write - 0x08000000u], tail, tail_bytes);
+        expect(td24b_dispatch4(0x7db31251u /* sceAtracAddStreamData */, id, tail_bytes, 0u, 0u) == 0u,
+               "ATRAC3+ refill accepts the bytes supplied by the guest");
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 1u,
+               "ATRAC3+ refill decodes the missing frame and reaches the track end");
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == ATRAC_ERROR_DECODE_DATA_AFTER_END && MEM_R32(AU03_OUT_N) == 0u,
+               "ATRAC3+ refill preserves the separate DecodeData after-end error");
+    }
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+static int au03_refill_loop_frame(uint32_t id, uint32_t read_offset, uint32_t write_address,
+                                  const uint8_t frame[AU03_ALIGN]) {
+    enum { WRITE_PTR = 0x08004118u, WRITABLE = 0x0800411cu, READ_OFFSET = 0x08004120u };
+    uint32_t ret = td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id,
+                                   WRITE_PTR, WRITABLE, READ_OFFSET);
+    if (ret != 0u || MEM_R32(READ_OFFSET) != read_offset || MEM_R32(WRITABLE) < AU03_ALIGN ||
+        MEM_R32(WRITE_PTR) != write_address)
+        return 0;
+    memcpy(&g_mem[write_address - 0x08000000u], frame, AU03_ALIGN);
+    return td24b_dispatch4(0x7db31251u /* sceAtracAddStreamData */, id, AU03_ALIGN, 0u, 0u) == 0u;
+}
+
+static void test_atrac3plus_refill_after_loop_rewind(void) {
+    enum { SAMPLES = 2048u, DATA_OFFSET = 124u, POSITION = 0x08004124u };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(4u, 3u * SAMPLES, 2u * SAMPLES - 1u);
+    const uint32_t ring = size - AU03_ALIGN;
+    uint8_t frame[AU03_ALIGN];
+    memcpy(frame, &g_mem[AU03_TRACK - 0x08000000u + DATA_OFFSET], sizeof(frame));
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, ring, 0u, 0u);
+    expect(id < 8u, "ATRAC3+ loop refill: setup takes the streamed track");
+    if (id >= 8u) return;
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, id, 0xffffffffu, 0u, 0u) == 0u,
+           "ATRAC3+ loop refill: the track is set to loop");
+    for (unsigned i = 0; i < 2u; ++i) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+               "ATRAC3+ loop refill: the initial frames decode and playback loops");
+    }
+
+    int fed_tail = au03_refill_loop_frame(id, ring, AU03_TRACK, frame);
+    expect(fed_tail, "ATRAC3+ loop refill: the remaining frame is supplied before EOF");
+    if (fed_tail) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES,
+               "ATRAC3+ loop refill: the last fed frame decodes after rewind");
+        /* All bytes through EOF have been fed, but the stream's next refill
+         * advertises an earlier file offset because playback is looping. */
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == ATRAC_ERROR_BUFFER_IS_EMPTY && MEM_R32(AU03_OUT_N) == 0u &&
+                   MEM_R32(AU03_OUT_END) == 0u && MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "ATRAC3+ loop refill: a dry ring at fed EOF still needs a refill");
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_NEXT_DECODE_POSITION,
+                              id, POSITION, 0u, 0u) == 0u && MEM_R32(POSITION) == SAMPLES,
+               "ATRAC3+ loop refill: buffer-empty preserves the rewound decode position");
+        int fed_loop = au03_refill_loop_frame(id, DATA_OFFSET, AU03_TRACK + AU03_ALIGN, frame);
+        expect(fed_loop, "ATRAC3+ loop refill: the advertised earlier bytes are accepted");
+        if (fed_loop) {
+            ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+            expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+                   "ATRAC3+ loop refill: decode resumes after feeding the earlier bytes");
+        }
+    }
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+static void test_atrac3plus_missing_frame_without_refill(void) {
+    reset_fixture();
+    sr_hle_init();
+    /* The loaded file contains only one frame although its sample count needs two. */
+    const uint32_t size = au03_build_at3p(1u, 2u * 2048u, 0u);
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, size, 0u, 0u);
+    expect(id < 8u, "ATRAC3+ no refill: setup takes the track");
+    if (id >= 8u) return;
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret == 0u && MEM_R32(AU03_OUT_N) == 2048u && MEM_R32(AU03_OUT_END) == 0u,
+           "ATRAC3+ no refill: the complete frame decodes before the missing one");
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "ATRAC3+ missing frame beyond the loaded file stops by name");
+    expect(MEM_R32(AU03_OUT_N) == 0xdeadbeefu && MEM_R32(AU03_OUT_END) == 0xdeadbeefu &&
+               MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu,
+           "ATRAC3+ missing frame without refill leaves guest outputs untouched");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
 /* The loop end rewinds only while loops remain, in every buffer state: a streamed play-once
  * track with a loop chunk finishes, and an all-data track with a trailer rewinds at its loop end
  * rather than at the end of the file. PPSSPP-derived, not PSP-measured. */
@@ -68590,6 +68796,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
     test_atrac_decode_without_frame_grid();
     test_atrac3plus_decode_after_end();
+    test_atrac3plus_refill_after_empty(1);
+    test_atrac3plus_refill_after_empty(0);
+    test_atrac3plus_refill_after_loop_rewind();
+    test_atrac3plus_missing_frame_without_refill();
     test_atrac_loop_end_follows_loop_num();
     test_atrac_set_loop_num_bad_id();
     test_mp3_loadexec_reset();
