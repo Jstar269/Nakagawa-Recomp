@@ -2431,6 +2431,14 @@ static void pipe_index_free(PipeIndex *ix) {
 
 static VkPipeline pipe_get(const PipeKey *k) {
     uint64_t profile_started = cpu_profile_now();
+    /* Fixed-function MIN and MAX ignore both RGB factors. Share the Vulkan
+     * object across those draws; alpha still uses the separate ADD state. */
+    PipeKey minmax_key;
+    if (k->blend_on && (k->eq == VK_BLEND_OP_MIN || k->eq == VK_BLEND_OP_MAX)) {
+        minmax_key = *k;
+        minmax_key.srcf = minmax_key.dstf = VK_BLEND_FACTOR_ONE;
+        k = &minmax_key;
+    }
     const int hit = pipe_index_find(&s_pipe_idx, s_pipes, s_pipe_n, k);
     if (hit >= 0) {
         if (s_cpu_profile) {
