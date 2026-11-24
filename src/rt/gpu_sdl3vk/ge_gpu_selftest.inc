@@ -4276,7 +4276,7 @@ static int parity_r6_chan(int s, int d, int sf, int df, int eq) {
 #define PARITY_FIXB 0x7F5F2Fu
 
 static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
-                            uint32_t fixb, uint32_t sprites) {
+                            uint32_t fixb, uint32_t sprites, uint32_t mask_rgb) {
     const uint32_t list_addr = 0x00100000u;
     uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
     uint32_t stride = 512u;
@@ -4295,7 +4295,7 @@ static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, 
     PARITY_EMIT(0x22, 0);
     PARITY_EMIT(0x23, 0);
     PARITY_EMIT(0xE7, 1);
-    PARITY_EMIT(0xE8, 0);
+    PARITY_EMIT(0xE8, mask_rgb);
     PARITY_EMIT(0xE9, 0);
     PARITY_EMIT(0x15, 0);
     PARITY_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
@@ -4359,7 +4359,7 @@ static int coherence_run_blend_parity(void) {
             for (uint32_t dfp = 0; dfp <= 10 && ok; dfp++) {
                 const uint32_t fixa = PARITY_FIXA, fixb = PARITY_FIXB;
                 const uint32_t mode = sfp | (dfp << 4) | (eq << 8);
-                const uint32_t list = parity_list(base, vaddr, mode, fixa, fixb, sprites);
+                const uint32_t list = parity_list(base, vaddr, mode, fixa, fixb, sprites, 0);
                 /* the matrix draws onto an 8888 framebuffer with dithering off, so
                  * build_state's routing reduces to blend_needs_shader() */
                 int shader_path = blend_needs_shader(sfp, dfp, eq, fixa, fixb);
@@ -9033,6 +9033,99 @@ static int twin_ref_read(const char *path, TwinRef *r) {
     return 1;
 }
 
+/* #2361: regular Vulkan MIN/MAX ignore the RGB factors. The same geometry with either
+ * factor pair must therefore reuse the pipeline and draw the same image. ADD keeps
+ * both factors, and masking one channel still changes the MAX pipeline. */
+static int coherence_run_pipeline_minmax(void) {
+    const char *name = "pipeline-minmax";
+    const uint32_t base = 0x04000000u | 0x00140000u, vaddr = 0x00101000u;
+    const uint32_t sprites = PARITY_GRID * PARITY_GRID;
+    const uint32_t sample = (PARITY_ORIGIN + 1u) * FB_W + PARITY_ORIGIN + 1u;
+    static const uint32_t equations[] = { 3u, 4u, 0u };
+    static const char *const operations[] = { "MIN", "MAX", "ADD" };
+    /* DST_COLOR and SRC_COLOR, then ONE_MINUS_DST_COLOR and ONE_MINUS_SRC_COLOR. */
+    static const uint32_t factors[] = { 0u, 1u | (1u << 4) };
+    static uint32_t first_images[3][FB_W * FB_H];
+    const GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = FB_W, .width = 480, .height = FB_H };
+    const uint32_t src = parity_src(0), dst = parity_bg(sample);
+    int ok = 1;
+
+    parity_vertices(vaddr, sprites);
+    ge_set_gpu_hooks(&k_hooks);
+    for (size_t op = 0; op < sizeof equations / sizeof equations[0]; op++) {
+        const uint32_t eq = equations[op];
+        const unsigned variants = eq == 4u ? 3u : 2u;
+        for (unsigned variant = 0; variant < variants; variant++) {
+            const uint32_t mask = variant == 2u ? 0x0000FFu : 0;
+            const uint32_t factor_pair = factors[variant != 0u];
+            const unsigned long want = variant == 0u || eq == 0u || mask != 0 ? 1u : 0u;
+            const uint32_t list = parity_list(base, vaddr, (eq << 8) | factor_pair, PARITY_FIXA,
+                                              PARITY_FIXB, sprites, mask);
+            coherence_reset_targets();
+            parity_fill_background(base);
+            const unsigned long creates0 = s_pcache_creates;
+            const unsigned long long draws0 = s_replay_stats.draws;
+            const unsigned long long fallback0 = s_replay_stats.fallback_prims;
+            const unsigned long long snapshots0 = s_replay_stats.snapshot_requests;
+            ge_run_list(list, 0);
+            if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK || s_replay_stats.draws == draws0 ||
+                s_replay_stats.fallback_prims != fallback0 || s_replay_stats.snapshot_requests != snapshots0) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u did not draw and read back "
+                        "through regular Vulkan blending (draws=%llu fallbacks=%llu snapshots=%llu)\n",
+                        name, operations[op], variant, s_replay_stats.draws - draws0,
+                        s_replay_stats.fallback_prims - fallback0, s_replay_stats.snapshot_requests - snapshots0);
+                coherence_reset_targets();
+                return 0;
+            }
+            const unsigned long creates = s_pcache_creates - creates0;
+            if (creates != want) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u created %lu pipelines, wanted %lu\n",
+                        name, operations[op], variant, creates, want);
+                ok = 0;
+            }
+            const uint32_t *pixels = (const uint32_t *)SR_HOST(base);
+            if (eq != 0u) {
+                /* Stencil is disabled, so the destination alpha is kept even on a blended pixel. */
+                uint32_t expected = dst & 0xFF000000u;
+                for (unsigned shift = 0; shift < 24u; shift += 8u) {
+                    const uint32_t s = (src >> shift) & 0xFFu, d = (dst >> shift) & 0xFFu;
+                    uint32_t chosen = (eq == 3u ? s < d : s > d) ? s : d;
+                    if ((mask >> shift) & 0xFFu) chosen = d;
+                    expected |= chosen << shift;
+                }
+                if (pixels[sample] != expected) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u interior pixel=%08x "
+                            "(wanted %08x)\n", name, operations[op], variant,
+                            (unsigned)pixels[sample], (unsigned)expected);
+                    ok = 0;
+                }
+            }
+            for (size_t earlier = 0; earlier < op; earlier++) {
+                if (!memcmp(pixels, first_images[earlier], sizeof first_images[earlier])) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u matched the %s image\n",
+                            name, operations[op], variant, operations[earlier]);
+                    ok = 0;
+                }
+            }
+            if (variant == 0u) {
+                memcpy(first_images[op], pixels, sizeof first_images[op]);
+            } else {
+                const int want_same = eq != 0u && mask == 0;
+                const int same = memcmp(pixels, first_images[op], sizeof first_images[op]) == 0;
+                if (same != want_same) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u image was %s\n",
+                            name, operations[op], variant, same ? "the same" : "different");
+                    ok = 0;
+                }
+            }
+        }
+    }
+    coherence_reset_targets();
+    if (ok) printf("gpu coherence selftest: PASS %-22s MIN/MAX reused both factor pairs; ADD and the mask "
+                   "kept separate pipelines and images\n", name);
+    return ok;
+}
+
 /* ---- the pipeline cache on disk (#2149) ------------------------------------------------
  *
  * Run by the recipe as three processes over one empty folder (`--pipeline-cache DIR`):
@@ -9065,7 +9158,7 @@ static int pcache_scene(uint32_t eq_end, uint64_t *hash) {
         for (uint32_t sfp = 0; sfp <= 10; sfp++)
             for (uint32_t dfp = 0; dfp <= 10; dfp++) {
                 const uint32_t list = parity_list(base, vaddr, sfp | (dfp << 4) | (eq << 8), PARITY_FIXA,
-                                                  PARITY_FIXB, sprites);
+                                                  PARITY_FIXB, sprites, 0);
                 coherence_reset_targets();
                 parity_fill_background(base);
                 ge_run_list(list, 0);
@@ -16880,6 +16973,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
+        if (strcmp(only, "pipeline-minmax") == 0) return coherence_run_pipeline_minmax();
         if (strcmp(only, "pipeline-clear-prewarm-cold") == 0) return coherence_run_pipeline_clear_prewarm(0, 0);
         if (strcmp(only, "pipeline-clear-prewarm-warm") == 0) return coherence_run_pipeline_clear_prewarm(1, 0);
         if (strcmp(only, "pipeline-clear-prewarm-retry") == 0) return coherence_run_pipeline_clear_prewarm(0, 1);
