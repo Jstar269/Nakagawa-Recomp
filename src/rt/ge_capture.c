@@ -171,9 +171,9 @@ static int cpu_vram_store_pending(void) {
     return 1;
 }
 
-/* Walk the saved pages under [addr, addr + bytes): `src` NULL is a GE read, otherwise the GE
- * writes `src` there. Returns 0 after dropping the capture. */
-static int note_span(uint32_t addr, uint32_t bytes, const uint8_t *src) {
+/* Walk the saved pages under [addr, addr + bytes). A GE read observes live RAM or
+ * the provided resident representation. A GE write updates the captured timeline. */
+static int note_span(uint32_t addr, uint32_t bytes, const uint8_t *src, const uint8_t *cached) {
     if (!s_capture.active || bytes == 0) return 1;
     if (cpu_vram_store_pending()) return 0;
     uint64_t first = SR_PHYS(addr);
@@ -209,10 +209,13 @@ static int note_span(uint32_t addr, uint32_t bytes, const uint8_t *src) {
             if (src) {
                 shadow[off] = src[(uint64_t)page_addr + off - first];
                 fixed[off] = 1;
-            } else if (!fixed[off]) {
-                if (live[off] != shadow[off]) data[off] = shadow[off] = live[off];
+                continue;
+            }
+            const uint8_t consumed = cached ? cached[(uint64_t)page_addr + off - first] : live[off];
+            if (!fixed[off]) {
+                data[off] = shadow[off] = consumed;
                 fixed[off] = 1;
-            } else if (live[off] != shadow[off]) {
+            } else if (consumed != shadow[off]) {
                 fprintf(stderr,
                         "GE_CAPTURE: guest byte 0x%08x changed after the GE consumed it in this "
                         "frame; one saved page cannot replay both values, so this capture is "
@@ -225,12 +228,21 @@ static int note_span(uint32_t addr, uint32_t bytes, const uint8_t *src) {
     return 1;
 }
 
+int ge_capture_note_observed_ram(uint32_t addr, const void *resident, uint32_t bytes) {
+    const uint32_t physical = SR_PHYS(addr);
+    if (!resident || physical < SR_RAM_BASE || !bytes ||
+        (uint64_t)physical + bytes > 0x0C000000u ||
+        !sr_guest_span_readable_current(addr, bytes))
+        return 0;
+    return note_span(addr, bytes, NULL, resident);
+}
+
 void ge_capture_note_memory(uint32_t addr, uint32_t bytes) {
-    (void)note_span(addr, bytes, NULL);
+    (void)note_span(addr, bytes, NULL, NULL);
 }
 
 void ge_capture_note_write(uint32_t addr, const void *src, uint32_t bytes) {
-    if (src) (void)note_span(addr, bytes, (const uint8_t *)src);
+    if (src) (void)note_span(addr, bytes, (const uint8_t *)src, NULL);
 }
 
 void ge_capture_note_cpu_vram_store(uint32_t addr, uint32_t bytes) {

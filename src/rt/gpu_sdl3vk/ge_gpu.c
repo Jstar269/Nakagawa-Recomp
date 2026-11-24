@@ -133,6 +133,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "../recomp.h"
 #include "../ge_shared.h"
+#include "../ge_capture.h"
 #include "../perf.h"
 #include "../ace.h"   /* Ace Mode: the 30 Hz detector counts draws per target (Ace on only) */
 #include "tex_scale.h"   /* texture scaling (xBRZ) and the smart 2D filter (Ace on only) */
@@ -319,6 +320,9 @@ typedef struct {
     int pending;                           /* referenced by not-yet-submitted batches */
     uint8_t *shadow;
     uint32_t shadow_bytes;
+    uint64_t shadow_gen;
+    uint32_t shadow_fmt;
+    int shadow_swizzle;
     uint8_t shadow_clut[2048];
     uint32_t shadow_clut_fmt;
     int shadow_clut_valid;
@@ -4753,6 +4757,9 @@ static void tex_shadow_store(TexEnt *e) {
     uint64_t memcpy_started = cpu_profile_now();
     for (uint32_t l = 0, off = 0; l <= e->mip.max_level; off += tex_level_bytes(e, l++))
         memcpy(e->shadow + off, src[l], tex_level_bytes(e, l));
+    e->shadow_gen = e->gen;
+    e->shadow_fmt = s_ge->tex_fmt;
+    e->shadow_swizzle = s_ge->tex_swizzle;
     if (s_ge->tex_fmt >= 4 && s_ge->tex_fmt <= 7) {
         memcpy(e->shadow_clut, s_ge->clutram, sizeof(e->shadow_clut));
         e->shadow_clut_fmt = s_ge->clut_fmt;
@@ -7171,6 +7178,50 @@ static void tex_slot_unmake(TexEnt *e) {
     e->smp = VK_NULL_HANDLE; e->view = VK_NULL_HANDLE; e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE;
 }
 
+static int tex_is_ram(uint32_t addr) {
+    const uint32_t physical = SR_PHYS(addr);
+    return physical >= SR_RAM_BASE && physical < 0x0C000000u;
+}
+
+static const char *tex_capture_cached_ram(const TexEnt *e) {
+    int any_ram = tex_is_ram(e->addr);
+    int all_ram = any_ram;
+    for (uint32_t i = 0; i < e->mip.max_level; i++) {
+        const int ram = tex_is_ram(e->mip.addr[i]);
+        any_ram |= ram;
+        all_ram &= ram;
+    }
+    if (!any_ram) return NULL; /* VRAM has its own snapshot and writes. */
+    if (!all_ram) return "mixed RAM and non-RAM mip chain";
+    if (!e->shadow || e->shadow_gen != e->gen) return "missing current resident source";
+    if (e->addr != s_ge->tex_addr || e->w != s_ge->tex_w || e->h != s_ge->tex_h ||
+        e->bufw != s_ge->tex_bufw || e->shadow_fmt != s_ge->tex_fmt ||
+        e->shadow_swizzle != s_ge->tex_swizzle)
+        return "resident texture layout differs";
+    if (s_ge->tex_fmt >= 4u && s_ge->tex_fmt <= 7u &&
+        (!e->shadow_clut_valid || e->shadow_clut_fmt != s_ge->clut_fmt ||
+         memcmp(e->shadow_clut, s_ge->clutram, sizeof(e->shadow_clut)) != 0))
+        return "resident CLUT differs from GE state";
+    uint32_t offset = 0;
+    for (uint32_t level = 0; level <= e->mip.max_level; level++) {
+        const uint32_t bytes = tex_level_bytes(e, level);
+        if (bytes > e->shadow_bytes - offset ||
+            !ge_capture_note_texture_level(level, e->shadow + offset, bytes))
+            return "resident texture read is unrepresentable";
+        offset += bytes;
+    }
+    return NULL;
+}
+
+static void tex_capture_cached_read(const TexEnt *e) {
+    const char *reason = tex_capture_cached_ram(e);
+    if (reason && g_ge_capture_active) {
+        fprintf(stderr, "GE_CAPTURE: cached texture at 0x%08x cannot be captured: %s\n",
+                e->addr, reason);
+        ge_capture_abort();
+    }
+}
+
 static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
     s_tex_bound_hm = 0;
@@ -7221,6 +7272,7 @@ static VkDescriptorSet tex_get(void) {
             if (xs_enabled()) tex_xs_retry(e, levels);
             tex_movie_refresh(e, levels);   /* #2111 */
             tex_dump_note(e, levels);
+            if (g_ge_capture_active) tex_capture_cached_read(e);
             return tex_bind_set(e, levels);
         }
         if (!e->content_valid && e->hash == hash && tex_shadow_matches(e)) {
@@ -7234,6 +7286,7 @@ static VkDescriptorSet tex_get(void) {
             if (sr_perf_enabled) sr_perf_texture_cache(1);
             if (xs_enabled()) tex_xs_retry(e, levels);
             tex_dump_note(e, levels);
+            if (g_ge_capture_active) tex_capture_cached_read(e);
             return tex_bind_set(e, levels);
         }
         /* same texture state, new contents: update in place (cache stays bounded) */

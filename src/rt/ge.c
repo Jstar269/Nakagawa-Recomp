@@ -2640,6 +2640,35 @@ static TexLevel tex_level(uint32_t level) {
     return t;
 }
 
+#ifndef SR_GE_VRAM_DECODER_CLI
+int ge_capture_note_texture_level(uint32_t level, const uint8_t *resident, uint32_t available) {
+    static const uint32_t format_bits[] = {16, 16, 16, 32, 4, 8, 16, 32};
+    const TexLevel t = tex_level(level);
+    if (!g_ge_capture_active || !resident || level > 7u || ge.tex_fmt > 7u ||
+        t.w <= 0 || t.h <= 0 || t.w > 512 || t.h > 512)
+        return 0;
+    const uint32_t bits = format_bits[ge.tex_fmt];
+    const uint32_t width = (uint32_t)t.w;
+    const uint32_t stride = t.bufw ? t.bufw : width;
+    /* Linear textures use one run per row. Swizzled tiles hold 16 row bytes.
+     * Visit each active run so stride padding and partial tiles stay unfixed. */
+    const uint32_t group = ge.tex_swizzle ? 128u / bits : width;
+    for (uint32_t y = 0; y < (uint32_t)t.h; y++) {
+        for (uint32_t x = 0; x < width; x += group) {
+            uint32_t count = width - x;
+            if (count > group) count = group;
+            const uint32_t offset = texel_offset(stride, x, y, bits);
+            const uint32_t bytes = (count * bits + 7u) / 8u;
+            if (offset > available || bytes > available - offset ||
+                (uint64_t)t.addr + offset + bytes > UINT64_C(0x100000000) ||
+                !ge_capture_note_observed_ram(t.addr + offset, resident + offset, bytes))
+                return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
 /* Host bytes of the level a GPU decode is reading (tex_decode_host_begin), else NULL. */
 static const uint8_t *s_tex_host;
 static uint32_t s_tex_host_addr;
