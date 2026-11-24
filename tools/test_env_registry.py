@@ -29,6 +29,9 @@ REGISTRY = RT / "env_registry.h"
 PLAYER = SRC / "player" / "main.c"
 SETUP = ROOT / "docs" / "SETUP.md"
 STABILITY = ROOT / "docs" / "RUNTIME_PACKAGING_ARCHITECTURE.md"
+BUILD_ENV_READERS = tuple(ROOT / "tools" / name for name in (
+    "contrib_check.py", "nk_cli.py", "nk_doctor_checks.py", "vulkan_sdk.py",
+))
 # The makefiles whose assignments name the runtime's sources, and the lists that link it.
 MAKE_FILES = (ROOT / "Makefile", *sorted((ROOT / "mk").glob("*.mk")))
 RUNTIME_LISTS = ("RT_SRCS", "SDL3VK_SRCS")
@@ -55,6 +58,14 @@ CLI_TOKEN_RE = re.compile(
     r'|(?P<directive>\#[^\n]+)|/\*[\s\S]*?\*/|//[^\n]*|\s+'
 )
 ENV_SYMBOL_RE = re.compile(r"\b[A-Z][A-Z0-9_]+\b")
+PYTHON_ENV_READ_RE = re.compile(
+    r'''\bos\.(?:(?:getenv|environ\.get)\(\s*|environ\[\s*)["']([A-Z][A-Z0-9_]+)["']'''
+)
+EXPLICIT_ENV_RE = re.compile(
+    r"\$env:([A-Za-z][A-Za-z0-9_]*)|%([A-Z][A-Z0-9_]+)%|\bexport\s+([A-Z][A-Z0-9_]+)\s*="
+    r"|`([A-Z][A-Z0-9_]+)`\s+environment variables?\b"
+    r"|\benvironment variable\s+`([A-Z][A-Z0-9_]+)`"
+)
 CLI_CLASSES = {
     "Stable user-facing, printed in `--help`",
     "Documented QA, capture and scripted-run flags (**Proposal**)",
@@ -138,6 +149,17 @@ def stability_classes(document, column):
                 raise ValueError(f"empty or duplicate stability names: {label}")
             classes[label] = set(members)
     return classes
+
+
+def setup_environment_names(text, known, families):
+    """Find project names, known environment inputs and explicit environment syntax."""
+    symbols = set(ENV_SYMBOL_RE.findall(text)) - SETUP_CODE_SYMBOLS
+    names = {name for name in symbols if name.startswith(("SR_", "NK_"))
+             or covered(name, known, families)}
+    names.update(name.upper() for match in EXPLICIT_ENV_RE.findall(text) for name in match if name)
+    # A numbered spelling in SETUP means the corresponding registered family.
+    return {re.sub(r"\d+$", "N", name)
+            if name not in known and covered(name, known, families) else name for name in names}
 
 
 def registry_rows():
@@ -351,14 +373,11 @@ class EnvRegistryTests(unittest.TestCase):
         classified = set().union(*classes.values())
         self.assertEqual(sorted(name for name in classified if not ENV_SYMBOL_RE.fullmatch(name)),
                          [], "list each variable explicitly in its stability class")
-        setup = set(ENV_SYMBOL_RE.findall(SETUP.read_text(encoding="utf-8"))) - SETUP_CODE_SYMBOLS
-        documented = {name for name in setup if name.startswith(("SR_", "NK_"))
-                      or covered(name, self.names, self.families)
-                      or name in self.getenv_names | SETUP_HOST_ONLY | SETUP_TOOL_ONLY}
-        # A numbered spelling in SETUP means the corresponding registered family.
-        documented = {re.sub(r"\d+$", "N", name)
-                      if name not in self.names and covered(name, self.names, self.families) else name
-                      for name in documented}
+        tooling = {name for path in BUILD_ENV_READERS
+                   for name in PYTHON_ENV_READ_RE.findall(path.read_text(encoding="utf-8"))}
+        known = self.names | self.getenv_names | tooling | SETUP_HOST_ONLY | SETUP_TOOL_ONLY
+        documented = setup_environment_names(SETUP.read_text(encoding="utf-8"), known,
+                                             self.families)
         self.assertEqual(sorted(documented - classified), [], "SETUP.md variables missing a class")
 
         build = classes["Build and toolchain inputs"]
@@ -382,6 +401,15 @@ class EnvRegistryTests(unittest.TestCase):
         self.assertEqual(classes[RUNTIME_OVERRIDES] & classes[LAUNCHER_OWNED], DUAL_USE_OVERRIDES)
         self.assertEqual(sum(map(len, classes.values())), len(classified) + len(DUAL_USE_OVERRIDES),
                          "unexpected overlap between environment stability classes")
+
+    def test_setup_names_unprefixed_environment_inputs_without_counting_acronyms(self):
+        setup = ("Set the `CUSTOM_SDK`\nenvironment variable. "
+                 "Use the environment variable `OTHER_SDK`. "
+                 "Try `export BUILD_TOOL=tool`, `$env:DevSdk` or `%USER_HOME%`. "
+                 "Set `VULKAN_SDK` to its installed location. "
+                 "GPU and `WIDGET_SDK` are acronyms.")
+        self.assertEqual(setup_environment_names(setup, {"VULKAN_SDK"}, set()),
+                         {"CUSTOM_SDK", "OTHER_SDK", "BUILD_TOOL", "DEVSDK", "USER_HOME", "VULKAN_SDK"})
 
 
 if __name__ == "__main__":
