@@ -243,5 +243,138 @@ class PrivacyTests(unittest.TestCase):
             self.assertIsNone(shape.search(block))
 
 
+class ReleaseValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tree = tempfile.TemporaryDirectory()
+        self.addCleanup(tree.cleanup)
+        root = Path(tree.name)
+        self.source = root / "library-build.json"
+        self.plan_path = root / "release-plan.json"
+        self.doc = root / "COMPATIBILITY.md"
+        self.output = root / "summary.json"
+        self.settings = {
+            "source_commit": COMMIT, "title_timeout_seconds": 2400,
+            "launch_timeout_seconds": 30, "decrypt": False,
+        }
+        self.data = manifest([
+            record("TEST72001", "Release Fixture One", "BUILT", frames=2,
+                   tier=disc_verify.VERIFIED_RETAIL),
+            record("TEST72002", "Release Fixture Two", "BUILD_FAILED", failure="COMPILE_FAILED",
+                   tier=disc_verify.UNKNOWN, sha1="ef" * 20),
+        ])
+        self.data["settings"] = dict(self.settings, jobs=1, priority="normal")
+        for row in self.data["titles"]:
+            row["run_settings"] = dict(self.settings)
+        self.plan = {
+            "format": "nakagawa-compat-release-plan", "schema_version": 1,
+            "settings": dict(self.settings),
+            "sources": [
+                {"source": row["source"], "size_bytes": row["size_bytes"],
+                 "sha1": row["verification"]["sha1"]}
+                for row in self.data["titles"]
+            ],
+        }
+        self.doc.write_text(f"Before\n{compat_table.DOC_BEGIN}\nold\n"
+                            f"{compat_table.DOC_END}\nAfter\n", encoding="utf-8")
+        self.output.write_bytes(b"old summary\n")
+
+    def run_export(self, *, release: bool = True) -> int:
+        self.source.write_text(json.dumps(self.data), encoding="utf-8")
+        self.plan_path.write_text(json.dumps(self.plan), encoding="utf-8")
+        args = [str(self.source), "--write-doc", str(self.doc), "--json", str(self.output)]
+        if release:
+            args.extend(("--release-plan", str(self.plan_path)))
+        return compat_table.main(args)
+
+    def assert_refuses(self, reason: str) -> None:
+        before = (self.doc.read_bytes(), self.output.read_bytes())
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+            self.run_export()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn(reason, stderr.getvalue())
+        self.assertNotIn("Release Fixture", stderr.getvalue())
+        self.assertEqual((self.doc.read_bytes(), self.output.read_bytes()), before)
+
+    def test_matching_candidate_publishes_aggregate_without_corpus_fields(self) -> None:
+        self.assertEqual(self.run_export(), 0)
+        summary = json.loads(self.output.read_text(encoding="utf-8"))
+        self.assertEqual(summary["counted"], 2)
+        self.assertEqual(summary["settings"], [dict(self.settings, source_commit=COMMIT[:12], discs=2)])
+        for path in (self.output, self.doc):
+            for secret in ("TEST72001", "Release Fixture One", "ab" * 20):
+                self.assertNotIn(secret, path.read_text(encoding="utf-8"))
+
+    def test_stale_top_level_source_is_refused(self) -> None:
+        self.data["settings"]["source_commit"] = "a" * 40
+        self.assert_refuses("release manifest settings differ from the plan")
+
+    def test_stale_or_missing_attempt_settings_are_refused(self) -> None:
+        for changed in (dict(self.settings, source_commit="a" * 40),
+                        dict(self.settings, launch_timeout_seconds=31),
+                        dict(self.settings, decrypt=True), None):
+            with self.subTest(changed=changed):
+                self.data["titles"][1]["run_settings"] = changed
+                self.assert_refuses("release row settings differ from the plan")
+
+    def test_missing_substituted_or_repeated_source_is_refused(self) -> None:
+        rows = self.data["titles"]
+        replacement = dict(rows[1], source="Synthetic replacement.iso")
+        for changed in ([rows[0]], [rows[0], replacement], [rows[0], rows[0]]):
+            with self.subTest(changed=changed):
+                self.data["titles"] = changed
+                self.assert_refuses("release corpus membership differs from the plan")
+
+    def test_same_source_with_different_identity_is_refused(self) -> None:
+        row = self.data["titles"][1]
+        row["verification"]["sha1"] = "ba" * 20
+        self.assert_refuses("release corpus identity differs from the plan")
+        row["verification"]["sha1"] = self.plan["sources"][1]["sha1"]
+        row["verification"]["size_bytes"] = row["size_bytes"] + 1
+        self.assert_refuses("release corpus identity is unverified")
+
+    def test_unattempted_source_is_refused(self) -> None:
+        self.data["titles"][1]["outcome"] = "PENDING"
+        self.assert_refuses("release corpus has unfinished or unknown outcomes")
+
+    def test_copy_of_replaced_package_counts_as_a_copy(self) -> None:
+        previous, current = self.data["titles"]
+        previous.update(outcome="REPLACED", replaced_by=current["source"])
+        current.update(outcome="BUILT", disc_id=previous["disc_id"])
+        copy = dict(previous, source="Synthetic identical copy.iso", outcome="DUPLICATE",
+                    duplicate_of=previous["source"])
+        copy.pop("run_settings")
+        self.data["titles"].append(copy)
+        self.plan["sources"].append(dict(self.plan["sources"][0], source=copy["source"]))
+        self.assertEqual(self.run_export(), 0)
+        summary = json.loads(self.output.read_text(encoding="utf-8"))
+        self.assertEqual(summary["counted"], 1)
+        self.assertEqual(summary["left_out"], {"not_built_yet": 1, "copies": 1})
+
+        copy["duplicate_of"] = current["source"]
+        self.assert_refuses("release corpus copy does not match its counted source")
+        copy["duplicate_of"] = previous["source"]
+        current.update(outcome="REPLACED", replaced_by=previous["source"])
+        self.assert_refuses("release corpus replacement references form a cycle")
+
+    def test_private_release_plan_cannot_be_an_output(self) -> None:
+        self.plan_path.write_text(json.dumps(self.plan), encoding="utf-8")
+        before = self.plan_path.read_bytes()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            compat_table.main([str(self.source), "--release-plan", str(self.plan_path),
+                               "--json", str(self.plan_path)])
+        self.assertEqual(error.exception.code, 2)
+        self.assertEqual(self.plan_path.read_bytes(), before)
+        self.assertFalse(self.source.exists())
+
+    def test_diagnostic_export_can_read_historical_rows(self) -> None:
+        self.data["titles"][1].pop("run_settings")
+        self.data.pop("settings")
+        self.assertEqual(self.run_export(release=False), 0)
+        summary = json.loads(self.output.read_text(encoding="utf-8"))
+        self.assertEqual(summary["counted"], 2)
+        self.assertTrue(any(row["source_commit"] is None for row in summary["settings"]))
+
+
 if __name__ == "__main__":
     unittest.main()
