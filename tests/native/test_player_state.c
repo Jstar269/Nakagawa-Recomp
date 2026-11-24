@@ -1848,6 +1848,18 @@ static int repeat_launch_child_mode(void) {
     fflush(stdout);
     fprintf(stderr, "synthetic runtime stderr line\n");
     fflush(stderr);
+    /* The runtime's last-resort crash report (src/rt/driver.c) writes this header
+       before its fault and register lines. "embedded" writes the same words inside a
+       longer line, the negative control. */
+    const char *crash_marker = getenv("NK_REPEAT_LAUNCH_CRASH_MARKER");
+    if (crash_marker && strcmp(crash_marker, "1") == 0) {
+        fprintf(stderr, "\n=== PSP RECOMPILER CRASH REPORT ===\n");
+        fprintf(stderr, "Exception: 0xc0000005 at host 0x0000000000000000\n");
+        fflush(stderr);
+    } else if (crash_marker && strcmp(crash_marker, "embedded") == 0) {
+        fprintf(stderr, "note === PSP RECOMPILER CRASH REPORT === quoted\n");
+        fflush(stderr);
+    }
     const char *stop_reason = getenv("NK_REPEAT_LAUNCH_STOP_REASON");
     const char *boot_event_path = getenv("SR_BOOT_EVENT_FILE");
     /* A run's own boot event, after as many lines of output as a real runtime
@@ -20453,6 +20465,7 @@ int main(int argc, char **argv) {
         bool had_code_env;
         bool had_stop_env;
         bool had_hold_env;
+        bool had_crash_env;
         char *old_report_env =
             capture_environment_value("NK_REPEAT_LAUNCH_REPORT_FILE", &had_report_env);
         char *old_code_env =
@@ -20461,9 +20474,12 @@ int main(int argc, char **argv) {
             capture_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", &had_stop_env);
         char *old_hold_env =
             capture_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", &had_hold_env);
+        char *old_crash_env =
+            capture_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", &had_crash_env);
         set_environment_value("NK_REPEAT_LAUNCH_REPORT_FILE", report_path);
         set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "");
         set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "");
 
         bool git_available = git_status_snapshot(git_before);
         if (!git_available) {
@@ -20751,6 +20767,82 @@ int main(int argc, char **argv) {
         assert(strstr(rep->last_error.message, "9") == NULL);
         assert(strstr(rep->last_error.details, "Exit code 9") != NULL);
         assert(strcmp(player_error_retry_label(&rep->last_error), "Restart game") == 0);
+
+        /* A child that wrote the runtime's own crash report and then exited
+           nonzero keeps that indication in Copy details, below and above 500 ms,
+           without changing the exit classification or the restart action. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "1");
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 11000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 7);
+        assert(player_app_monitor_game_session(rep, 11100));
+        assert(!rep->is_game_running);
+        assert_session_released(&rep->launch_session);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(strcmp(player_error_retry_label(&rep->last_error), "Restart game") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash\n") != NULL);
+        }
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "9");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 12000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 12600));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_ERROR_EXIT") == 0);
+        assert(strcmp(player_error_retry_label(&rep->last_error), "Restart game") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash\n") != NULL);
+        }
+
+        /* The same words inside a longer line are not the runtime's record. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "embedded");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 13000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 13600));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_ERROR_EXIT") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash") == NULL);
+        }
+
+        /* A plain nonzero exit is not a crash report, and a fresh launch keeps
+           no earlier run's indication. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 14000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 14600));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_ERROR_EXIT") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash") == NULL);
+        }
+
+        /* A structured runtime stop still wins over the marker and the exit status. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "1");
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "9");
+        set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "semantic-boundary");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 14500;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 15100));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_SEMANTIC_BOUNDARY") == 0);
+        assert(strstr(rep->last_error.boundary_text, "unsupported-interpreter-form") != NULL);
+        set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "");
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "");
+
         /* A structured runtime stop must reach the player error view with a
            plain sentence first and machine detail kept below it. */
         set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "semantic-boundary");
@@ -21493,10 +21585,13 @@ int main(int argc, char **argv) {
                                   had_stop_env);
         restore_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", old_hold_env,
                                   had_hold_env);
+        restore_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", old_crash_env,
+                                  had_crash_env);
         free(old_report_env);
         free(old_code_env);
         free(old_stop_env);
         free(old_hold_env);
+        free(old_crash_env);
         free(rep);
 
         char marker_path[1200];
