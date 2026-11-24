@@ -125,9 +125,10 @@ def production_vfpu_opcodes() -> tuple[tuple[int, ...], tuple[int, ...]]:
     return tuple(sorted(routed)), tuple(sorted(direct_controls))
 
 
-#: Words a PSP-3000 probe ran that the systematic sampling below does not reach: lv.q and sv.q
-#: with the write-back flag, vt = C000 and base $t2 (PSP-VFPU-QUADWB-001, probe case vfpu-quad-wb).
-MEASURED_PROBE_WORDS = (0xD9400002, 0xF9400002)
+#: Words a PSP-3000 probe ran that the systematic sampling does not reach:
+#: lv.q and sv.q with write-back (PSP-VFPU-QUADWB-001), and the exact vus2i.t
+#: word from PSP-VFPU-RESERVED-001 that both execution paths replay.
+MEASURED_PROBE_WORDS = (0xD9400002, 0xF9400002, codegen.VUS2I_T_C000_C200)
 
 
 def systematic_words() -> tuple[int, ...]:
@@ -693,6 +694,8 @@ def _measured_selftests(word: int, op: int, size: object) -> list[str]:
     # vus2i and vs2i at .s/.p (PSP-VFPU-VUS2I-001).
     if jump == 1 and sel in {26, 27} and size in {1, 2}:
         tests.append("vfpu-interp-selftest:check_vus2i_vs2i_measured_words")
+    if word == codegen.VUS2I_T_C000_C200:
+        tests.append("vfpu-interp-selftest:check_vus2i_t_measured")
     # vf2in, vf2iz, vf2iu and vf2id at .s (PSP-VFPU-CONVERT-001).
     if 16 <= jump <= 19 and size == 1:
         tests.append("vfpu-interp-selftest:check_vf2i_measured_cells")
