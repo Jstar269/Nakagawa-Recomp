@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -539,7 +539,7 @@ class TestBenchmarkWindows(unittest.TestCase):
                                       "completed": 2, "mode": "ge.vertex_cache", "valid": True,
                                       "runtime_sha256": self.runtime_sha, "runtime_pid": 51,
                                       "route_sha256": self.route_sha}
-        self.evidence = {
+        self.evidence: dict[str, Any] = {
             "run_id": "test-1", "operator_source_commit": "a" * 40,
             "windows": [[2, 5], [7, 9]], "exit_code": 0, "timed_out": False,
             "launch": {"mode": "direct", "runtime_pid": 51},
@@ -575,9 +575,12 @@ class TestBenchmarkWindows(unittest.TestCase):
         log = write_log(self.root, self.lines)
         evidence = self.root / "evidence.json"
         evidence.write_text(json.dumps(self.evidence), encoding="utf-8")
-        return perf_attribution.analyze(perf, log, evidence if strict else None,
-                                        runtime=self.runtime if strict else None,
-                                        route=self.route if strict else None, launcher=self.launcher)
+        result = perf_attribution.analyze(
+            perf, log, evidence if strict else None,
+            runtime=self.runtime if strict else None,
+            route=self.route if strict else None, launcher=self.launcher,
+        )
+        return cast("dict[str, Any]", result)
 
     def test_valid_paired_windows_have_load_columns_even_without_frames(self) -> None:
         report = self.analyze()
