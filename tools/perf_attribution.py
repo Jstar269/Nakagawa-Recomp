@@ -53,6 +53,7 @@ or refused by the summary validator.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -65,6 +66,11 @@ try:
     from perf_summary_diff import PerfSummaryError, load_summary
 except ModuleNotFoundError:
     from tools.perf_summary_diff import PerfSummaryError, load_summary
+
+try:
+    from soak_audit import ROUTE_OK
+except ModuleNotFoundError:
+    from tools.soak_audit import ROUTE_OK
 
 SCHEMA = "nakagawa-perf-attribution-v1"
 DIFF_SCHEMA = "nakagawa-perf-attribution-diff-v1"
@@ -109,6 +115,33 @@ PRESENT_PATTERN = re.compile(
 )
 PERF_PATTERN = _line_pattern("PERF", PERF_FIELDS)
 ATTRIB_PATTERN = _line_pattern("PERF_ATTRIB", ATTRIB_FIELDS)
+
+BENCHMARK_MAX_WINDOWS = 64
+BENCHMARK_EVIDENCE_LIMIT = 65536
+_BENCH_ID = r"[a-zA-Z0-9_-]{1,64}"
+_BENCH_INT = r"[0-9]{1,20}"
+_SHA256 = r"[0-9a-f]{64}"
+_BENCH_MODE = r"load|ge\.vertex_cache"
+LOAD_COUNTERS = ("iso_reads", "iso_bytes", "iso_ns", "vfs_reads", "vfs_ns", "umd_us",
+                 "present_submits", "idle_ns", "audio_frames")
+BENCHMARK_PATTERNS = {
+    "PERF_BENCH_BEGIN": _line_pattern("PERF_BENCH_BEGIN", (
+        ("run_id", _BENCH_ID), ("origin_ns", _BENCH_INT), ("planned", _BENCH_INT), ("mode", _BENCH_MODE),
+        ("runtime_sha256", _SHA256), ("runtime_pid", _BENCH_INT),
+    )),
+    "PERF_LOAD": _line_pattern("PERF_LOAD", (
+        ("id", _BENCH_INT), ("edge", "begin|end"), ("step", _BENCH_INT), ("wall_ns", _BENCH_INT),
+        ("vblank", _BENCH_INT), ("guest_us", _BENCH_INT), ("paced", "0|1"), ("clock_epoch", _BENCH_INT),
+        *((name, _BENCH_INT) for name in LOAD_COUNTERS),
+    )),
+    "PERF_AB": _line_pattern("PERF_AB", (
+        ("id", _BENCH_INT), ("path", r"ge\.vertex_cache"), ("arm", "A|B"),
+        ("eligible", _BENCH_INT), ("hits", _BENCH_INT),
+    )),
+    "PERF_BENCH_END": _line_pattern("PERF_BENCH_END", (
+        ("run_id", _BENCH_ID), ("completed", _BENCH_INT),
+    )),
+}
 
 # Metric rows shared by the Markdown tables and the diff: (section, label, key, kind).
 METRICS: tuple[tuple[str, str, str, str], ...] = (
@@ -219,9 +252,38 @@ class _Scan:
         self._prev_f: int | None = None
         self._prev_buf: int | None = None
         self._base_f: int | None = None
+        self.benchmarks: list[tuple[str, dict[str, Any]]] = []
+        self.benchmark_error: str | None = None
+        self.route_done: tuple[int, int] | None = None
+        self.route_done_count = 0
+        self.route_failed = False
+        self.auto_load_active = False
+        self.auto_load_starts = 0
+        self.auto_load_stops = 0
+        self.auto_load_out_of_order = False
 
     def feed(self, line_no: int, text: str, overlong: bool) -> None:
         self.lines += 1
+        tag = text.partition(" ")[0]
+        if tag in BENCHMARK_PATTERNS or text.startswith("PERF_BENCH_REFUSED"):
+            self._feed_benchmark(tag, text, overlong)
+            return
+        if text in ("AUTO_LOAD: on", "AUTO_LOAD: off") and not overlong:
+            active = text.endswith("on")
+            self.auto_load_out_of_order |= active == self.auto_load_active
+            self.auto_load_active = active
+            if active:
+                self.auto_load_starts += 1
+            else:
+                self.auto_load_stops += 1
+        if text.startswith("ROUTE_OK:"):
+            done = ROUTE_OK.fullmatch(text)
+            if done is not None and not overlong:
+                self.route_done = (int(done[1]), int(done[2]))
+                self.route_done_count += 1
+        if text.startswith(("ROUTE_FAIL:", "SEMANTIC_BOUNDARY:", "BOOT_EVENT phase=stop",
+                            "RUNTIME_NO_NEW_FRAMES:", "NATIVE_CRASH:")):
+            self.route_failed = True
         if overlong:
             if PRESENT_TAG in text:
                 self._reject_present(line_no, f"line is longer than {MAX_LINE_CHARS} characters")
@@ -245,6 +307,33 @@ class _Scan:
                 self.attrib_rows.append((float(match["aot_ms"]), float(match["ge_cpu_ms"])))
         else:
             self.ignored += 1
+
+    def _feed_benchmark(self, tag: str, text: str, overlong: bool) -> None:
+        if self.benchmark_error is not None:
+            return
+        if self.route_done_count:
+            self.benchmark_error = "benchmark record followed route completion"
+            return
+        if tag not in BENCHMARK_PATTERNS:
+            self.benchmark_error = "the runtime refused the benchmark"
+            return
+        match = None if overlong else BENCHMARK_PATTERNS[tag].fullmatch(text)
+        if match is None:
+            self.benchmark_error = f"malformed {tag} record"
+            return
+        if len(self.benchmarks) >= 3 * BENCHMARK_MAX_WINDOWS + 2:
+            self.benchmark_error = "too many benchmark records"
+            return
+        fields = {key: int(value) if value.isdecimal() and key not in ("run_id", "runtime_sha256") else value
+                  for key, value in match.groupdict().items()}
+        if any(type(value) is int and value > 0xFFFFFFFFFFFFFFFF for value in fields.values()):
+            self.benchmark_error = f"{tag} counter exceeds 64 bits"
+            return
+        if tag == "PERF_LOAD":
+            fields["auto_load_starts"] = self.auto_load_starts
+            fields["auto_load_stops"] = self.auto_load_stops
+            fields["auto_load_active"] = self.auto_load_active
+        self.benchmarks.append((tag, fields))
 
     def _reject_present(self, line_no: int, reason: str) -> None:
         self.malformed_presents += 1
@@ -428,9 +517,156 @@ def _warnings(scan: _Scan, telemetry: dict[str, Any], intervals: dict[str, Any])
     return warnings
 
 
-def analyze(perf_path: Path, stderr_path: Path) -> dict[str, Any]:
+def _benchmark_windows(scan: _Scan, summary: dict[str, Any]) -> dict[str, Any]:
+    if scan.benchmark_error is not None:
+        raise PerfAttributionError(scan.benchmark_error)
+    bench = summary.get("benchmark")
+    if not isinstance(bench, dict) or bench.get("valid") is not True:
+        raise PerfAttributionError("missing or invalid benchmark summary")
+    records = iter(scan.benchmarks)
+    header_tag, header = next(records, ("", {}))
+    if (header_tag != "PERF_BENCH_BEGIN" or header["origin_ns"] == 0
+            or not 1 <= header["runtime_pid"] <= UINT32_MAX):
+        raise PerfAttributionError("missing benchmark start")
+    if any(type(bench.get(key)) is not type(value) or bench[key] != value for key, value in header.items()):
+        raise PerfAttributionError("benchmark log and summary identifiers disagree")
+    if not 1 <= header["planned"] <= BENCHMARK_MAX_WINDOWS:
+        raise PerfAttributionError("invalid benchmark window count")
+    ab = header["mode"] == "ge.vertex_cache"
+    if ab and header["planned"] % 2:
+        raise PerfAttributionError("missing A/B arm")
+    rows: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    for ordinal in range(1, header["planned"] + 1):
+        bt, begin = next(records, ("", {}))
+        et, end = next(records, ("", {}))
+        if (bt != "PERF_LOAD" or et != "PERF_LOAD" or begin["id"] != ordinal or end["id"] != ordinal
+                or begin["edge"] != "begin" or end["edge"] != "end"):
+            raise PerfAttributionError(f"window {ordinal}: missing, duplicate or crossed edge")
+        if not 1 <= begin["step"] < end["step"] <= 4096:
+            raise PerfAttributionError(f"window {ordinal}: invalid route steps")
+        if not begin["wall_ns"] < end["wall_ns"] <= summary["wall_ns"]:
+            raise PerfAttributionError(f"window {ordinal}: invalid wall time")
+        monotonic = ("vblank", "guest_us", "wall_ns", *LOAD_COUNTERS)
+        if (any(begin[key] > end[key] for key in monotonic) or end["vblank"] > UINT32_MAX
+                or previous is not None and (previous["step"] >= begin["step"]
+                                             or any(previous[key] > begin[key] for key in monotonic))):
+            raise PerfAttributionError(f"window {ordinal}: observation moved backwards")
+        row: dict[str, Any] = {
+            "id": ordinal,
+            "begin_step": begin["step"], "end_step": end["step"],
+            "begin_wall_ns": begin["wall_ns"], "end_wall_ns": end["wall_ns"],
+            "paced": begin["paced"] == end["paced"] == 1,
+            "clock_changes": end["clock_epoch"] - begin["clock_epoch"],
+            "automatic_loads": end["auto_load_starts"] - begin["auto_load_starts"],
+            "automatic_load_balanced": (
+                not scan.auto_load_out_of_order and not begin["auto_load_active"] and not end["auto_load_active"]
+                and end["auto_load_starts"] - begin["auto_load_starts"] ==
+                    end["auto_load_stops"] - begin["auto_load_stops"]),
+            **{key: end[key] - begin[key] for key in monotonic},
+        }
+        if ab:
+            arm_tag, arm = next(records, ("", {}))
+            expected_arm = "A" if ordinal % 2 else "B"
+            if arm_tag != "PERF_AB" or arm["id"] != ordinal or arm["arm"] != expected_arm:
+                raise PerfAttributionError(f"window {ordinal}: missing or out-of-order A/B arm")
+            row["arm"] = arm
+        previous = end
+        rows.append(row)
+    count = header["planned"]
+    footer_tag, footer = next(records, ("", {}))
+    if (footer_tag != "PERF_BENCH_END" or footer != {"run_id": header["run_id"], "completed": count}
+            or next(records, None) is not None or type(bench.get("completed")) is not int
+            or bench["completed"] != count):
+        raise PerfAttributionError("missing or mismatched benchmark completion")
+    if (scan.route_failed or scan.route_done_count != 1 or scan.route_done is None or previous is None
+            or scan.route_done[0] < previous["step"] or scan.route_done[1] < previous["vblank"]):
+        raise PerfAttributionError("benchmark lacks a successful route completion")
+    return {**header, "windows": rows}
+
+
+def _file_sha256(path: Path) -> str:
+    try:
+        with path.open("rb") as file:
+            return hashlib.file_digest(file, "sha256").hexdigest()
+    except OSError as exc:
+        raise PerfAttributionError(f"cannot read benchmark executable: {exc}") from exc
+
+
+def _require_benchmark_evidence(
+        path: Path, benchmark: dict[str, Any], runtime: Path | None, launcher: Path | None) -> None:
+    try:
+        with path.open(encoding="utf-8") as file:
+            text = file.read(BENCHMARK_EVIDENCE_LIMIT + 1)
+        if len(text) > BENCHMARK_EVIDENCE_LIMIT:
+            raise ValueError("evidence exceeds the input limit")
+        evidence = json.loads(text)
+    except (OSError, ValueError, RecursionError) as exc:
+        raise PerfAttributionError(f"cannot read benchmark evidence: {exc}") from exc
+    if not isinstance(evidence, dict) or evidence.get("run_id") != benchmark["run_id"]:
+        raise PerfAttributionError("benchmark evidence names another run")
+    if type(evidence.get("exit_code")) is not int or evidence["exit_code"] != 0 or evidence.get("timed_out") is not False:
+        raise PerfAttributionError("benchmark run failed, timed out or did not record its exit")
+    if runtime is None or _file_sha256(runtime) != benchmark["runtime_sha256"]:
+        raise PerfAttributionError("measured runtime executable does not match the candidate")
+    launch = evidence.get("launch")
+    if (not isinstance(launch, dict) or type(launch.get("runtime_pid")) is not int
+            or launch["runtime_pid"] != benchmark["runtime_pid"]):
+        raise PerfAttributionError("launch evidence does not identify the measured runtime process")
+    if launch.get("mode") == "launcher":
+        launcher_sha = launch.get("observed_parent_sha256")
+        parent_pid = launch.get("observed_parent_pid")
+        if (launcher is None or type(parent_pid) is not int or not 1 <= parent_pid <= UINT32_MAX
+                or parent_pid == benchmark["runtime_pid"] or launcher_sha != _file_sha256(launcher)):
+            raise PerfAttributionError("launcher observation does not match the expected parent executable")
+    elif launch.get("mode") != "direct" or launcher is not None:
+        raise PerfAttributionError("benchmark launch mode does not match the supplied executables")
+    for key, regex in (("runtime_commit", r"[0-9a-f]{40}"), ("route_sha256", _SHA256)):
+        value = evidence.get(key)
+        if not isinstance(value, str) or re.fullmatch(regex, value) is None:
+            raise PerfAttributionError(f"missing or invalid {key} evidence")
+    for key in ("cpu", "gpu", "os", "renderer", "vsync", "cache_state"):
+        value = evidence.get(key)
+        if not isinstance(value, str) or not value.strip() or value.strip().lower() in ("unknown", "unverified"):
+            raise PerfAttributionError(f"missing benchmark setting or host identity: {key}")
+    windows = benchmark["windows"]
+    planned = [[row["begin_step"], row["end_step"]] for row in windows]
+    if evidence.get("windows") != planned:
+        raise PerfAttributionError("recorded route windows differ from the benchmark plan")
+    load_treatment = evidence.get("load_treatment", "off")
+    if load_treatment == "automatic" and benchmark["mode"] == "load":
+        if any(not row["paced"] or not row["automatic_load_balanced"]
+               or row["clock_changes"] != row["automatic_loads"] or row["automatic_loads"] == 0
+               for row in windows):
+            raise PerfAttributionError("a window lacks a complete observed Automatic load")
+    elif load_treatment != "off":
+        raise PerfAttributionError("unsupported benchmark load treatment")
+    elif any(not row["paced"] or row["clock_changes"] != 0 or row["automatic_loads"] != 0 for row in windows):
+        raise PerfAttributionError("a measured window crossed a clock mode change or ran unpaced")
+    host = evidence.get("host_observation")
+    if (not isinstance(host, dict) or host.get("state") != "idle"
+            or not isinstance(host.get("basis"), str) or not host["basis"].strip()):
+        raise PerfAttributionError("quiet-host observation is missing or reports a busy host")
+    start, end = host.get("begin_wall_ns"), host.get("end_wall_ns")
+    if (type(start) is not int or type(end) is not int or not 0 <= start <= windows[0]["begin_wall_ns"]
+            or end < windows[-1]["end_wall_ns"]):
+        raise PerfAttributionError("quiet-host evidence does not cover all measured windows")
+    if benchmark["mode"] == "ge.vertex_cache":
+        if evidence["renderer"] != "software":
+            raise PerfAttributionError("vertex-cache A/B requires the software GE")
+        for a, b in zip(windows[::2], windows[1::2], strict=True):
+            reference, optimized = a["arm"], b["arm"]
+            if (reference["eligible"] <= 0 or reference["eligible"] != optimized["eligible"]
+                    or reference["hits"] != 0 or optimized["hits"] <= 0):
+                raise PerfAttributionError(f"windows {a['id']} and {b['id']}: unequal or inactive A/B work")
+    benchmark["guard"] = "PASS"
+
+
+def analyze(perf_path: Path, stderr_path: Path, evidence_path: Path | None = None, *,
+            runtime: Path | None = None, launcher: Path | None = None) -> dict[str, Any]:
     """Read one run and return the attribution as a JSON-ready dict."""
-    summary = _summary_block(load_summary(perf_path))
+    document = load_summary(perf_path)
+    summary = _summary_block(document)
     scan = scan_log(stderr_path)
     intervals = _interval_stats(scan.intervals)
     telemetry, cost = _cost_block(scan.perf_rows, scan.attrib_rows)
@@ -456,6 +692,18 @@ def analyze(perf_path: Path, stderr_path: Path) -> dict[str, Any]:
         "summary": summary,
     }
     result["warnings"] = _warnings(scan, telemetry, intervals)
+    if scan.benchmarks or scan.benchmark_error or "benchmark" in document or evidence_path is not None:
+        try:
+            benchmark = _benchmark_windows(scan, document)
+            if evidence_path is not None:
+                if scan.malformed_presents or scan.malformed_telemetry or scan.non_monotonic or telemetry["unpaired_lines"]:
+                    raise PerfAttributionError("measurement log contains malformed or incomplete telemetry")
+                _require_benchmark_evidence(evidence_path, benchmark, runtime, launcher)
+            result["benchmark"] = benchmark
+        except PerfAttributionError as exc:
+            if evidence_path is not None:
+                raise
+            result["warnings"].append(f"benchmark refused: {exc}")
     return result
 
 
@@ -545,6 +793,18 @@ def render_markdown(result: dict[str, Any]) -> str:
         lines.extend(["", f"## {section}", ""])
         lines.extend(_table(["Metric", "Value"],
                             [[label, _cell(flat[key], kind)] for label, key, kind in rows]))
+    if "benchmark" in result:
+        benchmark = result["benchmark"]
+        keys = ("id", "begin_step", "end_step", "wall_ns", "guest_us", "vblank", *LOAD_COUNTERS)
+        lines.extend(["", "## Measured route windows", ""])
+        lines.extend(_table(list(keys), [[str(row[key]) for key in keys] for row in benchmark["windows"]]))
+        if benchmark["mode"] == "ge.vertex_cache":
+            arm_keys = ("id", "arm", "eligible", "hits")
+            lines.extend(["", "## Software GE vertex cache arms", ""])
+            lines.extend(_table(list(arm_keys), [[str(row["arm"][key]) for key in arm_keys]
+                                                  for row in benchmark["windows"]]))
+        if "guard" in benchmark:
+            lines.extend(["", f"Benchmark guard: **{benchmark['guard']}**."])
     lines.extend(_warning_lines(result["warnings"]))
     return "\n".join(lines)
 
@@ -592,19 +852,30 @@ def main(argv: list[str] | None = None) -> int:
                         help="stderr log of the same run, captured with SR_PERF=1 and SR_PRESENT_TRACE=1")
     parser.add_argument("--diff", nargs=4, type=Path, metavar=("PERF_A", "STDERR_A", "PERF_B", "STDERR_B"),
                         help="compare run A with run B")
+    parser.add_argument("--benchmark-evidence", type=Path,
+                        help="require a valid route benchmark and a local host and route evidence JSON")
+    parser.add_argument("--benchmark-runtime", type=Path,
+                        help="expected measured runtime executable for strict benchmark validation")
+    parser.add_argument("--benchmark-launcher", type=Path,
+                        help="expected parent executable for launcher-started benchmarks")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     args = parser.parse_args(argv)
     if args.diff is not None:
-        if args.perf is not None or args.stderr is not None:
-            parser.error("--diff takes four paths and cannot be combined with --perf or --stderr")
+        if any(value is not None for value in (args.perf, args.stderr, args.benchmark_evidence,
+                                               args.benchmark_runtime, args.benchmark_launcher)):
+            parser.error("--diff takes four paths and cannot be combined with a single-run input")
     elif args.perf is None or args.stderr is None:
         parser.error("--perf and --stderr are both required unless --diff is given")
+    if args.benchmark_evidence is None and (args.benchmark_runtime is not None
+                                            or args.benchmark_launcher is not None):
+        parser.error("benchmark executable inputs require --benchmark-evidence")
     try:
         if args.diff is not None:
             result = diff_runs(args.diff[0], args.diff[1], args.diff[2], args.diff[3])
         else:
             assert args.perf is not None and args.stderr is not None  # parser.error above exits otherwise
-            result = analyze(args.perf, args.stderr)
+            result = analyze(args.perf, args.stderr, args.benchmark_evidence,
+                             runtime=args.benchmark_runtime, launcher=args.benchmark_launcher)
     except (PerfAttributionError, PerfSummaryError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -230,6 +230,61 @@ python tools/perf_attribution.py --diff a.json a.log b.json b.log --format json
 The tool's docstring defines flips, re-presents, vblanks per new frame, implied fps and the
 `cpu_ms`, `ge_cpu_ms` and `aot_ms` shares. Those cost shares overlap and must not be added together.
 
+### Route load windows and same-run A/B (#2574)
+
+Use the existing state-gated route to choose one-based step-completion ordinals. Each window
+starts after its first step completes and ends after its last step completes. Choose a
+checkpoint that proves load entry or accepted input and one that proves readiness. Keep the
+same scene, route cadence and guest work in both arms. A window may contain zero presents.
+
+Set `SR_PERF_JSON` and a fresh `SR_PERF_RUN_ID` of at most 64 ASCII letters, digits,
+underscores or hyphens. Set `SR_PERF_WINDOWS` to ordered, disjoint pairs such as
+`2-5,7-9,11-13,15-17`. The route must finish with `ROUTE_OK`. The recorder writes cumulative
+`PERF_LOAD` edge records. The attribution report subtracts them to show wall nanoseconds,
+guest microseconds, VBlanks, ISO reads/bytes/time, VFS reads/time, present submissions,
+guest idle time and audio output frames for each window. UMD time sums the guest elapsed
+time of completed successful waitable synchronous reads, including reads that began before
+the window. Concurrent guest threads can run during that time. The column includes neither
+async requests nor a read still in flight when the endpoint occurs.
+
+For a single-process A/B, set `SR_PERF_AB=ge.vertex_cache` and leave
+`SR_GE_VERTEX_CACHE_DISABLE` unset. Select the software GE and configure pairs of equivalent
+route windows. A uses the rollback path and bypasses the cache. B uses the optimized path.
+Both arms count eligible draws. B must also report actual cache hits. The override is scoped
+to the chosen windows, and the cache's epoch still changes at every draw. Outside the windows
+the ordinary setting applies. Give every new speed path a rollback variable and a named A/B
+actuator before using it for performance claims.
+
+Run the attribution tool's strict mode on a finished capture:
+
+```powershell
+python tools/perf_attribution.py --perf run.json --stderr run.log `
+    --benchmark-evidence evidence.json --benchmark-runtime runtime.exe
+```
+
+The local evidence JSON carries `run_id`, the full `runtime_commit`, `route_sha256`,
+`exit_code`, `timed_out`, and `windows` as a list of the planned ordinal pairs. Include
+a `launch` object with `mode` (`direct` or `launcher`) and the actual `runtime_pid`.
+The runtime records its process ID and whole-file SHA-256 in stderr and the summary. The
+candidate passed with `--benchmark-runtime` must match that hash. For a launcher run, also
+record the child's observed parent PID as `observed_parent_pid` and the SHA-256 of that
+observed process image as `observed_parent_sha256` in `launch`, and pass the expected parent
+with `--benchmark-launcher`. Obtain the parent observation while the runtime is alive.
+Record the observed `cpu`, `gpu`, `os`, `renderer` (use `software` for the vertex-cache arm),
+`vsync`, and `cache_state`. Supply a `host_observation` object with `state` (`idle`,
+`busy`, or `unknown`), a short `basis` describing the operator's evidence about concurrent
+work, and `begin_wall_ns` and `end_wall_ns` relative to the perf run start. Its interval
+must cover both endpoints of every measured window. The tool validates the evidence fields,
+compares the observed step pairs and run identity, and rejects incomplete exits, missed or
+malformed records, mixed clock modes, busy or unverified host windows and inactive or unequal
+A/B work. For a load-only run explicitly testing Automatic loading, set
+`load_treatment` to `automatic` in the evidence. Both endpoints must be at normal pace and
+each intervening clock acceleration must match a complete observed `AUTO_LOAD` interval.
+An Automatic run that never activates the feature supplies no speed comparison.
+Quiet-host evidence here is an operator observation. The runtime's guest idle
+counter measures guest scheduling. Keep the evidence JSON and raw captures local for owned
+titles. Compare repeated matched windows before claiming a speed difference.
+
 ### Measured overhead of the perf counters (#282)
 
 Two switches exist. `SR_PERF=1` turns the counters and one-second telemetry on at run time, and

@@ -11,6 +11,7 @@ runtime fails this module rather than silently changing what the report means.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -519,6 +520,184 @@ class TestSourcePins(unittest.TestCase):
                 if period.search(line)]
         self.assertEqual(len(hits), 1, "\n".join(hits))
         self.assertRegex(hits[0], r"^perf\.h:\d+: #define SR_DISPLAY_PERIOD_US 16683u\b")
+
+
+class TestBenchmarkWindows(unittest.TestCase):
+    def setUp(self) -> None:
+        tree = tempfile.TemporaryDirectory()
+        self.addCleanup(tree.cleanup)
+        self.root = Path(tree.name)
+        self.runtime = self.root / "runtime-first.exe"
+        self.runtime.write_bytes(b"synthetic runtime")
+        self.runtime_sha = hashlib.sha256(b"synthetic runtime").hexdigest()
+        self.launcher: Path | None = None
+        self.document = summary_doc()
+        self.document["benchmark"] = {"run_id": "test-1", "origin_ns": 1000000, "planned": 2,
+                                      "completed": 2, "mode": "ge.vertex_cache", "valid": True,
+                                      "runtime_sha256": self.runtime_sha, "runtime_pid": 51}
+        self.evidence = {
+            "run_id": "test-1", "runtime_commit": "a" * 40, "route_sha256": "b" * 64,
+            "windows": [[2, 5], [7, 9]], "exit_code": 0, "timed_out": False,
+            "launch": {"mode": "direct", "runtime_pid": 51},
+            "cpu": "Synthetic CPU", "gpu": "Synthetic GPU", "os": "Synthetic OS",
+            "renderer": "software", "vsync": "fifo", "cache_state": "warm",
+            "host_observation": {
+                "state": "idle", "basis": "Observed no concurrent jobs throughout the route",
+                "begin_wall_ns": 0, "end_wall_ns": 7000000,
+            },
+        }
+        self.lines = [
+            "PERF_BENCH_BEGIN run_id=test-1 origin_ns=1000000 planned=2 mode=ge.vertex_cache"
+            f" runtime_sha256={self.runtime_sha} runtime_pid=51",
+            self.edge(1, "begin", 2, 1000000, 8, 20000, 0),
+            self.edge(1, "end", 5, 3000000, 9, 23000, 1),
+            "PERF_AB id=1 path=ge.vertex_cache arm=A eligible=2 hits=0",
+            self.edge(2, "begin", 7, 4000000, 10, 24000, 1),
+            self.edge(2, "end", 9, 5000000, 11, 25000, 1),
+            "PERF_AB id=2 path=ge.vertex_cache arm=B eligible=2 hits=1",
+            "PERF_BENCH_END run_id=test-1 completed=2",
+            "ROUTE_OK: 9 steps completed by vblank 11",
+        ]
+
+    @staticmethod
+    def edge(ordinal: int, edge: str, step: int, wall: int, vblank: int, guest: int, reads: int) -> str:
+        return (f"PERF_LOAD id={ordinal} edge={edge} step={step} wall_ns={wall} vblank={vblank} "
+                f"guest_us={guest} paced=1 clock_epoch=0 iso_reads={reads} iso_bytes={4096 * reads} "
+                f"iso_ns={700 * reads} vfs_reads=0 vfs_ns=0 umd_us={900 * reads} "
+                "present_submits=0 idle_ns=0 audio_frames=0")
+
+    def analyze(self, strict: bool = True) -> dict[str, Any]:
+        perf = write_summary(self.root, self.document)
+        log = write_log(self.root, self.lines)
+        evidence = self.root / "evidence.json"
+        evidence.write_text(json.dumps(self.evidence), encoding="utf-8")
+        return perf_attribution.analyze(perf, log, evidence if strict else None,
+                                        runtime=self.runtime if strict else None, launcher=self.launcher)
+
+    def test_valid_paired_windows_have_load_columns_even_without_frames(self) -> None:
+        report = self.analyze()
+        bench = report["benchmark"]
+        self.assertEqual(bench["guard"], "PASS")
+        a, b = bench["windows"]
+        self.assertEqual(a["wall_ns"], 2000000)
+        self.assertEqual(a["guest_us"], 3000)
+        self.assertEqual(a["iso_reads"], 1)
+        self.assertEqual(a["iso_bytes"], 4096)
+        self.assertEqual(a["umd_us"], 900)
+        self.assertEqual(a["present_submits"], 0)
+        self.assertEqual((a["arm"]["hits"], b["arm"]["hits"]), (0, 1))
+        self.assertIn("Measured route windows", perf_attribution.render_markdown(report))
+
+    def test_refuses_an_unfinished_or_duplicate_window_without_breaking_diagnostics(self) -> None:
+        self.lines.pop(2)
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "missing, duplicate or crossed"):
+            self.analyze()
+        report = self.analyze(strict=False)
+        self.assertNotIn("benchmark", report)
+        self.assertTrue(any(warning.startswith("benchmark refused") for warning in report["warnings"]))
+
+    def test_refuses_a_summary_from_another_run(self) -> None:
+        self.document["benchmark"]["run_id"] = "unrelated"
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "identifiers disagree"):
+            self.analyze()
+
+    def test_refuses_a_candidate_with_only_one_executable_byte_changed(self) -> None:
+        self.assertEqual(self.analyze()["benchmark"]["guard"], "PASS")
+        self.runtime.write_bytes(b"synthetic runtimE")
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "runtime executable"):
+            self.analyze()
+
+    def test_requires_observed_parent_for_launcher_run(self) -> None:
+        self.launcher = self.root / "launcher.exe"
+        self.launcher.write_bytes(b"synthetic launcher")
+        self.evidence["launch"] = {
+            "mode": "launcher", "runtime_pid": 51, "observed_parent_pid": 50,
+            "observed_parent_sha256": hashlib.sha256(b"synthetic launcher").hexdigest(),
+        }
+        self.assertEqual(self.analyze()["benchmark"]["guard"], "PASS")
+        self.evidence["launch"]["runtime_pid"] = 52
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "runtime process"):
+            self.analyze()
+        self.evidence["launch"]["runtime_pid"] = 51
+        self.launcher.write_bytes(b"synthetic launchEr")
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "expected parent"):
+            self.analyze()
+
+    def test_refuses_a_route_failure_even_with_good_measurement_rows(self) -> None:
+        self.lines.append("ROUTE_FAIL: synthetic stop after an apparent success")
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "successful route completion"):
+            self.analyze()
+
+    def test_refuses_a_clock_change_during_the_window(self) -> None:
+        self.lines[2] = self.lines[2].replace("clock_epoch=0", "clock_epoch=2")
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "clock mode change"):
+            self.analyze()
+
+    def test_automatic_load_requires_observed_balanced_runtime_transitions(self) -> None:
+        self.evidence["load_treatment"] = "automatic"
+        self.evidence["windows"] = [[2, 5]]
+        self.document["benchmark"].update(mode="load", planned=1, completed=1)
+        self.lines = [
+            self.lines[0].replace("mode=ge.vertex_cache", "mode=load").replace("planned=2", "planned=1"),
+            self.lines[1], "AUTO_LOAD: on", "AUTO_LOAD: off", self.lines[2].replace("clock_epoch=0", "clock_epoch=1"),
+            self.lines[7].replace("completed=2", "completed=1"), self.lines[8],
+        ]
+        self.assertEqual(self.analyze()["benchmark"]["windows"][0]["automatic_loads"], 1)
+        self.lines[2:4] = ["FAST_FORWARD: on", "FAST_FORWARD: off"]
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "complete observed Automatic"):
+            self.analyze()
+        self.lines[2:4] = ["AUTO_LOAD: on", "AUTO_LOAD: on"]
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "complete observed Automatic"):
+            self.analyze()
+
+    def test_refuses_busy_and_missing_host_observation(self) -> None:
+        for role in ("busy", "unknown"):
+            with self.subTest(role=role):
+                self.evidence["host_observation"]["state"] = role
+                with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "quiet-host"):
+                    self.analyze()
+
+    def test_refuses_a_window_outside_the_observed_host_interval(self) -> None:
+        self.evidence["host_observation"]["end_wall_ns"] = 3500000
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "cover all measured"):
+            self.analyze()
+
+    def test_refuses_a_recorded_route_plan_that_does_not_match(self) -> None:
+        self.evidence["windows"][1] = [7, 10]
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "route windows differ"):
+            self.analyze()
+
+    def test_refuses_missing_or_unequal_work_and_wrong_renderer(self) -> None:
+        expected = self.lines[6]
+        for alteration in ("eligible=0 hits=0", "eligible=3 hits=1", "eligible=2 hits=0"):
+            self.lines[6] = expected.replace("eligible=2 hits=1", alteration)
+            with self.subTest(alteration=alteration), self.assertRaisesRegex(
+                    perf_attribution.PerfAttributionError, "unequal or inactive"):
+                self.analyze()
+        self.lines[6] = expected
+        self.evidence["renderer"] = "vulkan"
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "requires the software GE"):
+            self.analyze()
+
+    def test_refuses_incomplete_exit_metadata(self) -> None:
+        self.evidence["timed_out"] = True
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "timed out"):
+            self.analyze()
+
+    def test_strict_cli_rejects_invalid_benchmark_without_printing_result(self) -> None:
+        self.lines.pop()
+        perf = write_summary(self.root, self.document)
+        log = write_log(self.root, self.lines)
+        evidence = self.root / "evidence.json"
+        evidence.write_text(json.dumps(self.evidence), encoding="utf-8")
+        run = subprocess.run(
+            [sys.executable, str(ROOT / "tools/perf_attribution.py"), "--perf", str(perf),
+             "--stderr", str(log), "--benchmark-evidence", str(evidence), "--benchmark-runtime", str(self.runtime)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(run.returncode, 2, run.stderr)
+        self.assertFalse(run.stdout)
+        self.assertIn("successful route completion", run.stderr)
 
 
 class TestCli(unittest.TestCase):

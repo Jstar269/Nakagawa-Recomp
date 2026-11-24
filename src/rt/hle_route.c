@@ -1180,8 +1180,14 @@ static void route_load_once(void) {
 }
 
 /* A finished step disarms its PRESS_UNTIL_NID flag, so its call cannot complete the next step. */
-static void route_advance(void) {
+static void route_advance(uint32_t v) {
     s_route_pc++;
+    if (sr_perf_windows_enabled) {
+        extern int sched_vbl_paced(void);
+        int paced = sched_vbl_paced() && !sched_clock_deterministic() && !sched_fast_forward_on();
+        sr_perf_window_step((uint32_t)s_route_pc, v, sched_vtime_us(), g_ge_vertex_cache_hits,
+                            paced, sched_fast_forward_epoch());
+    }
     s_route_step_started = 0;
     route_until_nid_arm(0, 0u);
 }
@@ -1222,6 +1228,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             s_route_state = ROUTE_DONE;
             route_nid_watch(0);
             route_until_nid_arm(0, 0u);
+            if (sr_perf_windows_enabled) sr_perf_window_route_done();
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_nsteps, v);
             return keys;
         }
@@ -1259,20 +1266,20 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                 return keys;
             }
             if (!sr_input_delivered(&s_input)) return keys | st->a;
-            route_advance();
+            route_advance(v);
             continue;
         case ROUTE_OP_DELAY:
             /* Released for `n` samples and until the guest has read the release, so the
              * press before it and the press after it reach the guest as two presses. */
             if (st->a > 0u && !sr_input_delivered(&s_input)) return keys;
-            route_advance();
+            route_advance(v);
             continue;
         case ROUTE_OP_UNTIL: {
             int d = 255;
             if (sig && route_matches(st->name, sig, &d)) {
                 fprintf(stderr, "ROUTE: reached %s at vblank %u (step %d, d=%d, after %u vblanks)\n",
                         st->name, v, s_route_pc, d, el);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->d) {
@@ -1291,7 +1298,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                 fprintf(stderr, "ROUTE: guest called %s (0x%08x) at vblank %u (step %d, after %u "
                                 "vblanks; the press repeated until then)\n",
                         nm ? nm : "an unnamed import", st->nid, v, s_route_pc, el);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->d) {
@@ -1311,7 +1318,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                     fprintf(stderr, "ROUTE: left %s at vblank %u (step %d, after %u vblanks)\n",
                             st->name, v, s_route_pc, el);
                     s_route_while_seen = 0;
-                    route_advance();
+                    route_advance(v);
                     continue;
                 }
             } else if (sig) {
@@ -1335,7 +1342,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             if (sig && route_matches(st->name, sig, &d)) {
                 fprintf(stderr, "ROUTE: reached %s at vblank %u (step %d, d=%d)\n",
                         st->name, v, s_route_pc, d);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->a) {
@@ -1363,7 +1370,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             if (route_matches(st->name, sig, &d)) {
                 fprintf(stderr, "ROUTE: confirmed %s at vblank %u (step %d, d=%d)\n",
                         st->name, v, s_route_pc, d);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             {
@@ -1383,7 +1390,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                 fprintf(stderr, "ROUTE: guest called %s (0x%08x) at vblank %u (step %d, after "
                                 "%u vblanks)\n",
                         nm ? nm : "an unnamed import", st->b, v, s_route_pc, el);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->a) {
@@ -1400,6 +1407,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             s_route_state = ROUTE_DONE;
             route_nid_watch(0);
             route_until_nid_arm(0, 0u);
+            if (sr_perf_windows_enabled) sr_perf_window_route_done();
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_pc + 1, v);
             return keys;
         default:

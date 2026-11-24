@@ -849,6 +849,22 @@ uint32_t mpeg_delete(uint32_t mpegAddr) {
     return 0;
 }
 int sr_perf_enabled;
+int sr_perf_windows_enabled;
+static unsigned s_perf_route_edges, s_perf_route_done;
+static uint32_t s_perf_route_step[4], s_perf_route_vblank[4];
+void sr_perf_window_step(uint32_t step, uint32_t vblank, uint64_t guest_us,
+                         unsigned long cache_hits, int paced, uint32_t clock_epoch) {
+    (void)guest_us; (void)cache_hits; (void)paced; (void)clock_epoch;
+    if (s_perf_route_edges < 4u) {
+        s_perf_route_step[s_perf_route_edges] = step;
+        s_perf_route_vblank[s_perf_route_edges] = vblank;
+    }
+    s_perf_route_edges++;
+}
+void sr_perf_window_route_done(void) { s_perf_route_done++; }
+void sr_perf_window_note_umd_us(uint64_t started, uint64_t completed) { (void)started; (void)completed; }
+void sr_perf_window_note_ge_draw(void) {}
+int sr_perf_window_skips_vertex_cache(void) { return 0; }
 /* Non-zero, and never repeating: every `sr_perf_now_ns()` caller uses the value only as
  * a "the counters are live" predicate before handing it to a stub, so a constant 0 would
  * silently disable the media-telemetry call sites this harness has to observe. */
@@ -54498,6 +54514,8 @@ static void test_route_program_advances_only_on_observed_state(void) {
     uint8_t sigA[576], sigB[576];
 
     sr_route_reset();
+    s_perf_route_edges = s_perf_route_done = 0;
+    sr_perf_windows_enabled = 1;
     rt_hex(hexA, 0x20); rt_hex(hexB, 0x80);
     snprintf(body, sizeof body,
              "# route program\n"
@@ -54521,6 +54539,9 @@ static void test_route_program_advances_only_on_observed_state(void) {
     /* Wrong screen observed: still no advance. */
     expect(rt_frame(200, sigB) == 0u, "the wrong screen does not satisfy a WAIT");
 
+    expect(s_perf_route_edges == 0u && s_perf_route_done == 0u,
+           "time and a wrong signature do not complete a benchmark step");
+
     /* Right screen: the WAIT completes and the following PRESS starts on the same vblank. */
     expect(rt_frame(201, sigA) == 0x4000u, "the press begins on the vblank the screen is reached");
     for (uint32_t v = 202; v < 217; v++)
@@ -54529,6 +54550,12 @@ static void test_route_program_advances_only_on_observed_state(void) {
 
     expect(rt_frame(240, sigB) == 0u, "the second WAIT is satisfied by the second screen");
     expect(sr_route_status() == RT_DONE, "END completes the route");
+    expect(s_perf_route_edges == 3u && s_perf_route_done == 1u &&
+           s_perf_route_step[0] == 1u && s_perf_route_vblank[0] == 201u &&
+           s_perf_route_step[1] == 2u && s_perf_route_vblank[1] == 217u &&
+           s_perf_route_step[2] == 3u && s_perf_route_vblank[2] == 240u,
+           "the benchmark sees delivered route steps and the terminal event once");
+    sr_perf_windows_enabled = 0;
     remove(RT_PATH);
 }
 

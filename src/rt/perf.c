@@ -9,6 +9,7 @@
 #endif
 
 #include "perf.h"
+#include "../core/nk_shared_helpers.h"
 
 #include <inttypes.h>
 #include <stdarg.h>
@@ -19,6 +20,8 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h>
 #endif
 
 /* The scheduler thread's CPU clock (thread_cpu_now). Windows counts a thread's run time in TSC
@@ -284,22 +287,38 @@ static double s_hud_vblank_hz = 0.0;
 static double s_hud_game_fps = 0.0;
 static double s_hud_vblanks_per_frame = 0.0;
 
+/* Route ordinals are one-based. Bound the request and preserve the existing
+ * PERF/CSV schemas when no window is selected. */
+enum { SR_PERF_WINDOWS_MAX = 64, SR_PERF_WINDOW_STEP_MAX = 4096 };
+typedef struct SrPerfWindowSpec {
+    uint32_t begin, end;
+} SrPerfWindowSpec;
+
+static struct {
+    SrPerfWindowSpec spec[SR_PERF_WINDOWS_MAX];
+    char run_id[65], runtime_sha256[65];
+    uint32_t runtime_pid;
+    unsigned count, next;
+    int ab, active, ended, invalid;
+    uint64_t started_ns, umd_us, eligible;
+    unsigned long cache_hits;
+} s_windows;
+int sr_perf_windows_enabled;
+
 static int env_on(const char *name) {
     const char *value = getenv(name);
     return value && value[0] && strcmp(value, "0") != 0;
 }
 
-static uint64_t raw_now_ns(void) {
+static uint64_t monotonic_now_ns(void) {
 #ifdef SR_PROFILER_SELFTEST
     if (s_test_wall_clock) return s_test_wall_clock();
 #endif
 #if defined(_WIN32) || defined(_WIN64)
     static LARGE_INTEGER frequency;
     LARGE_INTEGER counter;
-    if (frequency.QuadPart == 0 && !QueryPerformanceFrequency(&frequency))
-        return (uint64_t)clock() * 1000000000ull / (uint64_t)CLOCKS_PER_SEC;
-    if (!QueryPerformanceCounter(&counter))
-        return (uint64_t)clock() * 1000000000ull / (uint64_t)CLOCKS_PER_SEC;
+    if ((frequency.QuadPart == 0 && !QueryPerformanceFrequency(&frequency)) ||
+        !QueryPerformanceCounter(&counter)) return 0;
     return (uint64_t)(counter.QuadPart / frequency.QuadPart) * 1000000000ull +
            (uint64_t)((counter.QuadPart % frequency.QuadPart) * 1000000000ll /
                       frequency.QuadPart);
@@ -307,10 +326,16 @@ static uint64_t raw_now_ns(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
         return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-    return 0;
-#else
-    return (uint64_t)clock() * 1000000000ull / (uint64_t)CLOCKS_PER_SEC;
 #endif
+    return 0;
+}
+
+static uint64_t raw_now_ns(void) {
+    uint64_t now = monotonic_now_ns();
+#if defined(_WIN32) || defined(_WIN64) || !defined(CLOCK_MONOTONIC)
+    if (!now) return (uint64_t)clock() * 1000000000ull / (uint64_t)CLOCKS_PER_SEC;
+#endif
+    return now;
 }
 
 static double ms(uint64_t ns) {
@@ -830,6 +855,13 @@ static void write_summary(const char *path, uint64_t wall_ns) {
     fprintf(json, "  \"build\":{\"aot_instruction_hook\":%s},\n",
             PERF_AOT_INSTRUCTIONS ? "true" : "false");
     fprintf(json, "  \"wall_ns\":%llu,\n", (unsigned long long)wall_ns);
+    if (s_windows.count)
+        fprintf(json, "  \"benchmark\":{\"run_id\":\"%s\",\"origin_ns\":%" PRIu64
+                      ",\"planned\":%u,\"completed\":%u,\"mode\":\"%s\","
+                      "\"runtime_sha256\":\"%s\",\"runtime_pid\":%u,\"valid\":%s},\n",
+                s_windows.run_id, s_perf.run_start_ns, s_windows.count, s_windows.next,
+                s_windows.ab ? "ge.vertex_cache" : "load", s_windows.runtime_sha256, s_windows.runtime_pid,
+                s_windows.ended && !s_windows.invalid ? "true" : "false");
     fprintf(json, "  \"interval_count\":%llu,\n", (unsigned long long)s_perf.interval_count);
     fprintf(json, "  \"vblanks\":{\"count\":%llu,\"presents\":%llu,\"present_skips\":%llu,"
                   "\"present_busy\":%llu},\n",
@@ -980,6 +1012,190 @@ static void perf_emit_format(const char *fmt, ...) {
     size_t len = (size_t)n < sizeof line ? (size_t)n : sizeof line - 1u;
     if (len == sizeof line - 1u) line[len - 1u] = '\n';   /* a truncated line still ends the line */
     perf_emit_line(line, len);
+}
+
+static void perf_windows_refuse(const char *reason) {
+    s_windows.invalid = 1;
+    s_windows.active = 0;
+    sr_perf_windows_enabled = 0;
+    perf_emit_format("PERF_BENCH_REFUSED reason=%s\n", reason);
+}
+
+static uint32_t perf_window_ordinal(const char **cursor) {
+    uint32_t result = 0;
+    while (**cursor >= '0' && **cursor <= '9') {
+        result = result * 10u + (uint32_t)(**cursor - '0');
+        if (result > SR_PERF_WINDOW_STEP_MAX) return 0u;
+        (*cursor)++;
+    }
+    return result;
+}
+
+/* A benchmark binds to the image the OS is running. This hashes the full file;
+ * the replay format has a separate size-and-blocks identity. */
+static int perf_window_runtime_identity(void) {
+    FILE *file = NULL;
+#if defined(_WIN32) || defined(_WIN64)
+    wchar_t path[SR_PERF_PATH_MAX];
+    DWORD count = GetModuleFileNameW(NULL, path, (DWORD)(sizeof path / sizeof path[0]));
+    if (count && count < sizeof path / sizeof path[0]) file = _wfopen(path, L"rb");
+    s_windows.runtime_pid = (uint32_t)GetCurrentProcessId();
+#elif defined(__linux__)
+    file = fopen("/proc/self/exe", "rb");
+    s_windows.runtime_pid = (uint32_t)getpid();
+#endif
+    if (!file) return 0;
+    uint8_t buf[16384], digest[32];
+    NkSha256 sha;
+    nk_sha256_init(&sha);
+    size_t got;
+    while ((got = fread(buf, 1, sizeof buf, file)) != 0) nk_sha256_update(&sha, buf, got);
+    int ok = !ferror(file);
+    fclose(file);
+    if (!ok) return 0;
+    nk_sha256_finish(&sha, digest);
+    for (unsigned i = 0; i < sizeof digest; i++)
+        snprintf(s_windows.runtime_sha256 + i * 2u, 3u, "%02x", digest[i]);
+    return 1;
+}
+
+static void perf_windows_init(void) {
+    const char *plan = getenv("SR_PERF_WINDOWS");
+    const char *arm_path = getenv("SR_PERF_AB");
+    if ((!plan || !*plan) && (!arm_path || !*arm_path)) return;
+    const char *id = getenv("SR_PERF_RUN_ID");
+    if (!s_perf.enabled || !s_perf.json_path[0] || !id || !*id ||
+        strlen(id) >= sizeof s_windows.run_id ||
+        id[strspn(id, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")] != '\0') {
+        perf_windows_refuse("missing_or_invalid_identity");
+        return;
+    }
+    if (!plan || !*plan) {
+        perf_windows_refuse("missing_windows");
+        return;
+    }
+    s_windows.ab = arm_path && *arm_path;
+    if (s_windows.ab && (strcmp(arm_path, "ge.vertex_cache") != 0 ||
+                         env_on("SR_GE_VERTEX_CACHE_DISABLE"))) {
+        perf_windows_refuse("invalid_or_disabled_speed_path");
+        return;
+    }
+    unsigned count = 0;
+    uint32_t previous_end = 0;
+    while (*plan) {
+        uint32_t begin = perf_window_ordinal(&plan);
+        if (!begin || *plan++ != '-') {
+            perf_windows_refuse("invalid_windows");
+            return;
+        }
+        uint32_t end = perf_window_ordinal(&plan);
+        if (begin <= previous_end || end <= begin || count == SR_PERF_WINDOWS_MAX ||
+            (*plan != '\0' && (*plan != ',' || !plan[1]))) {
+            perf_windows_refuse("invalid_windows");
+            return;
+        }
+        s_windows.spec[count++] = (SrPerfWindowSpec){begin, end};
+        previous_end = end;
+        if (*plan) plan++;
+    }
+    if (s_windows.ab && (count < 2 || (count & 1u))) {
+        perf_windows_refuse("unpaired_arms");
+        return;
+    }
+    if (!s_perf.run_start_ns) {
+        perf_windows_refuse("wall_clock_unavailable");
+        return;
+    }
+    if (!perf_window_runtime_identity()) {
+        perf_windows_refuse("runtime_identity_unavailable");
+        return;
+    }
+    memcpy(s_windows.run_id, id, strlen(id) + 1u);
+    s_windows.count = count;
+    sr_perf_windows_enabled = 1;
+    perf_emit_format("PERF_BENCH_BEGIN run_id=%s origin_ns=%" PRIu64 " planned=%u mode=%s"
+                     " runtime_sha256=%s runtime_pid=%u\n",
+                     id, s_perf.run_start_ns, count, s_windows.ab ? "ge.vertex_cache" : "load",
+                     s_windows.runtime_sha256, s_windows.runtime_pid);
+}
+
+static void perf_window_emit(const char *edge, uint32_t step, uint32_t vblank,
+                             uint64_t wall_ns, uint64_t guest_us, int paced, uint32_t clock_epoch) {
+    const SrPerfMetrics *m = &s_perf.total;
+    perf_emit_format("PERF_LOAD id=%u edge=%s step=%u wall_ns=%" PRIu64 " vblank=%u guest_us=%" PRIu64
+                     " paced=%d clock_epoch=%u iso_reads=%" PRIu64 " iso_bytes=%" PRIu64 " iso_ns=%" PRIu64
+                     " vfs_reads=%" PRIu64 " vfs_ns=%" PRIu64 " umd_us=%" PRIu64
+                     " present_submits=%" PRIu64 " idle_ns=%" PRIu64 " audio_frames=%" PRIu64 "\n",
+                     s_windows.next + 1u, edge, step, wall_ns, vblank, guest_us, paced, clock_epoch,
+                     m->storage_reads[SR_PERF_STORAGE_ISO], m->storage_bytes[SR_PERF_STORAGE_ISO],
+                     m->storage_ns[SR_PERF_STORAGE_ISO], m->storage_reads[SR_PERF_STORAGE_VFS],
+                     m->storage_ns[SR_PERF_STORAGE_VFS], s_windows.umd_us, m->present_submits,
+                     m->guest_idle_ns, m->audio_output_frames);
+}
+
+void sr_perf_window_step(uint32_t step, uint32_t vblank, uint64_t guest_us,
+                         unsigned long cache_hits, int paced, uint32_t clock_epoch) {
+    if (!sr_perf_windows_enabled || s_windows.next == s_windows.count) return;
+    const SrPerfWindowSpec *spec = &s_windows.spec[s_windows.next];
+    uint32_t expected = s_windows.active ? spec->end : spec->begin;
+    if (step < expected) return;
+    if (step != expected) {
+        perf_windows_refuse("missed_window_edge");
+        return;
+    }
+    uint64_t now = monotonic_now_ns();
+    if (!now || now < s_perf.run_start_ns ||
+        (s_windows.active && now <= s_windows.started_ns)) {
+        perf_windows_refuse("invalid_wall_clock");
+        return;
+    }
+    if (!s_windows.active) {
+        s_windows.started_ns = now;
+        s_windows.eligible = 0u;
+        s_windows.cache_hits = cache_hits;
+        s_windows.active = 1;
+        perf_window_emit("begin", step, vblank, now - s_perf.run_start_ns, guest_us, paced, clock_epoch);
+        return;
+    }
+    perf_window_emit("end", step, vblank, now - s_perf.run_start_ns, guest_us, paced, clock_epoch);
+    if (s_windows.ab) {
+        if (cache_hits < s_windows.cache_hits) {
+            perf_windows_refuse("cache_counter_wrapped");
+            return;
+        }
+        perf_emit_format("PERF_AB id=%u path=ge.vertex_cache arm=%c eligible=%" PRIu64 " hits=%lu\n",
+                         s_windows.next + 1u, (s_windows.next & 1u) ? 'B' : 'A',
+                         s_windows.eligible, cache_hits - s_windows.cache_hits);
+    }
+    s_windows.active = 0;
+    s_windows.next++;
+}
+
+void sr_perf_window_route_done(void) {
+    if (!sr_perf_windows_enabled) return;
+    if (s_windows.active || s_windows.next != s_windows.count) {
+        perf_windows_refuse("incomplete_windows");
+        return;
+    }
+    s_windows.ended = 1;
+    sr_perf_windows_enabled = 0;
+    perf_emit_format("PERF_BENCH_END run_id=%s completed=%u\n", s_windows.run_id, s_windows.next);
+}
+
+void sr_perf_window_note_umd_us(uint64_t started, uint64_t completed) {
+    if (completed < started || completed - started > UINT64_MAX - s_windows.umd_us) {
+        perf_windows_refuse("invalid_umd_guest_clock");
+        return;
+    }
+    s_windows.umd_us += completed - started;
+}
+
+void sr_perf_window_note_ge_draw(void) {
+    if (s_windows.ab && s_windows.active) s_windows.eligible++;
+}
+
+int sr_perf_window_skips_vertex_cache(void) {
+    return s_windows.ab && s_windows.active && !(s_windows.next & 1u);
 }
 
 static void perf_emit_ge_frontend(const SrPerfMetrics *m) {
@@ -1419,6 +1635,8 @@ void sr_perf_init(void) {
     if (s_perf.initialized) return;
     memset(&s_perf, 0, sizeof(s_perf));
     memset(&s_aot_vfpu, 0, sizeof(s_aot_vfpu));
+    memset(&s_windows, 0, sizeof(s_windows));
+    sr_perf_windows_enabled = 0;
     sr_perf_history_reset(&s_history);
     s_perf.initialized = 1;
     s_perf_stderr_enabled = env_on("SR_PERF");
@@ -1436,8 +1654,11 @@ void sr_perf_init(void) {
     s_perf_files_only = s_perf.enabled && !s_perf_stderr_enabled && !hud;
     sr_perf_enabled = s_perf.enabled;
     sr_perf_aot_active = 0;
-    if (!s_perf.enabled) return;
-    s_perf.run_start_ns = raw_now_ns();
+    if (!s_perf.enabled) {
+        perf_windows_init();
+        return;
+    }
+    s_perf.run_start_ns = getenv("SR_PERF_WINDOWS") ? monotonic_now_ns() : raw_now_ns();
     s_perf.interval_start_ns = s_perf.run_start_ns;
     thread_clock_start();
     seed_gpu_replay_base();
@@ -1467,6 +1688,7 @@ void sr_perf_init(void) {
         }
         else fprintf(stderr, "PERF: cannot open SR_PERF_FRAMES output\n");
     }
+    perf_windows_init();
     static int exit_hooked;
     if (!exit_hooked) atexit(perf_exit);
     exit_hooked = 1;
@@ -2173,7 +2395,7 @@ void sr_perf_audio_queue(int channel, uint32_t queued_frames, uint64_t starved_n
 void sr_perf_enable_counters(void) {
     if (!s_perf.initialized) {
         s_perf.initialized = 1;
-        s_perf.run_start_ns = raw_now_ns();
+        s_perf.run_start_ns = getenv("SR_PERF_WINDOWS") ? monotonic_now_ns() : raw_now_ns();
     }
     int was_enabled = s_perf.enabled;
     s_perf.enabled = 1;
