@@ -64,8 +64,8 @@
  *   version-1 record or none. It writes a temporary sibling, flushes it to the disk, renames it
  *   into place and syncs <saves>. The caller holds the stick lock, so there is one writer.
  *
- * This module only names paths and reads and writes the record: it creates no folder, moves
- * nothing and starts nothing. The move (nk_memstick_migrate.h) and the launcher use it. */
+ * The layout API names paths and reads and writes the record. The collision-copy API below
+ * prepares one save folder for first migration. Neither API starts a game. */
 
 #ifndef NK_MEMSTICK_LAYOUT_H
 #define NK_MEMSTICK_LAYOUT_H
@@ -116,6 +116,32 @@ typedef enum {
     /* SAVES_LAYOUT_INVALID: the caller passed a layout or name this module refuses. */
     NK_MEMSTICK_LAYOUT_INVALID
 } NkMemstickLayoutResult;
+
+typedef enum {
+    NK_MEMSTICK_COLLISION_COPIED = 0,      /* distinct whole units, both preserved */
+    NK_MEMSTICK_COLLISION_IDENTICAL,      /* one equivalent whole unit is enough */
+    NK_MEMSTICK_COLLISION_INVALID,        /* incompatible names or the same legacy slot */
+    NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED, /* no readable moving record, or active stick exists */
+    NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE,
+    NK_MEMSTICK_COLLISION_SOURCE_CHANGING,
+    NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT,
+    NK_MEMSTICK_COLLISION_COPY_MISMATCH,
+    NK_MEMSTICK_COLLISION_IO
+} NkMemstickCollisionResult;
+
+/* Copy one colliding PSP/SAVEDATA folder from two legacy slots during first migration.
+ * The caller holds the stick lock and passes the already selected winner first. A valid
+ * moving layout record is required and the shared stick must not exist yet. The slot
+ * and save names are single components, with distinct slots and equivalent save names
+ * under ASCII case folding. Legacy units are read-only. The winner goes to the staged
+ * stick and a differing loser to Kept copies/<loser_slot>/PSP/SAVEDATA using its own
+ * spelling. An existing complete, equivalent output can be reused on retry. A different
+ * output is never replaced. Callers still own election, the journal and stick promotion. */
+NkMemstickCollisionResult nk_memstick_copy_save_collision(const char *saves_root,
+                                                          const char *winner_slot,
+                                                          const char *winner_name,
+                                                          const char *loser_slot,
+                                                          const char *loser_name);
 
 typedef enum {
     NK_MEMSTICK_STATE_MOVING = 0,

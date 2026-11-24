@@ -48,12 +48,13 @@ int64_t nk_ftell64(FILE *f);
 FILE *nk_fopen_utf8(const char *path, const char *mode);
 int nk_remove_utf8(const char *path);
 int nk_rename_utf8(const char *from, const char *to);
-/* Move file `from` to `to` only while `to` does not exist, so a file someone else put at `to`
+/* Move `from` to `to` only while `to` does not exist, so an entry someone else put at `to`
  * (a player's edited image, say) is never replaced, even one made between a check and the move.
  * Returns 0 when moved, 1 when `to` already exists (`from` is left where it is), -1 on any other
  * failure. Win32: MoveFileExW without MOVEFILE_REPLACE_EXISTING. POSIX: link() and then unlink()
  * of `from`; on a Linux file system without hard links, renameat2 with RENAME_NOREPLACE; with
- * neither the move is refused (-1), never done by a rename that could replace. */
+ * neither the move is refused (-1), never done by a rename that could replace. Directories
+ * work on Win32 and where Linux's RENAME_NOREPLACE is available. */
 int nk_rename_noreplace_utf8(const char *from, const char *to);
 
 /* Filesystem and path utilities (all paths in UTF-8) */
