@@ -7431,6 +7431,62 @@ static void versioned_remove(const char *path) {
     if (nk_platform_file_exists(path)) assert(remove(path) == 0);
 }
 
+static void versioned_release_fixture(char *out, size_t size, const char *release, const char *name) {
+    int written = snprintf(out, size, "tests/fixtures/user_data/%s/%s", release, name);
+    assert(written > 0 && (size_t)written < size);
+}
+
+static void versioned_expect_original(const char *fixture, const char *original) {
+    char *kept = read_text_file(fixture);
+    assert(strcmp(kept, original) == 0);
+    free(kept);
+}
+
+static void test_preview_settings(PlayerApp *app, const char *release, bool v003) {
+    char fixture[96];
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_release_fixture(fixture, sizeof(fixture), release, "settings.json");
+    versioned_path(path, sizeof(path), "settings.json");
+    versioned_path(backup, sizeof(backup), "settings.json.v2.bak");
+    char *original = read_text_file(fixture);
+    write_text_file(path, original);
+    for (unsigned pass = 0; pass < 2u; ++pass) {
+        assert(player_app_load_settings(app, path) == NK_OK);
+        assert(!app->settings_newer_schema && !app->settings_unreadable);
+        const PlayerSettings *settings = &app->settings;
+        assert(settings->resolution_scale == 2 && settings->fps_cap == 0 && !settings->vsync);
+        assert(settings->present_scaling == NK_PRESENT_SCALING_INTEGER);
+        assert(settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON);
+        assert(settings->high_contrast_choice == PLAYER_SYSTEM_CHOICE_OFF);
+        assert(settings->interface_size_pct == 125 && settings->text_size_pct == 150);
+        assert(settings->master_volume == (v003 ? 57 : 42));
+        assert(strcmp(settings->picker_folder, "<drive>:\\SyntheticFixture\\Images") == 0);
+        assert(settings->title_play_count == 1);
+        assert(strcmp(settings->title_play[0].key, "TEST80003") == 0);
+        assert(settings->title_play[0].mode == PLAYER_PLAY_ENHANCED);
+        assert(settings->launcher_music == v003);
+        assert(settings->launcher_music_volume == (v003 ? 37 : 80));
+        assert(settings->build_speed == (v003 ? PACKAGE_BUILD_SPEED_BACKGROUND : PACKAGE_BUILD_SPEED_BALANCED));
+        assert(settings->nickname_asked == v003);
+        assert(strcmp(settings->nickname, v003 ? "Fixture Three" : NK_NICKNAME_DEFAULT) == 0);
+        assert(settings->title_pack_count == (v003 ? 1 : 0));
+        if (v003) {
+            assert(strcmp(settings->title_packs[0].key, "TEST80003") == 0);
+            assert(strcmp(settings->title_packs[0].path, "//fixtures.invalid/synthetic-fixtures/texture-pack") == 0);
+        }
+        if (pass == 0u) {
+            assert(versioned_file_equals(path, fixture));
+            assert(player_app_save_settings(app, path) == NK_OK);
+        }
+    }
+    assert(!nk_platform_file_exists(backup));
+    versioned_expect_original(fixture, original);
+    free(original);
+    versioned_remove(path);
+    printf("[PLAYER_STATE_TEST] %s settings.json: schema 2 round-trip PASS\n", release);
+}
+
 static void test_versioned_settings(PlayerApp *app) {
     char path[NATIVE_TEST_PATH_MAX + 64];
     char v1_backup[NATIVE_TEST_PATH_MAX + 64];
@@ -7517,6 +7573,44 @@ static void test_versioned_settings(PlayerApp *app) {
            "a newer file is kept PASS\n");
 }
 
+static void test_preview_library(NkLibrary *library, NkLibrary *reloaded, const char *release,
+                                 uint64_t iso_size) {
+    char fixture[96];
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_release_fixture(fixture, sizeof(fixture), release, "library.json");
+    versioned_path(path, sizeof(path), "library.json");
+    versioned_path(backup, sizeof(backup), "library.json.bak");
+    char *original = read_text_file(fixture);
+    write_text_file(path, original);
+    assert(nk_library_load(library, path) == NK_OK);
+    assert(library->count == 2 && library->newer_schema_version == 0);
+    const NkGameEntry *one = nk_library_find_by_disc_id(library, "TEST80003");
+    const NkGameEntry *two = nk_library_find_by_disc_id(library, "TEST80004");
+    assert(one && two);
+    assert(strcmp(one->title_name, "Synthetic Preview \"One\"") == 0);
+    assert(strcmp(one->iso_path, "<drive>:\\SyntheticFixture\\Expanded\\preview.iso") == 0);
+    assert(strcmp(one->source_image_path, "<drive>:\\SyntheticFixture\\Images\\preview.cso") == 0);
+    assert(strcmp(one->content_sha1, "0123456789abcdef0123456789abcdef01234567") == 0);
+    assert(strcmp(one->content_crc32, "10203040") == 0);
+    assert(one->disc_verification == NK_DISC_TIER_MODIFIED && one->iso_size_bytes == iso_size);
+    assert(one->is_prepared && one->assets_staged && one->status == NK_STATUS_PREPARED);
+    assert(strcmp(two->title_name, "Synthetic Preview Two \xE6\x97\xA5\xE6\x9C\xAC") == 0);
+    assert(two->is_experimental && two->source_image_path[0] == '\0');
+    assert(versioned_file_equals(path, fixture));
+    assert(nk_library_save(library, path) == NK_OK);
+    assert(versioned_file_equals(backup, fixture));
+    assert(nk_library_load(reloaded, path) == NK_OK);
+    assert(reloaded->count == library->count);
+    assert(memcmp(reloaded->entries, library->entries,
+                  sizeof(library->entries[0]) * (size_t)library->count) == 0);
+    versioned_expect_original(fixture, original);
+    free(original);
+    versioned_remove(backup);
+    versioned_remove(path);
+    printf("[PLAYER_STATE_TEST] %s library.json: schema 1 round-trip PASS\n", release);
+}
+
 static void test_versioned_library(PlayerApp *app) {
     static NkLibrary library;
     static NkLibrary reloaded;
@@ -7593,6 +7687,8 @@ static void test_versioned_library(PlayerApp *app) {
     versioned_remove(bak);
     printf("[PLAYER_STATE_TEST] library.json: v0.0.1 loads and round-trips, a newer file "
            "and its .bak are kept PASS\n");
+    test_preview_library(&library, &reloaded, "v0.0.2", 124000000u);
+    test_preview_library(&library, &reloaded, "v0.0.3", 125000000u);
 }
 
 static void test_versioned_user_data(void) {
@@ -7605,6 +7701,8 @@ static void test_versioned_user_data(void) {
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
     test_versioned_settings(app);
+    test_preview_settings(app, "v0.0.2", false);
+    test_preview_settings(app, "v0.0.3", true);
     test_versioned_library(app);
     free(app);
 }
