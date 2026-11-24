@@ -1396,6 +1396,128 @@ class EntryCatalogInvariantTests(unittest.TestCase):
         self.assertNotIn("hst-profile", catalog[0x08800000].provenance)
 
 
+class DelaySlotAddressTakenEntryTests(unittest.TestCase):
+    """An `la` finished in a delay slot keeps its target a callable entry.
+
+    The image holds three functions. `registrar` hands a callee a pointer to `target`.
+    `owner` opens a 0x20 frame and reaches `target` by one direct edge. `target` is `jr ra`
+    with that frame's release in its delay slot: the stack signature of a continuation.
+
+    With no pointer to it, the continuation audits make `target` the owner's resume (`r_`,
+    no entry-`$sp` contract). A pointer means an indirect dispatch may enter it with a
+    contract the audits cannot see, so it stays a callable entry (`f_`). Compilers put the
+    low half of that `la` in the delay slot of the call it is an argument of; the audits'
+    evidence census (`analyze.code_pointer_evidence`) dropped its high halves one word
+    early, at the transfer, and so made a resume of a target the analyzer's own sweep had
+    made an entry from that very `la`.
+
+    Evidence tier: production path (`codegen.main`, both profiles) on a synthetic image.
+    """
+
+    REGISTRAR = 0x00001000
+    OWNER = 0x00001028
+    TARGET = 0x00001038
+    SINK = 0x00001048
+    LUI_A1 = 0x3C050000                              # lui a1, 0
+    ADDIU_A1_TARGET = 0x24A50000 | TARGET            # addiu a1, a1, target
+    ORI_A1_TARGET = 0x34A50000 | TARGET              # ori a1, a1, target
+    JAL_SINK = 0x0C000000 | (SINK >> 2)
+    J_SINK = 0x08000000 | (SINK >> 2)
+    JALR_T9 = 0x0320F809                             # jalr ra, t9
+    BNE_A0_OVER = 0x14800002                         # bne a0, zero, +2 (inside registrar)
+
+    @classmethod
+    def words(cls, before=(0, 0), transfer=JAL_SINK, slot=0, after=0, edge="j"):
+        """The image, by the five words of `registrar` around its transfer and `owner`'s edge."""
+        to_target = (0x08000000 | (cls.TARGET >> 2)) if edge == "j" else 0x14800001
+        return {
+            cls.REGISTRAR: 0x27BDFFF0,       # addiu sp, sp, -0x10
+            cls.REGISTRAR + 4: 0xAFBF0000,   # sw ra, 0(sp)
+            cls.REGISTRAR + 8: before[0],
+            cls.REGISTRAR + 12: before[1],
+            cls.REGISTRAR + 16: transfer,
+            cls.REGISTRAR + 20: slot,        # its delay slot
+            cls.REGISTRAR + 24: after,
+            cls.REGISTRAR + 28: 0x8FBF0000,  # lw ra, 0(sp)
+            cls.REGISTRAR + 32: 0x03E00008,  # jr ra
+            cls.REGISTRAR + 36: 0x27BD0010,  # addiu sp, sp, 0x10
+            cls.OWNER: 0x27BDFFE0,           # addiu sp, sp, -0x20
+            cls.OWNER + 4: 0x00000000,
+            cls.OWNER + 8: to_target,        # j target / bne a0, zero, target
+            cls.OWNER + 12: 0x00000000,
+            cls.TARGET: 0x03E00008,          # jr ra
+            cls.TARGET + 4: 0x27BD0020,      # addiu sp, sp, 0x20
+            cls.TARGET + 8: 0x00000000,
+            cls.TARGET + 12: 0x00000000,
+            cls.SINK: 0x03E00008,            # jr ra
+            cls.SINK + 4: 0x00000000,
+        }
+
+    def entry_symbols(self, words):
+        """The symbols `codegen.main` emits a body for at `target`, under each profile."""
+        found = {}
+        for profile in ("none", "hst"):
+            with scratch_dir.TemporaryDirectory(prefix="slot_la_") as tmp:
+                work = Path(tmp)
+                elf = work / "slot_la.elf"
+                elf.write_bytes(_synthetic_elf(words, self.REGISTRAR))
+                result = _codegen_in_process(
+                    [str(elf), str(work / "slot_la.c"), f"--profile={profile}"])
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                text = "\n".join(
+                    path.read_text(encoding="ascii")
+                    for path in sorted(work.glob("slot_la_*.c"))
+                )
+            symbols = [
+                symbol for symbol in (f"f_{self.TARGET:08x}", f"r_{self.TARGET:08x}")
+                if f"void {symbol}(CpuState *s)" in text
+            ]
+            for symbol in symbols:
+                self.assertIn(f"sr_register(0x{self.TARGET:08x}u, {symbol});", text)
+            found[profile] = symbols
+        return found
+
+    def assert_entry(self, words, expected):
+        self.assertEqual(self.entry_symbols(words), {"none": expected, "hst": expected})
+
+    CALLABLE: ClassVar[list[str]] = [f"f_{TARGET:08x}"]
+    RESUME: ClassVar[list[str]] = [f"r_{TARGET:08x}"]
+
+    def test_low_half_in_a_delay_slot_keeps_the_target_callable(self):
+        for name, transfer in (
+            ("jal", self.JAL_SINK),
+            ("jalr", self.JALR_T9),
+            ("j", self.J_SINK),
+            ("bne", self.BNE_A0_OVER),
+        ):
+            for low_name, low in (("addiu", self.ADDIU_A1_TARGET), ("ori", self.ORI_A1_TARGET)):
+                with self.subTest(transfer=name, low=low_name):
+                    self.assert_entry(
+                        self.words(before=(0, self.LUI_A1), transfer=transfer, slot=low),
+                        self.CALLABLE,
+                    )
+
+    def test_target_entered_by_a_branch_is_an_entry_only_through_the_slot_la(self):
+        # Nothing but the owner's branch names the target: it is no entry, the owner's
+        # own code. The `la` is what makes it one, so the `la` must also keep it callable.
+        self.assert_entry(self.words(edge="branch"), [])
+        self.assert_entry(
+            self.words(before=(0, self.LUI_A1), slot=self.ADDIU_A1_TARGET, edge="branch"),
+            self.CALLABLE,
+        )
+
+    def test_the_fixture_is_a_resume_without_the_pointer(self):
+        # The control: every other fact the audits need holds, so only the `la` decides.
+        self.assert_entry(self.words(), self.RESUME)
+        # A high half the slot did not complete is no pointer: the pair is broken after it.
+        self.assert_entry(
+            self.words(before=(0, self.LUI_A1), after=self.ADDIU_A1_TARGET), self.RESUME)
+
+    def test_la_ahead_of_the_call_keeps_the_target_callable(self):
+        self.assert_entry(
+            self.words(before=(self.LUI_A1, self.ADDIU_A1_TARGET)), self.CALLABLE)
+
+
 # A synthetic guest symbol map for the fixture above: names and addresses only, in the
 # `name = 0xADDR; // type:func size:0xNN` form tools/codegen.py --symbol-map reads.
 OWNER_SIZE = RESUME + 16 - OWNER

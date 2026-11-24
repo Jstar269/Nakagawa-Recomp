@@ -1933,11 +1933,19 @@ def code_pointer_evidence(elf, ranges):
     jumps = _relocated_jumps(elf)
 
     hireg = {}
-    clear_next = False
+    # A control transfer ends the straight-line run after its delay slot, which still
+    # executes first: an `la` whose low half sits there (`lui a1, hi; jal f; addiu a1, a1,
+    # lo`) is a pointer argument, and the analyzer's sweep makes its target an entry on it
+    # (_seed_address_materializations). The slot therefore reads the state from before the
+    # transfer, and only what the slot itself wrote outlives it. `slot_at` is the address of
+    # the pending delay slot; a transfer with no such word (the end of a range) has none.
+    slot_at = None
     for addr, word in _iter_code_words(elf, ranges):
-        if clear_next:
+        in_slot = slot_at == addr
+        if slot_at is not None and not in_slot:
             hireg.clear()
-            clear_next = False
+        slot_at = None
+        wrote = None  # the register this word left a tracked value in
         op = word >> 26
         rs, rt = (word >> 21) & 0x1F, (word >> 16) & 0x1F
         if op == 3:  # jal
@@ -1952,6 +1960,7 @@ def code_pointer_evidence(elf, ranges):
         if op == 0x0F:  # lui rt, imm
             if rt:
                 hireg[rt] = (word & 0xFFFF) << 16
+                wrote = rt
         elif op in (0x09, 0x0D):  # addiu / ori: the low half of an `la`
             base = hireg.get(rs)
             if isinstance(base, int):
@@ -1965,6 +1974,7 @@ def code_pointer_evidence(elf, ranges):
                     evidence["immediate"].add(value)
                 if rt:
                     hireg[rt] = value
+                    wrote = rt
             elif rt:
                 hireg.pop(rt, None)
         else:
@@ -1977,10 +1987,12 @@ def code_pointer_evidence(elf, ranges):
                 for register in writes:
                     if register:
                         hireg.pop(register, None)
-        if branch_target(addr, word) is not None or op in (2, 3) or (
+        if in_slot:
+            hireg = {} if wrote is None else {wrote: hireg[wrote]}
+        elif branch_target(addr, word) is not None or op in (2, 3) or (
             op == 0 and (word & 0x3F) in (0x08, 0x09)
         ):
-            clear_next = True
+            slot_at = addr + 4
 
     # `sections` is absent on the owned synthetic word images, which carry no data
     # segment; treat that as no data evidence.
