@@ -192,7 +192,7 @@ GUEST_PATCHES: list[dict[str, Any]] = [
 ]
 
 # --- tools/codegen.py: custom per-address stubs -----------------------------
-CODEGEN_CUSTOM_STUBS = [
+CODEGEN_CUSTOM_STUBS: list[dict[str, Any]] = [
     # 0x000011b0 (__register_frame_info bypass), 0x0000260c (exception helper bypass),
     # 0x0000fe3c (_getmodreent), 0x00015ea0 (CSV tokenizer) and 0x000149a8 (strcpy):
     # retired under #363. Each now translates as written: the guest's own frame
