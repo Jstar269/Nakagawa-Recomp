@@ -1716,6 +1716,12 @@
     "name": "sceMpegQueryStreamSize",
     "status": "unreviewed"
   },
+  "0x6138194a": {
+    "classification": "dedicated",
+    "handler": "h_NetResolverTerm",
+    "name": "sceNetResolverTerm",
+    "status": "partial"
+  },
   "0x616403ba": {
     "classification": "dedicated",
     "handler": "h_TerminateThread",
@@ -4098,6 +4104,12 @@
     "classification": "dedicated",
     "handler": "h_RtcTickAddSeconds",
     "name": "sceRtcTickAddSeconds",
+    "status": "partial"
+  },
+  "0xf3370e61": {
+    "classification": "dedicated",
+    "handler": "h_NetResolverInit",
+    "name": "sceNetResolverInit",
     "status": "partial"
   },
   "0xf3986382": {

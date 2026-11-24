@@ -89,6 +89,12 @@ static struct {
     uint32_t pool_uid;  /* the user-partition block holding the pool */
 } s_netlib;
 static int s_netinet_inited;
+typedef enum {
+    NET_RESOLVER_UNSTARTED,
+    NET_RESOLVER_ACTIVE,
+    NET_RESOLVER_TERMINATED,
+} NetResolverState;
+static NetResolverState s_netresolver_state;
 
 int hle_net_inet_initialized(void) { return s_netinet_inited; }
 
@@ -169,7 +175,42 @@ static uint32_t h_NetInetTerm(CpuState *s) {
     (void)s;
     if (!s_netinet_inited)
         return hle_unmodelled_stop("sceNetInetTerm", "before a successful sceNetInetInit (UNMEASURED)");
+    if (s_netresolver_state == NET_RESOLVER_ACTIVE)
+        return hle_unmodelled_stop("sceNetInetTerm", "while sceNetResolver is initialized (UNMEASURED teardown order)");
     s_netinet_inited = 0;
+    return 0u;
+}
+
+/* ---- Disconnected sceNetResolver lifecycle (#2999). PSPAutotests
+ * e37443a681c6a4d562f32b6b48e1f4e36cd69c97, tests/net/inet/offline:
+ * COMMON/INET, core Net and Inet are ready, AP control has terminated, and the
+ * WLAN switch is on. Init returns 0, repeated Init 0x80000020, and the first
+ * and repeated Term after Init return 0 once the resolver objects are gone.
+ * This handler tracks only those lifecycle cells. Resolver objects and DNS
+ * have separate imports, and these handlers never query the host. */
+static int net_resolver_offline_stack_ready(CpuState *s) {
+    return s_netinet_inited && !adhocctl_inited() && h_WlanOn(s);
+}
+
+static uint32_t h_NetResolverInit(CpuState *s) {
+    if (!net_resolver_offline_stack_ready(s))
+        return hle_unmodelled_stop("sceNetResolverInit",
+                                   "outside the disconnected Inet stack with WLAN on (UNMEASURED)");
+    if (s_netresolver_state == NET_RESOLVER_ACTIVE)
+        return 0x80000020u;
+    if (s_netresolver_state == NET_RESOLVER_TERMINATED)
+        return hle_unmodelled_stop("sceNetResolverInit", "after Term (UNMEASURED re-init order)");
+    s_netresolver_state = NET_RESOLVER_ACTIVE;
+    return 0u;
+}
+
+static uint32_t h_NetResolverTerm(CpuState *s) {
+    if (!net_resolver_offline_stack_ready(s))
+        return hle_unmodelled_stop("sceNetResolverTerm",
+                                   "outside the disconnected Inet stack with WLAN on (UNMEASURED)");
+    if (s_netresolver_state == NET_RESOLVER_UNSTARTED)
+        return hle_unmodelled_stop("sceNetResolverTerm", "before a successful Init (UNMEASURED)");
+    s_netresolver_state = NET_RESOLVER_TERMINATED;
     return 0u;
 }
 
@@ -3848,6 +3889,7 @@ static uint32_t h_NetAdhocMatchingGetPoolStat(CpuState *s) {
  * control thread, so nothing is freed here. */
 void hle_net_reset(void) {
     s_netinet_inited = 0;
+    s_netresolver_state = NET_RESOLVER_UNSTARTED;
     adhoc_close_sockets_and_matching();
     adhoc_release_transport();
     s_netlib.inited = 0;
@@ -3894,6 +3936,8 @@ void hle_register_unregistered_import_network_1(void) {
     sr_hle_register(0x281928a9u, "sceNetTerm", h_NetTerm);
     sr_hle_register(0x17943399u, "sceNetInetInit", h_NetInetInit);
     sr_hle_register(0xa9ed66b9u, "sceNetInetTerm", h_NetInetTerm);
+    sr_hle_register(0xf3370e61u, "sceNetResolverInit", h_NetResolverInit);
+    sr_hle_register(0x6138194au, "sceNetResolverTerm", h_NetResolverTerm);
     /* The net stack's thread and memory bookkeeping, and ad hoc discovery, which has no peers to
      * find, stay refused with the offline network code 0x80010086 (SCE_KERNEL_ERROR_ERRNO_
      * FUNCTION_NOT_SUPPORTED): their answers with no network are not modelled yet. */

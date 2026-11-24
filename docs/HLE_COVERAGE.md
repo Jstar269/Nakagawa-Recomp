@@ -26,9 +26,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 73 |
 | `ppsspp-derived` | 179 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 300 | 183 |
+| `synthetic` | 302 | 183 |
 | `unverified` | 174 | 22 |
-| total | 717 | 366 |
+| total | 719 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -358,6 +358,7 @@ a title that translates none has generated code unchanged.
 | `0x606a4649` | `sceMpegDelete` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x60b81f86` | `sceCtrlReadBufferNegative` | input | `synthetic` | HLE selftest dispatch |
 | `0x611e9e11` | `sceMpegQueryStreamSize` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
+| `0x6138194a` | `sceNetResolverTerm` | network | `synthetic` | HLE selftest dispatch |
 | `0x616403ba` | `sceKernelTerminateThread` | kernel_thread | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP |
 | `0x617f3fe6` | `sceDmacMemcpy` | cache_dma | `hardware-measured` | PSP oracle PSP-DMAC-001 |
 | `0x61eb33f5` | `sceAtracReleaseAtracID` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
@@ -753,6 +754,7 @@ a title that translates none has generated code unchanged.
 | `0xf27a9c51` | `sceIoRemove` | io | `hardware-measured` | PSP oracle PSP-IO-001 |
 | `0xf2930c9c` | `sceMpegAvcDecodeStopYCbCr` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0xf2a4afe5` | `sceRtcTickAddSeconds` | rtc | `unverified` | no recorded evidence |
+| `0xf3370e61` | `sceNetResolverInit` | network | `synthetic` | HLE selftest dispatch |
 | `0xf3986382` | `sceKernelReceiveMbxCB` | kernel_sync | `synthetic` | HLE selftest dispatch |
 | `0xf3f76017` | `sceUtilityOskGetStatus` | utility | `synthetic` | HLE selftest dispatch |
 | `0xf475845d` | `sceKernelStartThread` | kernel_thread | `synthetic` | HLE selftest dispatch; unlinked hardware note |

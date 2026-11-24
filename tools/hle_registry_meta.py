@@ -369,7 +369,23 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network",
             "PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): active sceNetInetTerm returns 0 before core Net Term and module unload",
         ],
-        "limitation": "clears active Inet state before core Net teardown; early or repeated Term stops by name; LoadExec clears Inet with the process's core Net and module state",
+        "limitation": "clears active Inet state before core Net teardown; early or repeated Term and Term while Resolver is active stop by name; LoadExec clears Inet with the process's core Net and module state",
+    },
+    "h_NetResolverInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network",
+            "PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): after normal Net/Inet setup and AP Term, first Resolver Init returns 0 and duplicate Init returns 0x80000020",
+        ],
+        "limitation": "tracks only lifecycle in the disconnected Inet stack with WLAN on; unsupported ordering stops by name; resolver objects, DNS and host transport remain outside the handler",
+    },
+    "h_NetResolverTerm": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network",
+            "PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): first and repeated Resolver Term return 0 after Init and deletion of the resolver objects",
+        ],
+        "limitation": "clears active Resolver in the disconnected Inet stack with WLAN on; Term before successful Init stops by name; LoadExec resets the lifecycle state",
     },
     "h_NetGetLocalEtherAddr": {
         "status": "partial",

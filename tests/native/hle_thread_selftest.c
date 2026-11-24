@@ -9599,6 +9599,104 @@ static void test_net_inet_lifecycle_without_network(int stop_at_socket) {
     sr_hle_test_partition_reset();
 }
 
+/* #2999: drive the two lifecycle imports without creating a resolver or making a host lookup. */
+static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
+    enum {
+        NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
+        NID_INET_INIT = 0x17943399u, NID_INET_TERM = 0xa9ed66b9u,
+        NID_RESOLVER_INIT = 0xf3370e61u, NID_RESOLVER_TERM = 0x6138194au,
+        NID_RESOLVER_CREATE = 0x244172afu, NID_RESOLVER_LOOKUP = 0x224c5f44u,
+        NID_LOAD_NET = 0x1579a159u, NID_UNLOAD_NET = 0x64d50c56u,
+        NET_COMMON = 1u, NET_INET = 3u,
+    };
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_net_inited(void);
+    extern uint32_t sr_hle_test_net_pool_uid(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    sr_hle_init();
+    const int init_registered = sr_hle_test_is_registered(NID_RESOLVER_INIT);
+    const int term_registered = sr_hle_test_is_registered(NID_RESOLVER_TERM);
+    const int lookup_registered = sr_hle_test_is_registered(NID_RESOLVER_LOOKUP);
+    expect(init_registered, "Resolver lifecycle registers the Init NID");
+    expect(term_registered, "Resolver lifecycle registers the Term NID");
+    expect(!sr_hle_test_is_registered(NID_RESOLVER_CREATE) && !lookup_registered,
+           "Resolver lifecycle leaves object creation and lookup unregistered");
+    if (!init_registered || !term_registered) return;
+
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_loadexec_reset_guest_state();
+    sysreg_scratch_clean();
+    sysreg_restart();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u,
+           "Resolver lifecycle: Init before Inet was started stops by name");
+    const int inet_ready = net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+                           net_call(NID_LOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+                           net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+                           net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u;
+    expect(inet_ready, "Resolver lifecycle: normal offline utility, Net and Inet startup");
+    const uint32_t pool = sr_hle_test_net_pool_uid();
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 2u,
+           "Resolver lifecycle: Term before successful Init stops by name");
+
+    static const char wlan_off[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, "
+        "\"categories\": [], \"keys\": [], \"console\": {\"wlan_mac_hex\": \"00a1b2c3d4e5\", "
+        "\"open_psid_hex\": \"00112233445566778899aabbccddeeff\", \"wlan_switch\": 0}}";
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, wlan_off, sizeof(wlan_off) - 1u),
+           "Resolver lifecycle: create the synthetic WLAN-off profile");
+    sysreg_restart();
+    expect(profile_call(0xd7763699u, 0u) == 0u &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Resolver lifecycle: the unmeasured WLAN-off cell stops by name");
+    sysreg_scratch_clean();
+    sysreg_restart();
+
+    const int resolver_ready = net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u;
+    expect(resolver_ready && sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: first disconnected Init returns zero and preserves the Net pool");
+    if (stop_at_lookup) {
+        /* Never exercise a lookup if a future change registers this import. */
+        if (inet_ready && resolver_ready && !lookup_registered) {
+            sr_sched_on = 1;
+            (void)net_call(NID_RESOLVER_LOOKUP, 0, 0, 0, 0, 0);
+        }
+        return;
+    }
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0x80000020u &&
+               sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Resolver lifecycle: duplicate Init returns the observed error without a stop");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 4u && sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: Inet cannot tear down while Resolver is active");
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == 0u &&
+               sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: first and repeated Term return zero and leave core Net alive");
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 5u,
+           "Resolver lifecycle: the unmeasured re-init order stops by name");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: normal Inet and core teardown follows Resolver Term");
+    sr_hle_loadexec_reset_guest_state();
+    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+               net_call(NID_LOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: a new program starts Resolver in its fresh state");
+    sr_hle_loadexec_reset_guest_state();
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
 static void test_net_core_without_network(void) {
     enum {
         NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
@@ -68405,6 +68503,17 @@ static int hle_selftest_main(int argc, char **argv) {
         free(g_mem_base);
         return 98;
     }
+    if (argc > 1 && strcmp(argv[1], "--resolver-lookup-stop-child") == 0) {
+        test_net_resolver_lifecycle_without_network(1);
+        free(g_mem_base);
+        return 1;
+    }
+    if (argc > 1 && strcmp(argv[1], "--resolver-offline") == 0) {
+        test_net_resolver_lifecycle_without_network(0);
+        fprintf(stderr, "resolver-offline: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--inet-offline") == 0) {
         test_net_inet_lifecycle_without_network(0);
         fprintf(stderr, "inet-offline: %d checks, %d failures\n", s_checks, s_failures);
@@ -68572,6 +68681,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_named_refusals();
     test_net_core_without_network();
     test_net_inet_lifecycle_without_network(0);
+    test_net_resolver_lifecycle_without_network(0);
     test_refer_system_status();
     test_ctrl_read_latch();
     test_ctrl_peek_latch_keeps_the_latch();
