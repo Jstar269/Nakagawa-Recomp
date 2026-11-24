@@ -498,9 +498,11 @@ it the same way ([#1876](https://github.com/Jstar269/nakagawa-recomp/issues/1876
 checksum, signature, source and debug files, ranks the archives that are left, reads the platform from the
 name, and refuses a file whose checksum changed after it first recorded it. The contract:
 
-- **One player archive per OS and architecture**, with the platform in its name:
-  `nakagawa-recomp-<version>-windows-x64.zip`. There is no second archive for the same platform (no
-  "portable" variant, no renamed copy). The one exception is the Windows installer below.
+- **One player archive per OS and architecture**, with the platform in its name.
+  `nakagawa-recomp-<version>-windows-x64.zip` is required.
+  `nakagawa-recomp-<version>-linux-x64.tar.gz` is optional and preserves Linux executable permissions.
+  Each archive requires its own `.sha256`. The Windows installer below is the only extra download
+  allowed for the same platform.
 - **The installer, optional, beside the ZIP and never alone**:
   `nakagawa-recomp-<version>-windows-x64-setup.exe` with its `.sha256` (and optional `.minisig`). It is not a name
   a filter drops, so the contract relies on how a launcher ranks files: Quiver Launcher ranks a ZIP ahead of an
@@ -509,8 +511,7 @@ name, and refuses a file whose checksum changed after it first recorded it. The 
   This rests on that ranking, which has **not been verified against a running launcher**: nothing in the
   `-setup.exe` name is a word a filter drops. It is an accepted, unverified risk. Before publishing a release
   that carries both files, open it in a catalogue launcher that applies this contract (Quiver Launcher) and
-  confirm it offers the ZIP only; if it offers the installer, publish the ZIP alone. A new platform is a new archive such as
-  `...-linux-x64.zip`, added to this list when it exists.
+  confirm it offers the ZIP only; if it offers the installer, publish the ZIP alone.
 - **Every other file carries a word a name filter drops**: `.sha256` (`...zip.sha256`), `.minisig`
   (`...zip.sha256.minisig`, a signature of the checksum file, optional), and `source`
   (`nakagawa-recomp-<version>-prerequisite-sources.zip` and its `.sha256`). The SBOMs and
@@ -529,7 +530,9 @@ checks the names and exits 1 with a named problem (`ASSET_PLATFORM_DUPLICATE`, `
 python tools/stage_install.py --check-assets $Zip "$Zip.sha256" $SourceZip "$SourceZip.sha256"
 ```
 
-With the installer, add `$SetupExe` and `"$SetupExe.sha256"` to that list.
+With the installer, add `$SetupExe` and `"$SetupExe.sha256"` to that list. If the release includes
+the Linux archive, add its `.tar.gz` and `.tar.gz.sha256` files as well (see
+[the Linux asset-name starter task](https://github.com/Jstar269/Nakagawa-Recomp/issues/2648)).
 
 Run it before the signature exists, and again with `"$Zip.sha256.minisig"` added, before anything is
 attached to a release. `tools/test_stage_install.py` keeps the rule from drifting.

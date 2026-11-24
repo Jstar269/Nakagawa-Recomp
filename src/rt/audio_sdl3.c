@@ -11,6 +11,10 @@
  * fails closed gracefully with a clear diagnostic and open-loop guest pacing.
  */
 
+#if defined(SR_AUDIO_SELFTEST) && !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L /* setenv and unsetenv under strict C99 */
+#endif
+
 #define SDL_MAIN_HANDLED 1
 
 #include <assert.h>
@@ -1482,6 +1486,58 @@ int sr_audio_queued(int ch) {
     return sr_audio_takeable_frames(ch, frames);
 }
 
+/* The shadow holds the host's actual queued stereo samples, after channel
+ * gains and the limiter. A failed or incomplete shadow cannot prove silence. */
+int sr_audio_load_pending_sound(int ch) {
+    if (s_audio_state != AUDIO_STATE_ACTIVE) return 0;
+    if (ch < 0 || ch >= SR_AUDIO_CHANNELS) return 1;
+    {
+        const int bytes = SDL_GetAudioStreamQueued(s_streams[ch]);
+        if (bytes < 0) return 1;
+        const uint32_t frames = (uint32_t)bytes / 4u;
+        sr_audio_shadow_sync(ch, frames);
+        const AudioShadowQueue *queue = &s_shadow_queues[ch];
+        if (!queue->valid || queue->frames != frames) return 1;
+        for (uint32_t i = 0; i < frames; ++i) {
+            const uint32_t at = (queue->head_frame + i) % queue->capacity_frames;
+            if (queue->samples[at * 2u] || queue->samples[at * 2u + 1u]) return 1;
+        }
+        if (s_tpl_on) {
+            const AudioPeakLimiter *limiter = &s_tpl[ch];
+            for (unsigned i = 1u; i <= SR_TPL_DELAY; ++i) {
+                const uint64_t at = (limiter->next - i) & (SR_TPL_RING - 1u);
+                if (limiter->x[at][0] != 0.0f || limiter->x[at][1] != 0.0f) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+int sr_audio_load_silent(void) {
+    if (s_audio_state != AUDIO_STATE_ACTIVE) return 1;
+    for (int ch = 0; ch < SR_AUDIO_CHANNELS; ++ch)
+        if (!sr_audio_played_dry(ch) && sr_audio_load_pending_sound(ch)) return 0;
+    return 1;
+}
+
+/* Only automatic fast-forward calls this. Its entry proved the queues
+ * silent, and it exits before accepting an audible block. */
+void sr_audio_replace_silent_queue(int ch, int frames, int hold) {
+    if (ch < 0 || ch >= SR_AUDIO_CHANNELS || s_audio_state != AUDIO_STATE_ACTIVE) return;
+    /* A played-dry channel can have converter / limiter history which
+     * needs another block to play. Leave it for the ordinary output path. */
+    if (sr_audio_load_pending_sound(ch)) return;
+    if (!SDL_ClearAudioStream(s_streams[ch])) {
+        fprintf(stderr, "audio: automatic load silence handoff failed: %s\n", SDL_GetError());
+        return;
+    }
+    sr_audio_shadow_sync(ch, 0u);
+    SDL_SetAtomicInt(&s_played_dry[ch], 1);
+    s_primed_frames[ch] = 0u;
+    if (frames > 0) sr_audio_push_silence(ch, frames);
+    if (s_primed_frames[ch] > (uint32_t)hold) s_primed_frames[ch] = (uint32_t)hold;
+}
+
 /* The frames the host output device takes from a channel in one pull, in mixer frames: 441 from
  * WASAPI and 1024 from DirectSound on the reference PC. It is the larger of what the pulls were
  * measured to take (above) and SDL's chunk size for the device, which stands alone until the
@@ -1633,6 +1689,63 @@ static void test_reset(void) {
     s_tpl_on = 0;
     sr_audio_tpl_reset();
     set_test_env("SR_MASTER_VOLUME", "");
+}
+
+static void test_auto_load_keeps_dry_audio(void) {
+    int16_t tone[512 * 2];
+    for (unsigned i = 0u; i < sizeof(tone) / sizeof(tone[0]); ++i)
+        tone[i] = (int16_t)(2000 + i);
+    for (int limiter = 0; limiter <= 1; ++limiter) {
+        test_reset();
+        SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+        s_test_device_freq = 48000;
+        assert(sr_audio_init() == 0);
+        assert(SDL_PauseAudioDevice(s_device_id));
+        assert(sr_audio_set_true_peak_limiter(limiter) == limiter);
+        sr_audio_push(0, tone, 512, 0x8000, 0x8000);
+        assert(!sr_audio_load_silent());
+        assert(SDL_ResumeAudioDevice(s_device_id));
+        const Uint64 deadline = SDL_GetTicks() + 5000;
+        while (!sr_audio_played_dry(0) && SDL_GetTicks() < deadline) SDL_Delay(2);
+        assert(sr_audio_played_dry(0));
+        assert(SDL_PauseAudioDevice(s_device_id));
+        const int tail = SDL_GetAudioStreamQueued(s_streams[0]);
+        const uint64_t limiter_next = s_tpl[0].next;
+        assert(tail > 0 && SDL_GetAudioStreamAvailable(s_streams[0]) == 0);
+        assert(sr_audio_load_pending_sound(0) && sr_audio_load_silent());
+        sr_audio_replace_silent_queue(0, 0, 0);
+        assert(SDL_GetAudioStreamQueued(s_streams[0]) == tail);
+        assert(s_tpl[0].next == limiter_next);
+        sr_audio_push(0, tone, 512, 0x8000, 0x8000);
+        assert(!sr_audio_load_silent());
+    }
+    /* Isolate audible limiter history from the SDL queue. */
+    test_reset();
+    s_test_device_freq = SR_AUDIO_SAMPLE_RATE;
+    assert(sr_audio_init() == 0 && SDL_PauseAudioDevice(s_device_id));
+    assert(sr_audio_set_true_peak_limiter(1) == 1);
+    sr_audio_push(0, tone, 512, 0x8000, 0x8000);
+    assert(SDL_ClearAudioStream(s_streams[0]));
+    assert(SDL_GetAudioStreamQueued(s_streams[0]) == 0);
+    assert(!sr_audio_played_dry(0));
+    assert(sr_audio_load_pending_sound(0) && !sr_audio_load_silent());
+    SDL_SetAtomicInt(&s_played_dry[0], 1);
+    const AudioPeakLimiter pending = s_tpl[0];
+    assert(sr_audio_played_dry(0) && sr_audio_load_silent());
+    sr_audio_replace_silent_queue(0, 0, 0);
+    assert(memcmp(&s_tpl[0], &pending, sizeof(pending)) == 0);
+
+    test_reset();
+    assert(sr_audio_init() == 0 && SDL_PauseAudioDevice(s_device_id));
+    sr_audio_replace_silent_queue(0, 256, 64);
+    sr_audio_replace_silent_queue(0, 192, 32);
+    assert(sr_audio_queued(0) == 192 && s_primed_frames[0] == 32u);
+    s_stats.channel_pushed_frames[0] = 1u; /* make false underrun classification observable */
+    const uint64_t before = s_stats.underrun_events;
+    sr_audio_push(0, tone, 512, 0x8000, 0x8000);
+    assert(s_stats.underrun_events == before);
+    test_reset();
+    printf("test_auto_load_keeps_dry_audio: PASS\n");
 }
 
 static void test_dummy_mixer_handoff(void) {
@@ -3045,6 +3158,7 @@ int main(int argc, char **argv) {
     test_dump_stats_opens_nothing();
     test_host_pull_frames();
     test_played_dry_is_exact_and_per_channel();
+    test_auto_load_keeps_dry_audio();
     test_push_silence_is_not_a_push();
     test_pause_stash_failure_is_visible();
     test_dump_conversion();

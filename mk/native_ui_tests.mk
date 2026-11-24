@@ -300,6 +300,22 @@ nk-ui-player-screens-selftest:
 		tests/native/test_player_screens.c -lm -o $(BUILD_ROOT)/test_player_screens$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_player_screens$(EXE_EXT)
 
+# Generate a temporary pseudo catalog and run the same launcher models through
+# the screen and widget layout. English snapshots use the separate target above.
+NK_UI_PSEUDO_LAYOUT_COMPILE = $(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror \
+	-I"$(BUILD_ROOT)" -Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay \
+	-DNK_UI_PSEUDO_LAYOUT_TEST -include nk_ui_pseudo_text.h -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+	$(NK_UI_CORE_SRCS) $(filter-out src/player/ui/player_ui_nk.c,$(NK_UI_PLAYER_C5_SRCS)) \
+	tests/native/test_player_screens.c -lm
+.PHONY: nk-ui-player-pseudo-selftest
+nk-ui-player-pseudo-selftest:
+	"$(PYTHON)" tests/native/test_player_ui.py --write-pseudo-catalog "$(BUILD_ROOT)/nk_ui_pseudo_text.h"
+	$(NK_UI_PSEUDO_LAYOUT_COMPILE) -o "$(BUILD_ROOT)/test_player_english$(EXE_EXT)"
+	$(NK_UI_PSEUDO_LAYOUT_COMPILE) -DNK_UI_TRANSLATION_HEADER=\"nk_ui_pseudo_text.h\" \
+		-o "$(BUILD_ROOT)/test_player_pseudo$(EXE_EXT)"
+	"$(PYTHON)" tests/native/test_player_ui.py --check-pseudo-layout \
+		"$(BUILD_ROOT)/test_player_english$(EXE_EXT)" "$(BUILD_ROOT)/test_player_pseudo$(EXE_EXT)" "$(BUILD_ROOT)"
+
 # launcher-secret-selftest - the launcher's hidden moment and themes, SDL-free: the classic cheat
 # code's detector, the greeting by the hour, the moment with and without motion and sound, the
 # rippled mark, the confetti, the jingle, the theme rules and the derived colours' contrast, and

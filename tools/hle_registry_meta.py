@@ -345,7 +345,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_net_core_without_network",
             "PSPAutotests tests/net (70e72391, recorded on a PSP): sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0 in every net test with no access point connected, and again after sceNetTerm (net/adhoc/socketids)",
         ],
-        "limitation": "the library's state and its pool (from the user partition) only: no network stack, no socket and no host network API; the SceNetCallout and SceNetNetintr threads are not created; the PSP results were recorded with the WLAN switch on, and with the console profile's switch off sceNetInit still returns 0 (UNMEASURED; PPSSPP does not consult the switch either); the pool-size and priority codes, the pool's placement and the Init failure codes follow PPSSPP (a behaviour reference, UNMEASURED); a second Init without Term starts over with one pool, but checks its arguments before releasing the first pool, unlike PPSSPP (the PSP's order is UNMEASURED); a pool size whose 256-byte rounding passes 4 GB is refused with NO_MEMORY",
+        "limitation": "the library's state and its pool (from the user partition) only: no network stack, no socket and no host network API; the SceNetCallout and SceNetNetintr threads are not created; the PSP results were recorded with the WLAN switch on, and with the console profile's switch off sceNetInit still returns 0 (UNMEASURED; PPSSPP does not consult the switch either); the pool-size and priority codes, the pool's placement and the Init failure codes follow PPSSPP (a behaviour reference, UNMEASURED); a second Init without Term starts over with one pool, but checks its arguments before releasing the first pool, unlike PPSSPP (the PSP's order is UNMEASURED); a pool size whose 256-byte rounding passes 4 GB is refused with NO_MEMORY; core re-Init while Inet is active stops by name",
     },
     "h_NetTerm": {
         "status": "partial",
@@ -353,7 +353,23 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_net_core_without_network",
             "PSPAutotests tests/net (70e72391, recorded on a PSP): sceNetTerm returns 0 after sceNetInit (net/adhoc/apctl, apctlinit, loopback)",
         ],
-        "limitation": "frees the pool and clears the library state; sceNetTerm before sceNetInit returns 0 as PPSSPP does (UNMEASURED)",
+        "limitation": "frees the pool and clears the library state; sceNetTerm before sceNetInit returns 0 as PPSSPP does (UNMEASURED); core Term while Inet is active stops by name",
+    },
+    "h_NetInetInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network",
+            "PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): fresh sceNetInetInit returns 0 after utility module and core Net setup",
+        ],
+        "limitation": "models only Inet lifecycle state after core Net and both COMMON and INET modules are ready; duplicate Init and unmet setup stop by name; guest pool and thread effects beyond core Net are unmeasured, and sockets, access-point control, DNS, and host transport are not enabled",
+    },
+    "h_NetInetTerm": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network",
+            "PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): active sceNetInetTerm returns 0 before core Net Term and module unload",
+        ],
+        "limitation": "clears active Inet state before core Net teardown; early or repeated Term stops by name; LoadExec clears Inet with the process's core Net and module state",
     },
     "h_NetGetLocalEtherAddr": {
         "status": "partial",
@@ -531,7 +547,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_utility_av_module_state",
             "tests/native/hle_thread_selftest.c:test_utility_module_table",
         ],
-        "limitation": "records utility module state only; does not check whether a loaded module still depends on the one unloaded (PPSSPP does not either); not measured on this project's PSP",
+        "limitation": "records utility module state only; unloading COMMON or INET while Inet is active stops by name; other module dependencies are not checked on unload (PPSSPP does not either); not measured on this project's PSP",
     },
     "h_UtilityLoadNetModule": {
         "status": "partial",
@@ -539,7 +555,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_utility_av_module_state",
             "tests/native/hle_thread_selftest.c:test_utility_module_table",
         ],
-        "limitation": "maps net-module numbers 1..7 onto utility IDs 0x100..0x106 and their shared state; the status codes for a bad number or a repeated call are the generic module ones, unmeasured on a PSP; makes no connection, and the net libraries stay refused",
+        "limitation": "maps net-module numbers 1..7 onto utility IDs 0x100..0x106 and their shared state; the status codes for a bad number or a repeated call are the generic module ones, unmeasured on a PSP; makes no connection and does not enable socket operations",
     },
     "h_UtilityUnloadNetModule": {
         "status": "partial",
@@ -547,7 +563,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_utility_av_module_state",
             "tests/native/hle_thread_selftest.c:test_utility_module_table",
         ],
-        "limitation": "maps net-module numbers 1..7 onto utility IDs 0x100..0x106; the status codes for a bad number or a module that is not loaded are the generic module ones, unmeasured on a PSP",
+        "limitation": "maps net-module numbers 1..7 onto utility IDs 0x100..0x106; the status codes for a bad number or a module that is not loaded are the generic module ones, unmeasured on a PSP; unloading COMMON or INET while Inet is active stops by name",
     },
     # scePsmfPlayerGetPsmfInfo reports the opened PSMF's header as SetPsmfCB parsed it.
     # Checks, their order and the one-picture duration offset follow PPSSPP

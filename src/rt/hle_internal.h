@@ -1173,8 +1173,10 @@ __attribute__((format(printf, 2, 3))) uint32_t hle_unmodelled_stop(const char *i
 const char *hle_import_name(uint32_t nid);
 int guest_cstr(uint32_t addr, char *out, int max);
 uint32_t free_block(uint32_t uid);
-/* sceNet core library state (hle_network.c): reset at LoadExec and by the self-tests. */
+/* sceNet state (hle_network.c): reset at LoadExec and by the self-tests. */
 void hle_net_reset(void);
+int hle_net_inet_initialized(void);
+int hle_utility_inet_modules_loaded(void);
 /* sceReg handles (hle_system.c): closed at LoadExec; the registry stays. */
 void hle_sysreg_loadexec_reset(void);
 void sr_hle_umd_loadexec_reset(void);  /* LoadExec: drop the UMD callback, drive at entry state */

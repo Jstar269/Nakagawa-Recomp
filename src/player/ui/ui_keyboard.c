@@ -9,12 +9,19 @@
 
 #include "ui_keyboard.h"
 #include "nk_ui_widgets.h"
+#include "nk_ui_text.h"
 
 #include <stdio.h>
 #include <string.h>
 
 static const char k_rows[UI_KEYBOARD_CHAR_ROWS][UI_KEYBOARD_KEYS_PER_ROW + 1u] = {
     "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-", "!?@#&*()_+"
+};
+/* Shift: the letters in upper case and the other keys' second characters, so that with the
+   two layers every printable ASCII character can be typed (a RetroAchievements password may
+   hold any of them). A space marks a key that types the same in both. */
+static const char k_shifted[UI_KEYBOARD_CHAR_ROWS][UI_KEYBOARD_KEYS_PER_ROW + 1u] = {
+    "$%^=/\\;\"|~", "          ", "         :", "       <>`", "      []{}"
 };
 
 void ui_keyboard_init(UiKeyboard *keyboard, char *text, size_t cap, UiKeyboardFilter accept,
@@ -124,15 +131,20 @@ int ui_keyboard_count_text(const UiKeyboard *keyboard, char *out, size_t cap) {
     size_t used = keyboard != NULL && keyboard->text != NULL ? strlen(keyboard->text) : 0u;
     size_t most = keyboard != NULL ? keyboard->cap : 0u;
     if (out == NULL || cap == 0u) return 0;
-    return snprintf(out, cap, "%zu / %zu bytes", used, most);
+    return snprintf(out, cap, NK_UI_STR(SHARED_KEYBOARD_BYTE_COUNT), used, most);
 }
 
 uint32_t ui_keyboard_key_char(unsigned place, bool shifted) {
     char c;
     if (place >= UI_KEYBOARD_CHAR_KEYS) return 0u;
     c = k_rows[place / UI_KEYBOARD_KEYS_PER_ROW][place % UI_KEYBOARD_KEYS_PER_ROW];
-    if (shifted && c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    else if (shifted && c == '\'') c = ':';
+    if (shifted && c >= 'a' && c <= 'z') {
+        c = (char)(c - 'a' + 'A');
+    } else if (shifted) {
+        const char second = k_shifted[place / UI_KEYBOARD_KEYS_PER_ROW]
+                                     [place % UI_KEYBOARD_KEYS_PER_ROW];
+        if (second != ' ') c = second;
+    }
     return (uint32_t)(unsigned char)c;
 }
 
@@ -203,9 +215,9 @@ static bool character_key(NkUi *ui, NkUiId id, const char *label, bool usable) {
 static bool space_key(NkUi *ui, NkUiId id, uint32_t flags, bool usable) {
     NkUiLayout layout;
     NkUiStyle resting;
-    if (usable) return nk_ui_button(ui, id, "Space", flags);
+    if (usable) return nk_ui_button(ui, id, NK_UI_STR(SHARED_KEYBOARD_SPACE), flags);
     nk_ui_button_configuration(ui, flags, &layout, &resting);
-    return draw_key(ui, id, flags, &layout, nk_ui_caps(ui, "Space"),
+    return draw_key(ui, id, flags, &layout, nk_ui_caps(ui, NK_UI_STR(SHARED_KEYBOARD_SPACE)),
                     nk_ui_type(nk_ui_button_role(flags), 0u), false);
 }
 
@@ -276,7 +288,8 @@ UiKeyboardResult ui_keyboard_draw(NkUi *ui, UiKeyboard *keyboard, const UiKeyboa
         NkUiLayout row = keyboard_row(NK_UI_SPACE_1);
         row.padding_top = NK_UI_SPACE_1;
         if (nk_ui_begin_container(ui, view->part_base + 1u + UI_KEYBOARD_CHAR_ROWS, &row, NULL)) {
-            if (nk_ui_button(ui, view->key_base + UI_KEYBOARD_KEY_SHIFT, "Shift", flags)) {
+            if (nk_ui_button(ui, view->key_base + UI_KEYBOARD_KEY_SHIFT,
+                             NK_UI_STR(SHARED_KEYBOARD_SHIFT), flags)) {
                 keyboard->shifted = !keyboard->shifted;
                 result = UI_KEYBOARD_EDITED;
             }
@@ -285,17 +298,20 @@ UiKeyboardResult ui_keyboard_draw(NkUi *ui, UiKeyboard *keyboard, const UiKeyboa
                 type_codepoint(keyboard, ' ')) {
                 result = UI_KEYBOARD_EDITED;
             }
-            if (nk_ui_button(ui, view->key_base + UI_KEYBOARD_KEY_DELETE, "Delete", flags) &&
+            if (nk_ui_button(ui, view->key_base + UI_KEYBOARD_KEY_DELETE,
+                             NK_UI_STR(SHARED_KEYBOARD_DELETE), flags) &&
                 ui_keyboard_delete(keyboard)) {
                 result = UI_KEYBOARD_EDITED;
             }
             if (nk_ui_button(ui, view->cancel_id,
-                             view->cancel_label != NULL ? view->cancel_label : "Cancel",
+                             view->cancel_label != NULL ? view->cancel_label
+                                                        : NK_UI_STR(SHARED_KEYBOARD_CANCEL),
                              flags | NK_UI_BUTTON_NOT_DEFAULT)) {
                 result = UI_KEYBOARD_CANCEL;
             }
             if (nk_ui_button(ui, view->done_id,
-                             view->done_label != NULL ? view->done_label : "Done",
+                             view->done_label != NULL ? view->done_label
+                                                      : NK_UI_STR(SHARED_KEYBOARD_DONE),
                              flags | NK_UI_BUTTON_PRIMARY)) {
                 result = UI_KEYBOARD_DONE;
             }

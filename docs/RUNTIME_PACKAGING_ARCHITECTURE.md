@@ -514,9 +514,13 @@ What the player does (it suggests a rebuild and never forces one):
 * The same queue takes first builds: a game with no package offers Add to
   queue beside BUILD PACKAGE on its page, and Remove from queue while it
   waits. The library line's Queue opens the queue: the game building first,
-  then the ones that wait, each with Up, Down and Remove, and Resume when a
-  build could not start for a reason outside its game. The build card says how
-  many games follow.
+  then the ones that wait, each with Up, Down and Remove, and one Pause button
+  that becomes Resume while the queue is paused. Pause lets the build that
+  runs finish (a build cannot be suspended halfway; Cancel build stops one),
+  then no next game starts until Resume; the screen's title, lead and hint say
+  so, and Add to queue or Rebuild all add games without resuming it. The queue
+  also pauses by itself, with Resume, when a build could not start for a reason
+  outside its game. The build card says how many games follow.
 * The queue survives a restart in `rebuild-queue.json` beside `settings.json`:
   `{"format": "nakagawa-rebuild-queue", "schema_version": 2, "titles":
   [{"disc_id": "...", "kind": "build" | "rebuild", "state": "pending" |
@@ -526,6 +530,13 @@ What the player does (it suggests a rebuild and never forces one):
   with another format or an unknown member is left in place and not resumed;
   a file with a newer `schema_version` is not resumed and is never replaced or
   removed. The file goes when nothing is pending.
+* The person's Pause is the marker file `rebuild-queue-paused` beside it, there
+  only while a queue is paused; its presence is the whole record and its bytes
+  are never read. A paused queue's build that was running starts again only
+  after Resume. The queue file keeps the shape every released player reads, so
+  an older player resumes the queue and ignores the pause. A marker with no
+  queue file beside it (an older player finished the queue) is removed at
+  start.
 
 A rebuild never removes the old package first. The build runs in the
 content-addressed cache entry, is validated, copied next to the package,
@@ -585,37 +596,58 @@ before packaging falls back to the stage's stub report.
 
 A user who updates Nakagawa keeps every library entry, setting, mapping and
 save, and rebuilds a package only when something the package was built from has
-changed. Every file the player keeps for the user carries its own version, and
-one rule (`src/core/nk_user_data_schema.h`) governs each writer:
+changed. The files Nakagawa writes for the user carry a version where Nakagawa
+owns the format. `library.json`, `settings.json` and `input_profile.json` share
+one writer rule (`src/core/nk_user_data_schema.h`); the runtime's
+`registry/system.json` overlay is versioned separately and is the exception to
+it:
 
 * An **older** file is read and carried forward one version at a time
   (v1 to v2 to the current version). It is not rewritten on load; the first save
   first copies the original, byte for byte, to `<file>.v<version>.bak`, and does
   not write when that copy fails.
-* A **newer** file, written by a later player, is refused by name and never
-  replaced: the session runs on defaults, the screen says why, and every save
-  over it is refused with `NK_ERROR_NEWER_SCHEMA`. Returning to the newer player
-  finds the file as it left it.
-* A file that is there but cannot be opened or read (another program holds it, a
-  read error) is never replaced: its version is unknown, so the save is refused
-  with `NK_ERROR_IO` and the file is left as it is.
-* A file over the size bound the reader holds it to is first copied, byte for
-  byte, to `<file>.unreadable.bak` (a later player may allow a larger file), and
+* A **newer** shared-writer file, written by a later player, is refused by
+  name when its version is readable and at or below 1,000,000: the session runs
+  on defaults or an empty library, the screen says why, and every direct save
+  over it is refused with `NK_ERROR_NEWER_SCHEMA`. `library.json`'s normal
+  player commit is stricter: it rereads the library and refuses any readable
+  newer primary, including above 1,000,000. A version above 1,000,000 is outside
+  the direct writer's probe, so that direct-save refusal and the versioned
+  backup do not apply (see below). When the file is refused, returning to the
+  newer player finds it as it left it.
+* A file that is there but cannot be opened or read (an I/O failure; this is not
+  the same as a version above the probe) is refused by the direct writer: its
+  version is unknown, so the direct save is refused with `NK_ERROR_IO` and the
+  file is left as it is. The Controls page's first save is the exception
+  described below: it moves an unreadable primary to `.unreadable.bak` and then
+  writes a replacement.
+* A shared-writer file over the size bound the reader holds it to is first
+  copied, byte for byte, to `<file>.unreadable.bak` (a later player may allow a larger file), and
   the save does not write when that copy fails.
-* A file with no readable version (empty, damaged, not JSON) is reported, and the
-  reader falls back as before (`library.json` to its `.bak`, the others to defaults).
+* A shared-writer file with no readable version (empty, damaged, not JSON) is
+  reported, and the reader falls back as before (`library.json` to its `.bak`, the others to defaults).
   A controls file that does not load for this or any other reason except a newer
   version is moved to `input_profile.json.unreadable.bak` by the first save, which
   does not write when that move fails, and the Controls page names the copy.
+
+The direct writer's probe reads `schema_version` only when it is an integer
+from 0 through 1,000,000 (`nk_user_data_file_version`,
+`src/core/nk_user_data_schema.h:64-100`). A larger integer is
+`NK_USER_DATA_VERSION_UNREADABLE` to the direct writer: it gets no versioned
+backup, and `nk_user_data_prepare_replace` treats it like any other unreadable
+version and lets the direct write proceed (`:151-163`). The three readers parse
+the version themselves, so they can still refuse a larger value as newer; the
+ceiling is a bound on the direct writer's probe, not a reader format limit. No
+migration or versioned backup is defined for a version above it.
 
 The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 `%LOCALAPPDATA%\Nakagawa\data` and `...\config`, plus the saves folder).
 
 | File | Version field and history | An older file | A newer file |
 | --- | --- | --- | --- |
-| `<data>/library.json` (`src/core/nk_library.c`; read too by `tools/nk_core/library.py` and `nk_cli`) | `schema_version` 1, the only version so far (v0.0.1 and later). `source_image_path`, added after v0.0.1, is an optional member v0.0.1 skips | (none exist) | Refused; the Library screen names it. The older `.bak` beside it is not loaded in its place, and no save replaces either file |
-| `<config>/settings.json` (`src/player/player_state.c`) | `schema_version` 1 (before v0.0.1), 2 (v0.0.1 and later) | 1 to 2: an `fps_cap` of 30 or 60 becomes PSP timing; `settings.json.v1.bak` on the first save | Refused; this session runs on defaults and every Settings page says changes are not saved |
-| `<config>/input_profile.json` (`src/core/nk_input_profile.c`) | `schema_version` 1, 2 (per-title map, #520), 3 (keyboard keys, #1299; v0.0.1 and later), 4 (analog stick keys), 5 (mouse aiming, #1791), 6 (mouse buttons as keys, #1791) | 1 to 2: no per-title map; 2 to 3: default keys; 3 to 4: default stick keys (I, K, J, L), with a direction left unbound when its default key is already a button's key; 4 to 5: aiming off; 5 to 6: nothing changes. `.v1.bak` to `.v5.bak` on the first save | Refused; the Controls page names it and its changes do not replace it |
+| `<data>/library.json` (`src/core/nk_library.c`; read too by `tools/nk_core/library.py` and `nk_cli`) | `schema_version` 1, the only version so far (v0.0.1 and later). `source_image_path`, added after v0.0.1, is an optional member v0.0.1 skips | (none exist) | Refused by the reader for any readable newer version, including above 1,000,000; the Library screen names it. The normal player commit (`library_commit`) rereads the library and refuses any readable newer primary, including above 1,000,000, before writing. The older `.bak` beside it is not loaded in its place. A direct `nk_library_save` is limited by the 1,000,000 writer probe, so it can replace a primary above that unless the `.bak` has a readable version above 1 and at or below 1,000,000; it makes no versioned backup |
+| `<config>/settings.json` (`src/player/player_state.c`) | `schema_version` 1 (before v0.0.1), 2 (v0.0.1 and later) | 1 to 2: an `fps_cap` of 30 or 60 becomes PSP timing; `settings.json.v1.bak` on the first save | Refused by the reader for a readable version at or below 1,000,000; defaults, and every Settings page says changes are not saved. Above 1,000,000 the reader still sets the newer-format notice, but the writer's probe does not see that version, so the shared guard does not refuse a save |
+| `<config>/input_profile.json` (`src/core/nk_input_profile.c`) | `schema_version` 1, 2 (per-title map, #520), 3 (keyboard keys, #1299; v0.0.1 and later), 4 (analog stick keys), 5 (mouse aiming, #1791), 6 (mouse buttons as keys, #1791) | 1 to 2: no per-title map; 2 to 3: default keys; 3 to 4: default stick keys (I, K, J, L), with a direction left unbound when its default key is already a button's key; 4 to 5: aiming off; 5 to 6: nothing changes. `.v1.bak` to `.v5.bak` on the first save | Refused by the reader for a readable version at or below 1,000,000; the Controls page names it and its changes do not replace it in that case. Above 1,000,000 the reader still calls it newer, but the writer's probe does not, so the save path can replace it |
 | `<saves>/<DISC_ID>/` | The PSP's own Memory Stick layout (`PSP/SAVEDATA/...`), defined by the PSP rather than by Nakagawa; the root rule (`nk_launch.c`) is unchanged since v0.0.1 | n/a | n/a |
 | `<data>/packages/<DISC_ID>/package.json`, `build-report.json`, `completion-manifest.json` | `nakagawa-aot-package` schema 3 (the player still reads v2), cache key and completion schema 2, and the ABI epochs of section 6 (the cache and completion schemas are unchanged since v0.0.1) | Built output, not user data: a package from another epoch is INCOMPATIBLE and its card offers REBUILD PACKAGE | INCOMPATIBLE with the card line "built by a newer Nakagawa (package format N; this player reads 3)". The player never changes it; only a rebuild the user asks for replaces it |
 | `<data>/title-input-identities/<DISC_ID>/title-input-identity.json` | `schema_version` 2 | Rebuilt by the next package build | Read as absent; the package card asks for a rebuild |
@@ -623,13 +655,231 @@ The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 | `<data>/experimental/<DISC_ID>/profile.json` | `schema_version` 1 | n/a | Not accepted: the package check fails closed |
 | `<data>/registry/system.json` (the PSP system settings a game changes; `src/rt/hle.c`, `SR_SYSTEM_REGISTRY` overrides the path) | `schema_version` 1, the only version so far (v0.0.1 and later) | (none exist) | Ignored: the game sees the modeled defaults, and the next registry flush (at start-up, when the launcher's host time zone is seeded) moves the file to `system.json.corrupt` (kept, not deleted) before writing a fresh one |
 
+### The four files in detail
+
+The table above is the summary. This one separates what each reader does for a
+file that is older, newer, missing or invalid, and names the live constant and
+reader. For the three shared-writer files, a **refusal** is an error the direct
+writer will not replace: a readable newer version at or below 1,000,000, or a file it
+cannot open or read. A version above 1,000,000 is not a refusal by the direct
+writer; its probe treats it as unreadable and the direct save may replace it,
+even though the reader can still call it newer. `library.json`'s normal player
+commit is stricter: it rereads the library and refuses any readable newer
+primary, including above 1,000,000. The Controls page's first save can move an
+unreadable primary to `.unreadable.bak` and write a replacement. The registry
+has no newer-file refusal: an invalid or newer overlay is moved aside at the
+next flush and replaced. A
+**fallback** is defaults in memory, after which a later save may replace the
+file. A **backup** is a copy the writer makes before replacing it. The
+`library.json` row is the player's C reader; `tools/nk_core/library.py` reads the
+same schema version and refuses a newer file, but it has no `.bak` recovery and
+makes no versioned backup.
+
+| File and source | Version | An older file | A newer file | A missing file | An invalid file |
+| --- | --- | --- | --- | --- | --- |
+| `library.json` (`nk_library_load`, `library_load` and `nk_library_save` in `src/core/nk_library.c`; `NK_LIBRARY_SCHEMA_VERSION` in `src/core/nk_library.h`) | 1, the first and only version (v0.0.1 and later). `source_image_path`, `content_sha1`, `content_crc32` and `disc_verification` are optional members an older reader skips | No older version exists and there is no migration table. A version below 1 is not carried forward: it fails as invalid, so the `.bak` recovery in the last column applies | `NK_ERROR_NEWER_SCHEMA`, an empty library, and `newer_schema_version` set for any readable newer primary, including above 1,000,000. The normal player commit (`library_commit`) rereads the library and refuses it before writing. The `.bak` is not read in its place. A direct `nk_library_save` writes nothing while the primary or `.bak` has a readable version above 1 and at or below 1,000,000; above 1,000,000 its probe treats the primary as unreadable, so that direct save is not refused unless the `.bak` is itself a readable version above 1 and at or below 1,000,000, and no versioned backup is made | `NK_OK` with an empty library. When the primary is missing, a `.bak` beside it is read as the library | A parse failure, a missing `games` array, or a version below 1: the `.bak` is read; if that fails too, an error and an empty library. A file that is there but cannot be opened or read is not damaged: the `.bak` is not used instead, and nothing is written over it |
+| `settings.json` (`player_app_load_settings` and `player_app_save_settings` in `src/player/player_state.c`; `NK_PLAYER_SETTINGS_SCHEMA_VERSION` in `src/player/player_state.h`) | 2 (v0.0.1 and later); 1 is the format before v0.0.1 | 1 to 2 in memory: an `fps_cap` of 30 or 60 becomes PSP timing (`-1`), and an explicit 0 stays uncapped. The file is not rewritten on load; the first save keeps it as `settings.json.v1.bak` | Defaults in memory, `settings_newer_schema` set, and a notice naming the format. The shared writer refuses the save with `NK_ERROR_NEWER_SCHEMA` when the version is readable at or below 1,000,000; above that it treats the version as unreadable and does not refuse the save | Defaults, no notice, `NK_OK` | A missing, non-integer or below-1 `schema_version`: defaults and "Unsupported settings schema version; defaults restored." A corrupt or non-object file: defaults and "Settings file is corrupt; defaults restored." A zero-byte or over-1 MiB file: defaults and "Settings file has invalid size; defaults restored." A file that cannot be opened or read: defaults, `settings_unreadable`, and no save over it in that session |
+| `input_profile.json` (`nk_input_profile_file_load` and `nk_input_profile_file_save` in `src/core/nk_input_profile.c`; `NK_INPUT_PROFILE_SCHEMA_VERSION` and the per-member constants in `src/core/nk_input_profile.h`) | 6 (mouse buttons, #1791); 5 added `aim` (#1791), 4 stick keys, 3 keyboard keys (#1299), 2 the per-title map (#520), 1 the first global mapping | 1 to 6 load in memory, one step at a time: v1 gets no per-title map, v2 the default keyboard keys, v3 the default stick keys (a direction stays unbound when its default key is already one of that file's button keys), v4 aiming off, and v5 changes nothing. The file is not rewritten on load; the first save keeps it as `input_profile.json.v<n>.bak`. A version that carries a member introduced later, such as `per_title` in v1 or mouse buttons in v5, refuses the whole document | `NK_ERROR_NEWER_SCHEMA`, defaults, and a diagnostic that names the version and says the file is kept as it is. The save path refuses it when the version is readable at or below 1,000,000; above that the shared writer's probe treats it as unreadable and does not refuse the save | `NK_ERROR_FILE_NOT_FOUND`; the player treats that as no profile and uses the defaults | Missing, non-numeric or non-whole `schema_version`, a version below 1, invalid JSON, or any invalid entry: defaults and `NK_ERROR_GENERIC`. The Controls page's first save moves a file that exists but did not load for any reason except a newer version to `input_profile.json.unreadable.bak`, and does not save if that move fails. A zero-byte or over-1 MiB file, or one that cannot be opened or read, takes the same `.unreadable.bak` route |
+| `registry/system.json` (the PSP system settings a game changes; `sreg_ensure_loaded`, `sreg_overlay_apply` and `sreg_persist` in `src/rt/hle.c`; `SREG_OVERLAY_VERSION` in `src/rt/hle.c`; `SR_SYSTEM_REGISTRY` overrides the path) | 1, with `"schema": "nakagawa.psp-system-registry-overlay"`; the only version so far (v0.0.1 and later) | No older version exists and there is no migration: any version other than 1 is invalid | Not preserved as a newer file: a later version fails the same `schema_version` check, so it is ignored like any invalid overlay and moved to `system.json.corrupt` on the next flush, then replaced | First run: the modeled defaults. The host time-zone seed may write a fresh overlay at start-up | Unparseable JSON, a wrong or missing `schema`, a version other than 1, a wrong shape, or a file over 1 MiB: reported, ignored, and the modeled defaults are served; the next flush (at start-up when the host time zone is seeded, or a game's `sceRegFlush*`) renames it to `system.json.corrupt` (kept, not deleted) before writing a fresh one; if the rename fails, it is not written over. A file that cannot be opened or read is reported and left in place, and no flush writes over it |
+
+### Backups, and what is not one
+
+The shared writer's versioned backup is made only when the file on disk carries
+a readable integer version older than the build's. A readable version below 1
+is not migrated, but it is still older to the writer: the first save keeps a
+`settings.json` or `library.json` at `schema_version` 0 as `<file>.v0.bak`. A
+missing, non-numeric or unreadable version gets no versioned backup.
+
+`.unreadable.bak` is the shared writer's name for a file over the reader's size
+bound, not for every file that fails to parse. `input_profile.json` adds a
+second use: the Controls page moves any file it could not load, except a newer
+one, to that name before its first save, so the mappings it holds are not lost
+to one bad entry.
+
+`library.json` has a second backup beside the versioned one: each save attempts
+to rotate the previous primary to `library.json.bak` before promoting the new
+file, but that rotation is best-effort. On Windows the copy's result is ignored
+(`CopyFileW`, `src/core/nk_library.c:406-413`); on POSIX a failed or short copy
+removes its temporary and still promotes the new primary (`:420-463`). A failed
+rotation therefore does not fail the save; on POSIX it leaves the previous
+`.bak` as it was, while on Windows its result is ignored, so a failed rotation can leave that file stale or incomplete.
+`library.json.bak` is read when the primary is missing or invalid, not when it
+is newer or cannot be read. This is not the shared writer's versioned backup: a
+failed versioned backup stops the save (`src/core/nk_user_data_schema.h:115-162`).
+`settings.json` and `input_profile.json` have no such fallback; when their
+primary cannot be loaded, the player runs on defaults.
+
+`registry/system.json` has neither a versioned backup nor an `.unreadable.bak`.
+An invalid or newer overlay is moved to `system.json.corrupt` on the next flush;
+one that cannot be read is left in place. The three shared-writer files are not
+rewritten on load: a migration stays in memory until a save, and the original
+stays on disk until then. The registry is the exception described next: its
+startup seed persists immediately when the overlay is absent or invalid.
+
+The registry's one startup write is the host time-zone seed. When the overlay
+is absent (a first run) or invalid, `sreg_seed_host_time_zone`
+(`src/rt/hle.c:1952-1984`) reads `SR_HOST_TIME_ZONE` (`<minutes>,<0|1>`), writes
+`/CONFIG/DATE/time_zone_offset` and `summer_time`, and calls `sreg_persist`
+immediately (`:2034-2039`). On a first run with a valid variable, that creates
+the overlay; on an invalid one it moves the old file to `system.json.corrupt`
+before writing the fresh overlay. A missing or malformed variable keeps the
+measured seed (-300 minutes, daylight saving on) and does not perform the
+startup write. A later host-zone change does not move the saved setting. An overlay that exists but cannot be read is neither seeded nor
+written over, and registry load makes no other write.
+
+### Flags and environment variables
+
+The code table is authoritative: a player option exists only when it is in
+`k_player_cli_options` (`src/player/main.c:4345-4384`); `--help` prints that
+table, and `player_cli_normalize` checks the whole command line against it
+before anything else reads it (`src/player/main.c:4406-4463`). The classes below
+are a reading of that table at this commit; a new option must be added there
+and classed here.
+
+| Class | Options | Contract and source |
+| --- | --- | --- |
+| Stable user-facing, printed in `--help` | `--help`, `--version`, `--user-data-root`, `--iso`, `--stage`, `--stage-only`, `--launch-now`, `--launch-title`, `--launch-index`, `--runtime-root`, `--manifest-overlay`, `--experimental-60hz`, `--cheats`, `--cheats-file` | These are the flags a person or launcher may write. `--launch-title` is what Add to Steam writes (`docs/SETUP.md:321-324`), and `--user-data-root` moves the whole per-user folder (`docs/SETUP.md:868-872`). |
+| Documented QA, capture and scripted-run flags (**Proposal**) | `--screenshot`, `--headless-launch`, `--headless-accept-presented-frames`, `--headless-timeout-ms` | `--screenshot` and `--headless-launch` are printed in `--help`; the two acceptance options have `help == NULL`. `docs/TITLE_TESTING.md:314-324`, `:343-347` and `docs/SETUP.md:908-909`, `:914-922` document them for QA/acceptance and headless runs, not as a stable user contract. This class is a proposal: it separates documented QA/capture routes from the stable CLI above, and is not yet ratified. |
+| Hidden but accepted | `--runtime-bin`, `--view`, `--width`, `--height`, `--render-scale`, `--demo`, `--empty`, `--wizard` | `help == NULL` in the same table. `--runtime-bin` is the old spelling of `--runtime-root`; the others are harness or launcher internals, not a user contract. |
+| Removed, kept as a tombstone | `--ui <ignored>` | Parsed and ignored so shortcuts made before its removal still pass `--ui=next` (`src/player/main.c:4374`). |
+| Compile-gated test options | `--ui-test-events`, `--ui-test-screenshot`, `--ui-test-error-code`, `--ui-test-iso-path`, `--ui-test-wait-background`, `--ui-test-catalog-reload-path`, `--ui-test-catalog-reload-count` | Present only with `NK_PLAYER_UI_REGRESSION_TEST`; not in a release build (`src/player/main.c:4375-4383`). |
+
+A command line that names an unknown option, leaves a stray argument, omits a
+value, or gives a value to a switch is refused by name and exits 2; nothing is
+ignored in silence (`src/player/main.c:4414-4462`; the exit code is stated at `:4331-4333`). A stable user-facing flag is the
+contract; a QA/capture, hidden or test flag may change or disappear. The split
+between the stable list and the QA/capture class is the **Proposal** above, not
+a ratified promise. The current exceptions are the accepted legacy spellings:
+`--runtime-bin` still names the runtime root, and `--ui=next` is still accepted
+and ignored. Keeping a future removed spelling for a notice release is a
+**Proposal** (see the release rule below), not a current guarantee.
+
+The runtime's variables have the same single source: `src/rt/env_registry.h`
+declares every name, its kind, its default, the file that reads it and its
+purpose (`src/rt/env_registry.h:7-24`). The classes below are a reading of that
+table and `docs/SETUP.md` at this commit. `tools/test_env_registry.py` fails on a
+name read in `src/rt` or linked `src/core` but missing from the table, on a row
+nothing reads, and on a malformed row.
+
+| Class | Examples | Contract and source |
+| --- | --- | --- |
+| Build and toolchain inputs | `NK_POWERSHELL`, `NK_PACKAGE_JOBS`, `NK_BUILD_ROOT`, `NK_INSTALL_ROOT` | Read by the build and player setup, not by a running title; documented in `docs/SETUP.md:41`, `:82-86`, `:1104`, `:1454-1465`. |
+| Documented runtime overrides | `SR_USER_DATA_ROOT`, `SR_MEMSTICK`, `SR_FPS_CAP`, `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_ACE`, `SR_TEX_*`, `SR_PRESENT_*`, `SR_RECORD`, `SR_REPLAY`, `SR_HEADLESS_*`, `SR_WATCHDOG_EXIT`, `SR_VIDEOREC_DIR`, `SR_SYSTEM_REGISTRY` | User-facing where `docs/SETUP.md` or `docs/DEBUGGING.md` gives a rule; each row in `src/rt/env_registry.h` carries its kind and default. `SR_USER_DATA_ROOT`, for example, is refused by name when invalid rather than silently replaced (`src/rt/env_registry.h:271`); other path variables keep their own row's default and validation. `SR_SYSTEM_REGISTRY` overrides the registry overlay path (`src/rt/hle_data.c:107-144`; `docs/DEBUGGING.md:1759`): an empty value falls back to the default, and a configured file that cannot be read leaves the change in memory only (`src/rt/hle.c:2190-2200`). |
+| Launcher-owned, not user knobs | `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_DISC_ID`, `SR_GAME_TITLE`, `SR_USER_DATA_ROOT`, `NK_INPUT_PROFILE`, `PSP_ISO` | The player always exports the switch and file so an inherited value cannot opt a launch in, and masks a stale title or data root (`src/core/nk_launch.c:1891-1929`; `src/rt/env_registry.h:34`). `NK_INPUT_PROFILE` is the path the launcher exports for the child; when it has none, it exports the bare name so an inherited value is removed (`src/core/nk_launch.c:1869-1873`, `:1998-2006`). |
+| Inherited fallback, not a launcher export | `SR_INPUT_PROFILE` | The runtime reads it only when `NK_INPUT_PROFILE` is unset or empty (`src/core/nk_input_profile.c:2491-2493`; `src/rt/env_registry.h:173`). It is the older name and a fallback, not an alias the launcher writes; an inherited value can reach a launch whose `NK_INPUT_PROFILE` is unset. |
+| Diagnostic and developer-only | `SR_*LOG`, `SR_GE*`, `SR_FLIGHT*`, `SR_*SNAP`, self-test fixture names | Registered and read, but not part of the player contract; `docs/DEBUGGING.md` documents their present meaning. |
+| Host and system | `HOME`, `PATH`, `TEMP`, `SDL_VIDEODRIVER`, `SDL_VIDEO_DRIVER` | Set by the host and read for their value; Nakagawa does not define their format (`src/rt/env_registry.h:10-16`, `:30`, `:36`, `:40-41`, `:304`). |
+| Test-only | `FUZZ_*`, `ATRAC3P_FIXTURE`, `NK_VIDEOREC_FAKE_FFMPEG` | Read only by a self-test tool; never needed to play. |
+
+The classes overlap by design: the launcher sets documented variables
+(`SR_CHEATS`, `SR_USER_DATA_ROOT`) as well as its own, and a hand-started
+runtime reads them directly.
+`NK_INPUT_PROFILE` and `SR_INPUT_PROFILE` are not aliases in the launch path:
+the launcher writes the first (or its bare name to mask an inherited value), and
+the runtime reads the second only as a fallback when the first is unset or
+empty.
+
+### Release notes, removal and version changes
+
+The release notes are the announcement point: `docs/PREVIEW_RELEASE.md:3` names
+the current release's notes as the description of what it holds, and
+`docs/RELEASE_NOTES_v0.0.3.md:1-5` is the current example. The deprecation
+promises below are a **Proposal** for
+[#2745](https://github.com/Jstar269/nakagawa-recomp/issues/2745), not an
+approved or code-enforced rule. The current legacy spellings and format refusals
+are behavior; the notice period is not.
+
+* **Proposal:** A user-facing flag, environment variable, format version or
+  release-asset name is not removed or repurposed in the release that first
+  stops using it. That release's notes name the replacement; the old spelling
+  or version remains accepted for at least one published release, then may be
+  refused.
+* A format version is bumped when a writer starts writing a layout the previous
+  reader cannot read. Runtime packages are the live example, with
+  `NK_AOT_PACKAGE_SCHEMA_VERSION 3` and v2 still accepted
+  (`src/core/nk_title_manifest.h:38-40`;
+  `src/core/nk_title_manifest.c:4727-4737`). The package reader refuses a newer
+  version by name and never rewrites it (`package_newer_format`,
+  `src/core/nk_title_manifest.c:2984-2996`); it does not call the file damaged.
+  **Proposal:** the previous version is kept readable for at least one release
+  under the notice period above.
+* **Proposal:** A removed player spelling is kept as a tombstone for that
+  window, not silently dropped. The current legacy spellings are behavior, not
+  evidence that the window is approved: `--runtime-bin` still names the runtime
+  root, and `--ui=next` is still accepted and ignored
+  (`src/player/main.c:4358`, `:4374`).
+* A published release asset is never replaced or edited; a changed file is a
+  new version (`docs/PREVIEW_RELEASE.md:518-520`). The version in every asset
+  name is the same version (`docs/PREVIEW_RELEASE.md:494-521`).
+
+This is a release-process proposal, not a code-enforced rule. Nothing in `src/`
+reads these documents or counts published releases, and no test enforces the
+notice period. The format refusals above are enforced; the notice period and
+tombstone window are proposals, not code behavior.
+
+### The remaining contracts in detail
+
+The first table in this section is the user-data summary. This one covers the
+formats and release contracts that are not one of the four shared-writer files.
+As in the user-data tables, a **refusal** is an error that keeps the file or
+package from being accepted or replaced; a **fallback** is defaults in memory
+after which a later write may replace the file, and a **backup** is a copy made
+before replacing it. A missing file is not a refusal:
+each row says whether it falls back or is created.
+
+| Contract and source | Version | An older or newer file | A missing file | An invalid file | Backup or repair |
+| --- | --- | --- | --- | --- | --- |
+| Built game package (`package.json`, `build-report.json`, `completion-manifest.json`) under `<data>/packages/<folder>/` (`src/core/nk_title_manifest.c:4727-4737`, `:5120-5131`) | package 3, cache 2, completion 2 (`src/core/nk_title_manifest.h:38-40`) | Older: v2 and v3 are read; v2 is not rewritten. Newer: refused by name, "built by a newer Nakagawa (package format N; this player reads 3)", status `INCOMPATIBLE`; never rewritten (`package_newer_format`, `:2984-2996`) | No folder or no `package.json`: `NK_RUNTIME_PACKAGE_MISSING` with a rebuild reason (`:5818-5823`, `:5834-5839`) | Unreadable JSON or a failed non-identity contract: `NK_RUNTIME_PACKAGE_INCOMPATIBLE`; an identity or completion mismatch: `NK_RUNTIME_PACKAGE_STALE` (`:5919-5976`) | None. A rebuild is the only repair; the player never edits a package (`package_newer_format` comment, `:2982-2988`) |
+| `<data>/title-input-identities/<DISC_ID>/title-input-identity.json` (`package_validate_title_input_identity`, `src/core/nk_title_manifest.c:4061-4110`) | 2, with nested `manifest.schema_version` 1 (`:4089-4107`) | Only 2 is read; there is no migration, so any other value is invalid. A later version is refused by the same equality check, not treated as a newer file with a backup | Missing or unreadable: "Title input identity record is missing or unreadable; source media cannot be qualified." gives `NK_RUNTIME_PACKAGE_STALE` (`:5848-5851`) | A failed format, schema or member check: `STALE` with the reader's reason (`:5871-5884`) | None in the player. The next package build writes the file (`tools/nk_core/package_cache.py:356-375`) and the card asks for a rebuild |
+| `<data>/fonts/v2/manifest.json` (`font_load_manifest`, `src/core/nk_font.c:515-575`) | 2 (`NK_FONT_CACHE_SCHEMA_VERSION`, `src/core/nk_font_slots.h:19`) | Only 2 is read; an older or newer number fails the exact check and reports "schema is not version 2" (`src/core/nk_font.c:557-561`). There is no migration and no versioned backup | Missing: `NK_FONT_STATUS_MISSING`, "No imported PSP font." (`:531-534`); the project font still serves the slots it has (`src/core/nk_font_slots.h:8-10`) | Malformed JSON, no `files` object, a bad entry, or a file over 1 MiB: `NK_FONT_STATUS_INVALID` with the reader's message; the user source is skipped, not partially served | None. Re-run `fonts import <folder>` to rewrite the cache |
+| `<data>/experimental/<DISC_ID>/profile.json` (`nk_title_manifest_read_experimental_profile`, public wrapper `src/core/nk_title_manifest.c:5390-5397`; implementation `:5240-5388`) | 1 (`package_number(..., 1)`, `:5293`) | Only 1 is read; an older or newer number is invalid, with no migration | Missing or unreadable: the reader returns false (`:5275-5281`); title selection fails with `NK_LAUNCH_DATA_ROOT_INVALID` (`src/core/nk_launch.c:658-671`), and an experimental package validates as `STALE` (`src/core/nk_title_manifest.c:5993-6002`) | A failed profile or embedded-manifest check: false with the reader's message; the package check fails closed, never falling back to the normal title | None in the player. The writer `nk_title_manifest_write_experimental_profile` (`src/core/nk_title_manifest.h:122-133`) rewrites the profile when an experimental package is made |
+| `<data>/manifests/*.json` (`nk_title_manifest_load_overlay_dir`, `src/core/nk_title_manifest.c:2198-2255`) | 1, the only manifest schema (`:635-640`) | Only 1 is read; any other number fails "only schema version 1 is supported". There is no migration and no backup | Missing folder: no overlays, no error (`:2200`). A missing individual file is simply not listed | Malformed or refused: skipped, with a report line naming the file and, when it declares one, the disc ID (`:2237-2251`). At most 8 manifests load; later names are skipped with a report line (`NK_TITLE_MAX_OVERLAYS`, `src/core/generated/nk_title_catalog.h:17`; `:2220-2224`) | None; the files are user-owned and never rewritten |
+| Enhancement package under `<data>/packages/<DISC_ID>-enhanced-<variant>/` (`nk_title_manifest_package_dir_name`, `src/core/nk_title_manifest.c:2324-2358`) | Same package schema as the authentic package (3 written; v2 and v3 read); the variant is a name, not a version (`nk_title_manifest_enhancement_variant_valid`, `:2305-2322`) | Older: the same v2/v3 package rule. Newer: the same `package_newer_format` refusal. A package recorded for another variant is `STALE` (`package_validate_variant`, `:5629`, `:5945-5950`) | `NK_RUNTIME_PACKAGE_MISSING`, reason "The enhanced runtime package is missing." (`:5818-5824`) | An invalid variant id is `INCOMPATIBLE` before any path is formed (`:5784-5788`); a recorded variant that differs is `STALE` | None; rebuild the enhanced package. It is selected only by the library entry's `enhancement_package_id` |
+
+| Contract and source | Version | An older or newer file | A missing file | An invalid file | Backup or repair |
+| --- | --- | --- | --- | --- | --- |
+| Cheat file, `<data>/cheats/<DISC_ID>.ini` or `--cheats-file` (`nk_cheats_load_file`, `src/core/nk_cheats.c:951-980`) | None. The file is CWCheat text with `_S` disc sections; it carries no version (`src/core/nk_cheats.h:45-49`) | Older/newer: n/a; the syntax is accepted as the reader parses it | No file, or `SR_CHEATS` not exactly 1: nothing is read and nothing is applied (`src/rt/cheats.c:236-275`) | A missing or unreadable file, or one over 64 MiB, makes `nk_cheats_load_file` return NULL; the runtime prints `CHEATS: on, but ...; nothing is applied` and the game still starts (`src/rt/cheats.c:273-276`; `NK_CHEATS_MAX_FILE_BYTES`, `src/core/nk_cheats.h:121`) | Past 4096 cheats are counted and not kept; a code line past 262144 is refused; a cheat past the per-frame write, byte or code limits is refused whole (`src/core/nk_cheats.h:130-141`; `src/core/nk_cheats.c:369-410`, `:907-930`). No backup; the file is user-owned. A package built before cheats is not launched with cheats on: the player refuses and asks for a rebuild (`src/core/nk_launch.c:1916-1922`) |
+| Texture pack folder or ZIP with `textures.ini` (`src/rt/texrepl.c:1013-1017`; `src/rt/texrepl.h:34-43`) | `[options] version` 1; a higher number is read anyway with a diagnostic (`src/rt/texrepl.c:1013-1017`) | Older/newer: no migration; the option is informational. A folder with no `textures.ini` is allowed and images are matched by hash (`src/rt/texrepl.h:9-16`) | No pack selected: no replacement, the game draws its own textures | A malformed or unreadable pack is refused whole, with a message and nothing loaded (`src/rt/texrepl.h:34-39`); one bad image is skipped and its texture is drawn as the game draws it (`:40-43`) | No backup; the pack is user-owned. `textures.ini` is capped at 4 MiB and an image at 64 MiB (`src/rt/texrepl.h:65`) |
+| `<saves>/<DISC_ID>/` (the PSP Memory Stick layout) (`src/core/nk_launch.c:1425-1496`) | None; the PSP defines the layout, not Nakagawa | Older/newer: n/a. A package rebuild or player update does not touch it (section 6; section 8) | The per-disc folder is the last candidate; it is used when it is writable | No writable root: `NK_ERROR_IO` and no launch ("No writable save location..."; `:1490-1495`). An explicit `SR_MEMSTICK` that is not writable is refused, with no fallback to the real save folder (`:1438-1458`) | None. Migration is #2744 and outside this slice; this section does not move or convert saves |
+| The per-user folder layout (`src/core/nk_data_migrate.h:13-22`) | None on disk. The choice is made once per process and nothing is recorded | The rule is fixed, not a file version: an older install uses its old layout exactly as before #324; otherwise the new `Nakagawa` layout | Missing old layout and missing new: the new layout. An empty or dangling old folder counts as existing | Both exist: the old layout is used and the player shows one notice naming both; nothing is moved, copied, merged or deleted | No backup; a user who wants the new folder moves the old folders away (`src/core/nk_data_migrate.h:9-11`) |
+| Release asset set (`docs/PREVIEW_RELEASE.md:494-534`; `--check-assets`, `tools/stage_install.py:960-1010`, `:1239`) | SemVer `<version>` in every name; one version across the set | The updater parses a tag as SemVer, accepts an optional leading `v` and ignores build metadata; pre-releases count and drafts or invalid tags are skipped (`src/player/update_check.h:66-77`, `:116-118`) | A missing player ZIP is `ASSET_PLAYER_MISSING`; a missing checksum is `ASSET_CHECKSUM_MISSING`; `--check-assets` exits 1 with the named problem (`docs/PREVIEW_RELEASE.md:522-529`) | A second archive for a platform, a mixed version, an orphan, an installer without its ZIP, or a name a filter drops is refused with its own `ASSET_*` name (`docs/PREVIEW_RELEASE.md:522-529`; `tools/stage_install.py:994-1002`) | No backup: a published asset is never replaced or edited; a changed file is a new version (`docs/PREVIEW_RELEASE.md:518-520`). Signing is scoped to the in-player Windows ZIP download, not the whole asset set: `src/player/update_check.c:379-416` looks only for `<zip>.sha256` and `<zip>.sha256.minisig`, and `docs/RELEASE_SIGNING.md:12-14` defines one signature over that checksum file; the ZIP itself is not signed. Missing key, missing signature, unknown key or invalid signature are `UPDATE_NO_SIGNING_KEY`, `UPDATE_SIGNATURE_MISSING`, `UPDATE_SIGNATURE_UNKNOWN_KEY`, `UPDATE_SIGNATURE_INVALID` (`src/player/update_check.h:139-150`; `src/player/update_check.c:557-590`; `src/core/nk_sig.c:143`, `nk_minisign_verify`). `--check-assets` checks names and versions only (`tools/stage_install.py:957-1010`) and verifies no signature; the installer, source archive and other assets are outside the in-player check. |
+
+### Ace package files
+
+For the 60 Hz timing package and the Ace cull hook, the player checks
+`<data>/enhancements/<disc_id>-60hz.json` (or `-cull.json`) first and, only
+when that file does not exist, the shipped
+`assets/enhancements/<disc_id>-...json` (`player_read_title_package_file`,
+`src/player/player_state.c:3389-3415`; `docs/ENHANCEMENT_CONTRACT.md:237`,
+`:379-380`). The disc ID is lowercase in both names. `build-package
+--experimental-60hz` and `--ace-cull` use the same order
+(`tools/nk_cli.py:2836-2846`, `:2926-2936`). A user file that exists always
+wins, even when it is unusable: the reader reports that file's error and does
+not fall back to the shipped one, so a broken override blocks the package
+rather than silently selecting the published package.
+
+The Ace declaration has its own version fields, separate from the built runtime
+package and the release. Its `schema_version` must be exactly 1
+(`SUPPORTED_SCHEMA_VERSION`, `tools/enhancement_package.py:49`, checked at
+`:480-488`; `docs/ENHANCEMENT_CONTRACT.md:247`, `:256`), and its `version` is
+the declaration's SemVer (`docs/ENHANCEMENT_CONTRACT.md:247`). That
+`schema_version` is not the built runtime package's package schema (3 written;
+v2/v3 read, the table above), and that `version` is not the release asset set's
+SemVer. The file name and `id` are names, not versions.
+
+**Follow-up.** The drift test is deliberately not built here. It would fail
+when a player flag or a `SETUP.md`-documented variable is added without a
+class; `tools/test_env_registry.py` covers the `env_registry.h` rows, not the
+player-flag or `docs/SETUP.md` classification. That remains recorded for issue #2745. The shared writer's 1,000,000
+probe bound is documented above, not deferred; this change does not alter it.
+
 Logs, the update download (kept only when its SHA-256 matches) and the
 content-addressed package cache (section 6) hold no state a user could lose.
 
 `tests/fixtures/user_data/` holds each of these files as an earlier player's own writer
 wrote it, and `tests/native/test_player_state.c`,
 `tests/native/test_input_profile.c` and `tools/test_nk_core.py` load, migrate and
-round-trip them, and prove that a newer file is kept.
+round-trip them, and cover the newer-file refusal for the versions they use.
 
 **What a package is keyed on after an update.** The native key's
 `compiler_identity` names the driver by its content hash, its version

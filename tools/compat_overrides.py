@@ -192,42 +192,30 @@ GUEST_PATCHES: list[dict[str, Any]] = [
 ]
 
 # --- tools/codegen.py: custom per-address stubs -----------------------------
-CODEGEN_CUSTOM_STUBS = [
+CODEGEN_CUSTOM_STUBS: list[dict[str, Any]] = [
     # 0x000011b0 (__register_frame_info bypass), 0x0000260c (exception helper bypass),
     # 0x0000fe3c (_getmodreent), 0x00015ea0 (CSV tokenizer) and 0x000149a8 (strcpy):
     # retired under #363. Each now translates as written: the guest's own frame
     # registration, reent lookup through the thread's k0, strtok and strcpy.
-    dict(address=0x00010738, category="hle_boundary", name="_malloc_r -> sr_newlib_malloc bridge",
-         reason="bridges retail dlmalloc to the host-owned arena. Retail memalign/realloc edit "
-                "dlmalloc headers directly, where bit 0 is PREV_INUSE; the host header uses bit "
-                "0 for the current block's allocation state. Mixing those metadata ABIs "
-                "deterministically quarantined a valid free list.",
-         test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x0000f538, category="hle_boundary", name="_free_r -> sr_newlib_free bridge",
-         reason="see 0x10738 -- same bridge, the free half",
-         test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x000101c4, category="hle_boundary",
-         name="_memalign_r -> sr_newlib_memalign bridge",
-         reason="the retail body directly carves dlmalloc chunks. A captured write at pc "
-                "0x000102b0 set PREV_INUSE on a host free header, whose bit 0 instead means "
-                "current block allocated; the host bridge preserves alignment without crossing "
-                "allocator metadata ABIs.",
-         test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x00013524, category="hle_boundary",
-         name="_realloc_r -> sr_newlib_realloc bridge",
-         reason="the retail body walks, unlinks, and rewrites dlmalloc chunks, so it must share "
-                "the host metadata ABI used by malloc/free/memalign.",
-         test="tools/test_codegen_retail_allocator.py"),
+    # 0x00010738 (_malloc_r), 0x0000f538 (_free_r), 0x000101c4 (_memalign_r) and 0x00013524
+    # (_realloc_r), the four bridges to the runtime's own heap (sr_newlib_malloc and its
+    # siblings): retired together under #363. They could only go together: the title's
+    # allocator keeps its chunk headers, bins and top chunk in guest memory, with header bit
+    # 0 meaning PREV_INUSE, while the runtime's block header used bit 0 for the block's own
+    # state. With malloc and free bridged, the title's memalign once set PREV_INUSE on a
+    # runtime free header (a captured write at pc 0x000102b0), which is why memalign and
+    # realloc were bridged too. All four now translate as written
+    # (tools/test_codegen_retail_allocator.py RetailAllocatorFamilyRunsAsWrittenTests).
     # 0x000143b0 (native sprintf): retired under #363 (2026-11-11). Its recorded reason was
     # that the translated formatter corrupted %s arguments during boot. On the private
     # full-match route the title's own sprintf and the native one agreed on every call, so
     # the title's own now runs (tools/test_codegen_entry_semantics.py
     # FormatterAtRetiredSprintfBridgeTests).
     # 0x0001034c (heap-statistics walk skip) and 0x001d9eb0 (title backdrop selector
-    # postcondition): retired under #363 (2026-10-26). The walk reads the retail
-    # allocator's statically linked bins, which nothing writes once malloc/free/memalign/
-    # realloc are host-bridged, so it terminates; the chooser never returned 0 on the
-    # private route. Both now translate as written.
+    # postcondition): retired under #363 (2026-10-26). The allocator was still bridged
+    # then, so the walk read bins that nothing wrote; since the bridges went it reads the
+    # bins the title's allocator maintains. The chooser never returned 0 on the private
+    # route. Both translate as written.
     # 0x0001a5f8 / 0x0001c008: constant-return stubs removed 2026-07-18 after a
     # Ghidra-assisted review proved both shadowed real translatable code (a
     # delay-slot setter and a computed-goto resume point). The real translations
@@ -235,21 +223,18 @@ CODEGEN_CUSTOM_STUBS = [
     # is now zero.
     # 0x000468c8 (main_RunGameLoop scheduler wrapper): retired under #363. The worker
     # thread's own loop yields through its syscalls, so the function translates as written.
-    dict(address=0x00011090, category="faithful_abi_bridge", name="memcpy native",
-         reason="native memmove-backed reimplementation (sr_native_memmove), same semantics as "
-                "the translated body, including the scalar accessors' VRAM read-back and write "
-                "notification",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
-    dict(address=0x000110dc, category="faithful_abi_bridge", name="memcpy native (alias)",
-         reason="see 0x11090",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
-    dict(address=0x000114c0, category="faithful_abi_bridge", name="sceKernelMemset native",
-         reason="native memset-backed reimplementation (sr_native_memset), same semantics as "
-                "the translated body, including the scalar accessors' VRAM write notification",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
-    dict(address=0x000114a8, category="faithful_abi_bridge", name="sceKernelMemset native (alias)",
-         reason="see 0x114c0",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
+    # 0x00011090 and 0x000110dc (native memcpy, sr_native_memmove) and 0x000114c0 and
+    # 0x000114a8 (native sceKernelMemset, sr_native_memset): retired under #363 (2026-11-23).
+    # They were recorded as faithful ABI bridges with the translated body's semantics, kept
+    # for speed. The copy had memmove semantics whatever the routine at its address does on
+    # overlap, the fill used only the low byte of its value, and both left every register but
+    # v0 as the caller set it, so equivalence with the translated body was never shown.
+    # Whatever the title has at the four addresses now takes the generator's general path:
+    # guest code translates as written, and a kernel sceKernelMemset or sceKernelMemcpy import
+    # is the generic handler's (src/rt/hle_kernel_utils.c), as before
+    # (tools/test_codegen_hst_stubs.py RetiredCopyAndFillBodiesRunAsWrittenTests).
+    # With these and the allocator bridges gone the table is empty: --profile=hst emits no
+    # hand-written body.
 ]
 
 # --- tools/codegen.py: HST profile entry roles -----------------------------

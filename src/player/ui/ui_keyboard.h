@@ -68,7 +68,8 @@ typedef struct {
     size_t cap;              /* the most bytes before the NUL: the buffer is cap + 1 */
     UiKeyboardFilter accept; /* NULL takes every well-formed character */
     void *user;
-    bool shifted;            /* the letters show, and type, in upper case */
+    bool shifted;            /* the letters show, and type, in upper case; the other keys
+                                their second characters (ui_keyboard.c k_shifted) */
 } UiKeyboard;
 
 /* One frame's presses of the pad's shortcuts (X or Square, Y or Triangle, L or R, Start,

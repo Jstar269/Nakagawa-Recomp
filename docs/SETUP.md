@@ -95,6 +95,11 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   inherited values appear as `Library (value)` and a game's own value is highlighted. Ace-only options carry a tag,
   and options that cannot apply as the page stands stay visible but dimmed, with the reason in the panel. Frame
   pacing is on Motion. A game's Texture pack folder and Remove texture pack rows are the last rows of Picture.
+- **Loading speed.** Under **Settings > Enhanced > Advanced**, choose **Automatic** to fast-forward through
+  detected silent disc loads. You can set it for the library or override it for one game. It works in Enhanced
+  and Ace without an Ace package for the game. Rebuild older game packages to enable Automatic. They keep
+  their other enhancements when launched. Sound, player input or a pause returns the game to normal speed.
+  **Off** is the default. **Short waits (Ace)** uses the loading waits declared by a game's Ace package.
 - **Texture scaling and the Smart 2D filter.** Two parts of Enhanced and Ace, off by default and in no graphics
   preset: Settings > Enhanced offers **Texture scaling** (2x to 6x, or Off) and **Smart 2D filter** (On or Off), for
   the library or for one game. Texture scaling draws each texture from a larger copy made with xBRZ. The Smart 2D
@@ -1567,7 +1572,7 @@ runtime can make is listed below, and each is opt-in and off by default.
 | Online play (ad hoc relay) | The shipped servers `socom.cc`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, `relay-sa.arenaanywhere.site` and `relay-asia.arenaanywhere.site`, a relay server you pick from PPSSPP's list (any host it names), or a server you enter yourself (`27312` lobby, `27313` data, plain TCP) | Only after you select **TURN ON** on the Online play card, which names that exact server, and only while a game that starts PSP ad hoc networking runs | The Online play card; **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) turns it off and ends the connection |
 | Online play server list | `metadata.ppsspp.org` (HTTPS) | Only while Online play is on, when you open the server picker or select **Refresh** in it | Online play being on; no download starts at start, in the background, or while Online play is off, and one already under way when you turn it off finishes but its list is thrown away |
 
-**RetroAchievements** is off by default. Its consent screen names `retroachievements.org` and
+**RetroAchievements** is off by default. Its consent card, a launcher page, names `retroachievements.org` and
 `media.retroachievements.org` and the data sent:
 your RetroAchievements user name and API token, the game hash, achievement unlocks and Rich Presence text,
 which a running game sends every two minutes. Leaderboard entries are not sent. Every request goes to
@@ -1599,8 +1604,12 @@ the game's page says why. Turning the switch off sends nothing more: a request w
 Its requests identify themselves in the form RetroAchievements documents:
 `NakagawaRecomp/<version> (<operating system and version>) rcheevos/<version>`, such as
 `NakagawaRecomp/0.1.0 (Windows 10.0.26100) rcheevos/12.5`. No telemetry is sent.
-To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read and accept the consent screen,
-then choose **Sign in**. The game's page lists the core achievements after the set loads.
+To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read the consent card and
+choose **Agree and turn on**. The launcher's sign-in page opens: choose **Username** and **Password** (each opens the
+on-screen keyboard, which a keyboard, mouse or controller can use; the password shows as stars), then **Sign in**.
+RetroAchievements offers no sign-in web page or OAuth for other apps (rcheevos signs in only with a password or a token
+it issued), so the password is entered in the launcher, as in other emulators. The game's page lists the core
+achievements after the set loads.
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).

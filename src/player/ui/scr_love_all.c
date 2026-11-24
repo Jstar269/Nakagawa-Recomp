@@ -5,6 +5,7 @@
    (launcher_secret.h). Project-written. */
 
 #include "launcher_secret.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -120,12 +121,10 @@ PlayerUiAction player_ui_screen_love_all(NkUi *ui, const PlayerUiLoveAllModel *m
             if (nk_ui_begin_container(ui, LOVE_ID_HEAD, &head, NULL)) {
                 nk_ui_shapes(ui, LOVE_ID_MARK, sizing_fixed(64.0f), sizing_fixed(64.0f),
                              nk_ui_art_n1_mark());
-                nk_ui_text_role(ui, LOVE_ID_TITLE, "LOVE ALL", NK_UI_TYPE_DISPLAY_XL,
+                nk_ui_text_role(ui, LOVE_ID_TITLE, NK_UI_STR(LOVE_ALL_TITLE), NK_UI_TYPE_DISPLAY_XL,
                                 theme->paper);
                 nk_ui_text_role(ui, LOVE_ID_LEAD,
-                                "In tennis, love all means a level start: nothing to nothing. "
-                                "Here it means thanks to everyone: the projects Nakagawa "
-                                "builds on, the people who made them, and you.",
+                                NK_UI_STR(LOVE_ALL_INTRO),
                                 NK_UI_TYPE_BODY_L, theme->muted);
                 nk_ui_end_container(ui);
             }
@@ -133,16 +132,15 @@ PlayerUiAction player_ui_screen_love_all(NkUi *ui, const PlayerUiLoveAllModel *m
                 love_all_credit(ui, i, &g_love_all_credits[i], i == 0u);
             }
             nk_ui_text_role(ui, LOVE_ID_THANKS,
-                            "Thank you to everyone who reports a problem, tests a build, "
-                            "or plays.",
+                            NK_UI_STR(LOVE_ALL_THANKS),
                             NK_UI_TYPE_BODY, theme->muted);
-            nk_ui_text_role(ui, LOVE_ID_TAIL, "The full list is in CREDITS.md and NOTICE.md.",
+            nk_ui_text_role(ui, LOVE_ID_TAIL, NK_UI_STR(LOVE_ALL_CREDITS_FILES),
                             NK_UI_TYPE_FOOTNOTE, theme->dim);
             {
                 NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), 0.0f);
                 row.padding_top = NK_UI_SPACE_4;
                 if (nk_ui_begin_container(ui, LOVE_ID_ACTIONS, &row, NULL)) {
-                    if (nk_ui_button(ui, PLAYER_UI_ID_LOVE_ALL_BACK, "Back",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_LOVE_ALL_BACK, NK_UI_STR(LOVE_ALL_BACK),
                                      NK_UI_BUTTON_PRIMARY)) {
                         result = action(PLAYER_UI_ACTION_BACK, 0u, PLAYER_UI_PRIMARY_NONE);
                     }
@@ -155,8 +153,8 @@ PlayerUiAction player_ui_screen_love_all(NkUi *ui, const PlayerUiLoveAllModel *m
     }
     {
         static const NkUiPromptItem prompts[] = {
-            {NK_UI_PROMPT_ACT_MOVE, "Scroll"},
-            {NK_UI_PROMPT_ACT_BACK, "Back"}
+            {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(LOVE_ALL_PROMPT_SCROLL)},
+            {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(LOVE_ALL_BACK)}
         };
         nk_ui_prompt_bar(ui, LOVE_ID_PROMPTS, "", prompts, sizeof(prompts) / sizeof(prompts[0]));
     }

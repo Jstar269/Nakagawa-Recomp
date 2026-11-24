@@ -131,8 +131,9 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
 - **Pending.** A long value that wraps inside the Settings options detail panel, and a panel whose text scrolls when
   it is taller than its room, are in [#2754](https://github.com/Jstar269/nakagawa-recomp/pull/2754), a Draft
   that is not on `main`; this page describes `main`.
-- Launcher text is English only and lives in the screen sources; moving it to a string table is
-  [#2747](https://github.com/Jstar269/nakagawa-recomp/issues/2747).
+- The launcher ships one English catalog for screen and shared-widget text.
+  [Adding launcher strings](../CONTRIBUTING.md#launcher-strings) describes the catalog and the pseudo-translation check.
+  [#2953](https://github.com/Jstar269/Nakagawa-Recomp/issues/2953) tracks the in-game overlay and messages produced outside the launcher screens.
 
 ### Focus
 
@@ -433,7 +434,9 @@ hardware keyboard, "/" or Ctrl+F. The box takes TEST THIS PC's room: a field sho
 disc ID" until then) and, 4 px under it, the player's shared on-screen keyboard (`src/player/ui/ui_keyboard.c`, the
 nickname editor's too). Its keys are small controls (34 px at 100% text) in rows 4 px apart, the last 8 px below
 the others: digits, three QWERTY rows with `'`, `,`, `.` and `-`, a row of symbols, and SHIFT, SPACE, DELETE, CANCEL
-and DONE. The letters are lower case until SHIFT. The field is a key's height, so a row of cards still fits under
+and DONE. The letters are lower case until SHIFT, which also gives the other keys a second character
+(`$ % ^ = / \ ; " | ~` on the digits, `:` on `'`, ``< > ` `` on `, . -`, `[ ] { }` on `( ) _ +`), so the two layers
+type every printable ASCII character, as a RetroAchievements password may need. The field is a key's height, so a row of cards still fits under
 the box at 1280 x 720; with larger text the grid scrolls under it.
 The box takes printable characters, up to 63 bytes. The grid shows the games whose name or disc ID holds what is
 typed, ignoring case, without the add card or the demos; the count reads "3 of 40 titles", and no match says "No
@@ -672,7 +675,9 @@ PICTURE contains TEXTURE FILTERING; WIDESCREEN; SHARPER ENLARGING; TEXTURE PACK;
 SMOOTH FAR TEXTURES; TEXTURE SCALING; SMART 2D FILTER; CRISP SYSTEM TEXT. MOTION contains SMOOTH MOTION and the
 existing global FRAME PACING control. SOUND contains CLEAN PITCHED SOUND and UNCLIPPED SOUND. CONTROLS contains
 STICK DEAD ZONE. ON-SCREEN contains SPEED READOUT and GAME BADGE. ADVANCED contains FINER PATCHES, WIDER CULLING,
-SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
+LOADING SPEED, LATE PAD SAMPLING and SOFT SHADOWS. Loading speed offers Automatic, Short waits (Ace) and Off.
+Automatic works in Enhanced or Ace without an Ace package. Older game packages need rebuilding to use Automatic.
+Short waits requires Ace and a package with declared loading waits. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
 REMOVE TEXTURE PACK are the last rows of Picture.
 Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
 ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
@@ -768,7 +773,7 @@ on (#2280), which changes only the picture the window shows; the other presets l
 second draw of each render op and its GPU memory stay off unless asked for. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, UNCLIPPED
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, LOADING SPEED, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, UNCLIPPED
 SOUND, TEXTURE SCALING, the SMART 2D FILTER, the SPEED READOUT or
 the GAME BADGE: they change timing, framing, input, sound, guest-visible output or the HUD, or have no measured cost on
 low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for
@@ -1031,8 +1036,8 @@ wording, do not exist yet.
 - Colour never carries meaning alone: a status is a marker shape and a word, a selected value has an edge or a fill
   as well as its text colour, and a key the on-screen keyboard cannot type loses its outline as well as dimming.
 - Not there yet: no screen-reader support
-  ([#2748](https://github.com/Jstar269/nakagawa-recomp/issues/2748)); English only, with no string table
-  ([#2747](https://github.com/Jstar269/nakagawa-recomp/issues/2747)); no light theme and no colour-blind palette;
+  ([#2748](https://github.com/Jstar269/nakagawa-recomp/issues/2748)); English is the only shipped language;
+  no light theme and no colour-blind palette;
   a Windows contrast theme changes the focus ring only. The full list, with workarounds, is in
   [`ACCESSIBILITY.md`](../ACCESSIBILITY.md#known-limitations).
 

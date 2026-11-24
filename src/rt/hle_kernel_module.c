@@ -1506,6 +1506,7 @@ static uint32_t h_LoadExecForUser_362A956B(CpuState *s) {
 
 /* sceKernelExitGame terminates the guest process in thread and interrupt contexts. */
 static uint32_t h_ExitGame(CpuState *s) {
+    sched_auto_load_quit();
     /* sceKernelExitGame takes no argument (PSPSDK psploadexec.h declares
      * `void sceKernelExitGame(void)`; PPSSPP registers NID 0x05572a5f with the
      * empty argument signature, and PSPAutotests tests/modules/loadexec-imports.S

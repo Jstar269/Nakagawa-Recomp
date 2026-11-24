@@ -9,6 +9,7 @@
    when it can be chosen (always, once an unlock is found, or between two dates). The
    launcher draws with the theme launcher_theme_pick gives; a running game never sees one. */
 
+#include "nk_ui_text.h"
 #include "nk_ui_theme.h"
 
 #include <stdbool.h>
@@ -25,7 +26,7 @@
 /* The theme the classic cheat code unlocks: its id (settings.json, which never changes) and
    the name Settings shows. The name is written only here, so renaming it is a one-line change. */
 #define LAUNCHER_THEME_WAVE_ID "wave"
-#define LAUNCHER_THEME_WAVE_NAME "Nami"
+#define LAUNCHER_THEME_WAVE_NAME NK_UI_STR(THEME_NAMI)
 /* The unlock the classic cheat code records (settings.json "theme_unlocks"). It also shows
    the Love All button on About. */
 #define LAUNCHER_THEME_UNLOCK_WAVE "wave"

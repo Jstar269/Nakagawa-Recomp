@@ -3797,7 +3797,11 @@ class NativePlayerUiTests(unittest.TestCase):
         # Frame pacing names PSP timing or no extra cap, never a fixed frame-rate cap.
         launcher = (ROOT / "src" / "player" / "ui" / "player_ui_nk.c").read_text(
             encoding="utf-8")
-        self.assertIn('"PSP timing" : "No extra cap"', launcher)
+        self.assertRegex(launcher, r"fps_cap < 0\s*\? NK_UI_STR\(SETTINGS_PACING_PSP_TIMING\)"
+                                   r"\s*: NK_UI_STR\(SETTINGS_PACING_NO_EXTRA_CAP\)")
+        catalog = (ROOT / "src/ui/nk_ui_text.h").read_text(encoding="utf-8")
+        self.assertIn('#define NK_UI_EN_SETTINGS_PACING_PSP_TIMING "PSP timing"', catalog)
+        self.assertIn('#define NK_UI_EN_SETTINGS_PACING_NO_EXTRA_CAP "No extra cap"', catalog)
         for source in sorted((ROOT / "src" / "player").rglob("*.c")):
             text = source.read_text(encoding="utf-8").upper()
             self.assertNotIn("30 FPS CAP", text, source.name)
@@ -3823,42 +3827,141 @@ class NativePlayerUiTests(unittest.TestCase):
     SETTINGS_CHEATS = str(0x4565)
     SETTINGS_ACHIEVEMENTS = str(0x455C)
 
-    def test_next_ui_achievements_switch_is_refused_in_a_ui_regression_run(self) -> None:
-        """#1316: a UI regression run stays offline and opens no box, so the Achievements
-        switch is refused and says so. No consent is asked for, and nothing is saved. Where
-        the feature cannot run (no credential store), the row is its reason, not a switch."""
-        focus = self.SETTINGS_FOCUS
-        run = self.next_ui_run(
-            "settings",
-            ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS +
-            ("KEY_LEFT", "KEY_RETURN", "WAIT_MS=100", "WAIT_LAID_OUT=5000") +
-            ("KEY_DOWN",) * 5 + ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
-        )
+    ACHIEVEMENTS_AGREE = str(0x45B5)
+    ACHIEVEMENTS_NOT_NOW = str(0x455F)
+    ACHIEVEMENTS_USERNAME = str(0x45B0)
+    ACHIEVEMENTS_PASSWORD = str(0x45B1)
+    ACHIEVEMENTS_SIGN_IN = str(0x45B2)
+    ACHIEVEMENTS_SIGN_IN_CANCEL = str(0x45B3)
+
+    def achievements_said(self, run: dict[str, object]) -> list[str]:
+        """The RetroAchievements status lines a run showed. Nothing turns it on in the run, nor
+        is it saved as on: the achievements-sign-in view is a preview with the switch off
+        (#1316 review; before, that view turned the switch on itself)."""
         stdout = run["stdout"]
         assert isinstance(stdout, str)
-        said = [bytes.fromhex(status).decode("utf-8") for status in re.findall(
-            r"\[PLAYER_UI_TEST\] achievements frame=\d+ enabled=0 status_hex=([0-9a-f]+)", stdout)]
         self.assertNotRegex(stdout, r"achievements frame=\d+ enabled=1")
         settings = run.get("settings") or {}
         assert isinstance(settings, dict)
         self.assertIsNot(settings.get("achievements_enabled"), True)
-        trail = self.focus_trail(run)
-        if os.name == "nt":
-            self.assertEqual(
-                trail[-6:], [focus["developer"], self.SETTINGS_NICKNAME, focus["online_play"],
-                             self.SETTINGS_COVER_ART, self.SETTINGS_CHEATS,
-                             self.SETTINGS_ACHIEVEMENTS],
-                "the keyboard reaches the Achievements switch, the last row of the page")
-            self.assertEqual(
-                said, ["Sign in to connect.",
-                       "RetroAchievements is not available in a UI regression run."],
-                "the switch is refused before the consent box or the credential store is asked")
-        else:
+        return [bytes.fromhex(status).decode("utf-8") for status in re.findall(
+            r"\[PLAYER_UI_TEST\] achievements frame=\d+ enabled=\d status_hex=([0-9a-f]+)",
+            stdout)]
+
+    def test_next_ui_achievements_switch_opens_the_consent_card(self) -> None:
+        """#1316: the Achievements switch opens the launcher's consent card, not a Windows
+        message box. Its focus starts on NOT NOW, which changes nothing; Esc does the same.
+        AGREE AND TURN ON is refused in a UI regression run, which stays offline, so nothing
+        is ever enabled or saved. Where the feature cannot run (no credential store), the row
+        is its reason, not a switch.
+
+        Failing before: the switch, refused in a regression run, opened no page; outside one
+        it opened SDL's message box (player_achievements_consent)."""
+        focus = self.SETTINGS_FOCUS
+        to_switch = (("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS +
+                     ("KEY_LEFT", "KEY_RETURN", "WAIT_MS=100", "WAIT_LAID_OUT=5000") +
+                     ("KEY_DOWN",) * 5 + ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"))
+        not_now = self.next_ui_run("settings", to_switch + ("KEY_RETURN", "WAIT_MS=200"))
+        said = self.achievements_said(not_now)
+        trail = self.focus_trail(not_now)
+        if os.name != "nt":
             self.assertNotIn(self.SETTINGS_ACHIEVEMENTS, trail)
             self.assertEqual(
                 said, ["Sign-in requires Windows Credential Manager; this platform is "
                        "unsupported."],
                 "no credential store here: the row is its reason, and nothing is asked")
+            return
+        at = trail.index(self.SETTINGS_ACHIEVEMENTS)
+        self.assertEqual(
+            trail[at - 5:at + 2],
+            [focus["developer"], self.SETTINGS_NICKNAME, focus["online_play"],
+             self.SETTINGS_COVER_ART, self.SETTINGS_CHEATS, self.SETTINGS_ACHIEVEMENTS,
+             self.ACHIEVEMENTS_NOT_NOW],
+            "the keyboard reaches the Achievements switch, and the card opens on NOT NOW")
+        views = [view for view, _ in self.screens(not_now)]
+        self.assertIn("achievements_card", views, "the switch opens the consent card")
+        self.assertEqual(views[-1], "online_settings", "NOT NOW returns to the page")
+        self.assertIn(self.ACHIEVEMENTS_NOT_NOW, trail, "the card's focus starts on NOT NOW")
+        self.assertEqual(said, ["Sign in to connect.", "RetroAchievements was not enabled."])
+
+        agree = self.next_ui_run(
+            "settings", to_switch + ("KEY_LEFT", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200",
+                                     "KEY_ESCAPE", "WAIT_MS=200"))
+        self.assertIn(self.ACHIEVEMENTS_AGREE, self.focus_trail(agree))
+        self.assertEqual(
+            self.achievements_said(agree),
+            ["Sign in to connect.", "RetroAchievements is not available in a UI regression run.",
+             "RetroAchievements was not enabled."],
+            "AGREE is refused before anything starts; Esc then leaves the card as NOT NOW does")
+        self.assertEqual([view for view, _ in self.screens(agree)][-1], "online_settings")
+
+    @unittest.skipUnless(os.name == "nt", "the sign-in page needs Windows Credential Manager")
+    def test_next_ui_achievements_sign_in_page_types_with_the_on_screen_keyboard(self) -> None:
+        """#1316: the sign-in page is the launcher's own, not Windows' credential dialog.
+        Username and Password each open the on-screen keyboard editor; a keyboard types there
+        too, the password shows as stars, and SIGN IN (refused in a UI regression run, which
+        stays offline) is reached by the keyboard once both are filled. Esc leaves the page.
+
+        Failing before: there was no such page; Sign in called CredUIPromptForCredentialsW."""
+        run = self.next_ui_run(
+            "achievements-sign-in",
+            ("WAIT_MS=100", "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_MS=100",
+             "TEXT=player_one", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_DOWN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100",
+             "TEXT=hunter2", "KEY_RETURN", "WAIT_MS=200",
+             "KEY_RETURN", "WAIT_MS=200", "KEY_ESCAPE", "WAIT_MS=200"))
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        self.assertNotIn("hunter2", stdout, "the password is never printed")
+        self.assertNotIn("hunter2".encode().hex(), stdout,
+                         "nor its bytes: the editor reports a password as its stars")
+        self.assertIn("text_hex=" + "2a" * 7 + " ", stdout,
+                      "the open password editor reports one star per character")
+        trail = self.focus_trail(run)
+        for control in (self.ACHIEVEMENTS_USERNAME, self.ACHIEVEMENTS_PASSWORD,
+                        self.ACHIEVEMENTS_SIGN_IN):
+            self.assertIn(control, trail)
+        self.assertLess(trail.index(self.ACHIEVEMENTS_PASSWORD),
+                        trail.index(self.ACHIEVEMENTS_SIGN_IN),
+                        "Done on the password moves the focus to SIGN IN")
+        self.assertEqual(
+            self.achievements_said(run)[-1],
+            "RetroAchievements is not available in a UI regression run.",
+            "SIGN IN is refused in a regression run, before anything is sent")
+        views = [view for view, _ in self.screens(run)]
+        self.assertEqual(views[0], "achievements_sign_in")
+        self.assertEqual(views[-1], "online_settings", "Esc leaves the sign-in page")
+
+    @unittest.skipUnless(os.name == "nt", "the sign-in page needs Windows Credential Manager")
+    def test_next_ui_achievements_sign_in_cancelled_or_empty_sends_nothing(self) -> None:
+        """#1316: leaving sign-in with nothing typed returns to the settings page, still signed
+        out, with nothing sent. The username editor opens and is cancelled empty; the window
+        loses and regains the focus (clicking away, which left Windows' credential dialog behind
+        a launcher that had stopped answering); with both fields empty SIGN IN is disabled, so
+        the keyboard passes it from Password to CANCEL, which leaves the page. The player goes
+        on running and quits only when the run ends.
+
+        Failing before: there was no such page; Sign in blocked the launcher's event loop in
+        CredUIPromptForCredentialsW, a dialog with no owner window."""
+        run = self.next_ui_run(
+            "achievements-sign-in",
+            ("WAIT_MS=100", "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_ESCAPE", "WAIT_MS=100", "FOCUS_LOST", "WAIT_MS=100", "FOCUS_GAINED",
+             "WAIT_MS=100", *(("KEY_DOWN", "WAIT_MS=100") * 2), "KEY_RETURN", "WAIT_MS=200"))
+        said = self.achievements_said(run)
+        self.assertEqual(said, ["Sign in to connect."],
+                         "nothing is sent, and no sign-in is even attempted")
+        trail = self.focus_trail(run)
+        at = trail.index(self.ACHIEVEMENTS_USERNAME)
+        self.assertEqual(trail[at + 2:at + 5],
+                         [self.ACHIEVEMENTS_USERNAME, self.ACHIEVEMENTS_PASSWORD,
+                          self.ACHIEVEMENTS_SIGN_IN_CANCEL],
+                         "the editor's Cancel returns to Username; the empty form's SIGN IN is "
+                         "passed over for CANCEL")
+        self.assertNotIn(self.ACHIEVEMENTS_SIGN_IN, trail, "an empty SIGN IN takes no focus")
+        self.assertEqual([view for view, _ in self.screens(run)],
+                         ["achievements_sign_in", "online_settings"],
+                         "the editor's Cancel stays on the page; CANCEL returns to settings")
 
     # #1316: why a title earns nothing (player_state.c achievements_block_reason).
     # The page's notice heading says "No achievements this session"; the reason does not repeat it.
@@ -8317,6 +8420,7 @@ class NativePlayerUiTests(unittest.TestCase):
         """#2055: Enhanced options opens Settings > Enhanced for that game: its rows show the
         game's own values and change only them, and Escape returns to its title page with
         Enhanced options focused."""
+        settings_with_auto_load = {"enhanced": {**self.LIBRARY_ENHANCED["enhanced"], "load": "auto"}}
         run = self.next_ui_run(
             "library",
             (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
@@ -8325,7 +8429,7 @@ class NativePlayerUiTests(unittest.TestCase):
              *(("KEY_DOWN", "WAIT_MS=80") * 3),
              "KEY_RETURN", "WAIT_MS=120", "KEY_RETURN", "WAIT_MS=120",
              "KEY_ESCAPE", "WAIT_MS=200"),
-            wait_background=True, settings=self.LIBRARY_ENHANCED)
+            wait_background=True, settings=settings_with_auto_load)
         trail = self.focus_trail(run)
         self.assertIn(self.TITLE_PLAY_OPTIONS, trail, "Right reaches Enhanced options")
         self.assertIn(self.ENHANCED_PAGE_PART, trail, "Down reaches the first part's row")
@@ -8335,6 +8439,8 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual({page["title"] for page in pages}, {"TEST00005"},
                          "the page is that game's")
         self.assertEqual(pages[0]["af"], "Library (16x)", "a part follows the library first")
+        self.assertEqual(pages[0]["load"], "Library (Automatic)",
+                         "a title in Enhanced follows Automatic loading without an Ace package")
         self.assertIn("Ace needs a package made for this game.", pages[0]["sentence"],
                       "a game with no package of its own says why it has no Ace")
         self.assertEqual(pages[-1]["af"], "8x", "the row shows the game's own value")
@@ -9619,5 +9725,490 @@ class PlayerVersionIdentityTests(unittest.TestCase):
         self.assertEqual(defines, again, "the same epoch gives the same defines")
 
 
+class PlayerUiStringSourceTests(unittest.TestCase):
+    """Keep launcher copy in the English catalog, including text built before draw calls."""
+
+    SOURCES = ("src/player/ui", "src/ui")
+    # These files provide data or backend diagnostics rather than composing screen text.
+    # Still check their text-sink calls. New files get the full check by default.
+    SINK_ONLY = frozenset({
+        "src/player/ui/love_all_credits.c",
+        "src/player/ui/player_ui_art.c",
+        "src/player/ui/player_ui_at3.c",
+        # The mixer reports errors and state tokens to the adapter, which owns screen copy.
+        "src/player/ui/player_ui_music.c",
+        "src/player/ui/player_ui_snd0.c",
+        "src/player/ui/player_ui_sound.c",
+        "src/player/ui/player_ui_vorbis.c",
+        "src/ui/backend/nk_ui_sdlr.c",
+        "src/ui/backend/nk_ui_vk.c",
+        "src/ui/nk_ui_assets.c",
+        "src/ui/nk_ui_clay.c",
+        "src/ui/nk_ui_dump.c",
+        "src/ui/nk_ui_image.c",
+        "src/ui/nk_ui_ttf.c",
+    })
+    TEXT_SINKS = frozenset({
+        "nk_ui_badge", "nk_ui_button", "nk_ui_button_between", "nk_ui_button_width",
+        "nk_ui_caps", "nk_ui_draw_add_text", "nk_ui_draw_add_text_centered",
+        "nk_ui_draw_add_text_spaced", "nk_ui_eyebrow", "nk_ui_frame_text",
+        "nk_ui_hero", "nk_ui_label", "nk_ui_prompt_bar", "nk_ui_status_pill",
+        "nk_ui_tag", "nk_ui_text", "nk_ui_text_break", "nk_ui_text_clamp",
+        "nk_ui_text_role", "nk_ui_text_width", "nk_ui_add_tile", "nk_ui_tile",
+        "nk_ui_top_bar", "nk_ui_section_tabs", "scr_flow_end", "scr_flow_eyebrow",
+    })
+    # Strings passed to these calls are consumed as keys/paths or diagnostic records.
+    NON_COPY_CALLS = frozenset({
+        "getenv", "memcmp", "nk_fopen_utf8", "nk_platform_env_utf8",
+        "nk_ui_clay_report_own", "nk_ui_fail", "player_dev_log_add",
+        "strcmp", "strncmp", "strstr",
+    })
+    C_TOKEN = re.compile(
+        r'(?P<comment>//[^\n]*|/\*.*?\*/)'
+        r"|(?P<char>'(?:\\.|[^'\\])*')"
+        r'|(?P<string>(?:u8|[LuU])?"(?:\\.|[^"\\])*")'
+        r"|(?P<name>[A-Za-z_]\w*)|(?P<other>[^\s])",
+        re.S,
+    )
+    PRINTF_FIELD = re.compile(
+        r"%(?:\d+\$)?[-+#0 ']*(?:\d+|\*\d*\$?)?"
+        r"(?:\.(?:\d*|\*\d*\$?))?(?:hh|ll|[hljztL])?[diuoxXfFeEgGaAcspn%]"
+    )
+    C_ESCAPE = re.compile(r"\\(x[0-9a-fA-F]+|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{1,3}|.)", re.S)
+    COMPATIBILITY_CATEGORIES = frozenset({
+        '"Works"', '"Partially works"', '"Boots to a named boundary"',
+        '"Not started"', '"Not supported"', '"Experimental"', '"Untested"',
+    })
+    COMPATIBILITY_KEYS = frozenset({
+        '"display-smoke-v1"', '"synthetic-allegrex-v1"', '"pspdev-phase5-v1"',
+        '"synthetic-title2-v1"', '"showcase-scene-v1"', '"showcase-breakout-v1"',
+        '"UCUS98701"', '"UCUS-98701"', '"PAC-MAN Championship Edition"',
+    })
+    # These strings are protocol names, paths, units or proper names. Keep the
+    # source/call context with each exception to catch the same word in copy.
+    DATA_CONTEXTS = {
+        "src/player/ui/launcher_themes.h": {
+            '"standard"': r"#\s*define\s+LAUNCHER_THEME_STANDARD_ID\s*$",
+            '"wave"': r"#\s*define\s+LAUNCHER_THEME_(?:WAVE_ID|UNLOCK_WAVE)\s*$",
+        },
+        "src/player/ui/player_ui_music.h": {
+            '"assets/music/launcher/ChillLofi.ogg"': r"#\s*define\s+PLAYER_UI_MUSIC_TRACK\s*$",
+        },
+        "src/player/ui/player_ui_snd0.h": {
+            '"PSP_GAME/SND0.AT3"': r"#\s*define\s+PLAYER_UI_SND0_PATH\s*$",
+        },
+        "src/player/ui/player_ui_nk.c": {
+            '"Windows"': r"\?\s*$",
+            '"KB"': r"bytes\s*>=\s*1024u\s*\?\s*$",
+            '"cpython-embed-amd64"': r"\bPLAYER_PREREQ_BOOTSTRAP\s*\?\s*$",
+            '"nakagawa_player"': r"\?\s*base\s*:\s*$",
+            '"GAME_MUSIC_DAMAGED"': r"\bPLAYER_UI_SND0_DAMAGED\s*\?\s*$",
+            '"GAME_MUSIC_NO_DEVICE"': r"^\s*:\s*$",
+            '"LAUNCHER_MUSIC_MISSING"': r"\bPLAYER_UI_MUSIC_MISSING\s*\?\s*$",
+            '"LAUNCHER_MUSIC_DAMAGED"': r"\bPLAYER_UI_MUSIC_DAMAGED\s*\?\s*$",
+            '"LAUNCHER_MUSIC_NO_DEVICE"': r"^\s*:\s*$",
+        },
+    }
+
+    @classmethod
+    def has_words(cls, token: str) -> bool:
+        """Remove printf fields and decode C escapes before checking for letters."""
+        text = token[token.index('"') + 1:-1]
+        fragments = bytearray()
+        i = 0
+        for m in cls.C_ESCAPE.finditer(text):
+            fragments.extend(text[i:m.start()].encode("utf-8"))
+            escape = m.group(1)
+            if escape.startswith("x"):
+                fragments.append(int(escape[1:], 16) & 255)
+            elif escape[0] in "uU" and len(escape) > 1:
+                fragments.extend(chr(int(escape[1:], 16)).encode("utf-8", errors="replace"))
+            elif escape[0] in "01234567":
+                fragments.append(int(escape, 8) & 255)
+            # The remaining valid C escapes produce punctuation or control bytes.
+            i = m.end()
+        fragments.extend(text[i:].encode("utf-8"))
+        value = cls.PRINTF_FIELD.sub("", fragments.decode("utf-8", errors="replace"))
+        return any(char.isalpha() for char in value)
+
+    @staticmethod
+    def regression_arm_lines(source: str) -> set[int]:
+        """The positive UI-regression preprocessor arms contain protocol and fixtures."""
+        scopes: list[bool] = []
+        test_lines = set()
+        for number, line in enumerate(source.splitlines(), 1):
+            directive = re.match(r"\s*#\s*(ifn?def|if|else|elif|endif)\b(.*)", line)
+            if directive:
+                kind, expr = directive.groups()
+                if kind in {"if", "ifdef", "ifndef"}:
+                    scopes.append(
+                        (kind == "ifdef" and expr.strip() == "NK_PLAYER_UI_REGRESSION_TEST")
+                        or (kind == "if" and expr.strip() == "defined(NK_PLAYER_UI_REGRESSION_TEST)")
+                    )
+                elif scopes and kind == "endif":
+                    scopes.pop()
+                elif scopes:
+                    scopes[-1] = False
+            if any(scopes):
+                test_lines.add(number)
+        return test_lines
+
+    @classmethod
+    def keep_data_literal(
+        cls, path: str, token: str, before: str, after: str, in_compatibility_lookup: bool,
+    ) -> bool:
+        """Data displayed verbatim or consumed by a specific non-text declaration."""
+        context = cls.DATA_CONTEXTS.get(path, {}).get(token)
+        if context and re.search(context, before):
+            return True
+        if path == "src/player/ui/player_ui_nk.h":
+            return (re.fullmatch(r'"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.+-]+)?"', token) is not None
+                    and re.search(r"#\s*define\s+NK_PLAYER_VERSION\s*$", before) is not None)
+        if path == "src/player/ui/scr_title.c":
+            # Raw docs/COMPATIBILITY.md keys compared by player_ui_tier_for_category.
+            return (token in cls.COMPATIBILITY_CATEGORIES
+                    and re.match(r"\s*,\s*PLAYER_UI_TIER_\w+\s*\}", after) is not None)
+        if path == "src/player/ui/player_ui_nk.c":
+            if token in cls.COMPATIBILITY_KEYS:
+                return before.strip() == "{" and re.match(r'\s*,\s*"', after) is not None
+            if token in cls.COMPATIBILITY_CATEGORIES:
+                return (re.match(r"\s*,\s*(?:PLAYER_UI_TIER_|NK_UI_STR\(ADAPTER_COMPAT_)", after) is not None
+                        or (in_compatibility_lookup and re.search(r"\breturn\s*$", before) is not None))
+        if path == "src/player/ui/ui_keyboard.c":
+            # Physical rows of keyboard characters, never translated as words.
+            return token in {'"qwertyuiop"', '"asdfghjkl\'"', '"zxcvbnm,.-"'}
+        if path == "src/player/ui/scr_about.c":
+            # A live source URL and version prefix are shown verbatim.
+            return (token == '"github.com/Jstar269/nakagawa-recomp"'
+                    or (token == '"v"' and re.match(r"\s*NK_PLAYER_VERSION\b", after) is not None))
+        if path == "src/player/ui/scr_shared.h":
+            return (token == '"host[:lobby_port[,data_port]]"'
+                    and "SCR_ONLINE_PLAY_OWN_FORMAT" in before)
+        if path == "src/ui/nk_ui_prompts.c":
+            return re.fullmatch(r'"input-prompts/[a-z0-9_]+\.png"', token) is not None
+        if path == "src/ui/nk_ui_theme.c":
+            return re.fullmatch(r'"assets/fonts/ui/[\w/-]+\.ttf"', token) is not None
+        return False
+
+    @classmethod
+    def problems(cls, path: str, source: str) -> list[str]:
+        # Text producers receive a lexical sweep so descriptor arrays, model fields,
+        # return values, and formatting intermediates are checked even when separated
+        # from the draw call. The known lower-level files get a weaker call-site check,
+        # which does not follow strings assigned to a local before a text-sink call.
+        calls: list[str] = []
+        previous = ""
+        problems = []
+        test_lines = cls.regression_arm_lines(source) if path.startswith("src/player/ui/") else set()
+        lookup = (re.search(r"\bplayer_ui_compatibility_words\([^;]*?\)\s*\{.*?^\}",
+                            source, re.S | re.M)
+                  if path == "src/player/ui/player_ui_nk.c" else None)
+        for m in cls.C_TOKEN.finditer(source):
+            if m.lastgroup == "comment":
+                continue
+            token = m.group()
+            if token == "(":
+                if previous == "fprintf" and re.match(r"\s*(?:stderr|stdout)\s*,", source[m.end():]):
+                    calls.append("fprintf(stream)")
+                else:
+                    calls.append(previous)
+            elif token == ")" and calls:
+                calls.pop()
+            elif m.lastgroup == "string":
+                in_sink = any(call in cls.TEXT_SINKS for call in calls)
+                if not in_sink and path in cls.SINK_ONLY:
+                    previous = token
+                    continue
+                line = source.count("\n", 0, m.start()) + 1
+                before = source[source.rfind("\n", 0, m.start()) + 1:m.start()]
+                after = source[m.end():]
+                call = calls[-1] if calls else ""
+                in_compatibility_lookup = lookup is not None and lookup.start() < m.start() < lookup.end()
+                if (cls.has_words(token)
+                    and not re.match(r"\s*#\s*(include|pragma|error)\b", before)
+                    and not (token == '"C"' and re.search(r"\bextern\s*$", before))
+                    and call not in cls.NON_COPY_CALLS
+                    and call != "fprintf(stream)"
+                    and not (call == "player_app_set_error"
+                             and re.fullmatch(r'"(?:SAVES_\w+|REMOVE_PLAN)_FAILED"', token))
+                    and not (not in_sink and line in test_lines)
+                    and not cls.keep_data_literal(path, token, before, after, in_compatibility_lookup)):
+                    problems.append(f"{path}:{line}: use NK_UI_STR for {token}")
+            previous = token
+        return problems
+
+    def test_launcher_strings_come_from_the_catalog(self) -> None:
+        problems = []
+        for directory in self.SOURCES:
+            for path in sorted((ROOT / directory).rglob("*")):
+                relative = path.relative_to(ROOT).as_posix()
+                if path.suffix not in {".c", ".h", ".inc"} or relative == "src/ui/nk_ui_text.h":
+                    continue
+                problems.extend(self.problems(relative, path.read_text(encoding="utf-8")))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_guard_finds_direct_descriptor_and_formatted_copy(self) -> None:
+        source = (
+            'nk_ui_button(ui, id, "Open this game", 0);\n'
+            'static const NkUiPromptItem prompt[] = {{NK_UI_PROMPT_ACT_BACK, "Go back"}};\n'
+            'snprintf(buffer, sizeof buffer, "%u games wait", count);\n'
+            'model.message = "Ready to play";\n'
+            'nk_ui_text_role(ui, id, buffer, NK_UI_TYPE_BODY, colour);\n'
+        )
+        problems = self.problems("src/player/ui/scr_future.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["1", "2", "3", "4"])
+
+    def test_guard_keeps_paths_keys_glyphs_and_diagnostics(self) -> None:
+        source = (
+            '#include "player_ui_nk.h"\n'
+            '/* "Inside a comment" */\n'
+            'file = nk_fopen_utf8("assets/fonts/example.ttf", "rb");\n'
+            'if (strcmp(getenv("NK_UI_TEST_X"), "record") == 0) {\n'
+            '    fprintf(stderr, "Could not open the diagnostic log");\n'
+            '    nk_ui_status_pill(ui, id, "\\xE2\\x97\\x8F", NK_UI_STR(TEST_READY), tone);\n'
+            '}\n'
+        )
+        self.assertEqual(self.problems("src/player/ui/scr_future.c", source), [])
+        # Even known lower-level files must catalog literals passed into a draw call.
+        source += 'nk_ui_text(ui, id, "Raw text", &style);\n'
+        self.assertEqual(len(self.problems("src/ui/backend/nk_ui_vk.c", source)), 1)
+
+    def test_guard_does_not_skip_draw_copy_in_test_arms(self) -> None:
+        source = (
+            '#ifdef NK_PLAYER_UI_REGRESSION_TEST\n'
+            'snprintf(now, sizeof now, "title=%s|tab=%d", title, tab);\n'
+            'nk_ui_text(ui, id, "Raw test copy", &style);\n'
+            '#else\n'
+            'const char *label = "Raw production copy";\n'
+            '#endif\n'
+        )
+        problems = self.problems("src/player/ui/player_ui_nk.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["3", "5"])
+
+
+_PSEUDO_CATALOG_ROW = re.compile(r"^#define\s+NK_UI_EN_([A-Z0-9_]+)[ \t]+(.+)$", re.MULTILINE)
+_PSEUDO_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"')
+_PSEUDO_TOKEN = re.compile(
+    r"\\(?:x[0-9a-fA-F]+|[0-7]{1,3}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)"
+    r"|%[A-Z_][A-Z0-9_]*%"
+    r"|%(?:%|(?:[0-9]+\$)?[-+' #0]*(?:[0-9]+|\*(?:[0-9]+\$)?)?"
+    r"(?:\.(?:[0-9]*|\*(?:[0-9]+\$)?))?(?:hh|ll|I32|I64|[hljztL])?[diouxXfFeEgGaAcspn])"
+    r"|[A-Za-z]{2,}"
+)
+_PSEUDO_ACCENTS = dict(zip("AEIOUCNYaeioucny", "ÀÉÎÖÜÇÑÝàéîöüçñý", strict=True))
+_PSEUDO_CHECKED_FORMAT = """\
+#include <stdio.h>
+#if defined(__MINGW_PRINTF_FORMAT)
+__attribute__((format(__MINGW_PRINTF_FORMAT, 5, 6)))
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 5, 6)))
+#endif
+int nk_ui_pseudo_snprintf(const char *file, int line, char *dest, size_t cap,
+                          const char *format, ...);
+#undef snprintf
+#define snprintf(...) nk_ui_pseudo_snprintf(__FILE__, __LINE__, __VA_ARGS__)
+"""
+
+
+def _pseudo_literal(match: re.Match[str]) -> str:
+    def translate_word(token: re.Match[str]) -> str:
+        word = token[0]
+        if not word.isascii() or not word.isalpha():
+            return word  # C escapes and printf conversions
+        for index, letter in enumerate(word):
+            accent = _PSEUDO_ACCENTS.get(letter)
+            if accent is not None:
+                # A single accented glyph keeps the word recognisable. Use UTF-8
+                # octal escapes so the generated header compiles in any locale.
+                glyph = "".join(f"\\{byte:03o}" for byte in accent.encode("utf-8"))
+                return word[:index] + glyph * (2 if len(word) >= 4 else 1) + word[index + 1 :]
+        return word
+
+    return '"' + _PSEUDO_TOKEN.sub(translate_word, match[0][1:-1]) + '"'
+
+
+def write_pseudo_catalog(catalog: Path, output: Path) -> None:
+    """Derive a build-time pseudo catalog from the canonical English expressions."""
+    source = catalog.read_text(encoding="utf-8").replace("\\\n", "")
+    entries = {}
+    for key, expression in _PSEUDO_CATALOG_ROW.findall(source):
+        if key in entries:
+            raise ValueError(f"duplicate English catalog key: {key}")
+        if not _PSEUDO_LITERAL.search(expression):
+            raise ValueError(f"English catalog key has no C literal: {key}")
+        entries[key] = _PSEUDO_LITERAL.sub(_pseudo_literal, expression)
+    if not entries:
+        raise ValueError(f"no English catalog entries in {catalog}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        "/* Generated by the launcher pseudo-translation test. */\n"
+        "#ifndef NK_UI_PSEUDO_TEXT_GENERATED_H\n#define NK_UI_PSEUDO_TEXT_GENERATED_H\n"
+        "#ifdef NK_UI_PSEUDO_LAYOUT_TEST\n" + _PSEUDO_CHECKED_FORMAT + "#endif\n"
+        "#ifdef NK_UI_TRANSLATION_HEADER\n"
+        f"#define NK_UI_PSEUDO_CATALOG_COUNT {len(entries)}\n"
+        + "".join(f"#define NK_UI_LOCAL_{key} {expression}\n" for key, expression in entries.items())
+        + "#endif\n#endif /* NK_UI_PSEUDO_TEXT_GENERATED_H */\n",
+        encoding="utf-8",
+    )
+
+
+_PSEUDO_FINDING = re.compile(
+    r"^PSEUDO (CLIPPED|OFF_WINDOW|RUN_OVERFLOW|BUFFER_TRUNCATED|FRAME_FAILED) "
+    r"case=([0-9]+) window=([0-9]+x[0-9]+) text=([0-9]+)% id=(\S+) "
+    r"lost=([0-9]+)\b",
+    re.MULTILINE,
+)
+
+
+def _pseudo_findings(report: str) -> dict[tuple[str, ...], list[int]]:
+    findings: dict[tuple[str, ...], list[int]] = {}
+    for kind, case, window, text_size, element, pixels in _PSEUDO_FINDING.findall(report):
+        if case == "0":  # The known clipped control used to verify the checker.
+            continue
+        findings.setdefault((kind, case, window, text_size, element), []).append(int(pixels))
+    for losses in findings.values():
+        losses.sort(reverse=True)
+    return findings
+
+
+def _pseudo_worsened(reference: list[int], translated: list[int]) -> bool:
+    # Compare every affected line in worst-first order at this same viewport.
+    return len(translated) > len(reference) or any(
+        actual > prior for prior, actual in zip(reference, translated, strict=False)
+    )
+
+
+def _print_pseudo_findings(label: str, findings: dict[tuple[str, ...], list[int]]) -> None:
+    groups: dict[tuple[str, str, str], list[tuple[int, str, str]]] = {}
+    for (kind, case, window, text_size, element), losses in findings.items():
+        groups.setdefault((kind, case, element), []).append((losses[0], window, text_size))
+    for (kind, case, element), locations in sorted(groups.items()):
+        lost, window, text_size = max(locations)
+        unit = "bytes" if kind == "BUFFER_TRUNCATED" else "px"
+        print(f"{label} {kind} case={case} id={element} viewports={len(locations)} "
+              f"worst={lost}{unit} at {window} text={text_size}%")
+
+
+def check_pseudo_layout(english: Path, pseudo: Path, directory: Path) -> int:
+    results: dict[str, dict[tuple[str, ...], list[int]]] = {}
+    totals = {}
+    for locale, executable in (("english", english), ("pseudo", pseudo)):
+        run = subprocess.run([str(executable.resolve()), f"--{locale}-layout"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+        report = run.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+        log = directory / f"launcher-{locale}-layout.log"
+        log.write_bytes(run.stdout)
+        summary = re.search(rf"^PSEUDO SUMMARY locale={locale} frames=(\d+) .*findings=(\d+)$",
+                            report, re.MULTILINE)
+        if run.returncode not in (0, 1) or summary is None or int(summary[1]) == 0:
+            print(f"Layout reporter failed for {locale} (exit {run.returncode}). See {log}.",
+                  file=sys.stderr)
+            return 2
+        findings = _pseudo_findings(report)
+        if sum(map(len, findings.values())) != int(summary[2]):
+            print(f"Layout reporter lost {locale} findings. See {log}.", file=sys.stderr)
+            return 2
+        results[locale] = findings
+        totals[locale] = int(summary[1])
+        print(summary[0])
+        print(f"Complete {locale} diagnostics in {log}")
+
+    baseline = results["english"]
+    translated = results["pseudo"]
+    _print_pseudo_findings("ENGLISH", baseline)
+    _print_pseudo_findings("PSEUDO", translated)
+    regressions = {key: losses for key, losses in translated.items()
+                   if _pseudo_worsened(baseline.get(key, []), losses)}
+    _print_pseudo_findings("NEW_OR_WORSE", regressions)
+    if totals["english"] != totals["pseudo"] or any(key[0] == "FRAME_FAILED" for key in baseline | translated):
+        print("Layout coverage is incomplete. See the frame diagnostics.", file=sys.stderr)
+        return 2
+    print(f"PSEUDO_LAYOUT_REPORT new_or_worse_viewports={len(regressions)}")
+    return int(bool(regressions))
+
+
+class PlayerUiPseudoCatalogTests(unittest.TestCase):
+    def test_pseudo_catalog_preserves_format_and_c_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            catalog = Path(folder) / "canonical.h"
+            output = Path(folder) / "output.h"
+            catalog.write_text(
+                '#define NK_UI_EN_LABEL "Play %s (%08llX, %.3f, %%, %2$*3$ld): %" PRIu64 \\\n'
+                '    " now" "\\xC2\\xB7" "\\u2192" "\\n"\n',
+                encoding="utf-8",
+            )
+            write_pseudo_catalog(catalog, output)
+            generated = output.read_text(encoding="utf-8")
+            self.assertIn(r"Pl\303\240\303\240y", generated)
+            self.assertIn(r'%s (%08llX, %.3f, %%, %2$*3$ld): %" PRIu64', generated)
+            self.assertIn(r'"\xC2\xB7" "\u2192" "\n"', generated)
+            self.assertIn("#define NK_UI_PSEUDO_CATALOG_COUNT 1", generated)
+            self.assertIn("%USERPROFILE%", _PSEUDO_LITERAL.sub(_pseudo_literal, '"Path: %USERPROFILE%"'))
+
+    def test_pseudo_catalog_rejects_duplicate_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            catalog = Path(folder) / "canonical.h"
+            output = Path(folder) / "output.h"
+            catalog.write_text('#define NK_UI_EN_KEY "One"\n#define NK_UI_EN_KEY "Two"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate English catalog key"):
+                write_pseudo_catalog(catalog, output)
+            self.assertFalse(output.exists())
+
+    def test_pseudo_report_compares_all_affected_lines(self) -> None:
+        report = 'PSEUDO CLIPPED case=2 window=960x540 text=150% id=AB000001 lost=34\n'
+        report += 'PSEUDO CLIPPED case=2 window=960x540 text=150% id=AB000001 lost=12\n'
+        only = _pseudo_findings(report)
+        self.assertEqual(only, {("CLIPPED", "2", "960x540", "150", "AB000001"): [34, 12]})
+        self.assertFalse(_pseudo_worsened([34, 12], [34, 11]))
+        self.assertTrue(_pseudo_worsened([34, 12], [34, 13]))
+        self.assertTrue(_pseudo_worsened([34], [17, 12]))
+
+
+
+def check_pseudo_launcher() -> int:
+    """Run the real SDL launcher and observe localized settings values and copy."""
+    if not _PLAYER_EXE_BUILD_PATH.is_file():
+        print("PSEUDO_LAUNCHER status=FAIL reason=missing-executable", file=sys.stderr)
+        return 1
+
+    test = NativePlayerUiTests()
+    try:
+        run = test.next_ui_run(
+            "settings",
+            ("WAIT_VIEW=settings,10000", "WAIT_MS=100")
+            + ("KEY_DOWN",) * 4
+            + ("KEY_RETURN", "WAIT_VIEW=ace_settings,10000", "WAIT_MS=150", "QUIT"),
+            settings={"enhanced": {"default": "enhanced", "load": "auto"}},
+            timeout=35.0,
+        )
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        test.assertEqual(frames[-1]["view"], "ace_settings", run["stdout"])
+        pages = [page for page in test.enhanced_pages(run) if page.get("title") == "library"]
+        test.assertTrue(pages, run["stdout"])
+        # player_ui_nk.c supplies ADAPTER_MODE_LIBRARY_DESCRIPTION to the screen.
+        # Its existing trace records the same model fields passed to the renderer.
+        expected = "Thé dééfault för éévery gààme; ééach gààme's pààge çan ççhoose îts öwn."
+        test.assertEqual(pages[-1]["sentence"], expected)
+        test.assertEqual(pages[-1]["load"], "ÀÀutomatic")
+    except subprocess.TimeoutExpired as exc:
+        print(f"PSEUDO_LAUNCHER status=FAIL reason=timeout limit={exc.timeout}", file=sys.stderr)
+        return 1
+    except (AssertionError, OSError, ValueError) as exc:
+        print(f"PSEUDO_LAUNCHER status=FAIL reason=launcher\n{exc}", file=sys.stderr)
+        return 1
+
+    print("PSEUDO_LAUNCHER status=PASS view=ace_settings adapter=ADAPTER_MODE_LIBRARY_DESCRIPTION "
+          "load=ADAPTER_LOADING_AUTOMATIC")
+    return 0
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--write-pseudo-catalog":
+        write_pseudo_catalog(ROOT / "src/ui/nk_ui_text.h", Path(sys.argv[2]))
+    elif len(sys.argv) == 5 and sys.argv[1] == "--check-pseudo-layout":
+        sys.exit(check_pseudo_layout(*(Path(value) for value in sys.argv[2:])))
+    elif len(sys.argv) == 2 and sys.argv[1] == "--check-pseudo-launcher":
+        sys.exit(check_pseudo_launcher())
+    else:
+        unittest.main()
