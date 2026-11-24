@@ -786,6 +786,43 @@ typedef struct {
     char guest_path[512];
 } Fd;
 
+/* The three standard handles (PSP-HLE-STDIO-001, docs/HARDWARE_ORACLE.md). On a PSP-3000
+ * sceKernelStdin, sceKernelStdout and sceKernelStderr returned these three kernel UIDs in both
+ * measured launch contexts: from the XMB on boots 135 and 222 and in the game context on boot
+ * 200, under ARK-5 5.1.0 and 5.2.0. The two contexts agree on the values. Every one of those
+ * launches went through PSPLink, whose tty the three handles are. UNMEASURED: the values on a
+ * launch without PSPLink, on another console and on other system software. Each handle names
+ * one reserved standard entry of the descriptor table (0, 1 and 2), which a guest may still
+ * name by its number as before. */
+#define HLE_STD_HANDLE_STDIN  0x0093a513u
+#define HLE_STD_HANDLE_STDOUT 0x00938a15u
+#define HLE_STD_HANDLE_STDERR 0x00936f17u
+
+/* sceIoClose of the Stdout handle (PSP-HLE-STDIO-001). Both measured launch contexts refuse it
+ * and close nothing: a write afterwards returns 1 and sceKernelStdout returns the same handle.
+ * They differ in the error: 0x800200D1 from the XMB (boots 135 and 222) and 0x80020325 in the
+ * game context (boot 200, the one launch measured there). The runtime starts its programs as
+ * games ("Games run in the game context", docs/HARDWARE_ORACLE.md), so it answers the game
+ * context's value. */
+#define HLE_STD_CLOSE_REFUSED_GAME_CONTEXT 0x80020325u
+
+/* The standard stream a guest value names as a handle: 0 Stdin, 1 Stdout, 2 Stderr; -1 for
+ * every other value, the descriptor numbers 0, 1 and 2 included. */
+static inline int hle_std_handle_stream(uint32_t handle) {
+    if (handle == HLE_STD_HANDLE_STDIN) return 0;
+    if (handle == HLE_STD_HANDLE_STDOUT) return 1;
+    if (handle == HLE_STD_HANDLE_STDERR) return 2;
+    return -1;
+}
+
+/* The descriptor-table entry a guest's descriptor argument names: a standard handle names its
+ * reserved entry and every other value is an entry number as it stands. An entry number is
+ * never a standard handle, so applying this twice changes nothing. */
+static inline uint32_t hle_io_guest_fd(uint32_t handle) {
+    const int stream = hle_std_handle_stream(handle);
+    return stream >= 0 ? (uint32_t)stream : handle;
+}
+
 typedef struct {
     int used;
     uint32_t index;
@@ -1386,6 +1423,18 @@ int hle_fd_is_file(uint32_t fd);
 int hle_fd_is_raw_device(uint32_t fd);
 uint32_t hle_io_raw_device_boundary(IoRawDeviceBoundary operation, const char *api, const char *path, uint32_t fd);
 uint32_t hle_io_raw_fd_boundary(uint32_t fd, IoRawDeviceBoundary operation, const char *api);
+/* The sceIo* calls on a standard handle that no PSP cell covers and that are reported when a
+ * guest makes them (PSP-HLE-STDIO-001 measures the three handle values, a one-byte sceIoWrite
+ * to Stdout and to Stderr, and sceIoClose of Stdout). */
+typedef enum {
+    IO_STD_UNMEASURED_CLOSE_STDIN = 0,
+    IO_STD_UNMEASURED_CLOSE_STDERR,
+    IO_STD_UNMEASURED_WRITE_STDIN,
+    IO_STD_UNMEASURED_WRITE_ASYNC_STDIN,
+    IO_STD_UNMEASURED_CLOSE_ASYNC,
+} IoStdUnmeasured;
+uint32_t hle_io_std_handle_boundary(IoStdUnmeasured operation, const char *api, int stream);
+uint32_t hle_io_std_handle_close_refusal(int stream);
 int hle_fd_is_raw_umd(uint32_t fd);
 int hle_fd_allocate(void);
 extern SrAssetIndex s_data_index;
