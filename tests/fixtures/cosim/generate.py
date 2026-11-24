@@ -1756,7 +1756,6 @@ CELLS: tuple[tuple[str, str, object], ...] = (
     ("link_leaf", "leaf A: the correct call destination", _cell_link_leaf),
     ("link_leaf_b", "leaf B: a late-resolved call destination", _cell_link_leaf_b),
     ("link", "jal link semantics", _cell_link),
-    ("jal_pc_read", "jal to its own link", _cell_jal_pc_read),
     ("rarewrite", "rewritten $ra at an AOT linked-call boundary", _cell_rarewrite),
     ("rarewrite_callee", "callee that rewrites its live $ra", _cell_rarewrite_callee),
     ("rarewrite_target", "guest destination of the rewritten $ra", _cell_rarewrite_target),
@@ -1814,6 +1813,7 @@ CELLS: tuple[tuple[str, str, object], ...] = (
     ("rs_tail", "resume at a PC: a TAIL transfer into a body that parks", _cell_rs_tail),
     ("negpad", "fail-closed negative corpus scratch", _cell_negpad),
     ("ret", "cosim return trampoline", _cell_ret),
+    ("jal_pc_read", "jal to its own link", _cell_jal_pc_read),
 )
 
 # Cells omitted from the two-lane comparison list. Most are reached through calls
