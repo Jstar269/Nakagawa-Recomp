@@ -1258,13 +1258,31 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertIn("tests/native/hle_thread_selftest.c:test_std_handles_measured", evidence)
                 self._assert_cited_cells_are_manifest_cells(evidence)
                 self.assertIn(nid, dispatched)
-                # The limitation names the returned value and what no boot measured.
+                # The limitation names the returned value, both launch contexts and what neither measured.
                 limitation = meta.HANDLER_LIMITATIONS[handler]
-                for needle in (value, "PSPLink", "unmeasured", "IO_STD_HANDLE_OPERATION"):
+                for needle in (value, "both measured launch contexts", "PSPLink", "unmeasured",
+                               "IO_STD_HANDLE_OPERATION"):
                     self.assertIn(needle, limitation)
                 self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
         # One handler per import: a shared handler could not return three handles.
         self.assertEqual(len({handler for _, handler, _ in batch.values()}), 3)
+        # The Stdout close differs by launch context; the limitation names both answers and the one modelled.
+        stdout_limitation = meta.HANDLER_LIMITATIONS["h_KernelStdout"]
+        for needle in ("0x800200d1 from the XMB", "0x80020325 in the game context", "starts its programs as games"):
+            self.assertIn(needle, stdout_limitation)
+        # A read from Stdin is unmeasured: the Stdin status covers the handle value only. It cites
+        # the handle cell and the measured selftest, and no evidence entry stands for a read.
+        stdin_limitation = meta.HANDLER_LIMITATIONS["h_KernelStdin"]
+        self.assertIn("covers the returned handle value only", stdin_limitation)
+        self.assertIn("a read from Stdin is UNMEASURED and unclaimed", stdin_limitation)
+        self.assertIn("not a PSP result", stdin_limitation)
+        self.assertEqual(
+            meta.HANDLER_EVIDENCE["h_KernelStdin"],
+            [
+                "docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles)",
+                "tests/native/hle_thread_selftest.c:test_std_handles_measured",
+            ],
+        )
 
     def test_route_a_batches_eleven_and_twelve_leave_uncovered_contracts_unreviewed(self) -> None:
         # The WritebackInvalidate range variant is not measured. It may not ride along with the

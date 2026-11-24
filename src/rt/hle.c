@@ -3737,18 +3737,19 @@ uint32_t hle_io_std_handle_boundary(IoStdUnmeasured operation, const char *api, 
 }
 
 /* sceIoClose of the Stdin or the Stderr handle. Only the Stdout close is measured
- * (PSP-HLE-STDIO-001: 0x800200D1, nothing closed). Before the three imports had handles of
- * their own, a close through sceKernelStdin or sceKernelStderr named the Stdout handle and so
- * answered that refusal; a program that closes its three standard streams as it exits still
- * gets it. Modelled, not measured for these two handles: said once per run for each. */
+ * (PSP-HLE-STDIO-001: refused and nothing closed in both launch contexts). Before the three
+ * imports had handles of their own, a close through sceKernelStdin or sceKernelStderr named the
+ * Stdout handle and so answered its refusal; a program that closes its three standard streams
+ * as it exits still gets the Stdout answer. Modelled, not measured for these two handles in
+ * either context: said once per run for each. */
 uint32_t hle_io_std_handle_close_refusal(int stream) {
     if (hle_io_std_handle_first_report(stream == 0 ? IO_STD_UNMEASURED_CLOSE_STDIN
                                                    : IO_STD_UNMEASURED_CLOSE_STDERR))
         fprintf(stderr,
                 "HLE: modelled, not PSP-measured: sceIoClose of the %s handle answers "
-                "0x800200D1 and closes nothing, as the measured close of the Stdout handle "
+                "0x80020325 and closes nothing, as the game-context close of the Stdout handle "
                 "does (PSP-HLE-STDIO-001)\n", hle_std_handle_name(stream));
-    return 0x800200d1u;
+    return HLE_STD_CLOSE_REFUSED_GAME_CONTEXT;
 }
 
 int hle_fd_is_raw_umd(uint32_t fd) {

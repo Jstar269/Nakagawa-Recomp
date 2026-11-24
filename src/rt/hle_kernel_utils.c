@@ -78,10 +78,11 @@ static uint32_t h_Memcpy(CpuState *s) {
     return dst;
 }
 /* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, PSP-3000): the three imports return three
- * distinct kernel UIDs, none of them 1, the same three on each of the three recorded boots
- * (XMB and game context, launched through PSPLink). hle_internal.h holds the values and what is
- * unmeasured about them. Each names its reserved standard entry of the descriptor table, which
- * the sceIo* handlers reach through hle_io_guest_fd(). */
+ * distinct kernel UIDs, none of them 1, the same three in both measured launch contexts (the
+ * XMB and the game context, each launched through PSPLink). hle_internal.h holds the values and
+ * what is unmeasured about them. Each names its reserved standard entry of the descriptor
+ * table, which the sceIo* handlers reach through hle_io_guest_fd(). Returning a handle claims
+ * nothing about a call made with it: a read from Stdin is unmeasured. */
 static uint32_t h_KernelStdin(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDIN; }
 static uint32_t h_KernelStdout(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDOUT; }
 static uint32_t h_KernelStderr(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDERR; }

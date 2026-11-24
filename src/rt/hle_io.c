@@ -344,9 +344,10 @@ static uint32_t h_IoOpen(CpuState *s) {
 uint32_t h_IoWrite(CpuState *s) {
     /* a0=fd, a1=src, a2=count. Returns bytes written. */
     uint32_t fd = hle_io_guest_fd(A0), src = A1, count = A2;
-    /* PSP-HLE-STDIO-001 measures a write through the Stdout and the Stderr handle (a one-byte
-     * write returns 1). UNMEASURED: a write through the Stdin handle, which has no result to
-     * keep and stops at a named boundary; a count above one byte, which returns the count. */
+    /* PSP-HLE-STDIO-001 measures a write through the Stdout and the Stderr handle, in the XMB
+     * and in the game context alike (a one-byte write returns 1). UNMEASURED: a write through
+     * the Stdin handle, which has no result to keep and stops at a named boundary; a count above
+     * one byte, which returns the count. */
     if (hle_std_handle_stream(A0) == 0)
         return hle_io_std_handle_boundary(IO_STD_UNMEASURED_WRITE_STDIN, "sceIoWrite", 0);
     if (fd >= (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) || !s_fds[fd].used)
@@ -407,7 +408,10 @@ uint32_t h_IoWrite(CpuState *s) {
 uint32_t io_read_now(CpuState *s) {
     /* a0=fd, a1=dst, a2=count. Returns bytes read. */
     uint32_t fd = A0, dst = A1, count = A2;
-    fd = hle_io_guest_fd(fd);   /* a standard handle reads as its stream does; UNMEASURED on a PSP */
+    /* A standard handle reads as its stream did before the handles were told apart. No PSP
+     * cell measures a read through any of them, a read from Stdin least of all (the probe does
+     * not run one): the answer below is the runtime's earlier one, not a PSP result. */
+    fd = hle_io_guest_fd(fd);
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
         return 0x80010009; /* baseline behavior preserved for standard streams */
     if (hle_fd_is_raw_umd(fd)) {
@@ -833,16 +837,17 @@ static uint32_t h_IoClose(CpuState *s) {
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (s_fds[fd].async.state == IO_ASYNC_PENDING)
         return SCE_ERROR_KERNEL_ASYNC_BUSY;
-    /* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, PSP-3000): closing the Stdout handle returns
-     * 0x800200D1 and closes nothing; a later write still returns its count and sceKernelStdout
-     * returns the same handle. That is the answer of the two XMB launches (boots 135 and 222);
-     * the one game-context launch (boot 200) answered 0x80020325 and closed nothing either,
-     * which is not modelled. The descriptor number 1 keeps the same answer, as before.
-     * UNMEASURED: closing the Stdin or the Stderr handle, which answers the Stdout refusal
-     * (hle_io_std_handle_close_refusal); closing descriptor 0 or 2 by its number, which keeps
-     * the result it had before; sceIoCloseAsync of a standard handle (h_IoCloseAsync). */
+    /* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, PSP-3000): in both measured launch contexts
+     * closing the Stdout handle is refused and closes nothing; a later write still returns its
+     * count and sceKernelStdout returns the same handle. The error is the game context's
+     * (HLE_STD_CLOSE_REFUSED_GAME_CONTEXT, hle_internal.h); the XMB launches answered
+     * 0x800200D1. The descriptor number 1 answers as the Stdout handle does, as before.
+     * UNMEASURED in either context: closing the Stdin or the Stderr handle, which answers the
+     * Stdout refusal (hle_io_std_handle_close_refusal); closing descriptor 0 or 2 by its number,
+     * which keeps the result it had before; sceIoCloseAsync of a standard handle
+     * (h_IoCloseAsync). */
     if (s_fds[fd].kind == FD_KIND_STD && s_fds[fd].std_stream == 1u)
-        return 0x800200d1u;
+        return HLE_STD_CLOSE_REFUSED_GAME_CONTEXT;
     if (hle_std_handle_stream(A0) >= 0)
         return hle_io_std_handle_close_refusal(hle_std_handle_stream(A0));
     hle_fd_release(&s_fds[fd], s_fds[fd].kind == FD_KIND_STD);
@@ -1882,7 +1887,8 @@ static uint32_t h_IoSetAsyncCallback(CpuState *s) {
 }
 
 static uint32_t h_IoCloseAsync(CpuState *s) {
-    /* PSP-HLE-STDIO-001 measures only the synchronous close of Stdout, which closes nothing.
+    /* PSP-HLE-STDIO-001 measures only the synchronous close of Stdout, which closes nothing in
+     * either launch context.
      * UNMEASURED: sceIoCloseAsync of a standard handle. Queueing a close that then succeeds
      * would invent a result, so it stops at a named boundary and nothing is queued or closed.
      * Descriptor 0, 1 or 2 named by its number keeps the queued close it had before. */

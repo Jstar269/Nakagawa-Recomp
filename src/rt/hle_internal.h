@@ -787,15 +787,24 @@ typedef struct {
 } Fd;
 
 /* The three standard handles (PSP-HLE-STDIO-001, docs/HARDWARE_ORACLE.md). On a PSP-3000
- * sceKernelStdin, sceKernelStdout and sceKernelStderr returned these three kernel UIDs on each
- * of the three recorded boots: 135 and 222 from the XMB and 200 in the game context, under
- * ARK-5 5.1.0 and 5.2.0. Every one of those launches went through PSPLink, whose tty the three
- * handles are. UNMEASURED: the values on a launch without PSPLink, on another console and on
- * other system software. Each handle names one reserved standard entry of the descriptor
- * table (0, 1 and 2), which a guest may still name by its number as before. */
+ * sceKernelStdin, sceKernelStdout and sceKernelStderr returned these three kernel UIDs in both
+ * measured launch contexts: from the XMB on boots 135 and 222 and in the game context on boot
+ * 200, under ARK-5 5.1.0 and 5.2.0. The two contexts agree on the values. Every one of those
+ * launches went through PSPLink, whose tty the three handles are. UNMEASURED: the values on a
+ * launch without PSPLink, on another console and on other system software. Each handle names
+ * one reserved standard entry of the descriptor table (0, 1 and 2), which a guest may still
+ * name by its number as before. */
 #define HLE_STD_HANDLE_STDIN  0x0093a513u
 #define HLE_STD_HANDLE_STDOUT 0x00938a15u
 #define HLE_STD_HANDLE_STDERR 0x00936f17u
+
+/* sceIoClose of the Stdout handle (PSP-HLE-STDIO-001). Both measured launch contexts refuse it
+ * and close nothing: a write afterwards returns 1 and sceKernelStdout returns the same handle.
+ * They differ in the error: 0x800200D1 from the XMB (boots 135 and 222) and 0x80020325 in the
+ * game context (boot 200, the one launch measured there). The runtime starts its programs as
+ * games ("Games run in the game context", docs/HARDWARE_ORACLE.md), so it answers the game
+ * context's value. */
+#define HLE_STD_CLOSE_REFUSED_GAME_CONTEXT 0x80020325u
 
 /* The standard stream a guest value names as a handle: 0 Stdin, 1 Stdout, 2 Stderr; -1 for
  * every other value, the descriptor numbers 0, 1 and 2 included. */
