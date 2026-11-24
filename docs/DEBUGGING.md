@@ -234,7 +234,8 @@ The tool's docstring defines flips, re-presents, vblanks per new frame, implied 
 
 Use the existing state-gated route to choose one-based step-completion ordinals. Each window
 starts after its first step completes and ends after its last step completes. Choose a
-checkpoint that proves load entry or accepted input and one that proves readiness. Keep the
+checkpoint that proves load entry or accepted input and one that proves readiness. An
+explicit `END` completes the run and cannot serve as an endpoint. Keep the
 same scene, route cadence and guest work in both arms. A window may contain zero presents.
 
 Set `SR_PERF_JSON` and a fresh `SR_PERF_RUN_ID` of at most 64 ASCII letters, digits,
@@ -259,25 +260,29 @@ Run the attribution tool's strict mode on a finished capture:
 
 ```powershell
 python tools/perf_attribution.py --perf run.json --stderr run.log `
-    --benchmark-evidence evidence.json --benchmark-runtime runtime.exe
+    --benchmark-evidence evidence.json --benchmark-runtime runtime.exe --benchmark-route planned.route
 ```
 
-The local evidence JSON carries `run_id`, the full `runtime_commit`, `route_sha256`,
-`exit_code`, `timed_out`, and `windows` as a list of the planned ordinal pairs. Include
+The local evidence JSON carries `run_id`, `operator_source_commit` (the full commit the
+operator built from), `exit_code`, `timed_out`, and `windows` as a list of the planned ordinal
+pairs. The runtime hashes the route bytes it parsed. The file supplied with
+`--benchmark-route` must match that hash. Include
 a `launch` object with `mode` (`direct` or `launcher`) and the actual `runtime_pid`.
 The runtime records its process ID and whole-file SHA-256 in stderr and the summary. The
-candidate passed with `--benchmark-runtime` must match that hash. For a launcher run, also
+candidate passed with `--benchmark-runtime` must match that hash. The source commit
+remains the operator's build record. For a launcher run, also
 record the child's observed parent PID as `observed_parent_pid` and the SHA-256 of that
 observed process image as `observed_parent_sha256` in `launch`, and pass the expected parent
-with `--benchmark-launcher`. Obtain the parent observation while the runtime is alive.
+with `--benchmark-launcher`. Obtain the parent observation while the runtime is alive,
+and use the distinct launcher executable.
 Record the observed `cpu`, `gpu`, `os`, `renderer` (use `software` for the vertex-cache arm),
 `vsync`, and `cache_state`. Supply a `host_observation` object with `state` (`idle`,
 `busy`, or `unknown`), a short `basis` describing the operator's evidence about concurrent
 work, and `begin_wall_ns` and `end_wall_ns` relative to the perf run start. Its interval
 must cover both endpoints of every measured window. The tool validates the evidence fields,
 compares the observed step pairs and run identity, and rejects incomplete exits, missed or
-malformed records, mixed clock modes, busy or unverified host windows and inactive or unequal
-A/B work. For a load-only run explicitly testing Automatic loading, set
+malformed records, pauses within windows, mixed clock modes, busy or unverified host
+windows and inactive or unequal A/B work. For a load-only run explicitly testing Automatic loading, set
 `load_treatment` to `automatic` in the evidence. Both endpoints must be at normal pace and
 each intervening clock acceleration must match a complete observed `AUTO_LOAD` interval.
 An Automatic run that never activates the feature supplies no speed comparison.

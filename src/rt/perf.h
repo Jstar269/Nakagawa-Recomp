@@ -128,6 +128,7 @@ extern int sr_perf_enabled;
 
 /* Explicit route benchmark windows. Only the scheduler thread changes them. */
 extern int sr_perf_windows_enabled;
+void sr_perf_window_route_loaded(const uint8_t digest[32], uint32_t observable_steps);
 void sr_perf_window_step(uint32_t step, uint32_t vblank, uint64_t guest_us,
                          unsigned long cache_hits, int paced, uint32_t clock_epoch);
 void sr_perf_window_route_done(void);

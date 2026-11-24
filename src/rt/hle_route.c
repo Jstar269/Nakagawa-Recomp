@@ -11,6 +11,7 @@
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "../core/nk_shared_helpers.h"
 #include "ge_scene.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
 #include "replay_checkpoint.h" /* sr_replay_pad_skip, sr_replay_pad_sample */
@@ -982,6 +983,9 @@ int sr_route_load(const char *path) {
     char line[4096];
     int lineno = 0, bad = 0;
     FILE *fp;
+    int trace_route = sr_perf_windows_enabled;
+    NkSha256 route_sha;
+    uint64_t hashed_bytes = 0u;
 
     s_route_ncp = s_route_nsteps = s_route_nlegacy = 0;
     s_route_pc = 0;
@@ -1005,17 +1009,27 @@ int sr_route_load(const char *path) {
                    "a pad script with an unknown read budget", getenv("SR_PADSCRIPT_READ_BUDGET"));
         return 0;
     }
-    fp = fopen(path, "r");
+    /* Hash the same bytes passed to the route parser, preserving CRLF as bytes.
+     * The parser already uses both CR and LF as token delimiters. */
+    fp = fopen(path, trace_route ? "rb" : "r");
     if (!fp) {
         /* A named route that cannot be read must not become an unscripted run on the default
          * START pulse: the run fails like any other unusable route file. */
         route_fail("cannot open route file '%s'; refusing to run without the route it names", path);
         return 0;
     }
+    if (trace_route) nk_sha256_init(&route_sha);
     while (fgets(line, sizeof line, fp)) {
+        if (trace_route) {
+            size_t length = strlen(line);
+            nk_sha256_update(&route_sha, (const uint8_t *)line, length);
+            hashed_bytes += length;
+        }
         lineno++;
         if (route_parse_line(line, lineno, path) != 0) { bad = 1; break; }
     }
+    long source_bytes = trace_route ? ftell(fp) : 0;
+    int matched_source = trace_route && !ferror(fp) && source_bytes >= 0 && (uint64_t)source_bytes == hashed_bytes;
     fclose(fp);
     if (bad) {
         route_fail("route file '%s' is not usable; refusing to run an unverified route", path);
@@ -1034,6 +1048,14 @@ int sr_route_load(const char *path) {
         if (route_finalize_checkpoints(path) != 0) {
             route_fail("route file '%s' has checkpoints that cannot be told apart", path);
             return 0;
+        }
+        if (trace_route) {
+            uint32_t observable_steps = 0;
+            while (observable_steps < (uint32_t)s_route_nsteps && s_route_prog[observable_steps].op != ROUTE_OP_END)
+                observable_steps++;
+            uint8_t digest[32];
+            if (matched_source) nk_sha256_finish(&route_sha, digest);
+            sr_perf_window_route_loaded(matched_source ? digest : NULL, observable_steps);
         }
         s_route_state = ROUTE_RUNNING;
         fprintf(stderr, "ROUTE: program loaded from %s (%d steps, %d checkpoints, grid %dx%d, "
@@ -1076,6 +1098,7 @@ int sr_route_load(const char *path) {
         }
         return 1;
     }
+    if (trace_route) sr_perf_window_route_loaded(NULL, 0u);
     if (s_route_nlegacy > 0) {
         uint32_t rf[ROUTE_MAX_LEGACY], rm[ROUTE_MAX_LEGACY], rw[ROUTE_MAX_LEGACY], rs[ROUTE_MAX_LEGACY];
         int stick_rows = 0;

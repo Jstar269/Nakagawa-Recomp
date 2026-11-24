@@ -851,6 +851,13 @@ uint32_t mpeg_delete(uint32_t mpegAddr) {
 int sr_perf_enabled;
 int sr_perf_windows_enabled;
 static unsigned s_perf_route_edges, s_perf_route_done;
+static uint32_t s_perf_route_observable;
+static uint8_t s_perf_route_sha[32];
+void sr_perf_window_route_loaded(const uint8_t digest[32], uint32_t observable_steps) {
+    s_perf_route_observable = observable_steps;
+    if (digest) memcpy(s_perf_route_sha, digest, sizeof s_perf_route_sha);
+    else memset(s_perf_route_sha, 0, sizeof s_perf_route_sha);
+}
 static uint32_t s_perf_route_step[4], s_perf_route_vblank[4];
 void sr_perf_window_step(uint32_t step, uint32_t vblank, uint64_t guest_us,
                          unsigned long cache_hits, int paced, uint32_t clock_epoch) {
@@ -54527,6 +54534,9 @@ static void test_route_program_advances_only_on_observed_state(void) {
              "END\n", hexA, hexB);
     rt_write(body);
     expect(sr_route_load(RT_PATH) == 1, "a route program loads");
+    const uint8_t empty_sha[32] = {0};
+    expect(s_perf_route_observable == 3u && memcmp(s_perf_route_sha, empty_sha, sizeof empty_sha) != 0,
+           "the file parser binds measured route bytes and leaves END out of the selectable steps");
     expect(sr_route_status() == RT_RUNNING, "a loaded route program is running");
     rt_sig(sigA, 0x20); rt_sig(sigB, 0x80);
 

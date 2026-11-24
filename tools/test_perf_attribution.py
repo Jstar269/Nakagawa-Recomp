@@ -530,13 +530,17 @@ class TestBenchmarkWindows(unittest.TestCase):
         self.runtime = self.root / "runtime-first.exe"
         self.runtime.write_bytes(b"synthetic runtime")
         self.runtime_sha = hashlib.sha256(b"synthetic runtime").hexdigest()
+        self.route = self.root / "planned.route"
+        self.route.write_bytes(b"synthetic route input")
+        self.route_sha = hashlib.sha256(b"synthetic route input").hexdigest()
         self.launcher: Path | None = None
         self.document = summary_doc()
         self.document["benchmark"] = {"run_id": "test-1", "origin_ns": 1000000, "planned": 2,
                                       "completed": 2, "mode": "ge.vertex_cache", "valid": True,
-                                      "runtime_sha256": self.runtime_sha, "runtime_pid": 51}
+                                      "runtime_sha256": self.runtime_sha, "runtime_pid": 51,
+                                      "route_sha256": self.route_sha}
         self.evidence = {
-            "run_id": "test-1", "runtime_commit": "a" * 40, "route_sha256": "b" * 64,
+            "run_id": "test-1", "operator_source_commit": "a" * 40,
             "windows": [[2, 5], [7, 9]], "exit_code": 0, "timed_out": False,
             "launch": {"mode": "direct", "runtime_pid": 51},
             "cpu": "Synthetic CPU", "gpu": "Synthetic GPU", "os": "Synthetic OS",
@@ -548,7 +552,7 @@ class TestBenchmarkWindows(unittest.TestCase):
         }
         self.lines = [
             "PERF_BENCH_BEGIN run_id=test-1 origin_ns=1000000 planned=2 mode=ge.vertex_cache"
-            f" runtime_sha256={self.runtime_sha} runtime_pid=51",
+            f" runtime_sha256={self.runtime_sha} runtime_pid=51 route_sha256={self.route_sha}",
             self.edge(1, "begin", 2, 1000000, 8, 20000, 0),
             self.edge(1, "end", 5, 3000000, 9, 23000, 1),
             "PERF_AB id=1 path=ge.vertex_cache arm=A eligible=2 hits=0",
@@ -572,7 +576,8 @@ class TestBenchmarkWindows(unittest.TestCase):
         evidence = self.root / "evidence.json"
         evidence.write_text(json.dumps(self.evidence), encoding="utf-8")
         return perf_attribution.analyze(perf, log, evidence if strict else None,
-                                        runtime=self.runtime if strict else None, launcher=self.launcher)
+                                        runtime=self.runtime if strict else None,
+                                        route=self.route if strict else None, launcher=self.launcher)
 
     def test_valid_paired_windows_have_load_columns_even_without_frames(self) -> None:
         report = self.analyze()
@@ -607,6 +612,23 @@ class TestBenchmarkWindows(unittest.TestCase):
         with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "runtime executable"):
             self.analyze()
 
+    def test_refuses_one_changed_route_byte_and_labels_operator_revision(self) -> None:
+        report = self.analyze()["benchmark"]
+        self.assertEqual(report["operator_source_commit"], "a" * 40)
+        self.assertEqual(report["route_sha256"], self.route_sha)
+        self.route.write_bytes(b"synthetic route inpuT")
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "route bytes"):
+            self.analyze()
+
+    def test_refuses_runtime_image_in_parent_role(self) -> None:
+        self.launcher = self.runtime
+        self.evidence["launch"] = {
+            "mode": "launcher", "runtime_pid": 51, "observed_parent_pid": 50,
+            "observed_parent_sha256": self.runtime_sha,
+        }
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "expected parent"):
+            self.analyze()
+
     def test_requires_observed_parent_for_launcher_run(self) -> None:
         self.launcher = self.root / "launcher.exe"
         self.launcher.write_bytes(b"synthetic launcher")
@@ -633,6 +655,19 @@ class TestBenchmarkWindows(unittest.TestCase):
         with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "clock mode change"):
             self.analyze()
 
+    @staticmethod
+    def pause_log() -> list[str]:
+        return ["SR_PAUSE: entered vcount=8 vtime_us=21200",
+                "SR_PAUSE: resumed vcount=8 vtime_us=21200 paused_ms=1"]
+
+    def test_refuses_pause_in_a_window_but_accepts_a_pause_between_arms(self) -> None:
+        self.lines[2:2] = self.pause_log()
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "overlapped a runtime pause"):
+            self.analyze()
+        del self.lines[2:4]
+        self.lines[4:4] = self.pause_log()
+        self.assertEqual(self.analyze()["benchmark"]["guard"], "PASS")
+
     def test_automatic_load_requires_observed_balanced_runtime_transitions(self) -> None:
         self.evidence["load_treatment"] = "automatic"
         self.evidence["windows"] = [[2, 5]]
@@ -643,6 +678,10 @@ class TestBenchmarkWindows(unittest.TestCase):
             self.lines[7].replace("completed=2", "completed=1"), self.lines[8],
         ]
         self.assertEqual(self.analyze()["benchmark"]["windows"][0]["automatic_loads"], 1)
+        self.lines[3:3] = self.pause_log()
+        with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "overlapped a runtime pause"):
+            self.analyze()
+        del self.lines[3:5]
         self.lines[2:4] = ["FAST_FORWARD: on", "FAST_FORWARD: off"]
         with self.assertRaisesRegex(perf_attribution.PerfAttributionError, "complete observed Automatic"):
             self.analyze()
@@ -692,7 +731,8 @@ class TestBenchmarkWindows(unittest.TestCase):
         evidence.write_text(json.dumps(self.evidence), encoding="utf-8")
         run = subprocess.run(
             [sys.executable, str(ROOT / "tools/perf_attribution.py"), "--perf", str(perf),
-             "--stderr", str(log), "--benchmark-evidence", str(evidence), "--benchmark-runtime", str(self.runtime)],
+             "--stderr", str(log), "--benchmark-evidence", str(evidence), "--benchmark-runtime", str(self.runtime),
+             "--benchmark-route", str(self.route)],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(run.returncode, 2, run.stderr)

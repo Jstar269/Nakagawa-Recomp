@@ -4452,6 +4452,8 @@ static void test_ge_vertex_cache_benchmark(void) {
     ge_vertex_cache_reload_env();
     sr_perf_init();
     expect(sr_perf_windows_enabled, "vertex_cache_ab", "route windows are not armed");
+    const uint8_t digest[32] = {0x12u};
+    sr_perf_window_route_loaded(digest, 4u);
 
     VcCase draw = {"vertex_cache_ab", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96,
                    s_vc_u8_list, 0u, 0.0f, 0, 0, 0, 0};

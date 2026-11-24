@@ -1144,6 +1144,7 @@ static void test_trace_window_limit_completes_the_window(const char *tmp) {
 }
 
 static void test_route_benchmark_windows(void) {
+    const uint8_t digest[32] = {0x12u};
     char json_path[600], summary[16384];
     snprintf(json_path, sizeof json_path, "%.*s.json", (int)(strlen(s_csv_path) - 4u), s_csv_path);
     set_env("SR_PERF", NULL);
@@ -1158,6 +1159,7 @@ static void test_route_benchmark_windows(void) {
     s_fake_wall_ns = 1000000u;
     sr_perf_test_reinit();
     CHECK(sr_perf_windows_enabled && !sr_perf_window_skips_vertex_cache(), "route plan is armed");
+    sr_perf_window_route_loaded(digest, 9u);
     sr_perf_window_step(1u, 7u, 19000u, 11ul, 1, 0u);
     sr_perf_window_step(2u, 8u, 20000u, 11ul, 1, 0u);
     CHECK(sr_perf_window_skips_vertex_cache(), "reference arm bypasses the cache");
@@ -1197,16 +1199,25 @@ static void test_route_benchmark_windows(void) {
                           "\"planned\":2,\"completed\":2,\"mode\":\"ge.vertex_cache\","
                           "\"runtime_sha256\":\"") != NULL &&
           strstr(summary, "\"valid\":true}") != NULL &&
-          strstr(s_report_lines[0], " runtime_sha256=") != NULL,
+          strstr(s_report_lines[0], " runtime_sha256=") != NULL &&
+          strstr(s_report_lines[0], " route_sha256=12000000") != NULL &&
+          strstr(summary, "\"route_sha256\":\"12000000") != NULL,
           "the JSON binds successful arm totals to the run identity");
 
     s_report_count = 0;
     sr_perf_test_reinit();
+    sr_perf_window_route_loaded(digest, 9u);
     sr_perf_window_step(2u, 8u, 20000u, 0ul, 1, 0u);
     sr_perf_window_route_done();
     CHECK(!sr_perf_windows_enabled && !sr_perf_window_skips_vertex_cache() &&
           whole_line(2, "PERF_BENCH_REFUSED reason=incomplete_windows"),
           "unfinished windows cannot be sealed and restore the normal cache");
+
+    s_report_count = 0;
+    sr_perf_test_reinit();
+    sr_perf_window_route_loaded(digest, 8u);
+    CHECK(!sr_perf_windows_enabled && whole_line(0, "PERF_BENCH_REFUSED reason=window_after_final_observable_step"),
+          "a window may not use the terminal END ordinal");
 
     set_env("SR_PERF_WINDOWS", "2-5,5-9");
     s_report_count = 0;

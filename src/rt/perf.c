@@ -296,7 +296,7 @@ typedef struct SrPerfWindowSpec {
 
 static struct {
     SrPerfWindowSpec spec[SR_PERF_WINDOWS_MAX];
-    char run_id[65], runtime_sha256[65];
+    char run_id[65], runtime_sha256[65], route_sha256[65];
     uint32_t runtime_pid;
     unsigned count, next;
     int ab, active, ended, invalid;
@@ -858,10 +858,10 @@ static void write_summary(const char *path, uint64_t wall_ns) {
     if (s_windows.count)
         fprintf(json, "  \"benchmark\":{\"run_id\":\"%s\",\"origin_ns\":%" PRIu64
                       ",\"planned\":%u,\"completed\":%u,\"mode\":\"%s\","
-                      "\"runtime_sha256\":\"%s\",\"runtime_pid\":%u,\"valid\":%s},\n",
+                      "\"runtime_sha256\":\"%s\",\"runtime_pid\":%u,\"route_sha256\":\"%s\",\"valid\":%s},\n",
                 s_windows.run_id, s_perf.run_start_ns, s_windows.count, s_windows.next,
                 s_windows.ab ? "ge.vertex_cache" : "load", s_windows.runtime_sha256, s_windows.runtime_pid,
-                s_windows.ended && !s_windows.invalid ? "true" : "false");
+                s_windows.route_sha256, s_windows.ended && !s_windows.invalid ? "true" : "false");
     fprintf(json, "  \"interval_count\":%llu,\n", (unsigned long long)s_perf.interval_count);
     fprintf(json, "  \"vblanks\":{\"count\":%llu,\"presents\":%llu,\"present_skips\":%llu,"
                   "\"present_busy\":%llu},\n",
@@ -1031,6 +1031,10 @@ static uint32_t perf_window_ordinal(const char **cursor) {
     return result;
 }
 
+static void perf_digest_hex(char text[65], const uint8_t digest[32]) {
+    for (unsigned i = 0; i < 32u; i++) snprintf(text + i * 2u, 3u, "%02x", digest[i]);
+}
+
 /* A benchmark binds to the image the OS is running. This hashes the full file;
  * the replay format has a separate size-and-blocks identity. */
 static int perf_window_runtime_identity(void) {
@@ -1054,8 +1058,7 @@ static int perf_window_runtime_identity(void) {
     fclose(file);
     if (!ok) return 0;
     nk_sha256_finish(&sha, digest);
-    for (unsigned i = 0; i < sizeof digest; i++)
-        snprintf(s_windows.runtime_sha256 + i * 2u, 3u, "%02x", digest[i]);
+    perf_digest_hex(s_windows.runtime_sha256, digest);
     return 1;
 }
 
@@ -1113,10 +1116,24 @@ static void perf_windows_init(void) {
     memcpy(s_windows.run_id, id, strlen(id) + 1u);
     s_windows.count = count;
     sr_perf_windows_enabled = 1;
+}
+
+void sr_perf_window_route_loaded(const uint8_t digest[32], uint32_t observable_steps) {
+    if (!sr_perf_windows_enabled) return;
+    if (!digest || s_windows.route_sha256[0]) {
+        perf_windows_refuse("unverified_route");
+        return;
+    }
+    if (s_windows.spec[s_windows.count - 1u].end > observable_steps) {
+        perf_windows_refuse("window_after_final_observable_step");
+        return;
+    }
+    perf_digest_hex(s_windows.route_sha256, digest);
     perf_emit_format("PERF_BENCH_BEGIN run_id=%s origin_ns=%" PRIu64 " planned=%u mode=%s"
-                     " runtime_sha256=%s runtime_pid=%u\n",
-                     id, s_perf.run_start_ns, count, s_windows.ab ? "ge.vertex_cache" : "load",
-                     s_windows.runtime_sha256, s_windows.runtime_pid);
+                     " runtime_sha256=%s runtime_pid=%u route_sha256=%s\n",
+                     s_windows.run_id, s_perf.run_start_ns, s_windows.count,
+                     s_windows.ab ? "ge.vertex_cache" : "load",
+                     s_windows.runtime_sha256, s_windows.runtime_pid, s_windows.route_sha256);
 }
 
 static void perf_window_emit(const char *edge, uint32_t step, uint32_t vblank,
@@ -1136,6 +1153,10 @@ static void perf_window_emit(const char *edge, uint32_t step, uint32_t vblank,
 void sr_perf_window_step(uint32_t step, uint32_t vblank, uint64_t guest_us,
                          unsigned long cache_hits, int paced, uint32_t clock_epoch) {
     if (!sr_perf_windows_enabled || s_windows.next == s_windows.count) return;
+    if (!s_windows.route_sha256[0]) {
+        perf_windows_refuse("unverified_route");
+        return;
+    }
     const SrPerfWindowSpec *spec = &s_windows.spec[s_windows.next];
     uint32_t expected = s_windows.active ? spec->end : spec->begin;
     if (step < expected) return;
