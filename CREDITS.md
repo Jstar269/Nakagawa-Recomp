@@ -11,6 +11,8 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 
 ## Other upstreams
 
+- **Yakumo — TeamGDB** — MIT. Yakumo's automatic fast loading and presentation pacing inspired Nakagawa's
+  project-written detector for silent disc loads. [Upstream revision `0a506b81`](https://github.com/TeamGDB/Yakumo/tree/0a506b81af44f4c70a3a197e81795891f5567968).
 - **FFmpeg n4.4 — the FFmpeg developers** — LGPL-2.1-or-later. The ATRAC3 and ATRAC3+ decoder subsets in [`src/rt/atrac3p/`](src/rt/atrac3p/) and the H.264 video decoder subset in [`src/rt/h264_ffmpeg_sub/`](src/rt/h264_ffmpeg_sub/); two imported ATRAC files also carry a MIPS Technologies, Inc. BSD-3-Clause notice.
 - **pspdecrypt — John Kelley (John-K) and contributors** — GNU GPL version 3, pinned at
   `c156627db7634d395c380c0a9589130f603307fc`. The ported `~PSP` container, KIRK, AES, SHA-1 and KL4E/KL3E code of the

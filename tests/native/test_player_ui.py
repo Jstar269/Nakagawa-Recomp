@@ -8420,6 +8420,7 @@ class NativePlayerUiTests(unittest.TestCase):
         """#2055: Enhanced options opens Settings > Enhanced for that game: its rows show the
         game's own values and change only them, and Escape returns to its title page with
         Enhanced options focused."""
+        settings_with_auto_load = {"enhanced": {**self.LIBRARY_ENHANCED["enhanced"], "load": "auto"}}
         run = self.next_ui_run(
             "library",
             (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
@@ -8428,7 +8429,7 @@ class NativePlayerUiTests(unittest.TestCase):
              *(("KEY_DOWN", "WAIT_MS=80") * 3),
              "KEY_RETURN", "WAIT_MS=120", "KEY_RETURN", "WAIT_MS=120",
              "KEY_ESCAPE", "WAIT_MS=200"),
-            wait_background=True, settings=self.LIBRARY_ENHANCED)
+            wait_background=True, settings=settings_with_auto_load)
         trail = self.focus_trail(run)
         self.assertIn(self.TITLE_PLAY_OPTIONS, trail, "Right reaches Enhanced options")
         self.assertIn(self.ENHANCED_PAGE_PART, trail, "Down reaches the first part's row")
@@ -8438,6 +8439,8 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual({page["title"] for page in pages}, {"TEST00005"},
                          "the page is that game's")
         self.assertEqual(pages[0]["af"], "Library (16x)", "a part follows the library first")
+        self.assertEqual(pages[0]["load"], "Library (Automatic)",
+                         "a title in Enhanced follows Automatic loading without an Ace package")
         self.assertIn("Ace needs a package made for this game.", pages[0]["sentence"],
                       "a game with no package of its own says why it has no Ace")
         self.assertEqual(pages[-1]["af"], "8x", "the row shows the game's own value")
@@ -10163,7 +10166,7 @@ class PlayerUiPseudoCatalogTests(unittest.TestCase):
 
 
 def check_pseudo_launcher() -> int:
-    """Run the real SDL launcher and observe an adapter's displayed sentence."""
+    """Run the real SDL launcher and observe localized settings values and copy."""
     if not _PLAYER_EXE_BUILD_PATH.is_file():
         print("PSEUDO_LAUNCHER status=FAIL reason=missing-executable", file=sys.stderr)
         return 1
@@ -10175,7 +10178,7 @@ def check_pseudo_launcher() -> int:
             ("WAIT_VIEW=settings,10000", "WAIT_MS=100")
             + ("KEY_DOWN",) * 4
             + ("KEY_RETURN", "WAIT_VIEW=ace_settings,10000", "WAIT_MS=150", "QUIT"),
-            settings={"enhanced": {"default": "enhanced"}},
+            settings={"enhanced": {"default": "enhanced", "load": "auto"}},
             timeout=35.0,
         )
         frames = run["frames"]
@@ -10187,6 +10190,7 @@ def check_pseudo_launcher() -> int:
         # Its existing trace records the same model fields passed to the renderer.
         expected = "Thé dééfault för éévery gààme; ééach gààme's pààge çan ççhoose îts öwn."
         test.assertEqual(pages[-1]["sentence"], expected)
+        test.assertEqual(pages[-1]["load"], "ÀÀutomatic")
     except subprocess.TimeoutExpired as exc:
         print(f"PSEUDO_LAUNCHER status=FAIL reason=timeout limit={exc.timeout}", file=sys.stderr)
         return 1
@@ -10194,7 +10198,8 @@ def check_pseudo_launcher() -> int:
         print(f"PSEUDO_LAUNCHER status=FAIL reason=launcher\n{exc}", file=sys.stderr)
         return 1
 
-    print("PSEUDO_LAUNCHER status=PASS view=ace_settings adapter=ADAPTER_MODE_LIBRARY_DESCRIPTION")
+    print("PSEUDO_LAUNCHER status=PASS view=ace_settings adapter=ADAPTER_MODE_LIBRARY_DESCRIPTION "
+          "load=ADAPTER_LOADING_AUTOMATIC")
     return 0
 
 

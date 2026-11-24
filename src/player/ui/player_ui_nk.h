@@ -771,6 +771,7 @@ typedef struct {
        page, the library's ("Library (16x)") before them. */
     const char *const *labels;
     int label_count;
+    int unavailable_label;      /* 1-based part label index, or 0 when all are available */
     const char *library_value;  /* NULL on the library's page */
 } PlayerUiEnhancedRow;
 

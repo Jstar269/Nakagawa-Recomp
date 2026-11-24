@@ -76,7 +76,7 @@
 #define ACE_HAS_SSAA 1          /* ssaa=2|4: supersampling on top of render scale (#2073, 10.21) */
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
 #define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
-#define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
+#define ACE_HAS_LOAD 1          /* automatic disc-load acceleration (10.15.1) and declared waits (11.3.10) */
 #define ACE_HAS_DEPTH 1         /* depth=32: a 32-bit float host depth buffer (#2051, 10.20, 11.3.12) */
 #define ACE_HAS_PEAK 1          /* peak=limit: SAS mixes unsaturated through a true-peak limiter (#2137, 10.22) */
 #define ACE_HAS_GLYPHS 1        /* glyphs=on: sharp game text, glyphs rebuilt at the render scale (10.13, 11.3.5) */
@@ -98,6 +98,7 @@ static inline int ace_wide_fill_blocked_by_smooth(int wide_requested, int smooth
 typedef enum { ACE_TIER_ENHANCED = 0, ACE_TIER_ACE = 1 } AceTier;
 typedef enum { ACE_SAS_OFF = 0, ACE_SAS_SINC = 1 } AceSas;
 typedef enum { ACE_SHADOW_OFF = 0, ACE_SHADOW_SOFT = 1 } AceShadow;
+typedef enum { ACE_LOAD_OFF = 0, ACE_LOAD_FAST = 1, ACE_LOAD_AUTO = 2 } AceLoad;
 
 typedef struct {
     int on;          /* 0: authentic (off, unset or refused); every field below is then 0 */
@@ -113,7 +114,7 @@ typedef struct {
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
     int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
                         (guest-visible, 11.3.11) */
-    int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
+    int load;        /* AceLoad: title-declared fast waits or automatic disc-load fast-forward */
     int depth;       /* depth=32: 0 off (the PSP's 16-bit depth), else 32: the Vulkan renderer's depth
                         buffer holds unrounded depth (guest-visible, 10.20 and 11.3.12) */
     int twin;        /* full 32-bit colour: 16-bit games drawn on a host twin, no dither (host-only) */
@@ -186,7 +187,8 @@ size_t ace_every_part_line(char *out, size_t cap);
 extern int g_ace_on;   /* the run's switch: 1 only after a valid line with Ace on */
 
 /* Reads SR_ACE once (and SR_ACE_REPORT when on), prints the start stamp or the refusal, and
- * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests).
+ * sets g_ace_on. SR_ACE_LOAD_AUTO=1 selects Automatic for a valid enabled line with no load key.
+ * Returns g_ace_on. ace_init_spec initializes a given line without reading the environment.
  * A retired variable that is set (ace_retired_env) stops the run first: the named line and exit 1. */
 int ace_init_from_env(void);
 /* SR_GLYPHS (its value, NULL or "" for unset) once switched sharp game text; the launch line's glyphs

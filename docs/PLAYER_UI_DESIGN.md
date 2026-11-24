@@ -675,7 +675,9 @@ PICTURE contains TEXTURE FILTERING; WIDESCREEN; SHARPER ENLARGING; TEXTURE PACK;
 SMOOTH FAR TEXTURES; TEXTURE SCALING; SMART 2D FILTER; CRISP SYSTEM TEXT. MOTION contains SMOOTH MOTION and the
 existing global FRAME PACING control. SOUND contains CLEAN PITCHED SOUND and UNCLIPPED SOUND. CONTROLS contains
 STICK DEAD ZONE. ON-SCREEN contains SPEED READOUT and GAME BADGE. ADVANCED contains FINER PATCHES, WIDER CULLING,
-SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
+LOADING SPEED, LATE PAD SAMPLING and SOFT SHADOWS. Loading speed offers Automatic, Short waits (Ace) and Off.
+Automatic works in Enhanced or Ace without an Ace package. Older game packages need rebuilding to use Automatic.
+Short waits requires Ace and a package with declared loading waits. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
 REMOVE TEXTURE PACK are the last rows of Picture.
 Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
 ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
@@ -771,7 +773,7 @@ on (#2280), which changes only the picture the window shows; the other presets l
 second draw of each render op and its GPU memory stay off unless asked for. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, UNCLIPPED
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, LOADING SPEED, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, UNCLIPPED
 SOUND, TEXTURE SCALING, the SMART 2D FILTER, the SPEED READOUT or
 the GAME BADGE: they change timing, framing, input, sound, guest-visible output or the HUD, or have no measured cost on
 low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for
