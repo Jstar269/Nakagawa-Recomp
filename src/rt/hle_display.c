@@ -673,16 +673,18 @@ static void screenshot_after_present(void) {
  * present call. Host-side gate only: no guest work is skipped, no timing is changed,
  * and the frames that do get captured are byte-identical to an ungated run. */
 static const char *fbcap_arm_for_present(uint32_t vcount, const DisplayFrameState *fb,
-                                         uint32_t sync, int framebuf_set) {
+                                         int guest_flip, int framebuf_set) {
     s_fbcap_armed[0] = '\0';
     s_fbcap_legacy[0] = '\0';
-    if (sync != 0u) return NULL;
     /* SR_FBSNAP_WINDOWS alone selects FBSNAP (every present inside the windows), so the
      * windows are parsed before the capture-owner decision (sr_fbcap_owner()), which uses
      * the same effective cadence as the gate below (sr_fbcap_snap_every). */
     fbcap_parse_windows_once();
     int fbsnap_every = sr_fbcap_snap_every(getenv("SR_FBSNAP"), s_fbsnap_win_n > 0);
     int owner = sr_fbcap_owner(sr_fbcap_env_on("SR_FBDUMP"), fbsnap_every > 0);
+    /* FBSNAP observes submitted pictures. FBDUMP and screenshots keep their
+     * explicit guest flip boundaries. The usual per-VBLANK cadence still applies. */
+    if (!guest_flip && owner != SR_FBCAP_FBSNAP) return NULL;
     if (owner == SR_FBCAP_NONE) {
         screenshot_arm_for_present(fb, framebuf_set);
         return NULL;
@@ -912,7 +914,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
         hle_watchdog_note_present();
         /* Issue #57: arm any due present capture BEFORE the present so the recorded
          * frame is exactly the one being presented. */
-        fbcap_arm_for_present(s_vcount, &s_display_active, 0u, s_framebuf != 0);
+        fbcap_arm_for_present(s_vcount, &s_display_active, 1, s_framebuf != 0);
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         display_present_active(1);
@@ -1196,7 +1198,7 @@ void sr_vblank_tick(void) {
          * is not the presented one. Arming only in the sync=0 branch left every
          * double-buffering title (which flips at VBLANK, not synchronously) with no
          * present-truthful capture at all. */
-        fbcap_arm_for_present(s_vcount, &s_display_active, 0u, s_framebuf != 0);
+        fbcap_arm_for_present(s_vcount, &s_display_active, 1, s_framebuf != 0);
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         display_present_active(1);
@@ -1205,7 +1207,14 @@ void sr_vblank_tick(void) {
     } else if (display_static_scanout_changed()) {
         /* A guest may change the visible pixels without another SetFrameBuf.
          * A refused host present leaves the old baseline for the next VBLANK. */
+        static int scanout_snapshots = -1;
+        if (scanout_snapshots < 0)
+            scanout_snapshots = getenv("SR_FBSNAP") != NULL || getenv("SR_FBSNAP_WINDOWS") != NULL;
+        if (scanout_snapshots)
+            fbcap_arm_for_present(s_vcount, &s_display_active, 0, s_framebuf != 0);
         display_present_active(0);
+        if (scanout_snapshots)
+            display_after_present(s_vcount);
     }
     if (g_ace_on) gui_ace_vblank(s_vcount);
     /* SR_VIDEOREC_DIR (videorec.h): this VBLANK's video frame is the newest picture presented
