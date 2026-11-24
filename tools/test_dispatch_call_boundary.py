@@ -20,6 +20,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import scratch_dir
@@ -1225,6 +1226,33 @@ def _read_the_pc() -> tuple[int, ...]:
         _addu(_A0, _RA, 0),                                # 0x101c a0 = the PC
         _addu(_RA, _T0, 0), _jr(_RA), _addiu(_V0, _V0, 10),
     ])
+
+
+def _jal_read_the_pc(independent_entry: bool = False) -> tuple[int, ...]:
+    """The delay slot sees the new link, then the body continues once."""
+    body_start = 0x1018 if independent_entry else 0x1010
+    link = body_start + 12
+    body = [
+        _addu(_T0, _RA, 0),
+        _jal(link), _addu(_A0, _RA, 0),
+        _addiu(_V0, _V0, 100),
+        _addu(_RA, _T0, 0), _jr(_RA), _addiu(_V0, _V0, 10),
+    ]
+    if not independent_entry:
+        return _probe_program(body)
+    # The unused nonzero-a0 route calls the link address independently.
+    # Save the host return address and pass the real call's link in t0.
+    entry = [
+        _i(0x05, _A0, 0, (0x1034 - 0x1004) >> 2), _NOP,
+        _jal(body_start), _NOP,
+        _jr(_RA), _addu(_V1, _SP, 0),
+    ]
+    another_call = [
+        _addiu(_SP, _SP, -8), _sw(_RA, 0, _SP),
+        _jal(link), _addu(_T0, _RA, 0),
+        _lw(_RA, 0, _SP), _jr(_RA), _addiu(_SP, _SP, 8),
+    ]
+    return tuple(entry + body + another_call)
 
 
 _DEPTH_PROBE_HARNESS = r"""
@@ -3398,6 +3426,39 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self.assertEqual(fields.get("v0"), 110, output)
         self.assertEqual(fields.get("a0"), 0x101C, output)
         self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        self.assertEqual(fields.get("unwinds"), 0, output)
+
+    def test_jal_pc_read_keeps_the_caller(self):
+        for omitted in ((), ("--omit-aot=0x1010",)):
+            with self.subTest(omitted=omitted):
+                generated, results = self._probe(_jal_read_the_pc(), (0,), codegen_args=omitted)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 110, output)
+                self.assertEqual(fields.get("a0"), 0x101C, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+                self.assertEqual(fields.get("unwinds"), 0, output)
+                self.assertNotIn("void f_0000101c(CpuState *s) {", generated)
+                if omitted:
+                    self.assertGreater(fields.get("interp", 0), 0, output)
+                else:
+                    self.assertEqual(fields.get("interp"), 0, output)
+
+    def test_jal_pc_read_hands_off_to_an_independently_registered_entry(self):
+        with mock.patch.dict(os.environ, {"SR_DISPLOG": "1"}):
+            generated, results = self._probe(
+                _jal_read_the_pc(independent_entry=True), (0,),
+                codegen_args=("--omit-aot=0x1018",),
+            )
+        rc, output, fields = results[0]
+        self.assertIn("void f_00001024(CpuState *s) {", generated)
+        self.assertEqual(rc, 0, output)
+        self.assertGreater(fields.get("interp", 0), 0, output)
+        self.assertEqual(fields.get("v0"), 110, output)
+        self.assertEqual(fields.get("a0"), 0x1024, output)
+        self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        self.assertIn("GUEST_INTERP_AOT_HANDOFF pc=0x00001024", output)
+        self.assertNotIn("GUEST_INTERP_AOT_CALL target=0x00001024", output)
         self.assertEqual(fields.get("unwinds"), 0, output)
 
     def test_linked_branch_mutants_fail_for_their_semantic(self):
