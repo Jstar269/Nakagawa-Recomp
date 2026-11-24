@@ -14259,6 +14259,97 @@ static int gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, uin
 /* Pinned cells differ from the PSP by at most this much in any native colour field. */
 #define GR_VK_DIVERGENT_MAX_DELTA 2u
 
+/* Submit the same regular color/alpha/depth clear first and again. Before warmup, the first
+ * draw calls vkCreateGraphicsPipelines even when the driver cache loaded from disk. */
+static int coherence_run_pipeline_clear_prewarm(int warm, int retry) {
+    const char *name = retry ? "pipeline-clear-prewarm-retry"
+                           : (warm ? "pipeline-clear-prewarm-warm" : "pipeline-clear-prewarm-cold");
+    const struct gr_cell cell = {"clear-rgba-depth", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN,
+                                 0u, 0x5ac3a50fu, {0xd3000701u}};
+    const uint32_t tex[GR_T_COUNT] = {0};   /* the clear samples no texture */
+    uint32_t ref[GR_N], pixels[GR_N];
+    uint16_t depth[GR_N];
+    unsigned long long fell = 0;
+    int sync = 0;
+    if (retry) {
+        gegpu_shutdown();
+        s_selftest_pipeline_create_fail = 1;
+        if (!gegpu_init() || s_selftest_pipeline_create_fail) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL warmup failure did not leave the renderer ready\n", name);
+            return 0;
+        }
+    }
+    if ((!retry && !s_pcache) || s_pcache_loaded != warm || !gr_vk_draw(&cell, 0, tex, 0, ref, &fell, &sync)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL expected cache state or software clear missing\n", name);
+        return 0;
+    }
+    for (uint32_t i = 0; i < GR_N; i++) {
+        const uint32_t x = GR_WX + i % GR_WW, y = GR_WY + i / GR_WW;
+        depth[i] = ge_zbuf_ptr()[y * ge_zbuf_stride() + x];
+        if (ref[i] != cell.vcol || depth[i] != (uint16_t)GR_Z) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL software clear at (%u,%u) gave %08x depth=%u\n",
+                    name, x, y, ref[i], depth[i]);
+            return 0;
+        }
+    }
+    const unsigned long init_creates = s_pcache_creates;
+    const double init_ms = (double)s_pcache_create_ns / 1e6;
+    const int init_ok = init_creates == (retry ? 0u : 1u);
+    int ok = 1;
+    for (int pass = 0; pass < 2; pass++) {
+        /* Seed fresh depth for both draws. The reference and the first draw have already
+         * written the expected depth, so a draw without depth writes could otherwise pass. */
+        coherence_reset_depths();
+        uint16_t *zbuf = ge_zbuf_ptr();
+        const uint32_t zstride = ge_zbuf_stride();
+        if (!zbuf || zstride != GR_STRIDE) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL could not seed the depth buffer\n", name);
+            return 0;
+        }
+        const uint16_t seed = pass ? 0x2345u : 0x1234u;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t x = GR_WX + i % GR_WW, y = GR_WY + i / GR_WW;
+            zbuf[y * zstride + x] = seed;
+        }
+        ge_zbuf_note_external_write();
+        const unsigned long creates0 = s_pcache_creates;
+        const uint64_t ns0 = s_pcache_create_ns;
+        const unsigned long long draws0 = s_replay_stats.draws;
+        const int done = gr_vk_draw(&cell, 1, tex, 0, pixels, &fell, &sync);
+        int depth_synced = 0;
+        for (int d = 0; d < MAX_DEP; d++) {
+            if (s_deps[d].used && s_deps[d].zba == GR_ZB_OFFSET) {
+                depth_synced = depth_to_cpu(&s_deps[d]);
+                break;
+            }
+        }
+        unsigned color_diff = 0, depth_diff = 0;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t x = GR_WX + i % GR_WW, y = GR_WY + i / GR_WW;
+            color_diff += ref[i] != pixels[i];
+            depth_diff += depth[i] != ge_zbuf_ptr()[y * ge_zbuf_stride() + x];
+        }
+        Target *target = target_find_by_fba(GR_FB_OFFSET);
+        const int present = gegpu_present(0x04000000u + GR_FB_OFFSET, 3, GR_STRIDE);
+        const int shown = present == GEGPU_PRESENT_SHOWN && target &&
+                          sdl3vk_wait_image((void *)present_image(target));
+        const unsigned long creates = s_pcache_creates - creates0;
+        const unsigned long long draws = s_replay_stats.draws - draws0;
+        const unsigned long want_creates = retry && pass == 0 ? 1u : 0u;
+        const int passed = done && sync == GEGPU_SYNC_OK && depth_synced && shown && draws == 1 && !fell &&
+                           !color_diff && !depth_diff && creates == want_creates && init_ok;
+        fprintf(passed ? stdout : stderr,
+                "gpu coherence selftest [%s/%s]: %s init creates=%lu (%.3f ms) draw creates=%lu (%.3f ms, expected %lu) "
+                "GPU draws=%llu fallback=%llu sync=%d depth sync=%d present=%d waited=%d "
+                "color differences=%u depth differences=%u\n",
+                name, pass ? "repeat" : "first", passed ? "PASS" : "FAIL", init_creates, init_ms,
+                creates, (double)(s_pcache_create_ns - ns0) / 1e6, want_creates, draws, fell, sync,
+                depth_synced, present, shown, color_diff, depth_diff);
+        ok &= passed;
+    }
+    return ok;
+}
+
 /* Clears through all-or-nothing pixel masks, one per framebuffer format: the GPU draws them
  * through its colour write mask and must give ge.c's window (which keeps every masked bit, as
  * the PSP does for clr-ca-msk). Before #343's fix the GPU wrote every bit of the clear colour. */
@@ -16789,6 +16880,9 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
+        if (strcmp(only, "pipeline-clear-prewarm-cold") == 0) return coherence_run_pipeline_clear_prewarm(0, 0);
+        if (strcmp(only, "pipeline-clear-prewarm-warm") == 0) return coherence_run_pipeline_clear_prewarm(1, 0);
+        if (strcmp(only, "pipeline-clear-prewarm-retry") == 0) return coherence_run_pipeline_clear_prewarm(0, 1);
         if (strcmp(only, "dst-read") == 0) return coherence_run_dst_read();
         if (strncmp(only, "dst-read-", 9) == 0) return coherence_run_dst_read_one(only);
         if (strcmp(only, "stencil-once") == 0) return coherence_run_stencil_once();

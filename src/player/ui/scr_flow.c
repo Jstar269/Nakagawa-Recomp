@@ -6,6 +6,7 @@
    prompt bar), and the box that lists the files a disc needs. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -18,10 +19,7 @@
    own buttons (Check again, Open folder). The guide shows only when built-in decryption
    (#295) stopped; its words never ask for a key and never say how to decrypt. */
 
-#define INPUT_GUIDE_LEAD \
-    "Nakagawa couldn't decrypt some of this game's program files from your disc. It can " \
-    "use decrypted copies you make from your own disc: put these files in the folder " \
-    "below, then choose Check again."
+#define INPUT_GUIDE_LEAD NK_UI_STR(FLOW_INPUT_GUIDE_LEAD)
 
 bool scr_input_guide_present(const PlayerUiInputGuide *guide) {
     return guide != NULL && guide->file_count > 0u;
@@ -49,7 +47,7 @@ void scr_input_guide_box(NkUi *ui, NkUiId base, const PlayerUiInputGuide *guide,
     box.padding_left = box.padding_right = 14.0f;
     if (compact) box.gap = 4.0f;
     if (!nk_ui_begin_container(ui, base, &box, &style)) return;
-    if (!compact) nk_ui_eyebrow(ui, base + 1u, "Files to add");
+    if (!compact) nk_ui_eyebrow(ui, base + 1u, NK_UI_STR(FLOW_INPUT_FILES_HEADING));
     nk_ui_text(ui, base + 2u,
                nk_ui_text_clamp(ui, INPUT_GUIDE_LEAD, &lead, inner, compact ? 2 : 3), &lead);
     shown = guide->file_count < PLAYER_UI_INPUT_FILES ? guide->file_count : PLAYER_UI_INPUT_FILES;
@@ -69,7 +67,9 @@ void scr_input_guide_box(NkUi *ui, NkUiId base, const PlayerUiInputGuide *guide,
             char copy_of[200];
             float rest = inner - 84.0f - 150.0f - 2.0f * NK_UI_SPACE_3;
             if (nk_ui_begin_container(ui, row_id + 1u, &cell, NULL)) {
-                nk_ui_text_role(ui, row_id + 4u, file->replace ? "REPLACE" : "NEEDED",
+                nk_ui_text_role(ui, row_id + 4u,
+                                file->replace ? NK_UI_STR(FLOW_INPUT_FILE_REPLACE)
+                                              : NK_UI_STR(FLOW_INPUT_FILE_NEEDED),
                                 NK_UI_TYPE_LABEL_S, file->replace ? theme->error : theme->warning);
                 nk_ui_end_container(ui);
             }
@@ -80,8 +80,8 @@ void scr_input_guide_box(NkUi *ui, NkUiId base, const PlayerUiInputGuide *guide,
                            &name);
                 nk_ui_end_container(ui);
             }
-            (void)snprintf(copy_of, sizeof(copy_of), "copy of %s",
-                           safe_text(file->source, "a file on the disc"));
+            (void)snprintf(copy_of, sizeof(copy_of), NK_UI_STR(FLOW_INPUT_FILE_COPY_FORMAT),
+                           safe_text(file->source, NK_UI_STR(FLOW_INPUT_FILE_SOURCE_FALLBACK)));
             if (rest < 60.0f) rest = 60.0f;
             nk_ui_text(ui, row_id + 3u, nk_ui_text_clamp(ui, copy_of, &source, rest, 1), &source);
             nk_ui_end_container(ui);
@@ -91,10 +91,11 @@ void scr_input_guide_box(NkUi *ui, NkUiId base, const PlayerUiInputGuide *guide,
         char count[192];
         size_t hidden = guide->file_count > shown ? guide->file_count - shown : 0u;
         if (hidden > 0u) {
-            (void)snprintf(count, sizeof(count), "%s \xC2\xB7 %u more not shown",
+            (void)snprintf(count, sizeof(count), NK_UI_STR(FLOW_INPUT_FILES_MORE_FORMAT),
                            safe_text(guide->summary, ""), (unsigned)hidden);
         } else {
-            (void)snprintf(count, sizeof(count), "%s", safe_text(guide->summary, ""));
+            (void)snprintf(count, sizeof(count), NK_UI_STR(FLOW_INPUT_FILES_SUMMARY_FORMAT),
+                           safe_text(guide->summary, ""));
         }
         if (count[0] != '\0') {
             NkUiTextStyle caption = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
@@ -105,8 +106,7 @@ void scr_input_guide_box(NkUi *ui, NkUiId base, const PlayerUiInputGuide *guide,
         NkUiTextStyle caption = nk_ui_type(NK_UI_TYPE_CAPTION, theme->error);
         nk_ui_text(ui, base + 4u,
                    nk_ui_text_clamp(ui,
-                                    "A file marked Replace is in the folder but isn't a working "
-                                    "program file. Put a new copy in its place.",
+                                    NK_UI_STR(FLOW_INPUT_REPLACE_EXPLANATION),
                                     &caption, inner, 2),
                    &caption);
     }
@@ -162,7 +162,7 @@ void scr_flow_end(NkUi *ui, const char *hint, const NkUiPromptItem *prompts, siz
 
 void scr_flow_eyebrow(NkUi *ui, const char *marker, const char *text, uint32_t rgba) {
     char line[160];
-    (void)snprintf(line, sizeof(line), "%s %s", marker, text);
+    (void)snprintf(line, sizeof(line), NK_UI_STR(FLOW_EYEBROW_FORMAT), marker, text);
     nk_ui_text_role(ui, FLOW_ID_EYEBROW, nk_ui_caps(ui, line), NK_UI_TYPE_EYEBROW, rgba);
 }
 
@@ -177,12 +177,14 @@ NkUiStyle scr_flow_box_style(const NkUiTheme *theme, uint32_t fill) {
 }
 
 void scr_flow_bytes(char *out, size_t cap, unsigned long long bytes) {
-    static const char *const units[] = {"KB", "MB", "GB"};
+    static const char *const units[] = {
+        NK_UI_STR(FLOW_UNIT_KB), NK_UI_STR(FLOW_UNIT_MB), NK_UI_STR(FLOW_UNIT_GB)
+    };
     const size_t last = sizeof(units) / sizeof(units[0]) - 1u;
     double value = (double)bytes / 1024.0;
     size_t unit = 0u;
     if (bytes < 1024ull) {
-        (void)snprintf(out, cap, "%llu bytes", bytes);
+        (void)snprintf(out, cap, NK_UI_STR(FLOW_BYTES_FORMAT), bytes);
         return;
     }
     /* The unit follows the figure as shown: from 1023.95, which %.1f rounds to
@@ -191,5 +193,5 @@ void scr_flow_bytes(char *out, size_t cap, unsigned long long bytes) {
         value /= 1024.0;
         ++unit;
     }
-    (void)snprintf(out, cap, "%.1f %s", value, units[unit]);
+    (void)snprintf(out, cap, NK_UI_STR(FLOW_SIZE_FORMAT), value, units[unit]);
 }

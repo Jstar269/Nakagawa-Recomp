@@ -697,14 +697,14 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `mips` (`on` or `off`,
-section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section
-11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
+section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`auto`, `fast` or `off`,
+sections 10.15.1 and 11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
 section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (`on` or `off`, section 11.3.4),
 `shadow` (`soft` or `off`, sections 10.23 and 11.3.13), `texscale` (`2` to `6` or `off`) and `smart2d` (`on` or
 `off`, both sections 10.10 and 11.3.3) and `cull` (`on` or `off`, section 11.3.6) are the other keys a
 line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs`, `texpack`, `shadow`,
 `texscale`, `smart2d` or
-`cull` is off, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
+`cull` is off by default, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
 `ssaa=2|4`, `peak=limit`, `glyphs=on`, `texpack=on`, `texscale=2..6` and `smart2d=on` do not), the launcher writes
 `;mips=on` for an Enhanced or Ace
 launch with that part on, `;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
@@ -774,18 +774,20 @@ the device is created with no feature outside Ace.
   11.1 names as already guest-visible; the other items are host-only unless section 11 admits them.
 - **Host work:** the detector and the readout count flips, draws and host waits; their cost runs on the scheduler
   thread like any renderer cost.
-- **PC LIMITED and GPU LIMITED (#2623).** The speed readout judges each second of wall time. A second is limited when a
-  VBLANK slot was skipped, or when the scheduler idled under 2 % of it while frames came slower than the frame-rate
-  class allows (`ace_readout_judge` in `src/rt/ace.c`). A limited second reads GPU LIMITED when the scheduler's
-  thread spent at least as long blocked on GPU fences as the second fell behind, so that without those waits the
-  game would have kept up; any other limited second reads PC LIMITED (the CPU, or anything else on the host). How far
-  a second fell behind is the larger of its skipped slots (1001/60 ms each) and, against a class of k VBLANKs a frame,
-  the second's length less k VBLANKs for each new frame (`ace_readout_behind_ns`). The GPU waits are measured on the
-  scheduler's thread, which also replays the GE and presents: the GE renderer's fence waits (a submission slot
-  reused, a drain at a CPU-visible boundary, a readback) and the presenter's wait for its frame's fence
-  (`ace_note_gpu_wait`). They are read only by the readout and the report, never by the guest. Both verdicts use
-  the warning colour, and the report's `pc_limited_seconds` counts both, with `gpu_limited_seconds` the GPU LIMITED
-  ones. `ace-selftest` pins the rule with synthetic windows and through the feed.
+- **Speed readout (#2960).** FPS counts new guest display frames. Speed compares serviced guest
+  VBLANKs against the wall time of the same window at 60000/1001 Hz. A 20 FPS scene can run at
+  full speed, including after a 30 FPS menu. The readout warns when the display clock falls
+  behind by more than 3% and more than one VBLANK period, which allows for window endpoints between
+  display edges. A window that includes guest-masked deadlines, receives service owed under
+  fast forward, or runs without the paced clock shows FPS and a dash for speed. A pause resets
+  the readout window.
+- **PC LIMITED and GPU LIMITED (#2623).** The warning says GPU LIMITED when measured scheduler
+  waits on GPU fences cover the display-clock shortfall. Other qualified shortfalls say PC
+  LIMITED. The GE renderer's submission-slot, drain and readback waits and the presenter's
+  fence wait feed that attribution. The report's `pc_limited_seconds` counts both verdicts.
+  `gpu_limited_seconds` counts the GPU subset. `ace-selftest` checks these rules and
+  `sched-selftest` exercises real VBLANK service, including an expired idle-pacer deadline after
+  the scheduler already serviced its edges.
 - **Pixels:** texture filtering (anisotropic, for transformed draws with linear minification) changes framebuffer
   pixels, and every present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps
   the filtered picture: the same class as a render scale above 1x, and the launcher says so. The launch notice, the
@@ -804,7 +806,8 @@ the device is created with no feature outside Ace.
   guest-visible item. Its entry is section 11.3.7.
 - **Input:** `stick=<counts>` (Ace only) changes the left-stick values of the live host samples the guest latches,
   never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
-- **Loads:** `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
+- **Loads:** `load=auto` accelerates the paced clock during detected silent disc loads (section 10.15.1).
+  `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
   it changes guest timing. It is a guest-visible item, not yet admitted. Its entry is section 11.3.10.
 - **Depth:** `depth=32` gives the Vulkan renderer a 32-bit float depth buffer, which changes which surface wins
   where two lie within one 16-bit depth step, in the frames a present commits to guest VRAM. The depth the guest
@@ -1963,7 +1966,7 @@ window's keys turn it on, and it never runs in an Authentic run.
   deterministic clock, seeded with the host queue's depth when fast forward starts, so the game paces its sound as it
   would on a PSP. When it stops, the guest reads the host queue again, which drained while nothing was pushed.
 - **The speed readout and the Ace report.** Their window is a second of wall time, so time at the fast-forward speed is
-  never judged: the readout hides while fast forward runs, skipped slots are not counted, no second counts as PC
+  never judged: the readout hides while fast forward runs and no second counts as PC
   LIMITED in the report, and the first full second at normal speed brings the readout back (`ace_note_fast_forward`
   in `src/rt/ace.h`). Smooth motion makes no in-betweens while it runs (section 10.6), so the report's
   `smooth_motion` block and in-between count hold only pictures made at normal speed.
@@ -1978,6 +1981,34 @@ window's keys turn it on, and it never runs in an Authentic run.
   its VBLANK returns where the turbo clock's does). `hle-thread-selftest` pins the audio: no host push from either
   output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
   queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
+
+#### 10.15.1. Automatic fast-forward during disc loads
+
+In Enhanced and Ace modes, Automatic lets the scheduler advance the paced clock faster while a game reads
+from disc during a quiet stretch. It works across games without a title-specific Ace package and defaults to
+off. The launcher always exports `SR_ACE_LOAD_AUTO`: `1` for Automatic, `0` for every other selection, including
+Authentic and the acceptance checkpoint. It sends the rest of the v1 `SR_ACE` line independently. An older game
+package ignores the additional variable and keeps the other requested enhancements. Rebuild that game package
+with a runtime that supports Automatic to use the setting.
+
+When starting the runtime directly, an explicit `load=auto`, `load=fast` or `load=off` in `SR_ACE` takes
+precedence. The additional variable can opt in only with a valid enabled Enhanced or Ace line and no explicit
+`load` key. An unset value or any value other than `1` leaves the parsed selection in force.
+
+Each successful, nonempty read through a guest disc file or raw UMD descriptor makes the next eight
+serviced VBLANKs eligible. A further read
+renews that window. On an eligible VBLANK, if the controller is idle and the output queues are silent,
+the paced clock can switch to 16x. The guest still executes its loading code, and its timers and waits
+follow the same guest clock throughout. Actual wall time depends on the storage, host and game.
+
+Input, audible output and pause end automatic acceleration. Zero-valued samples can continue during a load.
+The first audible block goes through the normal audio path, and its output starts an eight-VBLANK cooldown.
+The detector stays inactive in Authentic mode, under the deterministic and turbo clocks, and whenever the
+player has enabled online ad hoc play. Manual fast-forward still uses the controls in section 10.15. The separate `load=fast`
+choice applies the package-declared waits in section 11.3.10.
+
+The runtime logs `AUTO_LOAD: on` and `AUTO_LOAD: off` at clock transitions. If no eligible load occurs,
+the exit report records that reason. The `load_waits_skipped` counter belongs to package-declared waits.
 
 ### 10.16. Smooth Far Textures (Host Mip Chains)
 
@@ -3468,10 +3499,10 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   which is what the stock function returns after its wait. With the key
   off, or where waits are not permitted (the stock call then returns `SCE_KERNEL_ERROR_CAN_NOT_WAIT` without
   blocking), the skip steps aside and the stock call runs. Nothing else in the title's code changes.
-- **Key.** `load=fast` or `load=off` on the launch line (section 10.1), an optional key: a line without it reads as
-  off, any other value is refused, and `load=fast` is refused unless the line carries `tier=ace`. The player has a
-  library setting and a per-title setting, "Short loads", each able to turn it off alone (section 11.2,
-  item 2); the line carries `;load=fast` only for an Ace launch with the part on, so every other line is as it was.
+- **Key.** `load=fast` selects the package-declared waits and requires `tier=ace`. `load=off` selects stock
+  loading. Automatic uses the separate launcher variable described in section 10.15.1. A runtime started
+  directly also accepts `load=auto`. The library setting and per-title override select the same behavior
+  (sections 10.1 and 11.2).
   The run names it (`ACE_MODE: load fast (...)` at start, `ACE_MODE: load waits skipped <n> (longest run <m> logic
   updates; ...)` at exit, the report's `load`, `load_waits_skipped`, `load_skip_max_run` and `load_paced`), and
   confirms it the first time a declared wait is skipped. A run that asked for

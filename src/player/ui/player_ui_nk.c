@@ -4,6 +4,7 @@
 #include "player_ui_nk.h"
 
 #include "player_state.h"
+#include "../../rt/ace.h"
 #include "cover_art.h"
 #include "player_ui_art.h"
 #include "player_ui_music.h"
@@ -15,6 +16,7 @@
 #include "nk_shared_helpers.h"
 #include "nk_portable.h"
 #include "nk_ui_input.h"
+#include "nk_ui_text.h"
 #include "nk_ui_theme.h"
 #include "nk_ui_widgets.h"
 #include "backend/nk_ui_sdlr.h"
@@ -46,7 +48,7 @@ static size_t g_title_achievement_count;
 #endif
 
 /* Smooth motion's value on a game's page while that game runs its 60 FPS game logic. */
-#define ENHANCED_SMOOTH_AT_60_VALUE "Off (this game runs at 60 FPS)"
+#define ENHANCED_SMOOTH_AT_60_VALUE NK_UI_STR(ADAPTER_SMOOTH_AT_60)
 
 /* Status colours, from the theme's tokens. */
 #define PLAYER_UI_READY (nk_ui_theme_n1()->ready)
@@ -83,27 +85,27 @@ typedef struct {
    compatibility claim from layout code. */
 static const PlayerUiCompatibilityRecord s_compatibility_records[] = {
     {"display-smoke-v1", "Works", PLAYER_UI_TIER_NONE,
-     "Draws the project's moving test pattern. There is nothing to play.", ""},
+     NK_UI_STR(ADAPTER_COMPAT_DISPLAY_SMOKE), ""},
     {"synthetic-allegrex-v1", "Works", PLAYER_UI_TIER_NONE,
-     "Runs the project's test program, then closes.", ""},
+     NK_UI_STR(ADAPTER_COMPAT_SYNTHETIC_RUNS_AND_CLOSES), ""},
     {"pspdev-phase5-v1", "Partially works", PLAYER_UI_TIER_WONT_BOOT,
-     "A small test program from the Nakagawa project. It doesn't start from the player yet.",
+     NK_UI_STR(ADAPTER_COMPAT_PSPDEV_WONT_BOOT),
      ""},
     {"synthetic-title2-v1", "Works", PLAYER_UI_TIER_NONE,
-     "Runs the project's test program, then closes.", ""},
+     NK_UI_STR(ADAPTER_COMPAT_SYNTHETIC_RUNS_AND_CLOSES), ""},
     {"showcase-scene-v1", "Partially works", PLAYER_UI_TIER_PLAYABLE,
-     "Shows a lit, rotating cube that answers the stick and buttons, with sound.", ""},
+     NK_UI_STR(ADAPTER_COMPAT_SHOWCASE_CUBE), ""},
     {"showcase-breakout-v1", "Partially works", PLAYER_UI_TIER_PLAYABLE,
-     "Plays a full game of Breakout with sound and keeps your high score.", ""},
+     NK_UI_STR(ADAPTER_COMPAT_SHOWCASE_BREAKOUT), ""},
     /* Playable: full matches and Story Mode were played through (#1297). */
     {"UCUS98701", "Boots to a named boundary", PLAYER_UI_TIER_PLAYABLE,
-     "Plays full matches and Story Mode.",
-     "Known issues: some sound effects and text clicks can drop out while loading."},
+     NK_UI_STR(ADAPTER_COMPAT_HST_MATCHES_AND_STORY),
+     NK_UI_STR(ADAPTER_COMPAT_HST_LOAD_AUDIO)},
     {"UCUS-98701", "Boots to a named boundary", PLAYER_UI_TIER_PLAYABLE,
-     "Plays full matches and Story Mode.",
-     "Known issues: some sound effects and text clicks can drop out while loading."},
+     NK_UI_STR(ADAPTER_COMPAT_HST_MATCHES_AND_STORY),
+     NK_UI_STR(ADAPTER_COMPAT_HST_LOAD_AUDIO)},
     {"PAC-MAN Championship Edition", "Partially works", PLAYER_UI_TIER_NONE,
-     "Reaches the title screen and plays a stage. The rest of the game has not been tried yet.",
+     NK_UI_STR(ADAPTER_COMPAT_PACMAN_FIRST_STAGE),
      ""}
 };
 
@@ -209,7 +211,8 @@ struct PlayerUiNk {
     const char *enhanced_modes[4];
     char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
     char texpack_value[200];
-    char texpack_sentence[400];
+    char texpack_sentence[sizeof(((PlayerTexturePackInfo *)0)->error) +
+                          sizeof(NK_UI_STR(ADAPTER_TEXPACK_REFUSAL_DETAILS))];
     char enhanced_library_values[PLAYER_UI_ENHANCED_ROWS][48];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
@@ -404,7 +407,7 @@ static void player_ui_read_disc_art(const char *iso_path, unsigned wanted,
 
 static void player_ui_set_error(char *out, size_t out_size, const char *message) {
     if (out == NULL || out_size == 0u) return;
-    snprintf(out, out_size, "%s", message != NULL ? message : "UI initialization failed");
+    snprintf(out, out_size, "%s", message != NULL ? message : NK_UI_STR(ADAPTER_UI_INIT_FAILED));
 }
 
 /* The launcher's display rule (the profile folder as "~"), applied to a
@@ -474,7 +477,7 @@ static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
 static void player_ui_set_fonts_missing(char *error, size_t error_size) {
     char sep = nk_platform_path_separator();
     char message[96];
-    snprintf(message, sizeof(message), "its fonts (assets%cfonts%cui) are missing or damaged",
+    snprintf(message, sizeof(message), NK_UI_STR(ADAPTER_UI_FONTS_MISSING),
              sep, sep);
     player_ui_set_error(error, error_size, message);
 }
@@ -502,7 +505,7 @@ static bool player_ui_register_fonts(NkUiTtf *ttf, const char *base_path,
              !nk_ui_ttf_set_fallback(ttf, font, NK_UI_FONT_BODY)) ||
             !nk_ui_ttf_set_fallback(ttf, font, NK_UI_FONT_CJK)) {
             player_ui_set_error(error, error_size,
-                                "The next UI could not configure the font fallback chain.");
+                                NK_UI_STR(ADAPTER_UI_FONT_FALLBACK_FAILED));
             return false;
         }
     }
@@ -561,18 +564,18 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     NkUiConfig config;
     if (renderer == NULL) {
         player_ui_set_error(error, error_size,
-                            "The next UI could not access the player renderer.");
+                            NK_UI_STR(ADAPTER_UI_RENDERER_UNAVAILABLE));
         return NULL;
     }
     if (!nk_ui_sdlr_available() || !nk_ui_ttf_available()) {
         player_ui_set_error(error, error_size,
-                            "The next UI needs the SDL_Renderer and SDL3_ttf build dependencies.");
+                            NK_UI_STR(ADAPTER_UI_RENDERER_DEPENDENCIES));
         return NULL;
     }
     player = (PlayerUiNk *)calloc(1u, sizeof(*player));
     if (player == NULL) {
         player_ui_set_error(error, error_size,
-                            "The next UI could not allocate its renderer state.");
+                            NK_UI_STR(ADAPTER_UI_RENDERER_STATE_FAILED));
         return NULL;
     }
     player->enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
@@ -586,7 +589,7 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     player->router =nk_ui_router_create();
     if (player->router == NULL) {
         player_ui_set_error(error, error_size,
-                            "The next UI could not allocate its screen router.");
+                            NK_UI_STR(ADAPTER_UI_ROUTER_FAILED));
         player_ui_nk_destroy(player);
         return NULL;
     }
@@ -613,14 +616,14 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     player->ui = nk_ui_create(&config);
     if (player->ui == NULL) {
         player_ui_set_error(error, error_size,
-                            "The next UI could not create its layout core.");
+                            NK_UI_STR(ADAPTER_UI_LAYOUT_FAILED));
         player_ui_nk_destroy(player);
         return NULL;
     }
     player->backend = nk_ui_sdlr_create(renderer, &player->text);
     if (player->backend == NULL) {
         player_ui_set_error(error, error_size,
-                            "The next UI could not create its SDL_Renderer backend.");
+                            NK_UI_STR(ADAPTER_UI_BACKEND_FAILED));
         player_ui_nk_destroy(player);
         return NULL;
     }
@@ -665,8 +668,10 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
         char data_root[NK_MAX_PATH];
         if (nk_platform_resolve_app_data_dir(data_root, sizeof(data_root))) {
             (void)snprintf(player->data_root_line, sizeof(player->data_root_line),
-                           "%s: %s", nk_portable_in_use() ? "Data folder (portable mode)"
-                                                          : "Data folder", data_root);
+                           NK_UI_STR(ADAPTER_DATA_FOLDER_PATH),
+                           nk_portable_in_use() ? NK_UI_STR(ADAPTER_DATA_FOLDER_PORTABLE)
+                                                : NK_UI_STR(ADAPTER_DATA_FOLDER),
+                           data_root);
         }
     }
     player->ready = true;
@@ -795,12 +800,12 @@ static void player_ui_format_size(char *out, size_t out_size, uint64_t bytes) {
 
 static const char *player_ui_resolution_word(int scale) {
     switch (scale) {
-        case 1: return "1x native (480x272)";
-        case 2: return "2x (960x544)";
-        case 3: return "3x (1440x816)";
-        case 4: return "4x";
-        case 8: return "8x (3840x2176)";
-        default: return "Custom";
+        case 1: return NK_UI_STR(ADAPTER_RESOLUTION_NATIVE);
+        case 2: return NK_UI_STR(ADAPTER_RESOLUTION_2X);
+        case 3: return NK_UI_STR(ADAPTER_RESOLUTION_3X);
+        case 4: return NK_UI_STR(ADAPTER_RESOLUTION_4X);
+        case 8: return NK_UI_STR(ADAPTER_RESOLUTION_8X);
+        default: return NK_UI_STR(ADAPTER_RESOLUTION_CUSTOM);
     }
 }
 
@@ -838,11 +843,11 @@ static void player_ui_input_guide(PlayerUiInputGuide *guide, const PlayerInputRe
     }
     more = input->files_needed > guide->file_count ? input->files_needed - guide->file_count : 0u;
     if (more > 0u) {
-        snprintf(summary, summary_size, "%u of %u encrypted files ready \xC2\xB7 %u more after these",
+        snprintf(summary, summary_size, NK_UI_STR(ADAPTER_ENCRYPTED_FILES_READY_MORE),
                  (unsigned)input->encrypted_ready, (unsigned)input->encrypted_total,
                  (unsigned)more);
     } else {
-        snprintf(summary, summary_size, "%u of %u encrypted files ready",
+        snprintf(summary, summary_size, NK_UI_STR(ADAPTER_ENCRYPTED_FILES_READY),
                  (unsigned)input->encrypted_ready, (unsigned)input->encrypted_total);
     }
     guide->summary = summary;
@@ -900,8 +905,8 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
                                                         : game->iso_path;
             player_ui_format_size(size, sizeof(size), game->iso_size_bytes);
             snprintf(player->wizard_detail, sizeof(player->wizard_detail),
-                     "Size: %s \xC2\xB7 Disc ID: %s", size,
-                     game->disc_id[0] != '\0' ? game->disc_id : "Inspected");
+                     NK_UI_STR(ADAPTER_DISC_SIZE_AND_ID), size,
+                     game->disc_id[0] != '\0' ? game->disc_id : NK_UI_STR(ADAPTER_DISC_INSPECTED));
             model.iso_detail = player->wizard_detail;
             model.status_message = app->wizard.status_message;
             break;
@@ -925,8 +930,7 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
                     player_preflight_blocking_check(&app->wizard.preflight);
                 if (blocking != NULL) {
                     snprintf(player->wizard_blocked, sizeof(player->wizard_blocked),
-                             "%s Then open the disc again. The compatibility list on the "
-                             "project page shows which games work.",
+                             NK_UI_STR(ADAPTER_DISC_REOPEN_COMPATIBILITY),
                              player_preflight_plain_message(blocking));
                     model.blocked_reason = player->wizard_blocked;
                     player_ui_input_guide(&model.input_guide, &app->wizard.preflight.input,
@@ -946,12 +950,12 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
         case WIZARD_STEP_SYSTEM_FONTS:
             if (app->wizard.font_slot_detail[0][0] == '\0') player_app_refresh_font_status(app);
             snprintf(player->wizard_resolution, sizeof(player->wizard_resolution),
-                     "Internal resolution: %s",
+                     NK_UI_STR(ADAPTER_DISC_RESOLUTION),
                      player_ui_resolution_word(app->settings.resolution_scale));
             snprintf(player->wizard_controller, sizeof(player->wizard_controller),
-                     "Controller: %s",
+                     NK_UI_STR(ADAPTER_DISC_CONTROLLER),
                      app->settings.controller_connected ? app->settings.controller_name
-                                                        : "keyboard and mouse");
+                                                        : NK_UI_STR(ADAPTER_KEYBOARD_AND_MOUSE));
             model.resolution_line = player->wizard_resolution;
             model.controller_line = player->wizard_controller;
             model.font_line_count = player_ui_font_lines(
@@ -964,10 +968,11 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
         case WIZARD_STEP_READY_LAUNCH:
             model.runtime_ready = game->is_prepared;
             snprintf(player->wizard_summary, sizeof(player->wizard_summary),
-                     "Resolution %s \xC2\xB7 %s \xC2\xB7 Sound %d%% \xC2\xB7 Package %s",
+                     NK_UI_STR(ADAPTER_DISC_SUMMARY),
                      player_ui_resolution_word(app->settings.resolution_scale),
-                     app->settings.fullscreen ? "Fullscreen" : "Windowed",
-                     app->settings.master_volume, game->is_prepared ? "ready" : "not built yet");
+                     app->settings.fullscreen ? NK_UI_STR(ADAPTER_FULLSCREEN) : NK_UI_STR(ADAPTER_WINDOWED),
+                     app->settings.master_volume, game->is_prepared
+                         ? NK_UI_STR(ADAPTER_PACKAGE_READY) : NK_UI_STR(ADAPTER_PACKAGE_NOT_BUILT));
             model.summary_line = player->wizard_summary;
             break;
         case WIZARD_STEP_WELCOME:
@@ -1002,11 +1007,11 @@ static PlayerUiAction player_ui_render_disc(PlayerUiNk *player, PlayerApp *app,
     }
     model.title_name = game->title_name;
     model.disc_id = game->disc_id;
-    model.badge = nk_disc_id_is_non_retail_key(game->disc_id) ? "Beta / unofficial" : NULL;
+    model.badge = nk_disc_id_is_non_retail_key(game->disc_id) ? NK_UI_STR(ADAPTER_BADGE_UNOFFICIAL) : NULL;
     model.iso_path = game->source_image_path[0] ? game->source_image_path : game->iso_path;
     if (model.kind == PLAYER_UI_DISC_BLOCKED) {
         snprintf(player->disc_reason, sizeof(player->disc_reason),
-                 "%s Then open the disc again.", player_preflight_plain_message(blocking));
+                 NK_UI_STR(ADAPTER_DISC_REOPEN), player_preflight_plain_message(blocking));
         model.reason = player->disc_reason;
         player_ui_input_guide(&model.input_guide, &app->wizard.preflight.input,
                               player->input_summary, sizeof(player->input_summary));
@@ -1016,8 +1021,7 @@ static PlayerUiAction player_ui_render_disc(PlayerUiNk *player, PlayerApp *app,
                                                   sizeof(player->disc_profile))) {
         model.profile_details = player->disc_profile;
         if (model.kind == PLAYER_UI_DISC_SUPPORTED) {
-            model.profile_note = "A title profile on this PC couldn't be used, so Nakagawa uses "
-                                 "its own entry for this game.";
+            model.profile_note = NK_UI_STR(ADAPTER_DISC_PROFILE_FALLBACK);
         }
     }
     if (model.kind != PLAYER_UI_DISC_CHECKING) {
@@ -1105,7 +1109,7 @@ typedef char player_ui_enhanced_more_row_ids_fit[
         ? 1 : -1];
 
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
-#define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
+#define PLAYER_UI_ACE_NEEDS_PACKAGE NK_UI_STR(ADAPTER_ACE_PACKAGE_REQUIRED)
 
 static int player_ui_enhanced_value_index(int part, int value) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
@@ -1118,7 +1122,16 @@ static int player_ui_enhanced_value_index(int part, int value) {
 /* The part table says which parts act only in Ace (PlayerEnhancedPartInfo.ace_only). */
 static const char *player_ui_enhanced_tag(int part) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
-    return info != NULL && info->ace_only ? "Ace only" : NULL;
+    return info != NULL && info->ace_only ? NK_UI_STR(ADAPTER_ACE_ONLY) : NULL;
+}
+
+static const char *player_ui_play_mode_name(PlayerPlayMode mode) {
+    switch (mode) {
+        case PLAYER_PLAY_AUTHENTIC: return NK_UI_STR(ADAPTER_MODE_AUTHENTIC);
+        case PLAYER_PLAY_ENHANCED: return NK_UI_STR(ADAPTER_MODE_ENHANCED);
+        case PLAYER_PLAY_ACE: return NK_UI_STR(ADAPTER_MODE_ACE);
+        default: return NK_UI_STR(ADAPTER_MODE_LIBRARY_DEFAULT);
+    }
 }
 
 /* Settings > Enhanced (#2055): the library's page, or one title's
@@ -1131,13 +1144,14 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     model->enhanced_library_on = library_on;
     model->enhanced_title = NULL;
     model->enhanced_on = library_on;
-    model->enhanced_mode = library_on ? "Enhanced" : "Authentic";
+    model->enhanced_mode_index = library_on ? 1 : 0;
     model->enhanced_mode_sentence =
-        "The default for every game; each game's page can choose its own.";
-    player->enhanced_modes[0] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
-    player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
+        NK_UI_STR(ADAPTER_MODE_LIBRARY_DESCRIPTION);
+    player->enhanced_modes[0] = player_ui_play_mode_name(PLAYER_PLAY_AUTHENTIC);
+    player->enhanced_modes[1] = player_ui_play_mode_name(PLAYER_PLAY_ENHANCED);
     model->enhanced_modes = player->enhanced_modes;
     model->enhanced_mode_count = 2;
+    model->enhanced_mode = model->enhanced_modes[model->enhanced_mode_index];
     bool logic_60 = false;
     bool smooth_on = player_settings_library_part(settings, PLAYER_PART_SMOOTH) != 0;
     PlayerPlayMode chosen = PLAYER_PLAY_LIBRARY;
@@ -1156,18 +1170,22 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->enhanced_title = player->enhanced_title;
         model->enhanced_on = play.on;
         /* A title's page steps Library, Authentic, Enhanced and (with a package) Ace. */
-        snprintf(player->enhanced_mode, sizeof(player->enhanced_mode), "Library (%s)",
-                 library_on ? "Enhanced" : "Authentic");
+        snprintf(player->enhanced_mode, sizeof(player->enhanced_mode), NK_UI_STR(ADAPTER_MODE_LIBRARY_VALUE),
+                 model->enhanced_mode);
         model->enhanced_mode = chosen == PLAYER_PLAY_LIBRARY ? player->enhanced_mode
-                                                             : player_play_mode_name(chosen);
+                                                             : player_ui_play_mode_name(chosen);
         player->enhanced_modes[0] = player->enhanced_mode;
-        player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
-        player->enhanced_modes[2] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
-        player->enhanced_modes[3] = player_play_mode_name(PLAYER_PLAY_ACE);
+        player->enhanced_modes[1] = player_ui_play_mode_name(PLAYER_PLAY_AUTHENTIC);
+        player->enhanced_modes[2] = player_ui_play_mode_name(PLAYER_PLAY_ENHANCED);
+        player->enhanced_modes[3] = player_ui_play_mode_name(PLAYER_PLAY_ACE);
         model->enhanced_mode_count = app->title_enhancements[title].available ? 4 : 3;
+        /* This stepper follows PlayerPlayMode order, beginning at Library. */
+        model->enhanced_mode_index = chosen >= PLAYER_PLAY_LIBRARY &&
+            (int)chosen < model->enhanced_mode_count
+            ? (int)chosen : -1;
         model->enhanced_mode_sentence = app->title_enhancements[title].available
-            ? "Ace is Enhanced plus this game's own 60 FPS game logic."
-            : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
+            ? NK_UI_STR(ADAPTER_MODE_ACE_DESCRIPTION)
+            : NK_UI_STR(ADAPTER_MODE_ENHANCED_DESCRIPTION);
         /* The title's texture pack (contract 10.12): its folder's name and what it lists, as
            read when the page opened or the pack changed. */
         const char *pack = player_settings_title_pack(settings, game->disc_id);
@@ -1175,21 +1193,23 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->texpack_row = true;
         model->texpack_chosen = pack != NULL;
         if (!pack) {
-            snprintf(player->texpack_value, sizeof(player->texpack_value), "None");
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "%s",
+                     NK_UI_STR(ADAPTER_TEXPACK_NONE));
             snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
-                     "Choose the folder of a texture pack you made or downloaded for this game. "
-                     "Nakagawa ships none.");
+                     NK_UI_STR(ADAPTER_TEXPACK_CHOOSE));
         } else if (info && info->ok) {
-            snprintf(player->texpack_value, sizeof(player->texpack_value), "%s \xC2\xB7 %zu %s",
-                     info->name, info->textures, info->textures == 1u ? "texture" : "textures");
+            snprintf(player->texpack_value, sizeof(player->texpack_value), NK_UI_STR(ADAPTER_TEXPACK_COUNT),
+                     info->name, info->textures,
+                     info->textures == 1u ? NK_UI_STR(ADAPTER_TEXPACK_TEXTURE)
+                                          : NK_UI_STR(ADAPTER_TEXPACK_TEXTURES));
             snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
-                     "Used while Texture pack is on and the game runs Enhanced or Ace.");
+                     NK_UI_STR(ADAPTER_TEXPACK_IN_USE));
         } else {
-            snprintf(player->texpack_value, sizeof(player->texpack_value), "Refused");
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "%s",
+                     NK_UI_STR(ADAPTER_TEXPACK_REFUSED));
             snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
-                     "This pack can't be used: %s. Fix it where it is; it is read again when this page "
-                     "opens and when the game starts.",
-                     info && info->error[0] ? info->error : "it was not read");
+                     NK_UI_STR(ADAPTER_TEXPACK_REFUSAL_DETAILS),
+                     info && info->error[0] ? info->error : NK_UI_STR(ADAPTER_TEXPACK_UNREAD));
         }
         model->texpack_value = player->texpack_value;
         model->texpack_sentence = player->texpack_sentence;
@@ -1213,6 +1233,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         row->sentence = info->sentence;
         row->labels = info->labels;
         row->label_count = info->value_count;
+        row->unavailable_label = 0;
         row->library_value = NULL;
         row->selected_index = player_ui_enhanced_value_index(p, library);
         row->inherited = false;
@@ -1222,7 +1243,8 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
         if (title < 0 && preset && preset->part[p] >= 0) {
-            snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]), "%s (%s)",
+            snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]),
+                     NK_UI_STR(ADAPTER_PART_VALUE_WITH_PRESET),
                      player_enhanced_part_label(p, library), preset->label);
             row->value = player->enhanced_values[p];
         }
@@ -1232,15 +1254,24 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             row->selected_index = own < 0 ? 0 :
                 player_ui_enhanced_value_index(p, own) + 1;
             snprintf(player->enhanced_library_values[p], sizeof(player->enhanced_library_values[p]),
-                     "Library (%s)", player_enhanced_part_label(p, library));
+                     NK_UI_STR(ADAPTER_MODE_LIBRARY_VALUE), player_enhanced_part_label(p, library));
             row->library_value = player->enhanced_library_values[p];
             if (own < 0) {
                 snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]),
-                         "Library (%s)", player_enhanced_part_label(p, library));
+                         NK_UI_STR(ADAPTER_MODE_LIBRARY_VALUE), player_enhanced_part_label(p, library));
                 row->value = player->enhanced_values[p];
             } else {
                 row->value = player_enhanced_part_label(p, own);
                 row->on = own != 0;
+            }
+            if (p == PLAYER_PART_LOAD && !player_app_title_can_choose_short_waits(app, title)) {
+                row->unavailable_label = player_ui_enhanced_value_index(p, ACE_LOAD_FAST) + 1;
+                /* Keep the saved choice visible so it can be changed. In a title
+                   without Ace it does not take effect on launch. */
+                if ((own < 0 ? library : own) == ACE_LOAD_FAST) {
+                    row->on = false;
+                    row->sentence = NK_UI_STR(ADAPTER_LOADING_ACE_REQUIRED);
+                }
             }
             /* The launch line carries smooth=off while the game runs its 60 FPS game logic:
                this build interpolates only a 30 Hz source (docs/ENHANCEMENT_CONTRACT.md 10.5).
@@ -1248,8 +1279,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             if (p == PLAYER_PART_SMOOTH && logic_60) {
                 snprintf(player->enhanced_smooth_sentence,
                          sizeof(player->enhanced_smooth_sentence),
-                         "This build smooths only 30 FPS games. The choice here (%s) applies "
-                         "when this game's 60 FPS game logic is off.", row->value);
+                         NK_UI_STR(ADAPTER_SMOOTH_AT_60_DESCRIPTION), row->value);
                 row->value = ENHANCED_SMOOTH_AT_60_VALUE;
                 row->sentence = player->enhanced_smooth_sentence;
                 /* The row marks what runs, Off; its sentence names the choice it keeps. */
@@ -1274,7 +1304,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                    Smooth motion off. Widescreen is the one part with such a value
                    (player_enhanced_part_unavailable_label). */
                 row->disabled = true;
-                row->disabled_reason = "Smooth motion disables Widescreen.";
+                row->disabled_reason = NK_UI_STR(ADAPTER_SMOOTH_BLOCKS_WIDESCREEN);
                 row->value = unavailable;
                 row->selected_index = player_ui_enhanced_value_index(p, 0) + (title >= 0 ? 1 : 0);
                 row->inherited = false;
@@ -1283,17 +1313,17 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         }
         if (!model->enhanced_on) {
             row->disabled = true;
-            row->disabled_reason = "Play mode is Authentic.";
+            row->disabled_reason = NK_UI_STR(ADAPTER_PART_AUTHENTIC_DISABLES);
         } else if (title >= 0 && row->tag != NULL &&
                    (chosen != PLAYER_PLAY_ACE || !app->title_enhancements[title].available)) {
             /* A saved Ace whose package has gone is no Ace: its Ace-only rows stay dimmed. */
             row->disabled = true;
             row->disabled_reason = app->title_enhancements[title].available
-                ? "Available only in Ace."
+                ? NK_UI_STR(ADAPTER_PART_ACE_REQUIRED)
                 : PLAYER_UI_ACE_NEEDS_PACKAGE;
         } else if (p == PLAYER_PART_SMOOTH && title >= 0 && logic_60) {
             row->disabled = true;
-            row->disabled_reason = "This game's 60 FPS game logic is on.";
+            row->disabled_reason = NK_UI_STR(ADAPTER_PART_LOGIC_60_ON);
         }
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -1413,9 +1443,9 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         default: model.page = PLAYER_UI_SETTINGS_PAGE_MAIN; break;
     }
     model.resolution = player_ui_resolution_word(app->settings.resolution_scale);
-    model.pacing = app->settings.fps_cap < 0 ? "PSP timing" : "No extra cap";
-    model.pacing_sentence = "Sets whether every game, in every play mode, follows PSP timing "
-                            "or adds no frame cap.";
+    model.pacing = app->settings.fps_cap < 0 ? NK_UI_STR(SETTINGS_PACING_PSP_TIMING)
+                                            : NK_UI_STR(SETTINGS_PACING_NO_EXTRA_CAP);
+    model.pacing_sentence = NK_UI_STR(ADAPTER_PACING_DESCRIPTION);
     model.scaling = player_present_scaling_label(app->settings.present_scaling);
     model.preset = player_app_graphics_preset_label(app);
     model.vsync = app->settings.vsync;
@@ -1433,32 +1463,31 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.build_speed = package_build_speed_name(app->settings.build_speed);
     switch (app->settings.build_speed) {
     case PACKAGE_BUILD_SPEED_BACKGROUND:
-        model.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
-                                     "meanwhile stays smooth. Builds take longer.";
+        model.build_speed_sentence = NK_UI_STR(ADAPTER_BUILD_SPEED_BACKGROUND);
         break;
     case PACKAGE_BUILD_SPEED_FASTEST:
-        model.build_speed_sentence = "A part for every processor the free memory allows. "
-                                     "Other apps slow down until it ends.";
+        model.build_speed_sentence = NK_UI_STR(ADAPTER_BUILD_SPEED_FASTEST);
         break;
     default:
-        model.build_speed_sentence = "As many parts at a time as the free memory allows, up "
-                                     "to eight. Other apps may slow down.";
+        model.build_speed_sentence = NK_UI_STR(ADAPTER_BUILD_SPEED_BALANCED);
         break;
     }
     player_ui_fill_enhanced(player, app, &model);
     if (app->settings.interface_size_pct > 0) {
-        snprintf(player->settings_interface_size, sizeof(player->settings_interface_size), "%d%%",
+        snprintf(player->settings_interface_size, sizeof(player->settings_interface_size),
+                 NK_UI_STR(ADAPTER_INTERFACE_SIZE_PERCENT),
                  app->settings.interface_size_pct);
         model.interface_size = player->settings_interface_size;
     } else {
-        model.interface_size = "Automatic";
+        model.interface_size = NK_UI_STR(ADAPTER_INTERFACE_SIZE_AUTO);
     }
     model.text_size = player_text_size_label(app->settings.text_size_pct);
     model.high_contrast_choice = player_system_choice_label(app->settings.high_contrast_choice);
     model.reduce_motion_choice = player_system_choice_label(app->settings.reduce_motion_choice);
     model.high_contrast = player_app_high_contrast_focus(app);
     model.reduce_motion = player_app_reduce_motion(app);
-    model.system_name = nk_platform_host_kind() == NK_HOST_WINDOWS ? "Windows" : "your system";
+    model.system_name = nk_platform_host_kind() == NK_HOST_WINDOWS
+        ? "Windows" : NK_UI_STR(ADAPTER_SYSTEM_FALLBACK);
     model.system_scale_pct = (int)(player->viewport.display_scale * 100.0f + 0.5f);
     model.system_high_contrast = app->system_high_contrast;
     model.system_reduced_motion = app->system_reduced_motion;
@@ -1466,8 +1495,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     snprintf(player->settings_controller, sizeof(player->settings_controller), "%s",
              app->settings.controller_connected
                  ? (app->settings.controller_name[0] != '\0' ? app->settings.controller_name
-                                                             : "controller connected")
-                 : "keyboard and mouse");
+                                                             : NK_UI_STR(ADAPTER_CONTROLLER_CONNECTED))
+                 : NK_UI_STR(ADAPTER_KEYBOARD_AND_MOUSE));
     model.controller_line = player->settings_controller;
     /* nk_platform_get_path creates the folder, and it cannot change while the
        player runs, so it is looked up once. */
@@ -1528,19 +1557,19 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
             model.online_play_card_host = player->settings_online_play_card_host;
         }
         snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
-                 model.online_play ? "On (%s)" : "Off", srv);
+                 model.online_play ? NK_UI_STR(ADAPTER_ONLINE_PLAY_ON)
+                                   : NK_UI_STR(ADAPTER_ONLINE_PLAY_OFF), srv);
         if (app->online_play_notice[0]) {
             snprintf(player->settings_online_play_status,
                      sizeof(player->settings_online_play_status), "%s", app->online_play_notice);
         } else if (model.online_play) {
             snprintf(player->settings_online_play_status,
                      sizeof(player->settings_online_play_status),
-                     "Online play is on with %s. A game connects when it plays over local "
-                     "wireless.", srv);
+                     NK_UI_STR(ADAPTER_ONLINE_PLAY_ACTIVE), srv);
         } else {
             snprintf(player->settings_online_play_status,
                      sizeof(player->settings_online_play_status), "%s",
-                     "Online play is off. Nothing connects.");
+                     NK_UI_STR(ADAPTER_ONLINE_PLAY_INACTIVE));
         }
         model.online_play_row_value = player->settings_online_play_row;
         model.online_play_status = player->settings_online_play_status;
@@ -1633,9 +1662,9 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         const PackagePrerequisite *item = &app->prerequisites.items.items[i];
         char *line = player->settings_tools[model.tool_count];
         if (!item->installed) continue;
-        snprintf(line, sizeof(player->settings_tools[0]), "%.64s %.32s \xC2\xB7 %.80s", item->name,
+        snprintf(line, sizeof(player->settings_tools[0]), NK_UI_STR(ADAPTER_TOOL_DESCRIPTION), item->name,
                  item->version,
-                 strcmp(item->license, "NOASSERTION") == 0 ? "licence not yet reviewed"
+                 strcmp(item->license, "NOASSERTION") == 0 ? NK_UI_STR(ADAPTER_TOOL_LICENSE_UNREVIEWED)
                                                             : item->license);
         model.tools[model.tool_count++] = line;
     }
@@ -1705,9 +1734,10 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.report_path = player->report_path;
         for (int i = 0; i < report->file_count && (unsigned)i < PLAYER_UI_REPORT_LINES; ++i) {
             unsigned long long bytes = report->file_bytes[i];
-            snprintf(player->report_lines[i], sizeof(player->report_lines[i]), "%s  (%llu %s)",
+            snprintf(player->report_lines[i], sizeof(player->report_lines[i]),
+                     NK_UI_STR(ADAPTER_REPORT_FILE_SIZE),
                      report->file_names[i], bytes >= 1024u ? (bytes + 1023u) / 1024u : bytes,
-                     bytes >= 1024u ? "KB" : "bytes");
+                     bytes >= 1024u ? NK_UI_STR(ADAPTER_REPORT_KB) : NK_UI_STR(ADAPTER_REPORT_BYTES));
             model.report_lines[model.report_line_count++] = player->report_lines[i];
         }
         model.report_file_total = report->file_total > 0 ? (size_t)report->file_total : 0u;
@@ -1823,19 +1853,19 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
     model.scope_title = input_settings_is_title_scope(input);
     model.offer_scope = player_app_selected_disc_id(app) != NULL;
     if (model.scope_title) {
-        snprintf(player->pad_scope, sizeof(player->pad_scope), "%s only",
+        snprintf(player->pad_scope, sizeof(player->pad_scope), NK_UI_STR(ADAPTER_CONTROL_SCOPE_GAME),
                  input_settings_scope_label(input));
     } else {
-        snprintf(player->pad_scope, sizeof(player->pad_scope), "global mapping");
+        snprintf(player->pad_scope, sizeof(player->pad_scope), NK_UI_STR(ADAPTER_CONTROL_SCOPE_GLOBAL));
     }
     model.scope = player->pad_scope;
     model.noted = input->note[0] != '\0' ? input->note_control : -1;
     model.stick_right = input_settings_stick_is_right(input);
     /* A write that failed comes first: the mapping on screen is not the one on disk. */
     if (input->has_save_diagnostic) {
-        snprintf(player->pad_status, sizeof(player->pad_status), "Not saved: %s%s",
+        snprintf(player->pad_status, sizeof(player->pad_status), NK_UI_STR(ADAPTER_CONTROL_NOT_SAVED),
                  input->save_diagnostic,
-                 input->leave_unsaved ? " Back again leaves without saving." : "");
+                 input->leave_unsaved ? NK_UI_STR(ADAPTER_CONTROL_LEAVE_WITHOUT_SAVING) : "");
         model.status = player->pad_status;
         model.status_error = true;
     } else if (input->note[0] != '\0') {
@@ -1849,27 +1879,25 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
         model.status = player->pad_status;
     } else if (model.capturing >= 0) {
         snprintf(player->pad_status, sizeof(player->pad_status),
-                 model.keyboard ? "Press the key for %s. %d s left; Esc stops."
-                                : "Press the controller button or trigger for %s. %d s left; "
-                                  "Esc stops.",
+                 model.keyboard ? NK_UI_STR(ADAPTER_CONTROL_WAIT_KEY)
+                                : NK_UI_STR(ADAPTER_CONTROL_WAIT_BUTTON),
                  input_settings_control_name(model.capturing),
                  (input_settings_get_capture_remaining_ms(input) + 999) / 1000);
         model.status = player->pad_status;
     } else if (model.keyboard) {
-        model.status = "Choose a control, then press its key. Changes save as you make them.";
+        model.status = NK_UI_STR(ADAPTER_CONTROL_CHOOSE_KEY);
     } else if (app->settings.controller_connected) {
         snprintf(player->pad_status, sizeof(player->pad_status),
-                 "Connected: %s. Choose a button to change it.",
+                 NK_UI_STR(ADAPTER_CONTROL_CHOOSE_BUTTON),
                  app->settings.controller_name[0] != '\0' ? app->settings.controller_name
-                                                          : "controller");
+                                                          : NK_UI_STR(ADAPTER_CONTROLLER_FALLBACK));
         model.status = player->pad_status;
     } else {
-        model.status = "No controller connected. The keyboard works, and these are the "
-                       "controller defaults.";
+        model.status = NK_UI_STR(ADAPTER_CONTROL_NO_CONTROLLER);
     }
-    snprintf(player->pad_deadzone, sizeof(player->pad_deadzone), "Dead zone %d%%",
+    snprintf(player->pad_deadzone, sizeof(player->pad_deadzone), NK_UI_STR(ADAPTER_CONTROL_DEAD_ZONE),
              player_ui_axis_percent(input->profile.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner));
-    snprintf(player->pad_trigger, sizeof(player->pad_trigger), "Triggers at %d%%",
+    snprintf(player->pad_trigger, sizeof(player->pad_trigger), NK_UI_STR(ADAPTER_CONTROL_TRIGGERS),
              player_ui_axis_percent(input->profile.trigger_threshold));
     model.deadzone = player->pad_deadzone;
     model.trigger = player->pad_trigger;
@@ -1877,11 +1905,12 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
     model.aim_on = input->profile.aim.mouse;
     model.aim_invert_x = input->profile.aim.invert_x;
     model.aim_invert_y = input->profile.aim.invert_y;
-    snprintf(player->pad_aim, sizeof(player->pad_aim), "Mouse aim: %s",
-             model.aim_on ? "On" : "Off");
-    snprintf(player->pad_aim_speed, sizeof(player->pad_aim_speed), "Speed %d%%",
+    snprintf(player->pad_aim, sizeof(player->pad_aim), NK_UI_STR(ADAPTER_CONTROL_MOUSE_AIM),
+             model.aim_on ? NK_UI_STR(ADAPTER_CONTROL_ON) : NK_UI_STR(ADAPTER_CONTROL_OFF));
+    snprintf(player->pad_aim_speed, sizeof(player->pad_aim_speed), NK_UI_STR(ADAPTER_CONTROL_AIM_SPEED),
              (int)input->profile.aim.sensitivity);
-    snprintf(player->pad_aim_smoothing, sizeof(player->pad_aim_smoothing), "Smoothing %d%%",
+    snprintf(player->pad_aim_smoothing, sizeof(player->pad_aim_smoothing),
+             NK_UI_STR(ADAPTER_CONTROL_AIM_SMOOTHING),
              (int)input->profile.aim.smoothing);
     model.aim = player->pad_aim;
     model.aim_speed = player->pad_aim_speed;
@@ -1899,10 +1928,10 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
             model.page = PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_REST;
             model.calibration_fraction = ms > 0 ? (float)ms / 1000.0f : 0.0f;
             snprintf(player->pad_live[0], sizeof(player->pad_live[0]),
-                     "Stick at rest   %6d, %6d", input->calib.sampled_rest_x,
+                     NK_UI_STR(ADAPTER_CONTROL_STICK_REST), input->calib.sampled_rest_x,
                      input->calib.sampled_rest_y);
             snprintf(player->pad_live[1], sizeof(player->pad_live[1]),
-                     "Triggers at rest L %d  R %d", input->calib.sampled_rest_lt,
+                     NK_UI_STR(ADAPTER_CONTROL_TRIGGERS_REST), input->calib.sampled_rest_lt,
                      input->calib.sampled_rest_rt);
             model.live_count = 2u;
             break;
@@ -1910,29 +1939,29 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
         case CALIBRATION_STAGE_EXTREMES:
             model.page = PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_EXTREMES;
             snprintf(player->pad_live[0], sizeof(player->pad_live[0]),
-                     "Stick X  %6d to %6d  now %6d", input->calib.sampled_min_x,
+                     NK_UI_STR(ADAPTER_CONTROL_STICK_X_SAMPLE), input->calib.sampled_min_x,
                      input->calib.sampled_max_x, axes[NK_HOST_AXIS_LEFTX]);
             snprintf(player->pad_live[1], sizeof(player->pad_live[1]),
-                     "Stick Y  %6d to %6d  now %6d", input->calib.sampled_min_y,
+                     NK_UI_STR(ADAPTER_CONTROL_STICK_Y_SAMPLE), input->calib.sampled_min_y,
                      input->calib.sampled_max_y, axes[NK_HOST_AXIS_LEFTY]);
             snprintf(player->pad_live[2], sizeof(player->pad_live[2]),
-                     "Left trigger   %6d to %6d", input->calib.sampled_rest_lt,
+                     NK_UI_STR(ADAPTER_CONTROL_LEFT_TRIGGER_SAMPLE), input->calib.sampled_rest_lt,
                      input->calib.sampled_max_lt);
             snprintf(player->pad_live[3], sizeof(player->pad_live[3]),
-                     "Right trigger  %6d to %6d", input->calib.sampled_rest_rt,
+                     NK_UI_STR(ADAPTER_CONTROL_RIGHT_TRIGGER_SAMPLE), input->calib.sampled_rest_rt,
                      input->calib.sampled_max_rt);
             model.live_count = 4u;
             break;
         case CALIBRATION_STAGE_RESULT:
             model.page = PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_RESULT;
             snprintf(player->pad_live[0], sizeof(player->pad_live[0]),
-                     "Stick X  rest %6d  %6d to %6d", input->calib.result_rest_x,
+                     NK_UI_STR(ADAPTER_CONTROL_STICK_X_RESULT), input->calib.result_rest_x,
                      input->calib.result_min_x, input->calib.result_max_x);
             snprintf(player->pad_live[1], sizeof(player->pad_live[1]),
-                     "Stick Y  rest %6d  %6d to %6d", input->calib.result_rest_y,
+                     NK_UI_STR(ADAPTER_CONTROL_STICK_Y_RESULT), input->calib.result_rest_y,
                      input->calib.result_min_y, input->calib.result_max_y);
             snprintf(player->pad_live[2], sizeof(player->pad_live[2]),
-                     "Triggers rest %6d  full %6d", input->calib.result_trigger_rest,
+                     NK_UI_STR(ADAPTER_CONTROL_TRIGGERS_RESULT), input->calib.result_trigger_rest,
                      input->calib.result_trigger_extreme);
             model.live_count = 3u;
             break;
@@ -1942,15 +1971,18 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
             size_t used;
             int pressed = 0;
             nk_input_profile_eval_analog(&input->profile, axes, &psp_x, &psp_y);
-            snprintf(player->pad_live[0], sizeof(player->pad_live[0]), "Stick  %6d, %6d",
+            snprintf(player->pad_live[0], sizeof(player->pad_live[0]), NK_UI_STR(ADAPTER_CONTROL_STICK_LIVE),
                      axes[NK_HOST_AXIS_LEFTX], axes[NK_HOST_AXIS_LEFTY]);
-            snprintf(player->pad_live[1], sizeof(player->pad_live[1]), "PSP    %3u, %3u  %s",
+            snprintf(player->pad_live[1], sizeof(player->pad_live[1]),
+                     NK_UI_STR(ADAPTER_CONTROL_PSP_STICK_LIVE),
                      (unsigned)psp_x, (unsigned)psp_y,
-                     psp_x != 128u || psp_y != 128u ? "moving" : "in dead zone");
-            snprintf(player->pad_live[2], sizeof(player->pad_live[2]), "Triggers L %d  R %d",
+                     psp_x != 128u || psp_y != 128u ? NK_UI_STR(ADAPTER_CONTROL_STICK_MOVING)
+                                                   : NK_UI_STR(ADAPTER_CONTROL_STICK_IN_DEAD_ZONE));
+            snprintf(player->pad_live[2], sizeof(player->pad_live[2]),
+                     NK_UI_STR(ADAPTER_CONTROL_TRIGGERS_LIVE),
                      axes[NK_HOST_AXIS_LEFT_TRIGGER], axes[NK_HOST_AXIS_RIGHT_TRIGGER]);
             used = (size_t)snprintf(player->pad_live[3], sizeof(player->pad_live[3]),
-                                    "Pressed ");
+                                    NK_UI_STR(ADAPTER_CONTROL_BUTTONS_DOWN));
             for (int b = 0; b < NK_HOST_BUTTON_COUNT && pressed < 4 &&
                             used < sizeof(player->pad_live[3]); ++b) {
                 if (!app->host_buttons_live[b]) continue;
@@ -1962,7 +1994,7 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
             }
             if (pressed == 0) {
                 snprintf(player->pad_live[3] + used, sizeof(player->pad_live[3]) - used,
-                         "nothing");
+                         NK_UI_STR(ADAPTER_CONTROL_NO_BUTTONS_DOWN));
             }
             model.live_count = 4u;
             break;
@@ -2065,15 +2097,16 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
                 ? package_builder_compile_fraction(&app->build_session) : -1.0f;
             if (fraction >= 0.0f) {
                 snprintf(player->queue_status[r], sizeof(player->queue_status[r]),
-                         "Building %d%%", (int)(fraction * 100.0f + 0.5f));
+                         NK_UI_STR(ADAPTER_QUEUE_BUILD_PROGRESS), (int)(fraction * 100.0f + 0.5f));
             } else {
                 snprintf(player->queue_status[r], sizeof(player->queue_status[r]), "%s",
-                         "Building");
+                         NK_UI_STR(ADAPTER_QUEUE_BUILDING));
             }
         } else {
             snprintf(player->queue_status[r], sizeof(player->queue_status[r]), "%s",
-                     first_waiting ? (queue->paused || queue->held ? "Paused" : "Next")
-                                       : "Waiting");
+                     first_waiting ? (queue->paused || queue->held ? NK_UI_STR(ADAPTER_QUEUE_PAUSED)
+                                                                   : NK_UI_STR(ADAPTER_QUEUE_NEXT))
+                                       : NK_UI_STR(ADAPTER_QUEUE_WAITING));
         }
         row->status = player->queue_status[r];
         row->can_move_up = !row->building && at > 0u &&
@@ -2168,10 +2201,10 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
         int first = count > 4 ? count - 4 : 0;
         memset(&model, 0, sizeof(model));
         if (build->title_name[0] != '\0') {
-            snprintf(player->flow_title, sizeof(player->flow_title), "%s (%s)",
+            snprintf(player->flow_title, sizeof(player->flow_title), NK_UI_STR(ADAPTER_FLOW_TITLE_WITH_STATUS),
                      build->title_name, build->disc_id);
         } else {
-            snprintf(player->flow_title, sizeof(player->flow_title), "Package build (%s)",
+            snprintf(player->flow_title, sizeof(player->flow_title), NK_UI_STR(ADAPTER_FLOW_PACKAGE_BUILD),
                      build->disc_id);
         }
         model.title_line = player->flow_title;
@@ -2202,10 +2235,10 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
             if (waiting > 0) {
                 if (waiting == 1) {
                     snprintf(player->build_queue_line, sizeof(player->build_queue_line), "%s",
-                             "Then 1 more game from the build queue.");
+                             NK_UI_STR(ADAPTER_BUILD_QUEUE_ONE_MORE));
                 } else {
                     snprintf(player->build_queue_line, sizeof(player->build_queue_line),
-                             "Then %d more games from the build queue.", waiting);
+                             NK_UI_STR(ADAPTER_BUILD_QUEUE_MORE_GAMES), waiting);
                 }
                 model.queue_line = player->build_queue_line;
             }
@@ -2536,7 +2569,8 @@ int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown) {
    built for it as it is on disk now. */
 static bool player_ui_open_remove(PlayerUiNk *player, const PlayerApp *app, int index) {
     static const char *const labels[PLAYER_REMOVAL_KIND_COUNT] = {
-        "Built package", "Build cache", "Disc files Nakagawa copied"
+        NK_UI_STR(ADAPTER_REMOVE_BUILT_PACKAGE), NK_UI_STR(ADAPTER_REMOVE_BUILD_CACHE),
+        NK_UI_STR(ADAPTER_REMOVE_COPIED_DISC_FILES)
     };
     if (!player_app_plan_game_removal(app, index, &player->remove_plan)) return false;
     player->remove_item_count = 0u;
@@ -2563,19 +2597,20 @@ static bool player_ui_open_remove(PlayerUiNk *player, const PlayerApp *app, int 
    opens and after each action, never every frame. */
 static void player_ui_saves_bytes(char *out, size_t cap, uint64_t bytes) {
     if (bytes < 1024u) {
-        (void)snprintf(out, cap, "%u bytes", (unsigned)bytes);
+        (void)snprintf(out, cap, NK_UI_STR(ADAPTER_SIZE_BYTES), (unsigned)bytes);
     } else if (bytes < 1024u * 1024u) {
-        (void)snprintf(out, cap, "%.0f KB", (double)bytes / 1024.0);
+        (void)snprintf(out, cap, NK_UI_STR(ADAPTER_SIZE_KB), (double)bytes / 1024.0);
     } else if (bytes < 1024ull * 1024u * 1024u) {
-        (void)snprintf(out, cap, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+        (void)snprintf(out, cap, NK_UI_STR(ADAPTER_SIZE_MB), (double)bytes / (1024.0 * 1024.0));
     } else {
-        (void)snprintf(out, cap, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+        (void)snprintf(out, cap, NK_UI_STR(ADAPTER_SIZE_GB), (double)bytes / (1024.0 * 1024.0 * 1024.0));
     }
 }
 
 static void player_ui_saves_reload(PlayerUiNk *player, const PlayerApp *app, int index) {
     static const char *const kinds[PLAYER_SAVE_BACKUP_KIND_COUNT] = {
-        "Backed up", "Before a restore", "Before adding a save", "Before a removal"
+        NK_UI_STR(ADAPTER_SAVES_BACKUP_REGULAR), NK_UI_STR(ADAPTER_SAVES_BACKUP_BEFORE_RESTORE),
+        NK_UI_STR(ADAPTER_SAVES_BACKUP_BEFORE_ADD), NK_UI_STR(ADAPTER_SAVES_BACKUP_BEFORE_REMOVE)
     };
     char folder[NK_MAX_PATH];
     uint64_t bytes = 0u;
@@ -2609,9 +2644,9 @@ static void player_ui_saves_reload(PlayerUiNk *player, const PlayerApp *app, int
         }
         player_ui_saves_bytes(size, sizeof(size), backup->bytes);
         (void)snprintf(player->saves_detail[row], sizeof(player->saves_detail[row]),
-                       "%s \xC2\xB7 %s",
+                       NK_UI_STR(ADAPTER_SAVES_BACKUP_DETAIL),
                        (unsigned)backup->kind < PLAYER_SAVE_BACKUP_KIND_COUNT
-                           ? kinds[backup->kind] : "Backed up",
+                           ? kinds[backup->kind] : NK_UI_STR(ADAPTER_SAVES_BACKUP_REGULAR),
                        size);
         player->saves_rows[row].when = player->saves_when[row];
         player->saves_rows[row].detail = player->saves_detail[row];
@@ -2652,7 +2687,7 @@ static void player_ui_open_steam(PlayerUiNk *player, const PlayerApp *app, int i
                            plan->account_names[i]);
         } else {
             (void)snprintf(player->steam_account_labels[i],
-                           sizeof(player->steam_account_labels[i]), "Account %s",
+                           sizeof(player->steam_account_labels[i]), NK_UI_STR(ADAPTER_STEAM_ACCOUNT_FALLBACK),
                            plan->accounts[i].id);
         }
         player->steam_accounts[i] = player->steam_account_labels[i];
@@ -2737,9 +2772,9 @@ static void player_ui_saves_add(PlayerUiNk *player, PlayerApp *app, int index,
     if (result == PLAYER_SAVES_DONE) {
         player->saves_first = 0u;
         player_ui_saves_reload(player, app, index);
-        (void)snprintf(text, sizeof(text), "%s %s.%s%s",
-                       replace ? "Replaced the save" : "Added the save", added,
-                       replace ? " The saves from before are the newest backup." : "",
+        (void)snprintf(text, sizeof(text), NK_UI_STR(ADAPTER_SAVES_ADD_RESULT),
+                       replace ? NK_UI_STR(ADAPTER_SAVES_REPLACED) : NK_UI_STR(ADAPTER_SAVES_ADDED), added,
+                       replace ? NK_UI_STR(ADAPTER_SAVES_REPLACE_BACKUP) : "",
                        error[0] != '\0' ? " " : "");
         if (error[0] != '\0') {
             size_t used = strlen(text);
@@ -2750,8 +2785,9 @@ static void player_ui_saves_add(PlayerUiNk *player, PlayerApp *app, int index,
         return;
     }
     player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL, "");
-    player_app_set_error(app, "SAVES_ADD_FAILED", "The save was not added",
-                         error[0] != '\0' ? error : "Nakagawa could not add the save.", "Back",
+    player_app_set_error(app, "SAVES_ADD_FAILED", NK_UI_STR(ADAPTER_SAVES_ADD_ERROR_TITLE),
+                         error[0] != '\0' ? error : NK_UI_STR(ADAPTER_SAVES_ADD_ERROR),
+                         NK_UI_STR(ADAPTER_RECOVERY_BACK),
                          VIEW_LIBRARY);
 }
 
@@ -2795,16 +2831,16 @@ static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, un
         player_ui_saves_reload(player, app, index);
         if (result == PLAYER_SAVES_DONE) {
             player_ui_saves_status(player, PLAYER_UI_NOTE_DONE,
-                                   "Backed up. It is the newest backup in the list.");
+                                   NK_UI_STR(ADAPTER_SAVES_BACKUP_SUCCESS));
         } else if (result == PLAYER_SAVES_NOTHING) {
             player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL,
-                                   "There are no saves to back up yet.");
+                                   NK_UI_STR(ADAPTER_SAVES_NONE_TO_BACK_UP));
         } else {
             player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL, "");
-            player_app_set_error(app, "SAVES_BACKUP_FAILED", "Your saves were not backed up",
+            player_app_set_error(app, "SAVES_BACKUP_FAILED", NK_UI_STR(ADAPTER_SAVES_BACKUP_ERROR_TITLE),
                                  error[0] != '\0' ? error
-                                                  : "Nakagawa could not write the backup.",
-                                 "Back", VIEW_LIBRARY);
+                                                  : NK_UI_STR(ADAPTER_SAVES_BACKUP_ERROR),
+                                 NK_UI_STR(ADAPTER_RECOVERY_BACK), VIEW_LIBRARY);
         }
     } else if (op == PLAYER_UI_SAVES_ADD) {
         player->saves_waiting_pick = true;
@@ -2812,8 +2848,7 @@ static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, un
         app->saves_pick_index = index;
         app->request_save_folder_picker = true;
         player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL,
-                               "Pick the save's folder: the one that holds its PARAM.SFO, "
-                               "inside a SAVEDATA folder.");
+                               NK_UI_STR(ADAPTER_SAVES_PICK_FOLDER));
     } else if (op >= PLAYER_UI_SAVES_RESTORE_BASE) {
         size_t row = (size_t)(op - PLAYER_UI_SAVES_RESTORE_BASE);
         if (row < player_ui_saves_page_rows(player)) {
@@ -2848,10 +2883,9 @@ static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, un
         player_ui_saves_reload(player, app, index);
         if (result == PLAYER_SAVES_DONE) {
             (void)snprintf(text, sizeof(text),
-                           "Restored the backup from %s.%s%s", when,
+                           NK_UI_STR(ADAPTER_SAVES_RESTORE_RESULT), when,
                            kept[0] != '\0'
-                               ? " Your saves from before are the newest backup, and their "
-                                 "folder is kept beside the save folder."
+                               ? NK_UI_STR(ADAPTER_SAVES_RESTORE_OLD_FOLDER)
                                : "",
                            error[0] != '\0' ? " " : "");
             if (error[0] != '\0') {
@@ -2862,11 +2896,10 @@ static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, un
                                                               : PLAYER_UI_NOTE_DONE, text);
         } else {
             player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL, "");
-            player_app_set_error(app, "SAVES_RESTORE_FAILED", "Your saves were not restored",
+            player_app_set_error(app, "SAVES_RESTORE_FAILED", NK_UI_STR(ADAPTER_SAVES_RESTORE_ERROR_TITLE),
                                  error[0] != '\0' ? error
-                                                  : "Nakagawa could not restore the backup. "
-                                                    "Your saves are as they were.",
-                                 "Back", VIEW_LIBRARY);
+                                                  : NK_UI_STR(ADAPTER_SAVES_RESTORE_ERROR),
+                                 NK_UI_STR(ADAPTER_RECOVERY_BACK), VIEW_LIBRARY);
         }
     }
 }
@@ -3316,6 +3349,26 @@ static PlayerUiTier player_ui_record_tier(const PlayerUiCompatibilityRecord *rec
                                                : player_ui_tier_for_category(record->category);
 }
 
+/* Compatibility categories are documentation keys used for tier mapping. Only
+   the developer view's display label is localized. */
+static const char *player_ui_compatibility_category_label(const char *category) {
+    static const struct {
+        const char *category;
+        const char *label;
+    } labels[] = {
+        {"Works", NK_UI_STR(ADAPTER_COMPAT_WORKS)},
+        {"Partially works", NK_UI_STR(ADAPTER_COMPAT_PARTIAL)},
+        {"Boots to a named boundary", NK_UI_STR(ADAPTER_COMPAT_NAMED_BOUNDARY)},
+        {"Experimental", NK_UI_STR(ADAPTER_COMPAT_EXPERIMENTAL)},
+        {"Untested", NK_UI_STR(ADAPTER_COMPAT_UNTESTED)},
+        {"Not started", NK_UI_STR(ADAPTER_COMPAT_NOT_STARTED)},
+    };
+    for (size_t i = 0u; i < sizeof(labels) / sizeof(labels[0]); ++i) {
+        if (strcmp(category, labels[i].category) == 0) return labels[i].label;
+    }
+    return category;
+}
+
 /* The title's compatibility record: its player tier, what to expect and its
    known issues, in plain words. Returns the docs/COMPATIBILITY.md category for
    the developer view. A title with no record gets a sentence for its general
@@ -3323,7 +3376,7 @@ static PlayerUiTier player_ui_record_tier(const PlayerUiCompatibilityRecord *rec
 static const char *player_ui_compatibility_words(const GameRecord *game, const char **expect,
                                                  const char **known_issues,
                                                  PlayerUiTier *record_tier) {
-    *expect = "No one has tried this game in Nakagawa yet.";
+    *expect = NK_UI_STR(ADAPTER_COMPAT_NO_TEST);
     *known_issues = "";
     *record_tier = PLAYER_UI_TIER_NONE;
     if (game == NULL) return "Untested";
@@ -3344,19 +3397,18 @@ static const char *player_ui_compatibility_words(const GameRecord *game, const c
     }
     if (game->is_experimental) {
         if (game->status == NK_STATUS_BOOTS || game->status == NK_STATUS_PLAYABLE) {
-            *expect = "This game has started in Nakagawa, but no one has checked how "
-                      "far it plays. It may stop early.";
+            *expect = NK_UI_STR(ADAPTER_COMPAT_STARTED_UNVERIFIED);
             return "Experimental";
         }
-        *expect = "No one has tried this game in Nakagawa yet. It may not start.";
+        *expect = NK_UI_STR(ADAPTER_COMPAT_NO_BOOT_EVIDENCE);
         return "Untested";
     }
     switch (game->status) {
         case NK_STATUS_BOOTS:
-            *expect = "Starts, then stops at a part Nakagawa does not support yet.";
+            *expect = NK_UI_STR(ADAPTER_COMPAT_UNSUPPORTED_BOUNDARY);
             return "Boots to a named boundary";
         case NK_STATUS_PLAYABLE:
-            *expect = "Plays, but some parts may not work yet.";
+            *expect = NK_UI_STR(ADAPTER_COMPAT_PARTS_UNVERIFIED);
             return "Partially works";
         case NK_STATUS_UNIDENTIFIED:
         case NK_STATUS_IDENTIFIED: return "Untested";
@@ -3364,7 +3416,7 @@ static const char *player_ui_compatibility_words(const GameRecord *game, const c
         case NK_STATUS_PREPARED:
         case NK_STATUS_VERIFIED:
         default:
-            *expect = "This game does not run in Nakagawa yet.";
+            *expect = NK_UI_STR(ADAPTER_COMPAT_CANNOT_RUN);
             return "Not started";
     }
 }
@@ -3408,11 +3460,12 @@ static bool player_ui_unrecorded_experimental(const GameRecord *game) {
    (player_ui_unrecorded_experimental), looked up once per title. */
 static const char *player_ui_library_status_word(const GameRecord *game,
                                                  bool package_ready, bool unrecorded) {
-    if (package_ready) return "Ready";
+    if (package_ready) return NK_UI_STR(ADAPTER_LIBRARY_READY);
     if (unrecorded) {
-        return player_ui_has_seen_boot(game) ? "Experimental" : "Untested";
+        return player_ui_has_seen_boot(game)
+            ? NK_UI_STR(ADAPTER_COMPAT_EXPERIMENTAL) : NK_UI_STR(ADAPTER_COMPAT_UNTESTED);
     }
-    return "Needs setup";
+    return NK_UI_STR(ADAPTER_LIBRARY_NEEDS_SETUP);
 }
 
 /* Status colours follow the design system: Ready teal, experimental and
@@ -3452,8 +3505,8 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
     out->ace_shown = !out->is_demo;
     out->ace_in_effect = play.on;
     out->play_badge = out->is_demo ? NULL
-                    : play.mode == PLAYER_PLAY_ACE ? "Ace"
-                    : play.mode == PLAYER_PLAY_ENHANCED ? "Enhanced" : NULL;
+                    : play.mode == PLAYER_PLAY_ACE ? NK_UI_STR(ADAPTER_MODE_ACE)
+                    : play.mode == PLAYER_PLAY_ENHANCED ? NK_UI_STR(ADAPTER_MODE_ENHANCED) : NULL;
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     if (index >= 0 && index < PLAYER_UI_TITLE_CAP) {
         /* The library card's badge and the title's own choice, printed when either changes. */
@@ -3469,12 +3522,12 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
     }
 #endif
     switch (play.chosen) {
-        case PLAYER_PLAY_AUTHENTIC: out->ace_label = "Play mode: Authentic"; break;
-        case PLAYER_PLAY_ENHANCED: out->ace_label = "Play mode: Enhanced"; break;
-        case PLAYER_PLAY_ACE: out->ace_label = "Play mode: Ace"; break;
+        case PLAYER_PLAY_AUTHENTIC: out->ace_label = NK_UI_STR(ADAPTER_TITLE_MODE_AUTHENTIC); break;
+        case PLAYER_PLAY_ENHANCED: out->ace_label = NK_UI_STR(ADAPTER_TITLE_MODE_ENHANCED); break;
+        case PLAYER_PLAY_ACE: out->ace_label = NK_UI_STR(ADAPTER_TITLE_MODE_ACE); break;
         default:
-            out->ace_label = play.on ? "Play mode: Enhanced (library default)"
-                                     : "Play mode: Authentic (library default)";
+            out->ace_label = play.on ? NK_UI_STR(ADAPTER_TITLE_MODE_LIBRARY_ENHANCED)
+                                     : NK_UI_STR(ADAPTER_TITLE_MODE_LIBRARY_AUTHENTIC);
             break;
     }
     out->ace_enabled = out->ace_shown && !app->launch_pending && !app->is_game_running &&
@@ -3496,7 +3549,7 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
     }
     if (index != app->selected_game_index || !out->ace_shown) return;
     if (play.mode == PLAYER_PLAY_AUTHENTIC) {
-        out->ace_line = "Authentic: plays exactly as released, with nothing added.";
+        out->ace_line = NK_UI_STR(ADAPTER_TITLE_AUTHENTIC_DESCRIPTION);
     } else {
         /* Every part: each as long as its part[64], with the ", " before it. */
         char words[PLAYER_PART_COUNT * (64 + 2)] = "";
@@ -3508,7 +3561,8 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
             if (info == NULL || play.part[p] == 0) continue;
             /* "16x texture filtering" for a part with levels, else "crisp system text". */
             if (info->value_count > 2) {
-                snprintf(part, sizeof(part), "%s %s", player_enhanced_part_label(p, play.part[p]),
+                snprintf(part, sizeof(part), NK_UI_STR(ADAPTER_TITLE_PART_WITH_VALUE),
+                         player_enhanced_part_label(p, play.part[p]),
                          info->name);
             } else {
                 snprintf(part, sizeof(part), "%s", info->name);
@@ -3530,13 +3584,13 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
         /* Wider culling on with a culling package the player cannot use (contract 11.3.6):
            the launch keeps the title's other build, and the line says why by name. */
         const char *cull_problem = player_app_title_cull_problem(app, index);
-        snprintf(player->ace_line, sizeof(player->ace_line), "%s for this game: %s%s%s.%s%s%s",
-                 ace ? "Ace" : "Enhanced", ace && out->enhancement_on ? "60 FPS game logic" : "",
+        snprintf(player->ace_line, sizeof(player->ace_line), NK_UI_STR(ADAPTER_TITLE_ENHANCED_SUMMARY),
+                 ace ? NK_UI_STR(ADAPTER_MODE_ACE) : NK_UI_STR(ADAPTER_MODE_ENHANCED),
+                 ace && out->enhancement_on ? NK_UI_STR(ADAPTER_TITLE_LOGIC_60) : "",
                  ace && out->enhancement_on && count ? ", " : "",
-                 count ? words : (ace && out->enhancement_on ? "" : "every part is off"),
-                 smooth_held ? " Smooth motion is off while it runs at 60 FPS: this build "
-                               "smooths only 30 FPS games." : "",
-                 cull_problem[0] ? " Wider culling does nothing in this game. " : "",
+                 count ? words : (ace && out->enhancement_on ? "" : NK_UI_STR(ADAPTER_TITLE_ALL_PARTS_OFF)),
+                 smooth_held ? NK_UI_STR(ADAPTER_TITLE_SMOOTH_HELD) : "",
+                 cull_problem[0] ? NK_UI_STR(ADAPTER_TITLE_CULL_UNSUPPORTED) : "",
                  cull_problem);
         out->ace_line = player->ace_line;
     }
@@ -3640,32 +3694,32 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         ? player_preflight_plain_message(build_blocker) : "";
     out->build_preflight_folder = build_blocker
         ? app->package_build_preflight.action_folder : "";
-    out->compatibility_category = compatibility_category;
+    out->compatibility_category = app->settings.developer_mode
+        ? player_ui_compatibility_category_label(compatibility_category) : NULL;
     out->compatibility_tier = record_tier != PLAYER_UI_TIER_NONE
         ? record_tier : player_ui_tier_for_category(compatibility_category);
-    if (!app->settings.developer_mode) out->compatibility_category = NULL;
     /* The disc's executable is encrypted: the player decrypts it from the
        disc (#295). The title screen shows this only while the package still
        needs it. */
     out->input_note =
         game->executable_eboot_kind == NK_ISO_EXEC_PSP_ENCRYPTED &&
         game->executable_selection == NK_ISO_EXEC_SELECTION_NONE
-            ? "Nakagawa decrypts this game's program from your own disc, on this PC."
+            ? NK_UI_STR(ADAPTER_TITLE_DECRYPT_LOCALLY)
             : "";
     out->status_rgba = player_ui_library_status_color(package_ready, unrecorded);
     out->status_marker = player_ui_library_status_marker(game, package_ready, unrecorded);
     if (starting) {
-        out->library_status = "Starting";
+        out->library_status = NK_UI_STR(ADAPTER_LIBRARY_STARTING);
         out->status_rgba = PLAYER_UI_INFO;
         out->status_marker = "◆";
     } else if (out->package_state == PLAYER_UI_PACKAGE_CHECKING && !unrecorded) {
         /* Launcher review B4: until the background check has looked at the
            package, the card does not know it needs setup. */
-        out->library_status = "Checking";
+        out->library_status = NK_UI_STR(ADAPTER_LIBRARY_CHECKING);
         out->status_rgba = PLAYER_UI_INFO;
         out->status_marker = "◆";
     } else if (running) {
-        out->library_status = "Running";
+        out->library_status = NK_UI_STR(ADAPTER_LIBRARY_RUNNING);
         out->status_rgba = PLAYER_UI_READY;
         out->status_marker = "●";
     }
@@ -3679,11 +3733,13 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         bool queued = !rebuild.rebuilding && rebuild.queue_place > 0;
         if (rebuild.rebuilding && rebuild.fraction >= 0.0f) {
             snprintf(player->rebuild_word[index], sizeof(player->rebuild_word[index]),
-                     "%s %d%%", rebuild.word, (int)(rebuild.fraction * 100.0f + 0.5f));
+                     NK_UI_STR(ADAPTER_LIBRARY_ACTIVITY_PROGRESS), rebuild.word,
+                     (int)(rebuild.fraction * 100.0f + 0.5f));
             out->library_status = player->rebuild_word[index];
         } else if (queued) {
             snprintf(player->rebuild_word[index], sizeof(player->rebuild_word[index]),
-                     "%s %d of %d", rebuild.word, rebuild.queue_place, rebuild.queue_total);
+                     NK_UI_STR(ADAPTER_LIBRARY_ACTIVITY_PLACE), rebuild.word,
+                     rebuild.queue_place, rebuild.queue_total);
             out->library_status = player->rebuild_word[index];
         } else {
             out->library_status = rebuild.word;
@@ -3691,7 +3747,7 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->library_status_detail = rebuild.detail;
         if (queued) {
             snprintf(player->queue_detail[index], sizeof(player->queue_detail[index]),
-                     "Place in the build queue: %d of %d. %s", rebuild.queue_place,
+                     NK_UI_STR(ADAPTER_LIBRARY_QUEUE_PLACE), rebuild.queue_place,
                      rebuild.queue_total, rebuild.detail);
             out->library_status_detail = player->queue_detail[index];
         }
@@ -3710,10 +3766,10 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
     out->is_demo = game->is_showcase_package;
     /* A disc whose own ID is not a retail ID (a beta or a prototype) has a
        library key Nakagawa derived from its contents (nk_iso.h). */
-    out->badge = out->is_demo || out->art_kind != NK_UI_ART_NONE ? "Showcase demo"
-               : game->is_sample ? "Test program"
-               : nk_disc_id_is_non_retail_key(game->disc_id) ? "Beta / unofficial"
-               : "Your disc";
+    out->badge = out->is_demo || out->art_kind != NK_UI_ART_NONE ? NK_UI_STR(ADAPTER_BADGE_SHOWCASE)
+               : game->is_sample ? NK_UI_STR(ADAPTER_BADGE_TEST_PROGRAM)
+               : nk_disc_id_is_non_retail_key(game->disc_id) ? NK_UI_STR(ADAPTER_BADGE_UNOFFICIAL)
+               : NK_UI_STR(ADAPTER_BADGE_YOUR_DISC);
     /* Disc verification: a checked image says how it compares with the user's
        disc list; the check's progress is the library's heading line, so the
        badge changes once. A beta's own badge says more than "Unknown dump", and
@@ -3772,7 +3828,7 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
               strcmp(app->build_session.disc_id, game->disc_id) == 0);
         out->enhancement_problem = player_app_title_60hz_blocked(app, index)
             ? (enhancement->problem[0] ? enhancement->problem
-                                       : "Its enhancement package is missing.")
+                                       : NK_UI_STR(ADAPTER_TITLE_ENHANCEMENT_MISSING))
             : "";
     }
     player_ui_title_ace(player, app, index, out);
@@ -3780,52 +3836,52 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
     out->primary_action = PLAYER_UI_PRIMARY_NONE;
     if (app->launch_pending) {
         /* The launch worker hands back STOP GAME or an error card. */
-        out->primary_action_label = "STARTING…";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_STARTING);
     } else if (app->is_game_running) {
-        out->primary_action_label = "STOP GAME";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_STOP);
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_STOP_GAME;
     } else if (older && rebuild.rebuilding) {
         /* Its package is about to be replaced (or written for the first time,
            from the build queue); the package card says so. */
-        out->primary_action_label = rebuild.kind == PLAYER_QUEUE_BUILD ? "BUILDING…"
-                                                                       : "REBUILDING…";
+        out->primary_action_label = rebuild.kind == PLAYER_QUEUE_BUILD
+            ? NK_UI_STR(ADAPTER_TITLE_ACTION_BUILDING) : NK_UI_STR(ADAPTER_TITLE_ACTION_REBUILDING);
     } else if (player_app_title_60hz_blocked(app, index)) {
         /* 60 FPS game logic is on but its package is gone: neither variant
            builds or plays until the user turns it off or brings it back. */
-        out->primary_action_label = "ENHANCEMENT UNAVAILABLE";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_ACE_UNAVAILABLE);
     } else if (package_ready) {
-        out->primary_action_label = "PLAY";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_PLAY);
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_PLAY;
     } else if (check_failed && !checking) {
-        out->primary_action_label = "RETRY PACKAGE CHECK";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_RETRY_PACKAGE_CHECK);
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK;
     } else if (checking || package_status == NK_RUNTIME_PACKAGE_UNKNOWN) {
-        out->primary_action_label = "CHECKING PACKAGE";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_CHECKING_PACKAGE);
     } else if (package_status == NK_RUNTIME_PACKAGE_STALE) {
-        out->primary_action_label = "REBUILD PACKAGE";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_REBUILD_PACKAGE);
         if (!build_blocker) {
             out->primary_action_enabled = true;
             primary = PLAYER_UI_PRIMARY_BUILD;
         }
     } else if (package_status == NK_RUNTIME_PACKAGE_MISSING) {
-        out->primary_action_label = "BUILD PACKAGE";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_BUILD_PACKAGE);
         if (!build_blocker) {
             out->primary_action_enabled = true;
             primary = PLAYER_UI_PRIMARY_BUILD;
         }
     } else if (package_status == NK_RUNTIME_PACKAGE_INCOMPATIBLE) {
-        out->primary_action_label = "REBUILD PACKAGE";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_REBUILD_PACKAGE);
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_REBUILD;
         (void)player_incompatible_reason_line(reason, player->status_text[index],
                                               sizeof(player->status_text[index]));
     } else if (game->assets_staged) {
-        out->primary_action_label = "RUNTIME REQUIRED";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_RUNTIME_REQUIRED);
     } else {
-        out->primary_action_label = "PREPARATION UNAVAILABLE";
+        out->primary_action_label = NK_UI_STR(ADAPTER_TITLE_ACTION_PREPARATION_UNAVAILABLE);
     }
     {
         /* The build queue: a game BUILD PACKAGE would build can wait its turn
@@ -4692,7 +4748,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         if (slots > page_size) {
             size_t page_count = (slots + page_size - 1u) / page_size;
             snprintf(player->library_page_label,
-                     sizeof(player->library_page_label), "Page %zu of %zu",
+                     sizeof(player->library_page_label), NK_UI_STR(ADAPTER_LIBRARY_PAGE_NUMBER),
                      player->library_page + 1u, page_count);
             model.page_label = player->library_page_label;
         } else {
@@ -4701,7 +4757,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         }
         if (app->update.notice) {
             snprintf(player->update_notice, sizeof(player->update_notice),
-                     "Version %.40s is out", app->update.check.newest.version);
+                     NK_UI_STR(ADAPTER_LIBRARY_UPDATE_NOTICE), app->update.check.newest.version);
             model.update_notice = player->update_notice;
         }
         /* The data folder notice (#324), the library file's notice and the one summary of files
@@ -4810,7 +4866,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 if (app->achievements_list_loaded &&
                     strcmp(app->achievements_list_disc_id, game->disc_id) == 0) {
                     model.achievements_status = app->achievements_status[0]
-                        ? app->achievements_status : "Achievement set loaded.";
+                        ? app->achievements_status : NK_UI_STR(ADAPTER_ACHIEVEMENT_SET_READY);
                     model.achievement_count = app->achievements_list_count <
                             PLAYER_ACHIEVEMENTS_LIST_MAX
                         ? app->achievements_list_count : PLAYER_ACHIEVEMENTS_LIST_MAX;
@@ -4835,13 +4891,12 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                        than that says how many it shows and where the rest are. */
                     if (model.achievement_total > model.achievement_count)
                         (void)snprintf(model.achievements_more, sizeof model.achievements_more,
-                                       "Showing %zu of %zu achievements. All of them are on "
-                                       "this game's page at retroachievements.org.",
+                                       NK_UI_STR(ADAPTER_ACHIEVEMENT_MORE),
                                        model.achievement_count, model.achievement_total);
                 } else if (!app->achievements_signed_in) {
-                    model.achievements_status = "Sign in in Settings > Online to load this game's set.";
+                    model.achievements_status = NK_UI_STR(ADAPTER_ACHIEVEMENT_SIGN_IN);
                 } else {
-                    model.achievements_status = "Play this game to load its achievement set.";
+                    model.achievements_status = NK_UI_STR(ADAPTER_ACHIEVEMENT_PLAY_TO_LOAD);
                 }
                 /* With cheats or the 60 FPS game-logic package nothing is earned, and the page
                    says why before the game starts (player_app_achievements_block), in the
@@ -4997,12 +5052,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                     /* No plan, so nothing is removed: say why rather than ignore the press. */
                     const char *blocker = player_app_removal_blocker(app, index);
                     player_app_set_error(
-                        app, "REMOVE_PLAN_FAILED", "The game was not removed",
+                        app, "REMOVE_PLAN_FAILED", NK_UI_STR(ADAPTER_REMOVE_ERROR_TITLE),
                         blocker != NULL
                             ? blocker
-                            : "Nakagawa could not list this game's files safely: a folder "
-                              "path is too long. Nothing was removed.",
-                        "Back", VIEW_LIBRARY);
+                            : NK_UI_STR(ADAPTER_REMOVE_PATH_TOO_LONG),
+                        NK_UI_STR(ADAPTER_RECOVERY_BACK), VIEW_LIBRARY);
                 }
                 action.kind = PLAYER_UI_ACTION_NONE;
             } else if (action.kind == PLAYER_UI_ACTION_PRIMARY &&
@@ -5212,7 +5266,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         if (player_app_rebuild_reminder_visible(app)) {
             int index = player_app_find_game_by_disc_id(app, app->outdated.reminder_disc_id);
             model.title = index >= 0 && app->games[index].title_name[0]
-                ? app->games[index].title_name : "This game";
+                ? app->games[index].title_name : NK_UI_STR(ADAPTER_TITLE_FALLBACK);
             model.text = PLAYER_REBUILD_REMINDER_TEXT;
         } else {
             (void)player_app_rebuild_prompt_text(app, player->rebuild_text,

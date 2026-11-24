@@ -771,6 +771,7 @@ typedef struct {
        page, the library's ("Library (16x)") before them. */
     const char *const *labels;
     int label_count;
+    int unavailable_label;      /* 1-based part label index, or 0 when all are available */
     const char *library_value;  /* NULL on the library's page */
 } PlayerUiEnhancedRow;
 
@@ -847,6 +848,7 @@ typedef struct {
     /* Every play mode the play mode row steps through, in order. */
     const char *const *enhanced_modes;
     int enhanced_mode_count;
+    int enhanced_mode_index;       /* index in enhanced_modes, or -1 if unavailable */
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];

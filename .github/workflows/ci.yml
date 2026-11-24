@@ -1455,6 +1455,20 @@ jobs:
           printf '%s\n' "$help_output"
           grep -Fq "Usage: nakagawa_player" <<<"$help_output"
 
+      - name: Run the pinned gu-cube player smoke
+        if: matrix.part == 'player'
+        env:
+          NK_HOMEBREW_RUNTIME_REQUIRED: "1"
+          SDL_VIDEODRIVER: x11
+        run: |
+          set -euo pipefail
+          export PYTHON="$(command -v python)"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
+          xvfb-run -a -s "-screen 0 1280x800x24" \
+            python -m unittest -v tools.test_homebrew_corpus.CorpusRuntimeSmokeTests.test_gu_cube_runtime_smoke \
+            2>&1 | tee "$RUNNER_TEMP/gu-cube-smoke.log"
+          grep -Eq '^GU_CUBE_RUNTIME_SMOKE presents=120 ' "$RUNNER_TEMP/gu-cube-smoke.log"
+
       - name: Build and run the Linux showcase headlessly
         if: matrix.part == 'player'
         id: showcase

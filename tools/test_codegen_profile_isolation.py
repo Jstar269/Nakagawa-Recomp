@@ -466,7 +466,8 @@ class ProfileHstCouplingTests(unittest.TestCase):
 
 
 class ProfileHstLegacyTests(unittest.TestCase):
-    """profile=hst must still emit each legacy behavior, in production config."""
+    """What profile=hst emits in production config. Every body it used to put in place of the
+    title's own code is retired (#363), so the checks left are that none comes back."""
 
     @classmethod
     def setUpClass(cls):
@@ -477,20 +478,16 @@ class ProfileHstLegacyTests(unittest.TestCase):
         _CodegenRun._cache.clear()
 
     def test_legacy_hst_emission_is_unchanged(self):
-        expected = (
-            "sr_newlib_malloc(s->r[5], owner_ra)",
-            "sr_newlib_free(s->r[5], owner_ra)",
-            "sr_newlib_memalign",
-            "sr_newlib_realloc",
-            "sr_native_memmove(dest, s->r[5], s->r[6], 0x00011090u)",
-            "sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x000114c0u)",
-        )
-        missing = [s for s in expected if s not in self.combined]
-        self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
+        # Nothing is left to expect: the last legacy bodies (the allocator bridges and the
+        # native copy and fill) are retired, and no "custom stub" may be emitted at all.
+        self.assertNotIn("custom stub", self.combined, "profile=hst emits a hand-written body")
         # Retired under #363: the guest's own loops and abort() run as written.
         # The native sprintf went on 2026-11-11: the title's own formatter runs.
+        # The native copy and fill went on 2026-11-23: the title's own routines run.
+        # The four allocator bridges went together: the title's own allocator runs.
         for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)",
-                        "sr_guest_sprintf"):
+                        "sr_guest_sprintf", "sr_newlib_", "sr_native_memmove",
+                        "sr_native_memset"):
             self.assertNotIn(retired, self.combined, f"profile=hst still emits {retired}")
 
     def test_diagnostic_probes_stay_compiled_out_in_production(self):
@@ -1173,10 +1170,17 @@ class RetiredAddressGuardTests(unittest.TestCase):
 #: on 2026-11-11). Under profile=hst each of these addresses used to emit a title stub (a
 #: static-success simple stub, the heap-statistics walk skip, the backdrop chooser's
 #: postcondition wrapper, or a native sprintf) in place of, or around, its own body. Each
-#: now translates its own instructions under every profile.
+#: now translates its own instructions under every profile. The last four are the allocator
+#: family (_free_r, _memalign_r, _malloc_r, _realloc_r), whose bridges to the runtime's own
+#: heap were retired together.
 RETIRED_363_STUB_ADDRESSES: tuple[int, ...] = (
     0x00015F98, 0x0001034C, 0x0001C010, 0x0001C0FC, 0x0001C104, 0x0001C560,
     0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0, 0x000143B0,
+    0x0000F538, 0x000101C4, 0x00010738, 0x00013524,
+) + (
+    # The native copy (sr_native_memmove) and fill (sr_native_memset) bodies, retired on
+    # 2026-11-23: the title's own copy and fill routines translate as written.
+    0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
 )
 
 
@@ -1425,6 +1429,23 @@ def _calls(text: str, names: set[str]):
             yield match.group(1), text[open_at + 1:_balanced(text, open_at) - 1]
 
 
+#: A body of scalar loads and stores for NullPageGuardTests, at an address no HST table names.
+GUARDED_ACCESS = 0x00012000
+
+
+def _guarded_access_body() -> list[int]:
+    a0, t0 = 4, 8
+    return [
+        _itype(0x23, a0, t0, 0),     # lw  t0, 0(a0)
+        _itype(0x2B, a0, t0, 4),     # sw  t0, 4(a0)
+        _itype(0x24, a0, t0, 8),     # lbu t0, 8(a0)
+        _itype(0x28, a0, t0, 9),     # sb  t0, 9(a0)
+        _itype(0x25, a0, t0, 10),    # lhu t0, 10(a0)
+        _itype(0x29, a0, t0, 12),    # sh  t0, 12(a0)
+        JR_RA, NOP,
+    ]
+
+
 class NullPageGuardTests(unittest.TestCase):
     """A zero-based image occupies the range the PSP leaves unmapped, so a null base plus a
     field offset reaches real image bytes instead of faulting (#363)."""
@@ -1478,12 +1499,19 @@ class NullPageGuardTests(unittest.TestCase):
         # Generic over emitters: every runtime helper that reaches the arena (g_mem), directly
         # or through another helper, is found from the preprocessed header, and every call a
         # guarded HST body makes to one must carry a checked address. A bulk shortcut that
-        # forms its own host pointer is caught the same way as a scalar access.
+        # forms its own host pointer is caught the same way as a scalar access. The last
+        # hand-written bulk bodies (the native copy and fill) were retired under #363, so the
+        # specimen carries a translated body of scalar loads and stores of its own: the check
+        # must not pass because no body touches memory.
         cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if cc is None:
             self.skipTest("TOOLCHAIN_MISSING: no C compiler")
-        bodies = _CodegenRun.functions("hst")
-        self.assertIn("sr_native_memmove(", "".join(bodies.values()))
+        self.assertNotIn(GUARDED_ACCESS, COVERED)
+        bodies = _codegen_functions(
+            _build_specimen_words({GUARDED_ACCESS: _guarded_access_body()}), "hst")
+        access = bodies[f"f_{GUARDED_ACCESS:08x}"]
+        for form in ("MEM_R32(", "MEM_W32_PC(", "MEM_R8(", "MEM_W8_PC(", "MEM_R16(", "MEM_W16_PC("):
+            self.assertIn(form, access, "the specimen's access body lost a load or store")
         marker = "int nk_guarded_bodies_start;"
         source = ('#define SR_NULL_PAGE_GUARD 1\n#include "recomp.h"\n' + marker + "\n"
                   + "\n".join(bodies.values()) + "\n")
@@ -1499,12 +1527,15 @@ class NullPageGuardTests(unittest.TestCase):
         self.assertIn("sr_host_address", helpers)
         self.assertIn("sr_guest_fill", helpers)
         unchecked = []
+        checked = 0
         for name, args in _calls(generated, helpers):
             if "sr_null_page_checked(" in args or "sr_null_span_checked(" in args:
+                checked += 1
                 continue
             if re.fullmatch(r"[\s(]*0x[0-9a-fA-F]+u?[\s)]*", args.split(",")[0]):
                 continue  # a translation-time address: the body reading its own code
             unchecked.append(f"{name}({' '.join(args.split())[:120]})")
+        self.assertGreaterEqual(checked, 6, "the access body's loads and stores were not checked")
         self.assertEqual(sorted(set(unchecked)), [],
                          "these guarded calls reach guest memory with no null-page check")
 

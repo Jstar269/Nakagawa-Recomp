@@ -7,6 +7,7 @@
    library reads as an error. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -45,8 +46,8 @@ static void disc_rows(NkUi *ui, const PlayerUiDiscModel *model, float inner, int
     size_t rows = model->check_count < PLAYER_UI_DISC_CHECKS ? model->check_count
                                                               : PLAYER_UI_DISC_CHECKS;
     float status_w = scr_check_column_width(ui, model->checks, rows, true, NK_UI_TYPE_LABEL,
-                                        "Checked", 132.0f);
-    float name_w = scr_check_column_width(ui, model->checks, rows, false, NK_UI_TYPE_BODY_S, "Check",
+                                        NK_UI_STR(DISC_CHECKED), 132.0f);
+    float name_w = scr_check_column_width(ui, model->checks, rows, false, NK_UI_TYPE_BODY_S, NK_UI_STR(DISC_CHECK),
                                       124.0f);
     float message = inner - 32.0f - status_w - name_w - 2.0f * NK_UI_SPACE_3;
     box.padding_top = box.padding_bottom = lines > 1 ? 12.0f : 8.0f;
@@ -63,14 +64,14 @@ static void disc_rows(NkUi *ui, const PlayerUiDiscModel *model, float inner, int
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
             cell.padding_top = 2.0f;
             if (nk_ui_begin_container(ui, base + 1u, &cell, NULL)) {
-                nk_ui_text_role(ui, base + 4u, nk_ui_caps(ui, safe_text(check->status, "Checked")),
+                nk_ui_text_role(ui, base + 4u, nk_ui_caps(ui, safe_text(check->status, NK_UI_STR(DISC_CHECKED))),
                                 NK_UI_TYPE_LABEL, check->rgba);
                 nk_ui_end_container(ui);
             }
             cell.width = sizing_fixed(name_w);
             cell.padding_top = 0.0f;
             if (nk_ui_begin_container(ui, base + 2u, &cell, NULL)) {
-                nk_ui_text_role(ui, base + 5u, safe_text(check->name, "Check"), NK_UI_TYPE_BODY_S,
+                nk_ui_text_role(ui, base + 5u, safe_text(check->name, NK_UI_STR(DISC_CHECK)), NK_UI_TYPE_BODY_S,
                                 theme->paper);
                 nk_ui_end_container(ui);
             }
@@ -86,13 +87,13 @@ static void disc_rows(NkUi *ui, const PlayerUiDiscModel *model, float inner, int
 
 PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Back to library"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(DISC_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(DISC_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(DISC_BACK_TO_LIBRARY)}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     const char *marker = FLOW_MARK_DOT;
-    const char *badge = "Game found";
+    const char *badge = NK_UI_STR(DISC_GAME_FOUND);
     const char *lead = NULL;
     uint32_t tone;
     float inner;
@@ -109,33 +110,33 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model) {
     switch (model->kind) {
         case PLAYER_UI_DISC_CHECKING:
             marker = FLOW_MARK_DIAMOND;
-            badge = "Checking the disc";
+            badge = NK_UI_STR(DISC_CHECKING_BADGE);
             tone = theme->accent_dark;
-            lead = "Nakagawa is reading the disc image to find out which game it is.";
+            lead = NK_UI_STR(DISC_CHECKING_DETAILS);
             break;
         case PLAYER_UI_DISC_SUPPORTED:
-            lead = "On Nakagawa's list. Add it to your library, then build it there to play.";
+            lead = NK_UI_STR(DISC_SUPPORTED_DETAILS);
             break;
         case PLAYER_UI_DISC_UNTESTED:
             marker = "?";
-            badge = "Not tested yet";
+            badge = NK_UI_STR(DISC_UNTESTED_BADGE);
             tone = theme->info;
-            lead = "Not tested with this game yet. You can add it and try.";
+            lead = NK_UI_STR(DISC_UNTESTED_DETAILS);
             break;
         case PLAYER_UI_DISC_BLOCKED:
             marker = guided ? FLOW_MARK_TRIANGLE : FLOW_MARK_CROSS;
-            badge = guided ? "Needs your files" : "Can't play yet";
+            badge = guided ? NK_UI_STR(DISC_NEEDS_FILES_BADGE) : NK_UI_STR(DISC_BLOCKED_BADGE);
             tone = guided ? theme->warning : theme->error;
-            lead = "This game can't be played in this version of Nakagawa yet.";
+            lead = NK_UI_STR(DISC_BLOCKED_DETAILS);
             break;
         case PLAYER_UI_DISC_UNSUPPORTED:
         default:
             marker = FLOW_MARK_CROSS;
-            badge = "Not on the list yet";
+            badge = NK_UI_STR(DISC_UNSUPPORTED_BADGE);
             tone = theme->error;
             lead = model->profile_details != NULL && model->profile_details[0] != '\0'
-                ? "Nakagawa couldn't use this game's title profile, so it can't be added yet."
-                : "This game isn't on Nakagawa's list yet, so it can't be added.";
+                ? NK_UI_STR(DISC_INVALID_PROFILE_DETAILS)
+                : NK_UI_STR(DISC_UNSUPPORTED_DETAILS);
             break;
     }
     {
@@ -146,21 +147,21 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model) {
                 nk_ui_tag(ui, DISC_ID_CHIPS + 2u, model->disc_id);
             }
             if (model->kind != PLAYER_UI_DISC_CHECKING) {
-                nk_ui_tag(ui, DISC_ID_CHIPS + 3u, safe_text(model->badge, "Your disc"));
+                nk_ui_tag(ui, DISC_ID_CHIPS + 3u, safe_text(model->badge, NK_UI_STR(DISC_YOUR_DISC)));
             }
             nk_ui_end_container(ui);
         }
     }
     if (model->kind == PLAYER_UI_DISC_CHECKING) {
-        disc_text(ui, 0u, "Checking your disc", NK_UI_TYPE_TITLE, theme->paper);
+        disc_text(ui, 0u, NK_UI_STR(DISC_CHECKING_HEADING), NK_UI_TYPE_TITLE, theme->paper);
     } else {
-        disc_text(ui, 0u, safe_text(model->title_name, "PSP game"), NK_UI_TYPE_TITLE,
+        disc_text(ui, 0u, safe_text(model->title_name, NK_UI_STR(DISC_GAME_FALLBACK)), NK_UI_TYPE_TITLE,
                   theme->paper);
     }
     if (guided) {
         /* Encrypted program files the user can supply (#308): the next step,
            not a dead end. */
-        lead = "This game needs files from your own disc before Nakagawa can use it.";
+        lead = NK_UI_STR(DISC_NEEDS_FILES_DETAILS);
     }
     disc_text(ui, 1u, lead, NK_UI_TYPE_BODY, model->kind == PLAYER_UI_DISC_BLOCKED && !guided
                                                  ? theme->error : theme->muted);
@@ -183,7 +184,7 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model) {
             if (nk_ui_begin_container(ui, DISC_ID_DETAILS, &box, &style)) {
                 NkUiTextStyle data = nk_ui_type(NK_UI_TYPE_DATA, theme->muted);
                 data.wrap = true;
-                nk_ui_eyebrow(ui, DISC_ID_DETAILS + 1u, "Details");
+                nk_ui_eyebrow(ui, DISC_ID_DETAILS + 1u, NK_UI_STR(DISC_DETAILS_HEADING));
                 nk_ui_text(ui, DISC_ID_DETAILS + 2u,
                            nk_ui_text_clamp(ui, model->profile_details, &data, inner - 28.0f, 2),
                            &data);
@@ -212,17 +213,17 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model) {
         if (nk_ui_begin_container(ui, DISC_ID_TEXT + 0x40u, &row, NULL)) {
             switch (model->kind) {
                 case PLAYER_UI_DISC_CHECKING:
-                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, "Cancel", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, NK_UI_STR(DISC_CANCEL), 0u)) {
                         result = disc_op(PLAYER_UI_DISC_BACK);
                     }
                     break;
                 case PLAYER_UI_DISC_SUPPORTED:
                 case PLAYER_UI_DISC_UNTESTED:
-                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, "Add to library",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, NK_UI_STR(DISC_ADD_TO_LIBRARY),
                                      NK_UI_BUTTON_PRIMARY)) {
                         result = disc_op(PLAYER_UI_DISC_ADD);
                     }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_SECOND, "Back", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_SECOND, NK_UI_STR(DISC_BACK), 0u)) {
                         result = disc_op(PLAYER_UI_DISC_BACK);
                     }
                     break;
@@ -231,30 +232,30 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model) {
                        Files the user can supply get Check again, which reads
                        the same disc again, and the folder they go in (#308). */
                     if (guided) {
-                        if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, "Check again",
+                        if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, NK_UI_STR(DISC_CHECK_AGAIN),
                                          NK_UI_BUTTON_PRIMARY)) {
                             result = disc_op(PLAYER_UI_DISC_CHECK_AGAIN);
                         }
                         if (model->input_guide.folder != NULL &&
                             model->input_guide.folder[0] != '\0' &&
-                            nk_ui_button(ui, PLAYER_UI_ID_DISC_OPEN_FOLDER, "Open folder", 0u)) {
+                            nk_ui_button(ui, PLAYER_UI_ID_DISC_OPEN_FOLDER, NK_UI_STR(DISC_OPEN_FOLDER), 0u)) {
                             result = disc_op(PLAYER_UI_DISC_OPEN_FOLDER);
                         }
-                    } else if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, "Choose another disc",
+                    } else if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, NK_UI_STR(DISC_CHOOSE_ANOTHER),
                                             NK_UI_BUTTON_PRIMARY)) {
                         result = disc_op(PLAYER_UI_DISC_CHOOSE_ANOTHER);
                     }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_SECOND, "Back", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_SECOND, NK_UI_STR(DISC_BACK), 0u)) {
                         result = disc_op(PLAYER_UI_DISC_BACK);
                     }
                     break;
                 case PLAYER_UI_DISC_UNSUPPORTED:
                 default:
-                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, "Back to library",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_PRIMARY, NK_UI_STR(DISC_BACK_TO_LIBRARY),
                                      NK_UI_BUTTON_PRIMARY)) {
                         result = disc_op(PLAYER_UI_DISC_BACK);
                     }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_SECOND, "Choose another disc", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_DISC_SECOND, NK_UI_STR(DISC_CHOOSE_ANOTHER), 0u)) {
                         result = disc_op(PLAYER_UI_DISC_CHOOSE_ANOTHER);
                     }
                     break;
@@ -263,7 +264,7 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model) {
         }
     }
     scr_flow_end(ui, model->kind == PLAYER_UI_DISC_SUPPORTED || model->kind == PLAYER_UI_DISC_UNTESTED
-                     ? "Your disc image stays where it is. Nothing is uploaded."
+                     ? NK_UI_STR(DISC_PRIVACY_NOTE)
                      : "",
              prompts, 3u);
     return result;

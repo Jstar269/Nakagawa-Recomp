@@ -356,8 +356,11 @@ void sr_load_segment(uint32_t vaddr, const void *data, uint32_t len) {
     if (vaddr < g_loaded_base) g_loaded_base = vaddr;
 }
 
-/* Newlib malloc/free backing store (guest addresses 0x00010738 / 0x000104e0 in
- * tools/codegen.py's custom stubs). Per-block header at (payload - 8):
+/* A guest heap the runtime owns. No generated code reaches it any more: the bridges that
+ * handed Hot Shots Tennis's _malloc_r, _free_r, _memalign_r and _realloc_r to it were
+ * retired under #363 and the title's own allocator runs. It stays, with its selftest
+ * (tests/native/heap_selftest.c), until that retirement has its private title acceptance;
+ * removing it is tracked in #363. Per-block header at (payload - 8):
  *   +0: while free, the guest address of the next free block (0 = list end).
  *       While allocated, unused.
  *   +4: total block size (header + payload, always a multiple of 16) with bit0 set
