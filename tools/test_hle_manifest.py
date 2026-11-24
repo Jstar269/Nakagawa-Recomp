@@ -1307,7 +1307,7 @@ class LiveManifestTests(unittest.TestCase):
         self.assertIn("corroboration only", autotests[0])
         self.assertIn("recorded for sceAudioOutputBlocking only", autotests[0])
         # Derived evidence only: no PSP oracle record is cited, because none measures this API.
-        self.assertFalse(any("PSP-" in e and "PSPAutotests" not in e for e in evidence))
+        self.assertFalse(any(re.search(r"PSP-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d{3}", e) for e in evidence))
         self._assert_cited_cells_are_manifest_cells(evidence)
         dispatched = hle_manifest.selftest_dispatched_nids(
             hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
@@ -2667,8 +2667,14 @@ class ProfileZeroImportGateTests(unittest.TestCase):
     def test_the_cli_fails_on_a_stale_allowlist_entry(self) -> None:
         import tempfile
         allowlisted = sorted(meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # The guest still imports something: a reviewed NID keeps its import table non-empty
+        # when the allowlist holds a single entry.
+        reviewed = next(
+            int(r["nid"], 16) for r in self.manifest["registrations"]
+            if r["classification"] == "dedicated" and r["status"] == "partial"
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            module = self._module(tmp, allowlisted[1:])
+            module = self._module(tmp, allowlisted[1:] + [reviewed])
             rc, err = self._main("--out", str(Path(tmp) / "m.json"), "--imports", str(module),
                                  "--check-profile-zero-imports")
         self.assertEqual(rc, 1)
