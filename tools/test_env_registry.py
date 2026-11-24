@@ -65,6 +65,16 @@ EXPLICIT_ENV_RE = re.compile(
     r"\$env:([A-Za-z][A-Za-z0-9_]*)|%([A-Z][A-Z0-9_]+)%|\bexport\s+([A-Z][A-Z0-9_]+)\s*="
     r"|`([A-Z][A-Z0-9_]+)`\s+environment variables?\b"
     r"|\benvironment variable\s+`([A-Z][A-Z0-9_]+)`"
+    r'|\b(?i:set)[ \t]+"([A-Z][A-Z0-9_]+)=[^"\r\n]*"'
+    r"|\b(?i:prefix the command with)[ \t]+`([A-Z][A-Z0-9_]+)="
+)
+POSIX_ASSIGNMENT_WORD = r"""[A-Z][A-Z0-9_]+=(?:"[^"`\r\n]*"|'[^'`\r\n]*'|[^\s`"']*)"""
+POSIX_ASSIGNMENT_RE = re.compile(POSIX_ASSIGNMENT_WORD)
+# Require a command after the leading assignments. A Make argument or an
+# isolated assignment in prose does not establish an environment input.
+POSIX_ENV_COMMAND_RE = re.compile(
+    rf"(?:^|`)[ \t]*(?:env[ \t]+)?((?:{POSIX_ASSIGNMENT_WORD}[ \t]+)+)"
+    r"(?=[A-Za-z0-9_./-]+(?:[ \t\r\n`]|$))", re.MULTILINE,
 )
 CLI_CLASSES = {
     "Stable user-facing, printed in `--help`",
@@ -86,8 +96,8 @@ ENV_CLASSES = {
     "Inherited fallback, not a launcher export", "Retired runtime overrides",
     "Diagnostic and developer-only", "Host and system", "Test-only",
 }
-# These host variables belong to the launcher/Python setup and are outside the runtime registry.
-SETUP_HOST_ONLY = {"APPDATA", "LOCALAPPDATA"}
+# Host inputs for launcher setup or its shell tooling, outside the runtime registry.
+SETUP_HOST_ONLY = {"APPDATA", "LOCALAPPDATA", "MSYS_NO_PATHCONV"}
 SETUP_TOOL_ONLY = {"CODEGEN_ORACLE", "LOCAL_COSIM_TRACE", "MICROTEST_MODULE", "MICROTEST_ORACLE",
                    "PSP_HARDWARE_TRACE"}
 # SETUP names this compile-time limit next to the manifest overlay directory.
@@ -157,6 +167,9 @@ def setup_environment_names(text, known, families):
     names = {name for name in symbols if name.startswith(("SR_", "NK_"))
              or covered(name, known, families)}
     names.update(name.upper() for match in EXPLICIT_ENV_RE.findall(text) for name in match if name)
+    names.update(word.split("=", 1)[0]
+                 for prefix in POSIX_ENV_COMMAND_RE.findall(text)
+                 for word in POSIX_ASSIGNMENT_RE.findall(prefix))
     # A numbered spelling in SETUP means the corresponding registered family.
     return {re.sub(r"\d+$", "N", name)
             if name not in known and covered(name, known, families) else name for name in names}
@@ -388,6 +401,7 @@ class EnvRegistryTests(unittest.TestCase):
                          "classified variables missing from src/rt/env_registry.h")
         self.assertEqual(sorted(build & self.names), [], "runtime variables classed as build inputs")
         self.assertLessEqual(SETUP_HOST_ONLY, host)
+        self.assertFalse(SETUP_HOST_ONLY & self.names, "host-only inputs belong outside the runtime registry")
         self.assertLessEqual(SETUP_TOOL_ONLY, test)
         self.assertEqual(host & self.names, {e["name"] for e in self.entries
                                             if e["name"] in classified and e["kind"] == "system"})
@@ -410,6 +424,22 @@ class EnvRegistryTests(unittest.TestCase):
                  "GPU and `WIDGET_SDK` are acronyms.")
         self.assertEqual(setup_environment_names(setup, {"VULKAN_SDK"}, set()),
                          {"CUSTOM_SDK", "OTHER_SDK", "BUILD_TOOL", "DEVSDK", "USER_HOME", "VULKAN_SDK"})
+
+    def test_setup_shell_assignments_are_classified_as_environment_inputs(self):
+        cases = (
+            ("inline POSIX", "Run `STAGER_MODE=quiet python stage.py`.", {"STAGER_MODE"}),
+            ("env command", "Run `env STAGER_MODE=quiet python stage.py`.", {"STAGER_MODE"}),
+            ("multiple prefixes", "STAGER_MODE='quiet output' STAGER_ROOT=scratch/stage python stage.py\n",
+             {"STAGER_MODE", "STAGER_ROOT"}),
+            ("quoted cmd set", 'Use `set "STAGER_MODE=quiet"` before staging.', {"STAGER_MODE"}),
+            ("host prefix instruction", "Prefix the command with `MSYS_NO_PATHCONV=1`.",
+             {"MSYS_NO_PATHCONV"}),
+            ("Make argument", "Run `make target STAGER_MODE=quiet`.", set()),
+            ("ordinary acronym", "STAGER_MODE is an acronym in this example.", set()),
+        )
+        for label, setup, names in cases:
+            with self.subTest(syntax=label):
+                self.assertEqual(setup_environment_names(setup, set(), set()), names)
 
 
 if __name__ == "__main__":
