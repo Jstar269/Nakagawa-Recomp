@@ -2526,6 +2526,35 @@ class BoundedLibraryJsonTests(unittest.TestCase):
         self.assertEqual(entry["boot_executable"], "BOOT.BIN")
         self.assertEqual(entry["title_id"], "synthetic_one")
 
+    def test_v002_and_v003_player_libraries_round_trip(self) -> None:
+        for release in ("v0.0.2", "v0.0.3"):
+            with self.subTest(release=release):
+                fixture = REPO_ROOT / "tests" / "fixtures" / "user_data" / release / "library.json"
+                original = fixture.read_bytes()
+                data = self.temp_dir / release
+                data.mkdir()
+                path = data / "library.json"
+                path.write_bytes(original)
+                before = nk_cli._read_library_json(path)
+                self.assertEqual(before["schema_version"], 1)
+                first = nk_cli._load_library_entry(data, "TEST80003")
+                self.assertEqual(first["source_image_path"], r"<drive>:\SyntheticFixture\Images\preview.cso")
+                self.assertEqual(first["selected_executable"], "EBOOT.BIN")
+                self.assertEqual(first["boot_executable"], "BOOT.BIN")
+                self.assertEqual(first["content_sha1"], "0123456789abcdef0123456789abcdef01234567")
+                library = GameLibrary.load(path)
+                self.assertEqual(library.count(), 2)
+                self.assertEqual(path.read_bytes(), original)
+
+                library.save()
+                after = nk_cli._read_library_json(path)
+                self.assertEqual(after["schema_version"], 1)
+                saved = {row["disc_id"]: row for row in after["games"]}
+                self.assertEqual(set(saved), {"TEST80003", "TEST80004"})
+                for row in before["games"]:
+                    self.assertEqual({key: saved[row["disc_id"]][key] for key in row}, row)
+                self.assertEqual(fixture.read_bytes(), original)
+
     def test_library_target_with_tmp_suffix_is_preserved(self) -> None:
         path = self.temp_dir / "library.tmp"
         lib = GameLibrary(storage_file=path)
