@@ -588,6 +588,57 @@ Steps:
 
 Report the result in the release pull request: the ZIP SHA-256, the Windows build and VM type, the GPU, the time for extraction and for BUILD PACKAGE, and `PASS`, `FAIL` or `BLOCKED` for each step. Evidence about the title stays private (AGENTS.md section 5): report the title's catalog name and the step results only, with no captures, logs or paths from the run.
 
+## Withdraw a harmful release
+
+The maintainer decides whether to withdraw a release when a confirmed regression can lose or corrupt
+user data, prevent startup for many users, or expose users to a security vulnerability
+([withdrawal tracking issue](https://github.com/Jstar269/Nakagawa-Recomp/issues/2746)).
+Only the maintainer changes GitHub releases. Contributors can draft the notice and prepare the fix.
+
+1. **Warn users immediately.** As soon as the maintainer decides to withdraw the release, publish a
+   stop-use notice with the affected version, symptoms, immediate action, and the safe version to use.
+   Post it in a public issue or discussion. For a security issue, coordinate the notice through the
+   [security advisory process](../SECURITY.md#how-reports-are-handled). If the signing key was
+   exposed, follow the [signing key replacement procedure](RELEASE_SIGNING.md#replace-the-key).
+   Mark the version withdrawn in its `docs/RELEASE_NOTES_v<version>.md` and update the current
+   release references in the [README](../README.md) and [compatibility guide](COMPATIBILITY.md).
+2. **Remove the download and verify.** Delete the affected GitHub release entry. Preserve the Git
+   tag on the original commit, retire the version number permanently, and leave the published asset
+   names and bytes intact until removal. See
+   [GitHub's release deletion instructions](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository#deleting-a-release).
+   From a signed-out session, confirm that the public Releases API omits the affected version and
+   that each packaged asset is unavailable. Record removal as verified only when both checks
+   succeed. If a check fails, the feed still lists the release, or an asset remains downloadable,
+   keep the warning visible, record removal as unconfirmed, and retry or escalate.
+3. **Publish the fix under a new version.** Build a new patch release, include a regression check
+   for the original problem, and run the normal packaging, signing, and acceptance steps in this
+   guide and the [release signing guide](RELEASE_SIGNING.md). Link the fixed version from the
+   withdrawal notice and identify the withdrawn version in the replacement's release notes.
+
+### If you already installed the affected version
+
+Close the affected player and start the last safe version from its own installation folder. If
+needed, download that version from the link in the withdrawal notice and install it separately.
+The Windows in-app ZIP installer creates a new folder and leaves per-user data where it is.
+
+If the older player refuses a settings or controls file written by the affected version, close
+both players. In the [user data folders](RUNTIME_PACKAGING_ARCHITECTURE.md#7-per-user-data-formats-and-versions), copy the current file
+somewhere safe, then copy the compatible `<file>.v<version>.bak` over the original filename.
+Keep the backup and the saved copy. If no compatible backup exists, follow the withdrawal
+notice for that version before changing any files. The
+[per-user schema rules](RUNTIME_PACKAGING_ARCHITECTURE.md#7-per-user-data-formats-and-versions)
+list the files that have versioned backups.
+
+### What players see when they check for updates
+
+The [update checker](../src/player/update_check.h) reads up to ten entries from GitHub Releases and
+chooses the highest supported version tag in that response. Drafts are skipped and pre-releases
+still count, so marking a release as a pre-release leaves it eligible. On a fresh successful check
+after the release entry is gone, an older player can be offered the next eligible version above
+its own. A player already running the withdrawn version only offers an update when a higher
+version is available. It continues running its installed build and has no withdrawal alert or
+automatic downgrade. The withdrawal notice supplies the rollback instructions until the fix ships.
+
 ## Attribution boundary
 
 `NOTICE.md`, `third_party/licenses/`, `assets/release_manifest.json`, `assets/upstream/`, and the vendored ATRAC3+ license record attribution and third-party license data for a release candidate. The packaged native binaries also require the generated `THIRD_PARTY_NOTICES` bundle and `RELINK.md` described above.
