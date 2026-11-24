@@ -1197,7 +1197,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   `vwbn.s` applies the rule at every exponent; only the eight listed have cells. Unmeasured, and failing closed in
   both lanes: a pending prefix (the T and D prefixes were never set), the other widths, `vf2h`, `vrnds`, and
   `vc2i`. `vus2i.s/.p` are implemented in both lanes from an unrecorded PSP read (probe case `vfpu-vus2i`,
-  which also read `vs2i`); `vus2i.t/.q` still fail closed.
+  which also read `vs2i`). The exact identity-prefix `vus2i.t` word `0xd03a8008` uses
+  the later `PSP-VFPU-RESERVED-001` result. Other `.t` operand encodings and `.q` still stop.
 
 - **PSP-3000 single-case run of the `ge-sample` probe on commit `86e55611` (2026-10-28)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `86e55611` is the commit that adds the probe (case 109 in
