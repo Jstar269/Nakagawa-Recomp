@@ -25,6 +25,8 @@ const LoveAllCredit g_love_all_credits[] = {
      NULL},
     {LOVE_ALL_ENTRY, "PPSSPP SAS envelope",
      NULL},
+    {LOVE_ALL_ENTRY, "PPSSPP ATRAC3+ refill behavior",
+     NULL},
     {LOVE_ALL_ENTRY, "JPCSP",
      "the jpcsp authors"},
     {LOVE_ALL_ENTRY, "uOFW",
