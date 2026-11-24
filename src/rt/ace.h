@@ -76,7 +76,7 @@
 #define ACE_HAS_SSAA 1          /* ssaa=2|4: supersampling on top of render scale (#2073, 10.21) */
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
 #define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
-#define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
+#define ACE_HAS_LOAD 1          /* automatic disc-load acceleration (10.15.1) and declared waits (11.3.10) */
 #define ACE_HAS_DEPTH 1         /* depth=32: a 32-bit float host depth buffer (#2051, 10.20, 11.3.12) */
 #define ACE_HAS_PEAK 1          /* peak=limit: SAS mixes unsaturated through a true-peak limiter (#2137, 10.22) */
 #define ACE_HAS_GLYPHS 1        /* glyphs=on: sharp game text, glyphs rebuilt at the render scale (10.13, 11.3.5) */
@@ -187,7 +187,8 @@ size_t ace_every_part_line(char *out, size_t cap);
 extern int g_ace_on;   /* the run's switch: 1 only after a valid line with Ace on */
 
 /* Reads SR_ACE once (and SR_ACE_REPORT when on), prints the start stamp or the refusal, and
- * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests).
+ * sets g_ace_on. SR_ACE_LOAD_AUTO=1 selects Automatic for a valid enabled line with no load key.
+ * Returns g_ace_on. ace_init_spec initializes a given line without reading the environment.
  * A retired variable that is set (ace_retired_env) stops the run first: the named line and exit 1. */
 int ace_init_from_env(void);
 /* SR_GLYPHS (its value, NULL or "" for unset) once switched sharp game text; the launch line's glyphs

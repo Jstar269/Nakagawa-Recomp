@@ -676,8 +676,8 @@ SMOOTH FAR TEXTURES; TEXTURE SCALING; SMART 2D FILTER; CRISP SYSTEM TEXT. MOTION
 existing global FRAME PACING control. SOUND contains CLEAN PITCHED SOUND and UNCLIPPED SOUND. CONTROLS contains
 STICK DEAD ZONE. ON-SCREEN contains SPEED READOUT and GAME BADGE. ADVANCED contains FINER PATCHES, WIDER CULLING,
 LOADING SPEED, LATE PAD SAMPLING and SOFT SHADOWS. Loading speed offers Automatic, Short waits (Ace) and Off.
-Automatic works in Enhanced or Ace without a title package. Short waits requires Ace and a package with declared
-loading waits. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
+Automatic works in Enhanced or Ace without an Ace package. Older game packages need rebuilding to use Automatic.
+Short waits requires Ace and a package with declared loading waits. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
 REMOVE TEXTURE PACK are the last rows of Picture.
 Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
 ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box

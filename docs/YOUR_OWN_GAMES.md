@@ -298,7 +298,8 @@ in the panel. A game's **Texture pack folder** and **Remove texture pack** rows 
 
 To speed up silent disc reads, open **Advanced > Loading speed** and choose **Automatic**. Choose it on the library
 page for all games or on a game's page for that game. Enhanced and Ace can both use it. Loading speed defaults
-to **Off**. The older **Short loads** setting appears here as **Short waits (Ace)** and keeps its saved value.
+to **Off**. Older game packages keep their other enhancements and need a rebuild to use Automatic.
+The older **Short loads** setting appears here as **Short waits (Ace)** and keeps its saved value.
 
 | Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging | Full 32-bit colour |
 | --- | --- | --- | --- | --- | --- | --- | --- |

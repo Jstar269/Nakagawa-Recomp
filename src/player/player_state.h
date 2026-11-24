@@ -2144,12 +2144,13 @@ const char *player_ssaa_sentence(int value, int render_scale);
  * that adds interpolation above 30 Hz removes this limit. The other parts are untouched, and an
  * Authentic resolution stays off. */
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
-/* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
+/* The resolved Ace line for a session: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
  * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace and ";load=auto" for Enhanced or Ace. A missing load is off.
+ * nk_launch exports Automatic separately as SR_ACE_LOAD_AUTO and the rest of the line as SR_ACE.
  * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier: the resolved
  * factor, so plain 4x at a render scale of 3x or 4x writes ";ssaa=2" (player_ssaa_factor).
  * ";peak=limit" follows ssaa, before texpack, with the Unclipped sound part on, in either tier;

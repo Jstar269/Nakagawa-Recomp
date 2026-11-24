@@ -704,11 +704,10 @@ section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (
 `off`, both sections 10.10 and 11.3.3) and `cull` (`on` or `off`, section 11.3.6) are the other keys a
 line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs`, `texpack`, `shadow`,
 `texscale`, `smart2d` or
-`cull` is off, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
+`cull` is off by default, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
 `ssaa=2|4`, `peak=limit`, `glyphs=on`, `texpack=on`, `texscale=2..6` and `smart2d=on` do not), the launcher writes
 `;mips=on` for an Enhanced or Ace
-launch with that part on, `;load=auto` for an Enhanced or Ace launch with automatic load acceleration selected,
-`;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
+launch with that part on, `;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
 `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on (the factor after section 10.21's 4x
 guard), `;peak=limit` for an Enhanced or Ace
 launch with the Unclipped sound part on, `;texpack=on` for an Enhanced or Ace
@@ -1985,8 +1984,17 @@ window's keys turn it on, and it never runs in an Authentic run.
 
 #### 10.15.1. Automatic fast-forward during disc loads
 
-In Enhanced and Ace modes, `load=auto` lets the scheduler advance the paced clock faster while a game reads
-from disc during a quiet stretch. It works across games without a title-specific package. It defaults to off.
+In Enhanced and Ace modes, Automatic lets the scheduler advance the paced clock faster while a game reads
+from disc during a quiet stretch. It works across games without a title-specific Ace package and defaults to
+off. The launcher always exports `SR_ACE_LOAD_AUTO`: `1` for Automatic, `0` for every other selection, including
+Authentic and the acceptance checkpoint. It sends the rest of the v1 `SR_ACE` line independently. An older game
+package ignores the additional variable and keeps the other requested enhancements. Rebuild that game package
+with a runtime that supports Automatic to use the setting.
+
+When starting the runtime directly, an explicit `load=auto`, `load=fast` or `load=off` in `SR_ACE` takes
+precedence. The additional variable can opt in only with a valid enabled Enhanced or Ace line and no explicit
+`load` key. An unset value or any value other than `1` leaves the parsed selection in force.
+
 Each successful, nonempty read through a guest disc file or raw UMD descriptor makes the next eight
 serviced VBLANKs eligible. A further read
 renews that window. On an eligible VBLANK, if the controller is idle and the output queues are silent,
@@ -3491,9 +3499,10 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   which is what the stock function returns after its wait. With the key
   off, or where waits are not permitted (the stock call then returns `SCE_KERNEL_ERROR_CAN_NOT_WAIT` without
   blocking), the skip steps aside and the stock call runs. Nothing else in the title's code changes.
-- **Key.** `load=fast` selects the package-declared waits and requires `tier=ace`. An omitted key or `load=off`
-  selects stock loading. The third value, `load=auto`, selects automatic clock acceleration (section 10.15.1).
-  The library setting and the per-title override control the same launch key (sections 10.1 and 11.2).
+- **Key.** `load=fast` selects the package-declared waits and requires `tier=ace`. `load=off` selects stock
+  loading. Automatic uses the separate launcher variable described in section 10.15.1. A runtime started
+  directly also accepts `load=auto`. The library setting and per-title override select the same behavior
+  (sections 10.1 and 11.2).
   The run names it (`ACE_MODE: load fast (...)` at start, `ACE_MODE: load waits skipped <n> (longest run <m> logic
   updates; ...)` at exit, the report's `load`, `load_waits_skipped`, `load_skip_max_run` and `load_paced`), and
   confirms it the first time a declared wait is skipped. A run that asked for

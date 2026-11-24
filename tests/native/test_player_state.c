@@ -11619,6 +11619,7 @@ static void test_auto_load_player_path(void) {
     assert(load->values[automatic] == ACE_LOAD_AUTO && load->values[ace_waits] == ACE_LOAD_FAST &&
            load->values[off] == ACE_LOAD_OFF);
     assert(strcmp(load->labels[automatic], "Automatic") == 0);
+    assert(strstr(load->sentence, "Rebuild older game packages") != NULL);
     assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
     snprintf(root, sizeof(root), "%s%cauto_load_player_probe", cache_root, sep);
     assert(nk_platform_mkdir_p(root));

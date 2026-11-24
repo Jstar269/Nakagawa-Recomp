@@ -97,7 +97,8 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   pacing is on Motion. A game's Texture pack folder and Remove texture pack rows are the last rows of Picture.
 - **Loading speed.** Under **Settings > Enhanced > Advanced**, choose **Automatic** to fast-forward through
   detected silent disc loads. You can set it for the library or override it for one game. It works in Enhanced
-  and Ace without a game-specific package. Sound, player input or a pause returns the game to normal speed.
+  and Ace without an Ace package for the game. Rebuild older game packages to enable Automatic. They keep
+  their other enhancements when launched. Sound, player input or a pause returns the game to normal speed.
   **Off** is the default. **Short waits (Ace)** uses the loading waits declared by a game's Ace package.
 - **Texture scaling and the Smart 2D filter.** Two parts of Enhanced and Ace, off by default and in no graphics
   preset: Settings > Enhanced offers **Texture scaling** (2x to 6x, or Off) and **Smart 2D filter** (On or Off), for

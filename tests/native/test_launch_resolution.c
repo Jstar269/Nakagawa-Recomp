@@ -313,6 +313,7 @@ static int write_launch_environment_probe(void) {
     const char *developer_mode = getenv("SR_DEVELOPER_MODE");
     const char *reduce_motion = getenv("SR_REDUCE_MOTION");
     const char *ace = getenv("SR_ACE");
+    const char *ace_load_auto = getenv("SR_ACE_LOAD_AUTO");
     const char *ace_report = getenv("SR_ACE_REPORT");
     const char *texpack = getenv("SR_TEX_REPLACE");
     const char *texdump = getenv("SR_TEX_DUMP");
@@ -355,6 +356,7 @@ static int write_launch_environment_probe(void) {
                      "SR_DEVELOPER_MODE=%s\n"
                      "SR_REDUCE_MOTION=%s\n"
                      "SR_ACE=%s\n"
+                     "SR_ACE_LOAD_AUTO=%s\n"
                      "SR_ACE_REPORT=%s\n"
                      "SR_TEX_REPLACE=%s\n"
                      "SR_TEX_DUMP=%s\n"
@@ -395,6 +397,7 @@ static int write_launch_environment_probe(void) {
                      developer_mode ? developer_mode : "<unset>",
                      reduce_motion ? reduce_motion : "<unset>",
                      ace ? ace : "<unset>",
+                     ace_load_auto ? ace_load_auto : "<unset>",
                      ace_report ? ace_report : "<unset>",
                      texpack ? texpack : "<unset>",
                      texdump ? texdump : "<unset>",
@@ -622,6 +625,9 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_ace;
     char *old_ace = capture_environment_value("SR_ACE", &had_ace);
     set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
+    bool had_ace_load_auto;
+    char *old_ace_load_auto = capture_environment_value("SR_ACE_LOAD_AUTO", &had_ace_load_auto);
+    set_environment_value("SR_ACE_LOAD_AUTO", "1");
     bool had_ace_report;
     char *old_ace_report = capture_environment_value("SR_ACE_REPORT", &had_ace_report);
     set_environment_value("SR_ACE_REPORT", "poisoned-parent-report.json");
@@ -1178,6 +1184,39 @@ static void test_no_iso_child_environment(const char *test_executable,
            strstr(observed, "SR_GLYPHS=on") == NULL);
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
 
+    /* Automatic is an additive child flag so older runtime packages still read the other v1
+       selections. Run as a real child, with the load token in the middle of the producer line. */
+    {
+        static const char *const tiers[] = { "enhanced", "ace" };
+        const char *rest = "af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
+        char expected[sizeof(session.config.ace_spec) + 8];
+        for (size_t i = 0; i < sizeof(tiers) / sizeof(tiers[0]); ++i) {
+            snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
+                     "v1;tier=%s;%s;texscale=4;load=auto;smart2d=on", tiers[i], rest);
+            set_environment_value("SR_ACE_LOAD_AUTO", "0");
+            run_probe(&session, report_path, observed, sizeof(observed));
+            snprintf(expected, sizeof(expected), "SR_ACE=v1;tier=%s;%s;texscale=4;smart2d=on\n", tiers[i], rest);
+            assert(strstr(observed, expected) != NULL);
+            assert(strstr(observed, "SR_ACE_LOAD_AUTO=1\n") != NULL);
+        }
+        set_environment_value("SR_ACE_LOAD_AUTO", "1");
+        static const char *const loads[] = { "fast", "off", "auto;load=off", "automatic" };
+        for (size_t i = 0; i < sizeof(loads) / sizeof(loads[0]); ++i) {
+            snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
+                     "v1;tier=ace;%s;load=%s", rest, loads[i]);
+            run_probe(&session, report_path, observed, sizeof(observed));
+            snprintf(expected, sizeof(expected), "SR_ACE=%s\n", session.config.ace_spec);
+            assert(strstr(observed, expected) && strstr(observed, "SR_ACE_LOAD_AUTO=0\n"));
+        }
+        snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
+        run_probe(&session, report_path, observed, sizeof(observed));
+        assert(strstr(observed, "SR_ACE=off\n") && strstr(observed, "SR_ACE_LOAD_AUTO=0\n"));
+        session.config.headless_accept_presented_frames = 3u;
+        run_probe(&session, report_path, observed, sizeof(observed));
+        assert(strstr(observed, "SR_ACE=off\n") && strstr(observed, "SR_ACE_LOAD_AUTO=0\n"));
+        session.config.headless_accept_presented_frames = 0u;
+    }
+
     /* Audit 2026-11-17 (F-aeae5960): a session that resolves no data root, project fonts,
        module folder or per-title input profile hands the child none, whatever the launcher's
        own environment holds. They were exported only when the session had a value, so a
@@ -1577,6 +1616,8 @@ static void test_no_iso_child_environment(const char *test_executable,
 
     restore_environment_value("SR_ACE", old_ace, had_ace);
     free(old_ace);
+    restore_environment_value("SR_ACE_LOAD_AUTO", old_ace_load_auto, had_ace_load_auto);
+    free(old_ace_load_auto);
     restore_environment_value("SR_TEX_REPLACE", old_texpack, had_texpack);
     free(old_texpack);
     restore_environment_value("SR_TEX_DUMP", old_texdump, had_texdump);

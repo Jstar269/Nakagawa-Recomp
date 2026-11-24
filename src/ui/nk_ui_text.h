@@ -892,7 +892,7 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_ADAPTER_LOADING_SPEED "Loading speed"
 #define NK_UI_EN_ADAPTER_LOADING_AUTOMATIC "Automatic"
 #define NK_UI_EN_ADAPTER_LOADING_SHORT_WAITS "Short waits (Ace)"
-#define NK_UI_EN_ADAPTER_LOADING_DESCRIPTION "Automatic speeds up silent disc loads without a package. Short waits changes the game's timing at waits named by an Ace package."
+#define NK_UI_EN_ADAPTER_LOADING_DESCRIPTION "Automatic speeds up silent disc loads. Rebuild older game packages to use it. Short waits changes the game's timing at declared Ace waits."
 #define NK_UI_EN_ADAPTER_LOADING_ACE_REQUIRED "Use Short waits in Ace with a package that declares loading waits. Automatic also works in Enhanced."
 #define NK_UI_EN_ADAPTER_MODE_ACE_DESCRIPTION "Ace is Enhanced plus this game's own 60 FPS game logic."
 #define NK_UI_EN_ADAPTER_TEXPACK_NONE "None"

@@ -140,13 +140,15 @@ static int value_stick_counts(const char *v, int *out) {
     return 1;
 }
 
-int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
+static int ace_parse_line(const char *spec, AceConfig *out, char *why, size_t why_cap,
+                          int *explicit_load) {
     enum { KEYS = (int)(sizeof(k_ace_keys) / sizeof(k_ace_keys[0])) };
     AceConfig c;
     char buf[ACE_SPEC_MAX];
     int seen[KEYS] = {0};
     memset(&c, 0, sizeof(c));
     if (out) memset(out, 0, sizeof(*out));
+    if (explicit_load) *explicit_load = 0;
     if (!spec) { why_set(why, why_cap, "unset"); return 0; }
     if (strcmp(spec, "off") == 0) { why_set(why, why_cap, ""); return 1; }
     if (strlen(spec) >= sizeof(buf)) { why_set(why, why_cap, "line too long"); return 0; }
@@ -231,6 +233,7 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 }
                 break;
             case ACE_KEY_LOAD:
+                if (explicit_load) *explicit_load = 1;
                 if (strcmp(v, "off") == 0) { c.load = ACE_LOAD_OFF; ok = 1; }
                 else if (strcmp(v, "fast") == 0) { c.load = ACE_LOAD_FAST; ok = 1; }
                 else if (strcmp(v, "auto") == 0) { c.load = ACE_LOAD_AUTO; ok = 1; }
@@ -330,6 +333,10 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     if (out) *out = c;
     why_set(why, why_cap, "");
     return 1;
+}
+
+int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
+    return ace_parse_line(spec, out, why, why_cap, NULL);
 }
 
 static const char *on_off(int v) { return v ? "on" : "off"; }
@@ -527,8 +534,9 @@ static void observation_reset(void) {
     s_target_clock = 0;
 }
 
-int ace_init_spec(const char *spec, const char *report_path) {
+static int ace_init_line(const char *spec, const char *report_path, int automatic_load) {
     char why[64];
+    int explicit_load;
     g_ace_on = 0;
     memset(&s_req, 0, sizeof(s_req));
     memset(&s_eff, 0, sizeof(s_eff));
@@ -555,11 +563,12 @@ int ace_init_spec(const char *spec, const char *report_path) {
     snprintf(s_spec, sizeof(s_spec), "off");
     observation_reset();
     if (!spec) return 0;                       /* unset: off, silently */
-    if (!ace_parse(spec, &s_req, why, sizeof(why))) {
+    if (!ace_parse_line(spec, &s_req, why, sizeof(why), &explicit_load)) {
         fprintf(stderr, "ACE_MODE: refused (%s)\n", why);
         return 0;
     }
     if (!s_req.on) return 0;                   /* "off": authentic, silently */
+    if (ACE_HAS_LOAD && automatic_load && !explicit_load) s_req.load = ACE_LOAD_AUTO;
     s_eff = s_req;
     (void)ace_format(&s_req, s_spec, sizeof(s_spec));
     if (report_path && report_path[0]) {
@@ -620,6 +629,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
     return 1;
 }
 
+int ace_init_spec(const char *spec, const char *report_path) {
+    return ace_init_line(spec, report_path, 0);
+}
+
 /* The variables a launch-line key replaced: what each switched, the key that does it now, an
    example of the key on a line, and the contract section that describes it. The launcher exports
    each of them empty for a game it starts (src/core/nk_launch.c), so only a runtime started by
@@ -670,6 +683,10 @@ int ace_init_from_env(void) {
             exit(1);
         }
     }
+    /* The launcher sends Automatic separately for runtimes that know only
+       load=off and load=fast. The explicit load key on a direct line wins. */
+    const char *load_auto = getenv("SR_ACE_LOAD_AUTO");
+    const int automatic_load = load_auto && strcmp(load_auto, "1") == 0;
 #if defined(_WIN32)
     /* The report's path is UTF-8 and may name a folder outside the ANSI code page (the player's
        user-data root under the user's profile): the wide environment carries it whole, where the
@@ -690,11 +707,11 @@ int ace_init_from_env(void) {
         if (!report && got > 0)
             fprintf(stderr, "ACE_MODE: SR_ACE_REPORT is not valid UTF-16: no report is written\n");
     }
-    int on = ace_init_spec(getenv("SR_ACE"), report);
+    int on = ace_init_line(getenv("SR_ACE"), report, automatic_load);
     free(report);
     return on;
 #else
-    return ace_init_spec(getenv("SR_ACE"), getenv("SR_ACE_REPORT"));
+    return ace_init_line(getenv("SR_ACE"), getenv("SR_ACE_REPORT"), automatic_load);
 #endif
 }
 
