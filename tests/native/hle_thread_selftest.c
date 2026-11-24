@@ -18421,6 +18421,11 @@ static void test_auto_load_disc_and_silent_audio(void) {
     const uint32_t saved_disc_sectors = s_umd_synthetic_sectors;
     const int saved_stick = s_ctrl_test_stick, saved_interactive = s_test_gui_interactive;
     const uint8_t saved_lx = s_ctrl_test_lx, saved_ly = s_ctrl_test_ly;
+    uint64_t (*const saved_host_clock)(void) = s_host_ns_fn;
+    const int saved_pace = s_pace_on, saved_det_clock = s_det_clock;
+    const uint64_t saved_epoch_ns = s_clock_epoch_ns, saved_latch_ns = s_vbl_latch_ns;
+    const uint64_t saved_ff_host_ns = s_ff_host_anchor_ns, saved_ff_pace_ns = s_ff_pace_anchor_ns;
+    const uint32_t saved_ff_speed = s_ff_speed, saved_ff_epoch = s_ff_epoch;
     reset_fixture();
     sr_hle_init();
     sr_hle_test_register_iofilemgr();
@@ -18546,6 +18551,18 @@ static void test_auto_load_disc_and_silent_audio(void) {
     s_test_gui_interactive = saved_interactive;
     audio_fixture_reset();
     reset_fixture();
+
+    /* Returning to 1x preserves the elapsed guest-time offset. A later
+     * fixture that installs its own host clock must not inherit that offset. */
+    s_host_ns_fn = saved_host_clock;
+    s_pace_on = saved_pace;
+    s_det_clock = saved_det_clock;
+    s_clock_epoch_ns = saved_epoch_ns;
+    s_vbl_latch_ns = saved_latch_ns;
+    s_ff_host_anchor_ns = saved_ff_host_ns;
+    s_ff_pace_anchor_ns = saved_ff_pace_ns;
+    s_ff_speed = saved_ff_speed;
+    s_ff_epoch = saved_ff_epoch;
 }
 
 /* Media telemetry truthfulness on the production audio hand-off.
@@ -68060,6 +68077,7 @@ static int hle_selftest_main(int argc, char **argv) {
 
     if (argc > 1 && strcmp(argv[1], "--auto-load") == 0) {
         test_auto_load_disc_and_silent_audio();
+        test_pad_vblank_deadline(); /* the next fixture must see its own clock */
         fprintf(stderr, "auto-load: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
