@@ -26,8 +26,8 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 73 |
 | `ppsspp-derived` | 179 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 298 | 183 |
-| `unverified` | 174 | 22 |
+| `synthetic` | 299 | 183 |
+| `unverified` | 173 | 22 |
 | total | 715 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -139,7 +139,7 @@ a title that translates none has generated code unchanged.
 | `0x15b6446b` | `sceKernelUnlockLwMutex` | kernel_sync | `ppsspp-derived` | registry notes name PPSSPP; unlinked hardware note |
 | `0x167afd9e` | `sceMpegInitAu` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x17099f0a` | `sceVideocodecInit` | videocodec | `unverified` | no recorded evidence |
-| `0x172d316e` | `sceKernelStdin` | kernel_utils | `unverified` | no recorded evidence |
+| `0x172d316e` | `sceKernelStdin` | kernel_utils | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x17768e14` | `sceRegSetKeyValue` | system | `synthetic` | HLE selftest dispatch |
 | `0x17c1684e` | `sceKernelReferThreadStatus` | kernel_thread | `synthetic` | HLE selftest dispatch |
 | `0x18260574` | `sceKernelReceiveMbx` | kernel_sync | `hardware-measured` | PSP oracle PSP-KERNEL-001 |
@@ -550,7 +550,7 @@ a title that translates none has generated code unchanged.
 | `0xa5da2406` | `sceUtilityGetSystemParamInt` | utility | `hardware-measured` | PSP oracle PSP-HLE-SYSPARAM-001 |
 | `0xa62c6f57` | `sceNetAdhocTerm` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0xa66b0120` | `sceKernelReferEventFlagStatus` | kernel_sync | `unverified` | no recorded evidence; unlinked hardware note |
-| `0xa6bab2e9` | `sceKernelStdout` | kernel_utils | `synthetic` | HLE selftest dispatch |
+| `0xa6bab2e9` | `sceKernelStdout` | kernel_utils | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xa703fe0f` | `sceMp3GetInfoToAddStreamData` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceMp3 block: derived-translated from PPSSPP at a pinned revision |
 | `0xa7144800` | `sceCtrlSetIdleCancelThreshold` | input | `unverified` | no recorded evidence |
 | `0xa780cf7e` | `sceMpegMallocAvcEsBuf` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
@@ -761,7 +761,7 @@ a title that translates none has generated code unchanged.
 | `0xf64910f0` | `sceUtilityUnloadUsbModule` | utility | `synthetic` | HLE selftest dispatch |
 | `0xf6837a1a` | `sceAtracSetMOutData` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xf77d77cb` | `sceKernelSetCompilerVersion` | kernel_memory | `synthetic` | registry evidence `tools/test_sdkver_c.py` |
-| `0xf78ba90a` | `sceKernelStderr` | kernel_utils | `synthetic` | HLE selftest dispatch |
+| `0xf78ba90a` | `sceKernelStderr` | kernel_utils | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xf79472d7` | `sceNetAdhocMatchingSendData` | network | `ppsspp-derived` | sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0xf7d13214` | `sceNetAdhocDiscoverStop` | network | `unverified` | no recorded evidence |
 | `0xf7d8d092` | `sceUtilityUnloadAvModule` | utility | `synthetic` | HLE selftest dispatch |

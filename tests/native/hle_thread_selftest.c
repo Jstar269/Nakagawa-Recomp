@@ -51191,10 +51191,21 @@ static void test_fpl_blocking_waits(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
-/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, 2026-11-06, PSP-3000): a one-byte
- * sceIoWrite to Stdout and to Stderr returns 1; sceIoClose of the Stdout handle returns
- * 0x800200D1 and closes nothing, so a later write returns 1 and sceKernelStdout returns the same
- * handle. The cells hold whatever value the runtime hands out for the handles. */
+/* One sceIo* call on a descriptor argument through the production dispatch. a1 and a2 are the
+ * call's second and third argument words. */
+static uint32_t std_handle_call(uint32_t nid, uint32_t fd, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = fd; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, PSP-3000, boots 135, 200 and 222):
+ * sceKernelStdin, sceKernelStdout and sceKernelStderr return three distinct kernel UIDs, none of
+ * them 1 and the same three on each recorded boot; a one-byte sceIoWrite to Stdout and to Stderr
+ * returns 1 and each import returns the same handle afterwards; sceIoClose of the Stdout handle
+ * returns 0x800200D1 and closes nothing, so a later write returns 1 and sceKernelStdout returns
+ * the same handle. */
 static void test_std_handles_measured(void) {
     reset_fixture();
     sr_hle_init();
@@ -51202,22 +51213,148 @@ static void test_std_handles_measured(void) {
     MEM_W8(buf, (uint8_t)'x');
     CpuState cpu;
     memset(&cpu, 0, sizeof cpu);
+    const uint32_t in = sr_syscall(&cpu, 0x172d316eu);    /* sceKernelStdin */
+    memset(&cpu, 0, sizeof cpu);
     const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
     memset(&cpu, 0, sizeof cpu);
     const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
-    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001)");
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err; cpu.r[5] = buf; cpu.r[6] = 1u;
-    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001)");
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out;
-    expect(sr_syscall(&cpu, 0x810c4bc3u) == 0x800200d1u,
+    expect(in != out && out != err && in != err,
+           "std handles: Stdin, Stdout and Stderr are three distinct handles (PSP-HLE-STDIO-001 stdio-handles)");
+    expect(in != 1u && out != 1u && err != 1u,
+           "std handles: none of the three handles is 1 (PSP-HLE-STDIO-001 stdio-handles)");
+    expect(in == 0x0093a513u && out == 0x00938a15u && err == 0x00936f17u,
+           "std handles: the three handles are the UIDs of the three recorded boots (PSP-HLE-STDIO-001 stdio-handles)");
+    expect(in >= 64u && out >= 64u && err >= 64u,
+           "std handles: no handle is a number of the descriptor table");
+    expect(std_handle_call(0x42ec03acu, out, buf, 1u) == 1u,
+           "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
+           "std handles: sceKernelStdout returns the same handle after the write (PSP-HLE-STDIO-001 stdio-write-stdout)");
+    expect(std_handle_call(0x42ec03acu, err, buf, 1u) == 1u,
+           "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xf78ba90au) == err,
+           "std handles: sceKernelStderr returns the same handle after the write (PSP-HLE-STDIO-001 stdio-write-stderr)");
+    expect(std_handle_call(0x810c4bc3u, out, 0u, 0u) == 0x800200d1u,
            "std handles: sceIoClose of Stdout returns 0x800200D1 (PSP-HLE-STDIO-001)");
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
-    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u,
+    expect(std_handle_call(0x42ec03acu, out, buf, 1u) == 1u,
            "std handles: Stdout still takes a write after the refused close (PSP-HLE-STDIO-001)");
     memset(&cpu, 0, sizeof cpu);
     expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
            "std handles: sceKernelStdout returns the same handle after the close (PSP-HLE-STDIO-001)");
+}
+
+/* What PSP-HLE-STDIO-001 does not measure. A call on a standard handle that had a result keeps it
+ * and nothing more: the Stdin and Stderr closes answer Stdout's measured refusal, as they did
+ * while the three imports named one handle, and say once that this is modelled. A call with no
+ * result to keep stops at a named boundary and changes nothing: sceIoCloseAsync of a handle and
+ * a write through the Stdin handle. The descriptor numbers 0, 1 and 2 and every other value
+ * answer as before. */
+static void test_std_handles_unmeasured_are_named(void) {
+    enum { BAD_FD = 0x80020323u, NO_ASYNC = 0x8002032au, STD_ERRNO = 0x80010009u,
+           BOUNDARY = 0x80010086u, REFUSED = 0x800200d1u };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t buf = 0x00240c00u, result = 0x00240c10u;
+    MEM_W8(buf, (uint8_t)'x');
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t in = sr_syscall(&cpu, 0x172d316eu);    /* sceKernelStdin */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
+
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    static char captured[8192];
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    expect(capturing, "std handles: stderr capture for the unmeasured calls");
+
+    /* sceIoClose of the Stdin and the Stderr handle: the modelled refusal, nothing closed. */
+    expect(std_handle_call(0x810c4bc3u, err, 0u, 0u) == REFUSED &&
+               std_handle_call(0x810c4bc3u, err, 0u, 0u) == REFUSED,
+           "std handles: sceIoClose of the Stderr handle answers Stdout's refusal 0x800200D1 (modelled)");
+    expect(std_handle_call(0x42ec03acu, err, buf, 1u) == 1u,
+           "std handles: Stderr still takes a write after its refused close");
+    expect(std_handle_call(0x810c4bc3u, in, 0u, 0u) == REFUSED,
+           "std handles: sceIoClose of the Stdin handle answers Stdout's refusal 0x800200D1 (modelled)");
+
+    /* sceIoCloseAsync of a handle: a named boundary, nothing queued and nothing closed. */
+    expect(std_handle_call(0xff5940b6u, out, 0u, 0u) == BOUNDARY &&
+               std_handle_call(0xff5940b6u, err, 0u, 0u) == BOUNDARY &&
+               std_handle_call(0xff5940b6u, in, 0u, 0u) == BOUNDARY,
+           "std handles: sceIoCloseAsync of a standard handle stops at a named boundary (0x80010086)");
+    expect(std_handle_call(0x3251ea56u, out, 0u, 0u) == NO_ASYNC,
+           "std handles: the refused sceIoCloseAsync queued no request on Stdout");
+    expect(std_handle_call(0x42ec03acu, out, buf, 1u) == 1u,
+           "std handles: Stdout still takes a write after the refused sceIoCloseAsync");
+
+    /* A write through the Stdin handle: a named boundary, synchronous and asynchronous. */
+    expect(std_handle_call(0x42ec03acu, in, buf, 1u) == BOUNDARY,
+           "std handles: sceIoWrite through the Stdin handle stops at a named boundary (0x80010086)");
+    expect(std_handle_call(0x0facab19u, in, buf, 1u) == BOUNDARY &&
+               std_handle_call(0x3251ea56u, in, 0u, 0u) == NO_ASYNC,
+           "std handles: sceIoWriteAsync through the Stdin handle stops at a named boundary and queues nothing");
+
+    if (capturing) {
+        captured[0] = '\0';
+        hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+        fprintf(stderr, "%s", captured);
+        expect(count_occurrences(captured, "HLE: modelled, not PSP-measured: sceIoClose of the Stderr handle answers 0x800200D1") == 1 &&
+                   count_occurrences(captured, "HLE: modelled, not PSP-measured: sceIoClose of the Stdin handle answers 0x800200D1") == 1,
+               "std handles: each modelled close refusal is said once per run");
+        expect(count_occurrences(captured, "SEMANTIC_BOUNDARY: IO_STD_HANDLE_OPERATION: sceIoCloseAsync on the Stdout handle is not measured on a PSP (PSP-HLE-STDIO-001)") == 1 &&
+                   count_occurrences(captured, "IO_STD_HANDLE_OPERATION: sceIoCloseAsync") == 1,
+               "std handles: the sceIoCloseAsync boundary is named once per run");
+        expect(count_occurrences(captured, "SEMANTIC_BOUNDARY: IO_STD_HANDLE_OPERATION: sceIoWrite on the Stdin handle") == 1 &&
+                   count_occurrences(captured, "SEMANTIC_BOUNDARY: IO_STD_HANDLE_OPERATION: sceIoWriteAsync on the Stdin handle") == 1,
+               "std handles: the Stdin write boundaries are named");
+    }
+
+    /* The results the standard streams already had are reached through the handles too. */
+    expect(std_handle_call(0x6a638d83u, in, buf, 1u) == STD_ERRNO &&
+               std_handle_call(0x6a638d83u, out, buf, 1u) == STD_ERRNO,
+           "std handles: sceIoRead through a standard handle keeps the standard-stream errno 0x80010009");
+    expect(std_handle_call(0xa0b5a7c2u, in, buf, 1u) == STD_ERRNO,
+           "std handles: sceIoReadAsync through the Stdin handle keeps the standard-stream errno 0x80010009");
+    expect(std_handle_call(0x68963324u, out, 0u, 0u) == STD_ERRNO,
+           "std handles: sceIoLseek32 through the Stdout handle keeps the standard-stream errno 0x80010009");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err;
+    expect(sr_syscall(&cpu, 0x27eb27b8u) == STD_ERRNO && cpu.r[3] == 0u,
+           "std handles: sceIoLseek through the Stderr handle keeps the standard-stream errno 0x80010009");
+    expect(std_handle_call(0x63632449u, out, 0u, 0u) == STD_ERRNO,
+           "std handles: sceIoIoctl through the Stdout handle keeps the standard-stream errno 0x80010009");
+    expect(std_handle_call(0x1b385d8fu, out, 0u, 0u) == BAD_FD,
+           "std handles: sceIoLseek32Async through the Stdout handle is refused as for descriptor 1");
+    MEM_W32(result, 0xfeedfaceu); MEM_W32(result + 4u, 0xdeadbeefu);
+    expect(std_handle_call(0x0facab19u, err, buf, 1u) == 0u &&
+               std_handle_call(0x3251ea56u, err, result, 0u) == 1u &&
+               std_handle_call(0xe23eec33u, err, result, 0u) == 0u &&
+               MEM_R32(result) == 1u && MEM_R32(result + 4u) == 0u,
+           "std handles: a queued write through the Stderr handle completes with its count");
+
+    /* A value that is not one of the three handles answers as before. */
+    expect(std_handle_call(0x42ec03acu, out + 1u, buf, 1u) == BAD_FD &&
+               std_handle_call(0x810c4bc3u, in - 1u, 0u, 0u) == BAD_FD &&
+               std_handle_call(0xff5940b6u, err + 2u, 0u, 0u) == BAD_FD,
+           "std handles: a value beside a handle is a bad descriptor");
+    expect(std_handle_call(0x42ec03acu, 1u, buf, 1u) == 1u &&
+               std_handle_call(0x42ec03acu, 2u, buf, 1u) == 1u &&
+               std_handle_call(0x42ec03acu, 0u, buf, 1u) == 1u,
+           "std handles: descriptors 0, 1 and 2 named by number still take a write");
+    expect(std_handle_call(0x810c4bc3u, 1u, 0u, 0u) == REFUSED,
+           "std handles: sceIoClose of descriptor 1 keeps the Stdout refusal");
+    expect(std_handle_call(0x810c4bc3u, 2u, 0u, 0u) == 0u &&
+               std_handle_call(0x42ec03acu, 2u, buf, 1u) == BAD_FD,
+           "std handles: sceIoClose of descriptor 2 by number closes it, as before");
+    expect(std_handle_call(0x42ec03acu, err, buf, 1u) == BAD_FD,
+           "std handles: the Stderr handle names the stream that descriptor 2 closed");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xf78ba90au) == err,
+           "std handles: sceKernelStderr still returns its handle");
+    sr_hle_init();
 }
 
 static void test_vpl_blocking_waits(void) {
@@ -68467,6 +68604,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_pool_priority_attribute_orders_waiters();
     test_fpl_calls_are_quiet_without_trace();
     test_std_handles_measured();
+    test_std_handles_unmeasured_are_named();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_mbx_has_no_host_table_limits();
