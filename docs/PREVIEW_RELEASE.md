@@ -592,19 +592,21 @@ user data, prevent startup for many users, or expose users to a security vulnera
 ([withdrawal tracking issue](https://github.com/Jstar269/Nakagawa-Recomp/issues/2746)).
 Only the maintainer changes GitHub releases. Contributors can draft the notice and prepare the fix.
 
-1. **Remove the download.** Delete the affected GitHub release entry and leave its Git tag on the
-   original commit. Keep the version retired and leave all published asset names and bytes intact
-   until removal. GitHub treats releases and Git tags separately. See
-   [GitHub's release deletion instructions](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository#deleting-a-release).
-   Verify from a signed-out session that the version is absent from the public Releases API and
-   its packaged assets are unavailable. The source tag remains available.
-2. **Tell users where to go.** Mark the version withdrawn in its `docs/RELEASE_NOTES_v<version>.md`
-   and update the current release references in the [README](../README.md) and
-   [compatibility guide](COMPATIBILITY.md) to point to the last safe release or its replacement.
-   Post a public issue or discussion with the affected version, symptoms, immediate action,
-   and the safe version to use. For a security issue, coordinate those details using the
+1. **Warn users immediately.** As soon as the maintainer decides to withdraw the release, publish a
+   stop-use notice with the affected version, symptoms, immediate action, and the safe version to use.
+   Post it in a public issue or discussion. For a security issue, coordinate the notice through the
    [security advisory process](../SECURITY.md#how-reports-are-handled). If the signing key was
    exposed, follow the [signing key replacement procedure](RELEASE_SIGNING.md#replace-the-key).
+   Mark the version withdrawn in its `docs/RELEASE_NOTES_v<version>.md` and update the current
+   release references in the [README](../README.md) and [compatibility guide](COMPATIBILITY.md).
+2. **Remove the download and verify.** Delete the affected GitHub release entry. Preserve the Git
+   tag on the original commit, retire the version number permanently, and leave the published asset
+   names and bytes intact until removal. See
+   [GitHub's release deletion instructions](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository#deleting-a-release).
+   From a signed-out session, confirm that the public Releases API omits the affected version and
+   that each packaged asset is unavailable. Record removal as verified only when both checks
+   succeed. If a check fails, the feed still lists the release, or an asset remains downloadable,
+   keep the warning visible, record removal as unconfirmed, and retry or escalate.
 3. **Publish the fix under a new version.** Build a new patch release, include a regression check
    for the original problem, and run the normal packaging, signing, and acceptance steps in this
    guide and the [release signing guide](RELEASE_SIGNING.md). Link the fixed version from the
