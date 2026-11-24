@@ -158,6 +158,9 @@ static uint32_t h_AudioChangeChannelVolume(CpuState *s) {
  * slightly slower than the device every iteration (sleep + decode time), so streams drifted
  * behind (voice lagging subtitles) and underran (crackle). */
 extern int sr_audio_queued(int ch);
+extern int sr_audio_load_silent(void);
+extern int sr_audio_load_pending_sound(int ch);
+extern void sr_audio_replace_silent_queue(int ch, int frames, int hold);
 
 /* ---- the audio device under the deterministic clock (#2037) --------------------------------
  *
@@ -321,6 +324,40 @@ static void audio_vq_pushed(int ch, int nframes) {
     audio_vq_drain((uint32_t)ch);
     uint64_t sum = (uint64_t)s_vq_frames[ch] + (uint32_t)nframes;
     s_vq_frames[ch] = sum > UINT32_MAX ? UINT32_MAX : (uint32_t)sum;
+}
+
+static void audio_auto_load_transition(int active) {
+    for (int ch = 0; ch < 9; ++ch) {
+        if (active) {
+            (void)audio_vq_on(ch); /* seed once at the transition, before any clock advance */
+            continue;
+        }
+        audio_vq_drain((uint32_t)ch);
+        const uint32_t frames = s_vq_frames[ch];
+        const uint32_t hold = frames ? audio_host_hold_frames(audio_mixer_period((uint32_t)ch)) : 0u;
+        const uint64_t lead = (uint64_t)frames + hold;
+        sr_audio_replace_silent_queue(ch, lead > INT_MAX ? INT_MAX : (int)lead, (int)hold);
+    }
+}
+
+/* At the output boundary, every accepted sample that could play ends the
+ * automatic mode before touching the host queue. Keep the SAS wide sum and
+ * the converted SRC output in the same decision. */
+static void audio_auto_load_output(int ch, const int16_t *lr, const int32_t *wide, uint32_t frames) {
+    if (!sched_auto_load_enabled()) return;
+    /* Feeding a played-dry stream can release retained converter or limiter
+     * samples, even with a zero input block. Give the backend that block at
+     * normal speed so it applies its existing dry-stream rules. */
+    if (sched_auto_load_active() && sr_audio_load_pending_sound(ch)) {
+        sched_auto_load_audible();
+        return;
+    }
+    for (uint32_t i = 0; i < frames * 2u; ++i) {
+        if (lr[i] || (wide && wide[i])) {
+            sched_auto_load_audible();
+            return;
+        }
+    }
 }
 static uint32_t s_audio_delay_carry[9];
 
@@ -556,6 +593,9 @@ static uint32_t audio_output_mode(CpuState *s, uint32_t ch, uint32_t buf, int vo
             if (mono) { int16_t v = (int16_t)MEM_R16(buf + i * 2); lr[i*2] = v; lr[i*2+1] = v; }
             else { lr[i*2] = (int16_t)MEM_R16(buf + i * 4); lr[i*2+1] = (int16_t)MEM_R16(buf + i * 4 + 2); }
         }
+        const int32_t *wide = !mono && (!sched_fast_forward_on() || sched_auto_load_enabled())
+            ? sas_wide_for_output(buf, n, lr) : NULL;
+        audio_auto_load_output((int)ch, lr, wide, n);
         /* The output counters live here, on the guest-visible sceAudioOutput* hand-off,
          * not inside a host audio backend. A backend that does not instrument itself made
          * audio_output_calls/frames read zero for a run whose music was plainly audible,
@@ -566,7 +606,6 @@ static uint32_t audio_output_mode(CpuState *s, uint32_t ch, uint32_t buf, int vo
         sr_videorec_audio((int)ch, lr, (int)n, voll, volr, sched_vtime_us());
         if (!sched_fast_forward_on()) {
             /* Ace Mode's peak=limit: a SAS grain the output hands over unchanged plays unsaturated. */
-            const int32_t *wide = mono ? NULL : sas_wide_for_output(buf, n, lr);
             if (wide) sr_audio_push_wide((int)ch, lr, wide, (int)n, voll, volr);
             else sr_audio_push((int)ch, lr, (int)n, voll, volr);
         }
@@ -656,6 +695,7 @@ static uint32_t h_AudioRestLen(CpuState *s) {
  * mapping. The Output2 family is registered by hle_register_output2_audio_handlers(),
  * which both the harness and the production branch of sr_hle_init call. */
 void hle_register_regular_audio_handlers(void) {
+    sched_auto_load_audio_hooks(sr_audio_load_silent, audio_auto_load_transition);
     sr_hle_register(0x5ec81c55, "sceAudioChReserve", h_AudioChReserve);
     sr_hle_register(0x6fc46853, "sceAudioChRelease", h_AudioChRelease);
     sr_hle_register(0x136caf51, "sceAudioOutputBlocking", h_AudioOutputBlocking);
@@ -816,6 +856,7 @@ static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t 
         psmf_av_audio_submit(AUDIO_OUTPUT2_CHANNEL, buf, bytes, 4u, s_audio_src_freq);
         converted_frames = sr_audio_resampler_pull(&s_audio_src_resampler, converted, 4111u);
         if (converted_frames > 0u) {
+            audio_auto_load_output(AUDIO_OUTPUT2_CHANNEL, converted, NULL, (uint32_t)converted_frames);
             audio_host_hold_prime((int)AUDIO_OUTPUT2_CHANNEL, period);
             uint64_t out_started = sr_perf_now_ns();
             sr_videorec_audio(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,

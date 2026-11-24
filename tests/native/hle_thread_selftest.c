@@ -660,6 +660,24 @@ int sr_audio_host_pull_frames(void) {
     return s_audio_sim_reported_pull >= 0 ? s_audio_sim_reported_pull : s_audio_sim_pull;
 }
 
+static int s_audio_load_queue_silent = 1;
+static int s_audio_load_handoff[9];
+static int s_audio_load_pending_sound;
+
+int sr_audio_load_silent(void) { return s_audio_load_queue_silent; }
+
+int sr_audio_load_pending_sound(int ch) { return ch == 0 && s_audio_load_pending_sound; }
+
+void sr_audio_replace_silent_queue(int ch, int frames, int hold) {
+    (void)hold;
+    if (sr_audio_load_pending_sound(ch)) return;
+    if (ch >= 0 && ch < 9) {
+        s_audio_load_handoff[ch] = frames;
+        s_audio_sim_q[ch] = frames;
+        s_audio_sim_dry[ch] = frames == 0;
+    }
+}
+
 int sr_audio_queued(int ch) {
     if (s_audio_sim_pull > 0 && ch >= 0 && ch < 9) {
         s_audio_queue_calls++;
@@ -676,6 +694,9 @@ int sr_audio_queued(int ch) {
 }
 
 static void audio_fixture_reset(void) {
+    s_audio_load_queue_silent = 1;
+    s_audio_load_pending_sound = 0;
+    memset(s_audio_load_handoff, 0, sizeof(s_audio_load_handoff));
     s_oor_calls = 0;
     s_audio_push_calls = 0;
     s_audio_push_wide_calls = 0;
@@ -9481,6 +9502,101 @@ static uint32_t net_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, ui
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3; cpu.r[8] = t0;
     return sr_syscall(&cpu, nid);
+}
+
+/* #2968: only the public offline lifecycle is modelled. All cells go
+ * through the dispatcher, including the two spellings of utility IO. */
+static void test_net_inet_lifecycle_without_network(int stop_at_socket) {
+    enum {
+        NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
+        NID_INET_INIT = 0x17943399u, NID_INET_TERM = 0xa9ed66b9u,
+        NID_INET_SOCKET = 0x8b7b220fu,
+        NID_LOAD_NET = 0x1579a159u, NID_UNLOAD_NET = 0x64d50c56u,
+        NID_LOAD_MODULE = 0x2a2b3de0u, NID_UNLOAD_MODULE = 0xe49bfe92u,
+        NET_COMMON = 1u, NET_INET = 3u, MODULE_INET = 0x102u,
+    };
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_net_inited(void);
+    extern uint32_t sr_hle_test_net_pool_uid(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    sr_hle_init();
+    const int init_registered = sr_hle_test_is_registered(NID_INET_INIT);
+    const int term_registered = sr_hle_test_is_registered(NID_INET_TERM);
+    expect(init_registered, "Inet lifecycle registers the fresh Init NID");
+    expect(term_registered, "Inet lifecycle registers the active Term NID");
+    expect(!sr_hle_test_is_registered(NID_INET_SOCKET), "Inet lifecycle leaves sceNetInetSocket unsupported");
+    if (!init_registered || !term_registered) return;
+
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_loadexec_reset_guest_state();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u,
+           "Inet lifecycle: early Term stops by name");
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 2u,
+           "Inet lifecycle: Init without setup stops by name");
+    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+               net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "Inet lifecycle: starting core Net supplies its pool");
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Inet lifecycle: loading INET is still needed after core Net starts");
+    expect(net_call(NID_LOAD_MODULE, MODULE_INET, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: generic utility loading shares the legacy INET state");
+    const uint32_t pool = sr_hle_test_net_pool_uid();
+    const int inet_started = net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u;
+    expect(inet_started && sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: fresh Init returns zero and preserves the core allocator");
+    if (stop_at_socket) {
+        /* The child must use the normal named-stop path. Never invoke a socket
+         * handler if a future change registers one for this NID. */
+        if (inet_started && !sr_hle_test_is_registered(NID_INET_SOCKET)) {
+            sr_sched_on = 1;
+            (void)net_call(NID_INET_SOCKET, 2u, 2u, 0, 0, 0);
+        }
+        return;
+    }
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 4u,
+           "Inet lifecycle: duplicate Inet Init stops by name");
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 5u &&
+               sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: early core Term leaves the pool and active Inet alone");
+    expect(net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) ==
+               SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 6u &&
+               sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: core re-Init while Inet is live preserves the pool");
+    expect(net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               net_call(NID_UNLOAD_MODULE, MODULE_INET, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 8u,
+           "Inet lifecycle: utility unloads cannot remove the active modules");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: active Inet Term returns zero and leaves core Net alive");
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: core Net Term and both unloads work after Inet Term");
+
+    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+               net_call(NID_LOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 9u,
+           "Inet lifecycle: loaded modules do not substitute for core Net initialization");
+    expect(net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: a new ordinary setup after teardown succeeds");
+    sr_hle_loadexec_reset_guest_state();
+    expect(!sr_hle_test_net_inited() &&
+               net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 10u,
+           "Inet lifecycle: the LoadExec reset clears active Inet as well as core Net");
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
 }
 
 static void test_net_core_without_network(void) {
@@ -18370,6 +18486,178 @@ static void test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue(voi
     sr_hle_test_audio_reset();
     audio_fixture_reset();
     reset_fixture();
+}
+
+static uint64_t s_load_host_ns;
+static uint64_t load_host_clock_fixture(void) { return s_load_host_ns; }
+
+static void load_audio_wait_fixture(uint32_t guest_us) {
+    const unsigned speed = sched_fast_forward_speed();
+    const uint64_t host_ns = ((uint64_t)guest_us * 1000u + speed - 1u) / speed;
+    s_load_host_ns += host_ns;
+    vtime_take_host_sample();
+    audio_sim_advance((uint32_t)((host_ns + 999u) / 1000u));
+}
+
+static void test_auto_load_disc_and_silent_audio(void) {
+    static const char spec[] =
+        "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+        "sas=off;tess=off;twin=off;load=auto";
+    extern int hle_audio_queued(int ch);
+    extern void sr_hle_test_ctrl_sampling_reset(void);
+    extern void sr_hle_test_ctrl_stick(uint8_t lx, uint8_t ly);
+    extern int s_ctrl_test_stick;
+    extern uint8_t s_ctrl_test_lx, s_ctrl_test_ly;
+    enum {
+        PATH_ADDR = 0x08019000u, DISC_ADDR = 0x08019100u, PAD_ADDR = 0x08019400u,
+        PCM = 0x08a00000u, DISC_LBA = 0x1002u
+    };
+    CpuState cpu;
+    const uint32_t saved_disc_sectors = s_umd_synthetic_sectors;
+    const int saved_stick = s_ctrl_test_stick, saved_interactive = s_test_gui_interactive;
+    const uint8_t saved_lx = s_ctrl_test_lx, saved_ly = s_ctrl_test_ly;
+    uint64_t (*const saved_host_clock)(void) = s_host_ns_fn;
+    const int saved_pace = s_pace_on, saved_det_clock = s_det_clock;
+    const uint64_t saved_epoch_ns = s_clock_epoch_ns, saved_latch_ns = s_vbl_latch_ns;
+    const uint64_t saved_ff_host_ns = s_ff_host_anchor_ns, saved_ff_pace_ns = s_ff_pace_anchor_ns;
+    const uint32_t saved_ff_speed = s_ff_speed, saved_ff_epoch = s_ff_epoch;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    audio_fixture_reset();
+    s_test_gui_on = s_test_gui_interactive = 1;
+    s_umd_io_synthetic_enabled = 1;
+    s_umd_synthetic_sectors = DISC_LBA + 1u;
+    s_pace_on = 1;
+    s_det_clock = 0;
+    s_load_host_ns = 1000000u;
+    s_host_ns_fn = load_host_clock_fixture;
+    s_clock_epoch_ns = 0u;
+    s_ff_speed = 1u;
+    s_ff_host_anchor_ns = s_ff_pace_anchor_ns = 0u;
+    sched_auto_load_reset();
+    s_audio_sim_pull = 64;
+    s_audio_sim_reported_pull = 0;
+    s_audio_load_queue_silent = 0;
+    sr_hle_test_audio_wait_hook(load_audio_wait_fixture);
+    memset(&g_mem[PCM - 0x08000000u], 0, 64u * 4u);
+    expect(ace_init_spec(spec, NULL) == 1 && !nk_ace_load_fast("fixture", 0u),
+           "automatic disc load does not skip a title-declared wait");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "automatic load fixture reserves stereo PCM");
+    fd_set_path(&cpu, PATH_ADDR, "disc0:/UMD_DATA.BIN");
+    cpu.r[5] = 1u;
+    const uint32_t fd = sr_syscall(&cpu, 0x109f50bcu); /* sceIoOpen */
+    expect(fd >= 3u && fd < 64u, "automatic load fixture opens a synthetic disc file");
+
+    if (fd >= 3u && fd < 64u) {
+        expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 0u) == 0u,
+               "automatic load: a zero-byte read still returns zero");
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active(), "automatic load: zero bytes do not start it");
+        expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u &&
+                   MEM_R8(DISC_ADDR) == umd_synthetic_byte((uint64_t)DISC_LBA * 2048u),
+               "automatic load fixture processes 16 disc bytes through sceIoRead");
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active(), "automatic load: mixed queued audio blocks entry");
+        s_audio_load_queue_silent = 1;
+        sched_auto_load_vblank();
+        expect(sched_auto_load_active(), "automatic load: silence permits the recent read");
+        sr_hle_test_ctrl_stick(190u, 128u);
+        sr_ctrl_sample();
+        expect(!sched_auto_load_active() && sched_fast_forward_speed() == 1u,
+               "automatic load: a physical stick stops it with PSP digital sampling");
+        expect(audio_dispatch(&cpu, 0x3a622550u, PAD_ADDR, 1u, 0u) == 1u &&
+                   MEM_R8(PAD_ADDR + 8u) == 128u && MEM_R8(PAD_ADDR + 9u) == 128u,
+               "automatic load: the PSP's digital sample still reads centred");
+        sr_hle_test_ctrl_stick(128u, 128u);
+        sr_ctrl_sample();
+        expect(!s_auto_load_input, "automatic load: the next centred host latch clears input");
+        for (unsigned i = 0; i < 3u; ++i) {
+            expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u,
+                   "automatic load: the next disc bytes are delivered");
+            sched_auto_load_vblank();
+            expect(sched_auto_load_active() && sched_fast_forward_speed() == SCHED_AUTO_LOAD_SPEED,
+                   "automatic load: silent PCM and ongoing reads coexist at 16x");
+            expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u &&
+                       hle_audio_queued(0) == 64 && s_audio_push_calls == 0u,
+                   "automatic load: accepted zero PCM is kept in the guest-time queue");
+            if (i != 2u) {
+                s_load_host_ns += 1100000u;
+                scheduler_progress_time();
+            }
+        }
+        ace_ff_hold(1);
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active() && sched_fast_forward_speed() == SCHED_FAST_FORWARD_SPEED &&
+                   hle_audio_queued(0) == 64 && s_audio_load_handoff[0] == 64,
+               "automatic load: manual handoff seeds the same pending guest silence");
+        ace_ff_hold(0);
+        sched_auto_load_disc_read();
+        sched_auto_load_vblank();
+        expect(sched_auto_load_active() && hle_audio_queued(0) == 64,
+               "automatic load: a later silent load starts with the preserved queue");
+        MEM_W16(PCM, 12345u);
+        MEM_W16(PCM + 2u, (uint16_t)(int16_t)-23456);
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u,
+               "automatic load: the first audible PCM submission succeeds");
+        expect(sched_fast_forward_speed() == 1u && !sched_auto_load_active() &&
+                   s_audio_push_calls == 1u && s_audio_push_first_l == 12345 &&
+                   s_audio_push_first_r == -23456,
+               "automatic load: the first audible stereo frame reaches the mixer at 1x");
+        expect(s_audio_load_handoff[0] == 64 && hle_audio_queued(0) == 128,
+               "automatic load: the pending silence remains queued before the incoming PCM");
+
+        /* After the last tone the device played dry. A retained tail is
+         * unavailable for playback until the guest supplies another block. */
+        s_audio_sim_q[0] = 0;
+        s_audio_sim_dry[0] = 1;
+        s_audio_load_pending_sound = 1;
+        s_audio_load_handoff[0] = -1;
+        for (unsigned i = 0u; i <= AUTO_LOAD_RECENT_VBLANKS; ++i) {
+            s_load_host_ns += 16683333u;
+            scheduler_progress_time();
+            expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u,
+                   "automatic load: disc reads continue after the channel drains");
+            sched_auto_load_vblank();
+        }
+        expect(sched_auto_load_active() && s_audio_load_handoff[0] == -1,
+               "automatic load: a dry channel can accelerate without clearing retained samples");
+        memset(&g_mem[PCM - 0x08000000u], 0, 64u * 4u);
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u &&
+                   sched_fast_forward_speed() == 1u && s_audio_push_calls == 2u &&
+                   s_audio_load_handoff[0] == -1,
+               "automatic load: the first resumed block reaches the backend with the retained tail");
+        (void)audio_dispatch(&cpu, 0x810c4bc3u, fd, 0u, 0u); /* sceIoClose */
+    }
+    sched_auto_load_reset();
+    (void)ace_init_spec("off", NULL);
+    s_host_ns_fn = NULL;
+    s_umd_io_synthetic_enabled = 0;
+    s_umd_synthetic_sectors = saved_disc_sectors;
+    sr_hle_test_audio_wait_hook(NULL);
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    s_ctrl_test_stick = saved_stick;
+    s_ctrl_test_lx = saved_lx;
+    s_ctrl_test_ly = saved_ly;
+    s_test_gui_interactive = saved_interactive;
+    audio_fixture_reset();
+    reset_fixture();
+
+    /* Returning to 1x preserves the elapsed guest-time offset. A later
+     * fixture that installs its own host clock must not inherit that offset. */
+    s_host_ns_fn = saved_host_clock;
+    s_pace_on = saved_pace;
+    s_det_clock = saved_det_clock;
+    s_clock_epoch_ns = saved_epoch_ns;
+    s_vbl_latch_ns = saved_latch_ns;
+    s_ff_host_anchor_ns = saved_ff_host_ns;
+    s_ff_pace_anchor_ns = saved_ff_pace_ns;
+    s_ff_speed = saved_ff_speed;
+    s_ff_epoch = saved_ff_epoch;
 }
 
 /* Media telemetry truthfulness on the production audio hand-off.
@@ -30321,7 +30609,10 @@ static void test_sysclib_memory_imports(void) {
 }
 
 static void test_refer_thread_status(void) {
+    extern uint32_t sr_hle_test_compiled_sdk_version(void);
     enum {
+        LEGACY_SDK = 0x02060010u,
+        EXTENDED_SDK = 0x02060011u,
         THREAD_NAME = 0x08301000u,
         THREAD_INFO = 0x08302000u,
         THREAD_ENTRY = 0x08001234u,
@@ -30331,9 +30622,15 @@ static void test_refer_thread_status(void) {
         NID_REFER_THREAD_STATUS = 0x17c1684eu,
         TEST_ILLEGAL_ADDR = 0x80000103u,
         TEST_UNKNOWN_THID = 0x80020198u,
+        TEST_ILLEGAL_SIZE = 0x800201bcu,
     };
     reset_fixture();
     sr_hle_init();
+    const uint32_t saved_sdk = sr_hle_test_compiled_sdk_version();
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+               sr_hle_test_compiled_sdk_version() == LEGACY_SDK,
+           "ReferThreadStatus fixture selects the legacy compiled SDK through dispatch");
     title_hle_write_cstr(THREAD_NAME, "showcase-worker");
     s_cpu->r[4] = THREAD_NAME;
     s_cpu->r[5] = THREAD_ENTRY;
@@ -30370,47 +30667,96 @@ static void test_refer_thread_status(void) {
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR,
            "ReferThreadStatus validates the complete output structure span");
 
-    /* The caller's size word selects the write (the PSP-KERNEL-STATUS-001 rule of the sema,
-     * event-flag and mailbox status calls): 0 writes nothing, a smaller size writes only that
-     * many bytes of the 0x68-byte record, and an unmeasured larger one stops by name.
-     * MUTANT: write sizeof(SrThreadInfo) bytes whatever the size word says -- the size-0 and
-     *   size-8 cells see bytes past the caller's struct overwritten. */
-    enum { INFO_GUARD = 0x70u };
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 0u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == 0u && MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 0 succeeds and writes nothing");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 8u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == (uint32_t)sizeof(SrThreadInfo) &&
-               memcmp((const void *)SR_HOST(THREAD_INFO + 4u), "show", 4u) == 0 &&
-               MEM_R32(THREAD_INFO + 8u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 8 writes only the first 8 bytes of the record");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO + 0x64u) != 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x68u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with the full size writes the record and nothing past it");
+    /* The prefix is the live 104-byte status for the same dormant thread. The
+     * SDK split, write sizes, and trailing word are independently recorded in
+     * PSPAutotests threads/threads/refer.expected (see h_ReferThreadStatus).
+     * A full sentinel comparison proves both the returned bytes and the absence
+     * of writes after the smaller of the declared and supported lengths. */
+    uint8_t legacy[sizeof(SrThreadInfo)];
+    uint8_t extended[0x6c] = {0};
+    memcpy(legacy, (const void *)SR_HOST(THREAD_INFO), sizeof(legacy));
+    memcpy(extended, legacy, sizeof(legacy));
+    fixture_wr32(extended, (uint32_t)sizeof(extended));
+    static const struct {
+        uint32_t sdk, input_size, written, result;
+        const char *label;
+    } cases[] = {
+        { LEGACY_SDK, 0, 0, 0, "legacy size zero leaves output untouched" },
+        { LEGACY_SDK, 8, 8, 0, "legacy partial size returns an exact prefix" },
+        { LEGACY_SDK, 0x68, 0x68, 0, "legacy full size writes 104 bytes" },
+        { LEGACY_SDK, 0x6c, 0x68, 0, "legacy size 108 preserves the trailing word" },
+        { LEGACY_SDK, 0x80, 0x68, 0, "legacy size 128 caps the write at 104 bytes" },
+        { LEGACY_SDK, 0x400, 0x68, 0, "legacy size 1024 caps the write at 104 bytes" },
+        { LEGACY_SDK, UINT32_MAX, 0x68, 0, "legacy maximum size caps the write at 104 bytes" },
+        { EXTENDED_SDK, 0, 0, 0, "newer size zero leaves output untouched" },
+        { EXTENDED_SDK, 8, 8, 0, "newer partial size reports 108 and returns an exact prefix" },
+        { EXTENDED_SDK, 0x68, 0x68, 0, "newer size 104 reports 108 without writing the trailing word" },
+        { EXTENDED_SDK, 0x80, 0, TEST_ILLEGAL_SIZE, "newer size 128 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x400, 0, TEST_ILLEGAL_SIZE, "newer size 1024 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, UINT32_MAX, 0, TEST_ILLEGAL_SIZE, "newer maximum size returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x6c, 0x6c, 0, "newer size 108 still succeeds after a rejected size" },
+    };
+    uint8_t expected[0x404];
     const uint32_t stops_before = sr_hle_test_unmodelled_stops();
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo) + 4u);
+    sr_flight_test_disable();
+    expect(!sr_flight_class_enabled(SR_FLIGHT_CLASS_ALL),
+           "ReferThreadStatus diagnostic is tested with flight recording disabled");
+    FILE *capture = NULL;
+    int saved_stderr = -1;
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_stderr);
+    expect(capturing, "ReferThreadStatus fixture captures normal stderr");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (i == 0 || cases[i].sdk != cases[i - 1].sdk) {
+            s_cpu->r[4] = cases[i].sdk;
+            expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+                       sr_hle_test_compiled_sdk_version() == cases[i].sdk,
+                   "ReferThreadStatus fixture selects the compiled SDK through dispatch");
+        }
+        memset(expected, 0xa5, sizeof(expected));
+        fixture_wr32(expected, cases[i].input_size);
+        memcpy((void *)SR_HOST(THREAD_INFO), expected, sizeof(expected));
+        const uint8_t *record = cases[i].sdk == LEGACY_SDK ? legacy : extended;
+        memcpy(expected, record, cases[i].written);
+        s_cpu->r[4] = uid;
+        s_cpu->r[5] = THREAD_INFO;
+        expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == cases[i].result &&
+                   memcmp((const void *)SR_HOST(THREAD_INFO), expected, sizeof(expected)) == 0,
+               cases[i].label);
+    }
+    char log[1024] = {0};
+    if (capturing) hle_data_stderr_capture_end(capture, saved_stderr, log, sizeof(log));
+    expect(count_occurrences(log, "HLE: sceKernelReferThreadStatus ILLEGAL_SIZE (0x800201bc)") == 3 &&
+               strstr(log, "requested=0x00000080 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0x00000400 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0xffffffff max=0x6c sdk=0x02060011"),
+           "ReferThreadStatus logs only the three newer SDK oversized requests");
+    expect(strstr(log, "UNSUPPORTED_IMPORT:") == NULL,
+           "ReferThreadStatus diagnostic never claims an unsupported import");
+    expect(sr_hle_test_unmodelled_stops() == stops_before,
+           "ReferThreadStatus handles both observed SDK layouts without a semantic stop");
+
+    /* Exactly 104 bytes fit. The newer 108-byte write must check the whole span
+     * before modifying the prefix. The legacy write fits despite the request. */
+    const uint32_t end_buffer = 0x0c000000u - (uint32_t)sizeof(legacy);
+    memset(expected, 0xa5, sizeof(legacy));
+    fixture_wr32(expected, (uint32_t)sizeof(extended));
+    memcpy((void *)SR_HOST(end_buffer), expected, sizeof(legacy));
     s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
-               sr_hle_test_unmodelled_stops() == stops_before + 1u &&
-               MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word above 0x68 stops by name and writes nothing");
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR &&
+               memcmp((const void *)SR_HOST(end_buffer), expected, sizeof(legacy)) == 0,
+           "newer ReferThreadStatus rejects a truncated 108-byte span before writing");
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture switches back to the legacy SDK");
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               memcmp((const void *)SR_HOST(end_buffer), legacy, sizeof(legacy)) == 0,
+           "legacy ReferThreadStatus validates the 104-byte write span for a 108-byte request");
+    s_cpu->r[4] = saved_sdk;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture restores the prior compiled SDK");
 }
 
 /* sceKernelReferThreadRunStatus and sceKernelReferCallbackStatus check the whole record span
@@ -67488,6 +67834,154 @@ static void test_atrac3plus_decode_after_end(void) {
     (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
 }
 
+/* Drain two complete frames. For the ring the first encoded frame is the state-loading
+ * frame. For halfway playback the third frame is only partially supplied. */
+static void test_atrac3plus_refill_after_empty(int streamed) {
+    enum {
+        SAMPLES = 2048u, FRAMES = 4u, HEADER = 56u,
+        WRITE_PTR = 0x08004118u, WRITABLE = 0x0800411cu, READ_OFFSET = 0x08004120u,
+        POSITION = 0x08004124u, PCM_BYTES = SAMPLES * 2u * 2u
+    };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(FRAMES, 3u * SAMPLES, 0u);
+    const uint32_t prefix = HEADER + (streamed ? 3u * AU03_ALIGN
+                                               : 2u * AU03_ALIGN + AU03_ALIGN / 2u);
+    uint8_t tail[FRAMES * AU03_ALIGN];
+    const uint32_t tail_bytes = size - prefix;
+    uint8_t *track = &g_mem[AU03_TRACK - 0x08000000u];
+    memcpy(tail, track + prefix, tail_bytes);
+    memset(track + prefix, 0, tail_bytes);
+    uint32_t id = streamed
+        ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, prefix, 0u, 0u)
+        : td24b_dispatch4(NID_SCE_ATRAC_SET_HALFWAY_BUFFER_AND_GET_ID, AU03_TRACK, prefix, size, 0u);
+    expect(id < 8u, "ATRAC3+ refill: the filled prefix configures the decoder");
+    if (id >= 8u) return;
+
+    for (unsigned frame = 0u; frame < 2u; ++frame) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+               "ATRAC3+ refill: ordinary buffered frames decode before starvation");
+    }
+    uint8_t unchanged_pcm[PCM_BYTES];
+    memset(unchanged_pcm, 0xa5, sizeof(unchanged_pcm));
+    uint8_t *pcm = &g_mem[AU03_PCM - 0x08000000u];
+    memcpy(pcm, unchanged_pcm, sizeof(unchanged_pcm));
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret == ATRAC_ERROR_BUFFER_IS_EMPTY &&
+               MEM_R32(AU03_OUT_N) == 0u && MEM_R32(AU03_OUT_END) == 0u,
+           streamed ? "ATRAC3+ drained stream returns 0x80630023, 0 samples, finish 0"
+                    : "ATRAC3+ short halfway prefix returns 0x80630023, 0 samples, finish 0");
+    expect(MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu,
+           streamed ? "ATRAC3+ drained stream leaves remain untouched"
+                    : "ATRAC3+ short halfway prefix leaves remain untouched");
+    expect(memcmp(pcm, unchanged_pcm, sizeof(unchanged_pcm)) == 0 &&
+               sr_hle_test_atrac_last_block_us() == 0u,
+           "ATRAC3+ buffer-empty performs no PCM write or decode wait");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_NEXT_DECODE_POSITION, id, POSITION, 0u, 0u) == 0u &&
+               MEM_R32(POSITION) == 2u * SAMPLES,
+           "ATRAC3+ buffer-empty leaves the decode position at the missing frame");
+
+    ret = td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id, WRITE_PTR, WRITABLE, READ_OFFSET);
+    const uint32_t write = MEM_R32(WRITE_PTR);
+    const uint32_t expected_write = streamed ? AU03_TRACK : AU03_TRACK + prefix;
+    int can_refill = ret == 0u && MEM_R32(READ_OFFSET) == prefix &&
+                     MEM_R32(WRITABLE) >= tail_bytes && write == expected_write;
+    expect(can_refill, "ATRAC3+ refill requests the unfed file bytes at the correct guest address");
+    if (can_refill) {
+        memcpy(&g_mem[write - 0x08000000u], tail, tail_bytes);
+        expect(td24b_dispatch4(0x7db31251u /* sceAtracAddStreamData */, id, tail_bytes, 0u, 0u) == 0u,
+               "ATRAC3+ refill accepts the bytes supplied by the guest");
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 1u,
+               "ATRAC3+ refill decodes the missing frame and reaches the track end");
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == ATRAC_ERROR_DECODE_DATA_AFTER_END && MEM_R32(AU03_OUT_N) == 0u,
+               "ATRAC3+ refill preserves the separate DecodeData after-end error");
+    }
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+static int au03_refill_loop_frame(uint32_t id, uint32_t read_offset, uint32_t write_address,
+                                  const uint8_t frame[AU03_ALIGN]) {
+    enum { WRITE_PTR = 0x08004118u, WRITABLE = 0x0800411cu, READ_OFFSET = 0x08004120u };
+    uint32_t ret = td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id,
+                                   WRITE_PTR, WRITABLE, READ_OFFSET);
+    if (ret != 0u || MEM_R32(READ_OFFSET) != read_offset || MEM_R32(WRITABLE) < AU03_ALIGN ||
+        MEM_R32(WRITE_PTR) != write_address)
+        return 0;
+    memcpy(&g_mem[write_address - 0x08000000u], frame, AU03_ALIGN);
+    return td24b_dispatch4(0x7db31251u /* sceAtracAddStreamData */, id, AU03_ALIGN, 0u, 0u) == 0u;
+}
+
+static void test_atrac3plus_refill_after_loop_rewind(void) {
+    enum { SAMPLES = 2048u, DATA_OFFSET = 124u, POSITION = 0x08004124u };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(4u, 3u * SAMPLES, 2u * SAMPLES - 1u);
+    const uint32_t ring = size - AU03_ALIGN;
+    uint8_t frame[AU03_ALIGN];
+    memcpy(frame, &g_mem[AU03_TRACK - 0x08000000u + DATA_OFFSET], sizeof(frame));
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, ring, 0u, 0u);
+    expect(id < 8u, "ATRAC3+ loop refill: setup takes the streamed track");
+    if (id >= 8u) return;
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, id, 0xffffffffu, 0u, 0u) == 0u,
+           "ATRAC3+ loop refill: the track is set to loop");
+    for (unsigned i = 0; i < 2u; ++i) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+               "ATRAC3+ loop refill: the initial frames decode and playback loops");
+    }
+
+    int fed_tail = au03_refill_loop_frame(id, ring, AU03_TRACK, frame);
+    expect(fed_tail, "ATRAC3+ loop refill: the remaining frame is supplied before EOF");
+    if (fed_tail) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES,
+               "ATRAC3+ loop refill: the last fed frame decodes after rewind");
+        /* All bytes through EOF have been fed, but the stream's next refill
+         * advertises an earlier file offset because playback is looping. */
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == ATRAC_ERROR_BUFFER_IS_EMPTY && MEM_R32(AU03_OUT_N) == 0u &&
+                   MEM_R32(AU03_OUT_END) == 0u && MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "ATRAC3+ loop refill: a dry ring at fed EOF still needs a refill");
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_NEXT_DECODE_POSITION,
+                              id, POSITION, 0u, 0u) == 0u && MEM_R32(POSITION) == SAMPLES,
+               "ATRAC3+ loop refill: buffer-empty preserves the rewound decode position");
+        int fed_loop = au03_refill_loop_frame(id, DATA_OFFSET, AU03_TRACK + AU03_ALIGN, frame);
+        expect(fed_loop, "ATRAC3+ loop refill: the advertised earlier bytes are accepted");
+        if (fed_loop) {
+            ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+            expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+                   "ATRAC3+ loop refill: decode resumes after feeding the earlier bytes");
+        }
+    }
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+static void test_atrac3plus_missing_frame_without_refill(void) {
+    reset_fixture();
+    sr_hle_init();
+    /* The loaded file contains only one frame although its sample count needs two. */
+    const uint32_t size = au03_build_at3p(1u, 2u * 2048u, 0u);
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, size, 0u, 0u);
+    expect(id < 8u, "ATRAC3+ no refill: setup takes the track");
+    if (id >= 8u) return;
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret == 0u && MEM_R32(AU03_OUT_N) == 2048u && MEM_R32(AU03_OUT_END) == 0u,
+           "ATRAC3+ no refill: the complete frame decodes before the missing one");
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "ATRAC3+ missing frame beyond the loaded file stops by name");
+    expect(MEM_R32(AU03_OUT_N) == 0xdeadbeefu && MEM_R32(AU03_OUT_END) == 0xdeadbeefu &&
+               MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu,
+           "ATRAC3+ missing frame without refill leaves guest outputs untouched");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
 /* The loop end rewinds only while loops remain, in every buffer state: a streamed play-once
  * track with a loop chunk finishes, and an all-data track with a trailer rewinds at its loop end
  * rather than at the end of the file. PPSSPP-derived, not PSP-measured. */
@@ -68032,6 +68526,14 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--auto-load") == 0) {
+        test_auto_load_disc_and_silent_audio();
+        test_pad_vblank_deadline(); /* the next fixture must see its own clock */
+        fprintf(stderr, "auto-load: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--utility-usb") == 0) {
         test_utility_usb_module_state();
         fprintf(stderr, "utility-usb: %d checks, %d failures\n", s_checks, s_failures);
@@ -68048,6 +68550,17 @@ static int hle_selftest_main(int argc, char **argv) {
 
     if (argc > 1 && strcmp(argv[1], "--adhocctl-handler-fault-child") == 0)
         return run_adhocctl_handler_fault_child();
+    if (argc > 1 && strcmp(argv[1], "--inet-socket-stop-child") == 0) {
+        test_net_inet_lifecycle_without_network(1);
+        free(g_mem_base);
+        return 98;
+    }
+    if (argc > 1 && strcmp(argv[1], "--inet-offline") == 0) {
+        test_net_inet_lifecycle_without_network(0);
+        fprintf(stderr, "inet-offline: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--adhocctl") == 0) {
         test_adhocctl_lone_console();
         test_adhocctl_teardown();
@@ -68208,6 +68721,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_edram_addr_translation();
     test_named_refusals();
     test_net_core_without_network();
+    test_net_inet_lifecycle_without_network(0);
     test_refer_system_status();
     test_ctrl_read_latch();
     test_ctrl_peek_latch_keeps_the_latch();
@@ -68336,6 +68850,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_calls_read_the_guest_queue_under_the_deterministic_clock();
     test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock();
     test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue();
+    test_auto_load_disc_and_silent_audio();
     test_ctrl_live_input_latch_suppresses_phantom_start();
     test_ctrl_pulse_never_synthesises_start_in_a_real_window();
     test_ctrl_read_buffer_contract();
@@ -68538,6 +69053,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
     test_atrac_decode_without_frame_grid();
     test_atrac3plus_decode_after_end();
+    test_atrac3plus_refill_after_empty(1);
+    test_atrac3plus_refill_after_empty(0);
+    test_atrac3plus_refill_after_loop_rewind();
+    test_atrac3plus_missing_frame_without_refill();
     test_atrac_loop_end_follows_loop_num();
     test_atrac_set_loop_num_bad_id();
     test_mp3_loadexec_reset();

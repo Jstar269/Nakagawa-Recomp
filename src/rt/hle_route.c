@@ -1556,23 +1556,32 @@ static uint32_t h_CtrlButtons(void) {
  * gets it. Digital mode reads the stick centred whatever holds it (measured, see hle.c). The
  * VBLANK latch and late pad sampling's refresh both build their sample from this, so a refreshed
  * sample holds what a latch of the same host input would. */
-static void ctrl_host_sample(uint32_t *buttons, uint8_t *lx, uint8_t *ly) {
+static int ctrl_host_sample(uint32_t *buttons, uint8_t *lx, uint8_t *ly) {
+    const int analog = s_ctrl_sampling_mode == 1u;
+    int stick_active = 0;
     *lx = 128u;
     *ly = 128u;
-    if (s_ctrl_sampling_mode == 1u) {
+    if (analog || sched_auto_load_enabled()) {
         if (gui_on()) {
             gui_analog(lx, ly);
+            stick_active = *lx != 128u || *ly != 128u;
             /* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) reshapes the live host
              * stick only. It does nothing unless the run's line asked for it, so every other run
              * latches the bytes the window gave. A route's stick and a replay's recorded sample
              * are already the guest's bytes and pass through unchanged (sr_ctrl_sample). */
-            if (g_ace_on) ace_stick_sample(lx, ly, gui_stick_dead_zone());
+            if (analog && g_ace_on) ace_stick_sample(lx, ly, gui_stick_dead_zone());
         }
 #ifdef SR_HLE_THREAD_SELFTEST
-        if (s_ctrl_test_stick) { *lx = s_ctrl_test_lx; *ly = s_ctrl_test_ly; }
+        if (s_ctrl_test_stick) {
+            *lx = s_ctrl_test_lx;
+            *ly = s_ctrl_test_ly;
+            stick_active = *lx != 128u || *ly != 128u;
+        }
 #endif
     }
+    if (!analog) *lx = *ly = 128u; /* the PSP's digital sample is still centred */
     *buttons = h_CtrlButtons();
+    return stick_active || *buttons;
 }
 
 void sr_ctrl_sample(void) {
@@ -1589,7 +1598,7 @@ void sr_ctrl_sample(void) {
     uint32_t buttons = 0u;
     uint8_t route_lx = 128u, route_ly = 128u;
     int route_stick = s_route_state != ROUTE_OFF && sr_input_stick(&s_input, &route_lx, &route_ly);
-    ctrl_host_sample(&buttons, &lx, &ly);
+    const int live_input = ctrl_host_sample(&buttons, &lx, &ly);
     if (s_ctrl_sampling_mode == 1u) {
         if (route_stick) { lx = route_lx; ly = route_ly; }
     } else if (route_stick && !s_route_stick_digital_noted) {
@@ -1620,6 +1629,9 @@ void sr_ctrl_sample(void) {
     /* The sample is final here: SR_RECORD writes it down and SR_REPLAY hands back the recorded
      * one, before anything below reads it (replay_checkpoint.h). */
     sr_replay_pad_sample(&buttons, &lx, &ly, &keyboard_took_sample);
+    sched_auto_load_input(live_input || buttons || lx != 128u || ly != 128u ||
+                          (route_stick && (route_lx != 128u || route_ly != 128u)) ||
+                          keyboard_took_sample || pulses);
     /* A line per change of what the guest is handed, the stick included: padscript_from_log
      * rebuilds a replay from these lines, so a stick that moved with no button change has to
      * appear here, or the replay would hold the stick where the last button left it. */
@@ -1989,11 +2001,12 @@ static int pad_refresh_live(void) {
      * Ace's dead-zone remap (stick=<counts>) applied as the latch applies it. */
     uint32_t buttons = 0u;
     uint8_t lx = 128u, ly = 128u;
-    ctrl_host_sample(&buttons, &lx, &ly);
+    const int live_input = ctrl_host_sample(&buttons, &lx, &ly);
     const uint64_t poll_ns = gui_input_poll_ns();
     /* The pulses in these buttons go to this sample, as they would to the next one without the
      * part, and it keeps them if it is refreshed again. */
     const uint32_t taps = buttons & gui_consume_button_pulses();
+    if (live_input || taps) sched_auto_load_input(1);
     if (!ctrl_refresh_newest(buttons, lx, ly, poll_ns, taps)) return 0;
     if (hle_inlog_on())
         fprintf(stderr, "ctrl_refresh: vcount=%u buttons 0x%04x lx=%u ly=%u\n", s_vcount_fwd,

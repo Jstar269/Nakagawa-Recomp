@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **548** (declared in `recomp.h`: 463)
-- reach class: emitter-reached 91, production-runtime-only 414, selftest-only 0, address-only 8, none 35
-- provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 494
+- helpers: **556** (declared in `recomp.h`: 471)
+- reach class: emitter-reached 89, production-runtime-only 424, selftest-only 0, address-only 8, none 35
+- provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 502
 
 ## Helpers
 
@@ -125,6 +125,14 @@ does not make this file stale. `--details` prints them to stdout.
 | `resume_refuse` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sched_alarm_cancel` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_alarm_set` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_auto_load_active` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_auto_load_audible` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_auto_load_audio_hooks` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_auto_load_disc_read` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_auto_load_enabled` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_auto_load_host_input` | `rt/gui.c`, `rt/sched.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived; `rt/sched.c`: upstream_derived |
+| `sched_auto_load_input` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_auto_load_quit` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_block_on` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_block_on_timeout` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_change_current_thread_attr` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
@@ -444,9 +452,9 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_nan_trap_note` | `rt/debug.c` | yes | emitter-reached (via `SR_NAN_TRAP_F`) | `rt/debug.c`: project_authored_attested |
 | `sr_nan_trap_note_v` | `rt/debug.c` | yes | emitter-reached (via `SR_NAN_TRAP_V`, via `SR_NAN_TRAP_V2`) | `rt/debug.c`: project_authored_attested |
 | `sr_nan_trap_print_floats` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
-| `sr_native_memmove` | `rt/recomp.h` | yes | emitter-reached (direct) | `rt/recomp.h`: upstream_derived |
+| `sr_native_memmove` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_native_memmove_checked` | `rt/recomp.h` | yes | none | `rt/recomp.h`: upstream_derived |
-| `sr_native_memset` | `rt/recomp.h` | yes | emitter-reached (direct) | `rt/recomp.h`: upstream_derived |
+| `sr_native_memset` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_native_memset_checked` | `rt/recomp.h` | yes | none | `rt/recomp.h`: upstream_derived |
 | `sr_newlib_free` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_newlib_malloc` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
