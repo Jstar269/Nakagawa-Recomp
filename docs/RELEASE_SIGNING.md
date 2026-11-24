@@ -162,7 +162,9 @@ passwords.
 **Steps.** On the signing machine, make a copy of the verified attested bundle outside the release layouts.
 Set `$ApprovedBundle` to that copy and sign it before assembling either layout in
 [the portable release recipe](PREVIEW_RELEASE.md#recreate-the-package). Both layouts, their SBOMs and
-checksums, and the content audit then use the same verified signed bytes.
+checksums, and the content audit then use the same verified signed bytes. The ZIP includes the approved
+`signing-record.json` at its root. The audit checks its recorded final hashes against the two signed
+executables and refreshed runtime manifest.
 
 ```powershell
 pwsh tools/sign_release_binaries.ps1 -Stage $ApprovedBundle -Thumbprint <certificate SHA-1 thumbprint> `

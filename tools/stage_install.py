@@ -941,8 +941,8 @@ def resolve_commit(revision: str, *, repo: Path = ROOT) -> str:
                            f"{detail}") from exc
 
 
-def _check_record_path(record: Path, zip_path: Path, stage: Path) -> Path:
-    """Refuse a ``--record`` path that exists, is or holds the ZIP, or lies in the stage."""
+def _check_record_path(record: Path, zip_path: Path, stage: Path, *verification_inputs: Path | None) -> Path:
+    """Keep a new record outside the stage, ZIP and all verification inputs."""
     record = Path(record).resolve()
     zip_path = Path(zip_path).resolve()
     if record.is_relative_to(zip_path) or zip_path.is_relative_to(record):
@@ -951,6 +951,13 @@ def _check_record_path(record: Path, zip_path: Path, stage: Path) -> Path:
     if record.is_relative_to(Path(stage).resolve()):
         raise InstallError("PORTABLE_RECORD_INSIDE_STAGE: write the record outside the staged folder; "
                            "SHA256SUMS.txt would not list it")
+    for verification_input in verification_inputs:
+        if verification_input is not None:
+            try:
+                publish_audit.require_separate_artifact_paths(record, verification_input)
+            except publish_audit.ArtifactAuditError as exc:
+                raise InstallError("PORTABLE_RECORD_OVERLAPS_REFERENCE: write the record outside "
+                                   "all artifact verification inputs") from exc
     if record.exists():
         raise InstallError(f"PORTABLE_RECORD_EXISTS: {record} already exists; write a new file")
     return record
@@ -1334,7 +1341,8 @@ def main(argv=None) -> int:
             parser.error("--portable-zip and --zip-stage go together, without --dest")
         try:
             record_path = (None if args.record is None
-                           else _check_record_path(args.record, args.portable_zip, args.zip_stage))
+                           else _check_record_path(args.record, args.portable_zip, args.zip_stage,
+                                                   args.artifact_reference, args.approved_bundle, args.approved_prereqs))
             expected_commit = resolve_commit(args.revision)
             epoch = resolve_source_date_epoch(args.source_date_epoch, revision=args.revision)
             summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch,

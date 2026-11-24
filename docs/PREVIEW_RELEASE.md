@@ -240,6 +240,10 @@ function New-WindowsReleaseLayout([string]$Layout) {
     }
     # Use the exact toolchain record shipped and attested with the binary bundle.
     Copy-Item -LiteralPath (Join-Path $ApprovedBundle 'toolchain.json') -Destination (Join-Path $Layout 'toolchain.json')
+    $SigningRecord = Join-Path $ApprovedBundle 'signing-record.json'
+    if (Test-Path -LiteralPath $SigningRecord -PathType Leaf) {
+        Copy-Item -LiteralPath $SigningRecord -Destination (Join-Path $Layout 'signing-record.json')
+    }
     Copy-Item LICENSE, NOTICE.md (Join-Path $Layout '.')
     Copy-Item README.md (Join-Path $Layout '.')
     Copy-Item docs\PREVIEW_RELEASE.md, docs\SETUP.md, docs\SMOKE_TEST.md, docs\RELEASE_NOTES_v0.0.3.md $PackageDocs
@@ -300,7 +304,8 @@ $ReferenceLayout = Join-Path $ArtifactRoot 'expected-windows-layout'
 New-WindowsReleaseLayout $ReferenceLayout
 New-WindowsReleaseLayout $Stage
 # The closed temporary ZIP is audited before it can take the final name. Its
-# record, outside both layouts, binds the ZIP and checksum list to the source SHA.
+# record binds the ZIP and checksum list to the source SHA. Both outputs stay
+# outside the candidate layout, reference layout, and approved input directories.
 python tools/stage_install.py --portable-zip $Zip --zip-stage $Stage --revision $CandidateSha --record $ZipRecord `
     --artifact-reference $ReferenceLayout --approved-bundle $ApprovedBundle --approved-prereqs $ApprovedPrereqs
 if ($LASTEXITCODE -ne 0) { throw 'Writing the portable ZIP failed.' }
@@ -323,7 +328,7 @@ Then sign that checksum file on the offline signing machine, as [`RELEASE_SIGNIN
 
 The source archive step writes `nakagawa-recomp-<version>-prerequisite-sources.zip` beside the ZIP, outside the stage. It downloads each pinned source file into the same cache, or reuses a cached copy, checks its exact size and SHA-256, stores it unchanged under one top-level folder with `SOURCES.txt`, and verifies the archive again, contents included. It prints `source_count`, `source_bytes`, `archive_bytes` and `archive_sha256`: record the archive size in the release notes next to the ZIP figures, and attach the archive and its `.sha256` to the same release as the ZIP. `python -m tools.nk_core.prereq_fetcher --manifest assets/prereq_manifest.json --verify-source-archive <archive>` repeats the check on a downloaded copy.
 
-The artifact auditor binds all finished ZIP members to their paths, expected roles, sizes, and SHA-256 values. It derives the ZIP's checksum list from the independent layout. It checks the `bin/` tree, including the two source-owned showcase images, directly against the approved bundle. For an older bundle without a runtime manifest, the packer verifies the derived manifest against those same runtime files. It checks the prerequisite subtree against the separate reconstruction from the pinned archives. The toolchain record identifies the frozen source commit in both layouts and the bundle. `--artifact-reference` can also read an independently reviewed pin JSON with `format` set to `nakagawa-release-artifact-reference`, `schema_version` set to 1, `source_commit`, an `empty_folders` list with trailing slashes, and `files` rows containing `path`, `role`, `size` and `sha256`. The roles are `runtime` under `bin/`, `showcase` under `bin/demos/`, `prerequisite` under `prereqs/`, `source` under `source/`, and `distribution` elsewhere. Omit `SHA256SUMS.txt` from the pin rows. Keep both reference forms outside the staged folder and release archive.
+The artifact auditor binds all finished ZIP members to their paths, expected roles, sizes, and SHA-256 values. It derives the ZIP's checksum list from the independent layout. It checks the `bin/` tree, including the two source-owned showcase images, directly against the approved bundle. For an older bundle without a runtime manifest, the packer verifies the derived manifest against those same runtime files. It checks the prerequisite subtree against the separate reconstruction from the pinned archives. When the approved bundle includes `signing-record.json`, both layouts carry those exact bytes at the root. The archive audit checks the record's final executable and refreshed runtime-manifest hashes against the archived files. The toolchain record identifies the frozen source commit in both layouts and the bundle. `--artifact-reference` can also read an independently reviewed pin JSON with `format` set to `nakagawa-release-artifact-reference`, `schema_version` set to 1, `source_commit`, an `empty_folders` list with trailing slashes, and `files` rows containing `path`, `role`, `size` and `sha256`. The roles are `runtime` under `bin/`, `showcase` under `bin/demos/`, `prerequisite` under `prereqs/`, `source` under `source/`, and `distribution` elsewhere. Omit `SHA256SUMS.txt` from the pin rows. Keep both reference forms outside the staged folder and release archive.
 
 Repeating the same layout and ZIP proves reproducibility. The workflow attestation, frozen source export and pinned prerequisite reconstruction establish the origin of the inputs. A matching copy of the candidate supplies no such evidence.
 

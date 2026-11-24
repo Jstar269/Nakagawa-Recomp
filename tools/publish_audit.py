@@ -1325,6 +1325,7 @@ class ArtifactAuditError(ValueError):
 
 ARTIFACT_REFERENCE_FORMAT = "nakagawa-release-artifact-reference"
 ARTIFACT_SUMS = "SHA256SUMS.txt"
+_ARTIFACT_SIGNING_RECORD = "signing-record.json"
 _ARTIFACT_SHOWCASE_IDS = frozenset(("TEST00007", "TEST00008"))
 _ARTIFACT_ISOS = frozenset(f"bin/demos/images/{name}.iso" for name in _ARTIFACT_SHOWCASE_IDS)
 _ARTIFACT_PREFIX_BYTES = 0x8006  # includes the ISO volume identifier
@@ -1588,6 +1589,12 @@ def _artifact_reference_directory(path: Path, approved_bundle: Path | None,
                 raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISSING: {expected}")
     if approved_bundle is not None and "toolchain.json" in files:
         _artifact_check_approved("toolchain.json", files["toolchain.json"], approved_bundle / "toolchain.json")
+    approved_record = approved_bundle / _ARTIFACT_SIGNING_RECORD if approved_bundle is not None else None
+    recorded = files.get(_ARTIFACT_SIGNING_RECORD)
+    if recorded is not None:
+        _artifact_check_approved(_ARTIFACT_SIGNING_RECORD, recorded, approved_record)
+    elif approved_record is not None and (approved_record.exists() or approved_record.is_symlink()):
+        raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISSING: {_ARTIFACT_SIGNING_RECORD}")
     return _artifact_reference(_artifact_toolchain_commit(_artifact_load_json(path / "toolchain.json")),
                                files, directories)
 
@@ -1615,6 +1622,37 @@ def load_artifact_reference(path: Path, *, approved_bundle: Path | None = None,
         raise ArtifactAuditError(f"ARTIFACT_REFERENCE_UNREADABLE: {exc}") from exc
 
 
+def _artifact_check_signing_record(data: bytes, pins: dict[str, ArtifactPin]) -> None:
+    # These are SHA-256 relationships from the already approved derivative record.
+    # SignTool verifies Authenticode when the release owner produces that record.
+    try:
+        record = json.loads(data)
+    except ValueError as exc:
+        raise ArtifactAuditError("ARTIFACT_SIGNING_RECORD_INVALID: unreadable JSON") from exc
+    if (not isinstance(record, dict) or record.get("format") != "nakagawa-signing-record" or
+            type(record.get("schema")) is not int or record["schema"] != 1 or record.get("digest_algorithm") != "sha256"):
+        raise ArtifactAuditError("ARTIFACT_SIGNING_RECORD_INVALID: expected the version 1 SHA-256 signing record")
+    groups = (
+        ("files", "unsigned_sha256", "signed_sha256", {"bin/nakagawa_player.exe", "bin/production_smoke.exe"}),
+        ("refreshed_files", "attested_sha256", "refreshed_sha256", {"bin/runtime-manifest.json"}),
+    )
+    for group, original_field, final_field, remaining in groups:
+        rows = record.get(group)
+        if not isinstance(rows, list) or len(rows) != len(remaining):
+            raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_INVALID: incomplete {group}")
+        for row in rows:
+            path = row.get("path") if isinstance(row, dict) else None
+            if not isinstance(path, str) or path not in remaining:
+                raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_INVALID: unexpected path in {group}")
+            remaining.remove(path)
+            original = row.get(original_field)
+            if not isinstance(original, str) or not _ARTIFACT_SHA256.fullmatch(original):
+                raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_INVALID: invalid {original_field} for {path}")
+            pin = pins.get(path)
+            if pin is None or pin.sha256 != row.get(final_field):
+                raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_DIGEST: {path}")
+
+
 def _audit_artifact_members(members: Iterable[ArtifactMember], reference: ArtifactReference) -> None:
     seen: dict[str, tuple[str, bool]] = {}
     explicit: set[str] = set()
@@ -1638,7 +1676,9 @@ def _audit_artifact_members(members: Iterable[ArtifactMember], reference: Artifa
         _artifact_check_kind(member.path, prefix)
         if actual != pin:
             raise ArtifactAuditError(f"ARTIFACT_MEMBER_DIGEST: {member.path}")
-        if member.path == "toolchain.json":
+        if member.path == _ARTIFACT_SIGNING_RECORD:
+            _artifact_check_signing_record(prefix, reference.files)
+        elif member.path == "toolchain.json":
             try:
                 commit = _artifact_toolchain_commit(json.loads(prefix))
             except ValueError as exc:

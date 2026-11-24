@@ -1012,6 +1012,68 @@ class PortableZipTests(unittest.TestCase):
         self.assertIn("ARTIFACT_REFERENCE_ROLE_MISSING: prereqs/python/python.exe", error)
         self.assertFalse(rejected.exists() or rejected_record.exists())
 
+    def test_cli_preserves_approved_signing_record_and_binds_its_final_hashes(self):
+        head = stage_install.resolve_commit("HEAD")
+        stage = self.root / "signed-stage"
+        reference = self.root / "signed-reference"
+        bundle = self.root / "approved-signed-bundle"
+        layouts = (stage, reference, bundle)
+        unsigned = {"bin/nakagawa_player.exe": b"unsigned player", "bin/production_smoke.exe": b"unsigned smoke",
+                    "bin/runtime-manifest.json": b"original inventory"}
+        signed = {"bin/nakagawa_player.exe": b"synthetic signed player", "bin/production_smoke.exe": b"synthetic signed smoke",
+                  "bin/runtime-manifest.json": b"refreshed inventory"}
+        path_to_manifest = "bin/runtime-manifest.json"
+
+        def digest(data):
+            return hashlib.sha256(data).hexdigest()
+
+        signing = {
+            "format": "nakagawa-signing-record", "schema": 1, "test_certificate": False,
+            "signer_subject": "synthetic witness", "signer_thumbprint": "1" * 40,
+            "digest_algorithm": "sha256", "timestamped": True,
+            "files": [{"path": path, "unsigned_sha256": digest(unsigned[path]), "signed_sha256": digest(signed[path])}
+                      for path in unsigned if path != path_to_manifest],
+            "refreshed_files": [{"path": path_to_manifest, "attested_sha256": digest(unsigned[path_to_manifest]),
+                                 "refreshed_sha256": digest(signed[path_to_manifest])}],
+        }
+        record_name = "signing-record.json"
+        approved_record = (json.dumps(signing, indent=2) + "\n").encode()
+        for layout in layouts:
+            self._write_member(layout, "toolchain.json", json.dumps({"candidate": {"commit": head}}).encode())
+            self._write_member(layout, record_name, approved_record)
+            for name, data in signed.items():
+                self._write_member(layout, name, data)
+        options = ("--artifact-reference", str(reference), "--approved-bundle", str(bundle))
+        out, release_record = self.root / "signed.zip", self.root / "signed.json"
+        self.assertEqual(self._cli_zip(stage, out, release_record, head, *options), (0, ""))
+        with zipfile.ZipFile(out) as archive:
+            self.assertEqual(archive.read(record_name), approved_record)
+            self.assertIn(f"{digest(approved_record)}  {record_name}\n", archive.read("SHA256SUMS.txt").decode())
+
+        def refused(message):
+            rejected, rejected_record = self.root / "rejected.zip", self.root / "rejected.json"
+            status, error = self._cli_zip(stage, rejected, rejected_record, head, *options)
+            self.assertEqual(status, 1)
+            self.assertIn(message, error)
+            self.assertFalse(rejected.exists() or rejected_record.exists() or rejected.with_suffix(".zip.part").exists())
+
+        for layout in (stage, reference):
+            (layout / record_name).unlink()
+        refused("ARTIFACT_REFERENCE_ROLE_MISSING: signing-record.json")
+
+        for layout in (stage, reference):
+            self._write_member(layout, record_name, approved_record.replace(b"synthetic witness", b"synthetic changed"))
+        refused("ARTIFACT_REFERENCE_ROLE_MISMATCH: signing-record.json")
+
+        for rows, field in ((signing["files"], "signed_sha256"), (signing["refreshed_files"], "refreshed_sha256")):
+            with self.subTest(field=field):
+                previous = rows[0][field]
+                rows[0][field] = "0" * 64
+                for layout in layouts:
+                    self._write_member(layout, record_name, json.dumps(signing, indent=2).encode())
+                refused(f"ARTIFACT_SIGNING_RECORD_DIGEST: {rows[0]['path']}")
+                rows[0][field] = previous
+
     def test_cli_rejects_closed_zip_with_an_unexpected_member_and_publishes_nothing(self):
         head = stage_install.resolve_commit("HEAD")
         reference = _make_stage(self.root / "reference", reverse=True, mtime=1_800_000_000)
@@ -1086,6 +1148,45 @@ class PortableZipTests(unittest.TestCase):
                 self.assertIn(code, stderr)
                 self.assertFalse(zip_path.exists())
                 self.assertFalse((stage / "record.json").exists())
+
+    def _record_reference_inputs(self):
+        stage = self.root / "stage"
+        reference = self.root / "reference"
+        bundle = self.root / "bundle"
+        prereqs = self.root / "prereqs"
+        head = stage_install.resolve_commit("HEAD")
+        data = json.dumps({"candidate": {"commit": head}}).encode()
+        for layout in (stage, reference, bundle):
+            self._write_member(layout, "toolchain.json", data)
+        (bundle / "bin").mkdir()
+        prereqs.mkdir()
+        flags = ("--artifact-reference", str(reference), "--approved-bundle", str(bundle),
+                 "--approved-prereqs", str(prereqs))
+        return stage, reference, bundle, prereqs, flags
+
+    def test_record_cannot_write_inside_any_verification_input(self):
+        stage, reference, bundle, prereqs, flags = self._record_reference_inputs()
+        out = self.root / "out.zip"
+        for root in (reference, bundle, prereqs):
+            with self.subTest(root=root.name):
+                record = root / "new" / "record.json"
+                status, error = self._cli_zip(stage, out, record, "HEAD", *flags)
+                self.assertEqual(status, 1)
+                self.assertIn("PORTABLE_RECORD_OVERLAPS_REFERENCE", error)
+                self.assertFalse(out.exists() or record.parent.exists())
+
+    def test_record_refuses_an_alias_into_the_verification_input(self):
+        stage, reference, _, _, flags = self._record_reference_inputs()
+        alias = self.root / "alias"
+        try:
+            os.symlink(reference, alias, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"this host cannot create a directory alias: {exc}")
+        out = self.root / "out.zip"
+        status, error = self._cli_zip(stage, out, alias / "record.json", "HEAD", *flags)
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_RECORD_OVERLAPS_REFERENCE", error)
+        self.assertFalse(out.exists() or (reference / "record.json").exists())
 
     def test_record_without_a_portable_zip_is_an_error(self):
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
