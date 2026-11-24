@@ -858,7 +858,8 @@ static void write_summary(const char *path, uint64_t wall_ns) {
     if (s_windows.count)
         fprintf(json, "  \"benchmark\":{\"run_id\":\"%s\",\"origin_ns\":%" PRIu64
                       ",\"planned\":%u,\"completed\":%u,\"mode\":\"%s\","
-                      "\"runtime_sha256\":\"%s\",\"runtime_pid\":%u,\"route_sha256\":\"%s\",\"valid\":%s},\n",
+                      "\"runtime_sha256\":\"%s\",\"runtime_pid\":%" PRIu32
+                      ",\"route_sha256\":\"%s\",\"valid\":%s},\n",
                 s_windows.run_id, s_perf.run_start_ns, s_windows.count, s_windows.next,
                 s_windows.ab ? "ge.vertex_cache" : "load", s_windows.runtime_sha256, s_windows.runtime_pid,
                 s_windows.route_sha256, s_windows.ended && !s_windows.invalid ? "true" : "false");
@@ -1130,7 +1131,7 @@ void sr_perf_window_route_loaded(const uint8_t digest[32], uint32_t observable_s
     }
     perf_digest_hex(s_windows.route_sha256, digest);
     perf_emit_format("PERF_BENCH_BEGIN run_id=%s origin_ns=%" PRIu64 " planned=%u mode=%s"
-                     " runtime_sha256=%s runtime_pid=%u route_sha256=%s\n",
+                     " runtime_sha256=%s runtime_pid=%" PRIu32 " route_sha256=%s\n",
                      s_windows.run_id, s_perf.run_start_ns, s_windows.count,
                      s_windows.ab ? "ge.vertex_cache" : "load",
                      s_windows.runtime_sha256, s_windows.runtime_pid, s_windows.route_sha256);
@@ -1139,8 +1140,9 @@ void sr_perf_window_route_loaded(const uint8_t digest[32], uint32_t observable_s
 static void perf_window_emit(const char *edge, uint32_t step, uint32_t vblank,
                              uint64_t wall_ns, uint64_t guest_us, int paced, uint32_t clock_epoch) {
     const SrPerfMetrics *m = &s_perf.total;
-    perf_emit_format("PERF_LOAD id=%u edge=%s step=%u wall_ns=%" PRIu64 " vblank=%u guest_us=%" PRIu64
-                     " paced=%d clock_epoch=%u iso_reads=%" PRIu64 " iso_bytes=%" PRIu64 " iso_ns=%" PRIu64
+    perf_emit_format("PERF_LOAD id=%u edge=%s step=%" PRIu32 " wall_ns=%" PRIu64
+                     " vblank=%" PRIu32 " guest_us=%" PRIu64 " paced=%d clock_epoch=%" PRIu32
+                     " iso_reads=%" PRIu64 " iso_bytes=%" PRIu64 " iso_ns=%" PRIu64
                      " vfs_reads=%" PRIu64 " vfs_ns=%" PRIu64 " umd_us=%" PRIu64
                      " present_submits=%" PRIu64 " idle_ns=%" PRIu64 " audio_frames=%" PRIu64 "\n",
                      s_windows.next + 1u, edge, step, wall_ns, vblank, guest_us, paced, clock_epoch,
