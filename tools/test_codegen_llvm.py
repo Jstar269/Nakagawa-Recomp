@@ -133,6 +133,19 @@ class LoweringTests(unittest.TestCase):
         self.assertIn("define void @f_00001000(ptr %s) nounwind uwtable {", text)
         self.assertVerifies(text)
 
+    def test_jal_pc_read_writes_the_link_without_a_call(self):
+        words = program(
+            0x03E04021,                     # addu t0, ra, zero
+            0x0C000403,                     # jal from 0x1004 to its own link, 0x100c
+            0x03E02021,                     # delay: addu a0, ra, zero
+            0x0100F821, JR_RA, NOP,          # restore ra and return
+        )
+        _, text = self.ir(words, end=0x1018)
+        self.assertIn("store i32 4108,", text)
+        self.assertNotIn("call i32 @dispatch_call_checked", text)
+        self.assertNotIn("call void @sr_llvm_host_stack_check", text)
+        self.assertVerifies(text)
+
     def test_branch_condition_is_read_before_the_delay_slot(self):
         # beq r4, r5 with `addu r4, ...` in its slot: the slot overwrites r4, so the
         # condition must be the value before the slot (codegen.emit_function's `_c`).
