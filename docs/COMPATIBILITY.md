@@ -144,6 +144,17 @@ The maintainer builds a whole library of their own discs with `tools/library_bui
 into the summary below. The summary holds counts only: no titles, disc IDs, file names or hashes. The tool refuses
 to write one that carries any of them.
 
+Prepare the candidate's private release plan from the expected corpus before running the sweep. Then update this
+checkout's table with the manifest and plan.
+
+```text
+python tools/compat_table.py library-build.json --release-plan release-plan.json --write-doc docs/COMPATIBILITY.md
+```
+
+The [exporter](../tools/compat_table.py) documents the plan fields. It checks the candidate commit, every
+attempt's recorded settings, and the expected sources and image hashes before replacing the table. Keep the
+manifest and plan private. For an older or partial report, use standard output or a separate local file.
+
 Each disc is counted in the first tier it fails to pass:
 
 | Tier | Meaning |
