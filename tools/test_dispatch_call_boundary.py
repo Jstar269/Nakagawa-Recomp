@@ -291,13 +291,15 @@ _CHAIN_MARK = 0x5A5A
 def _entry_tail_program() -> tuple[int, ...]:
     """The entry itself ends in a direct TAIL, so whoever invoked it must drain.
 
-    0x1000 `j 0x1010` (the delay slot copies $sp to $v1); 0x1008 is a dead `jal` that only
-    makes 0x1010 a translated body; 0x1010 sets v0 = 7 and returns to the harness.
+    0x1000 `j 0x1018` copies $sp to $v1 in its slot. The dead JAL at 0x1008 names 0x1018
+    as a translated body, with its own distinct return point at 0x1010. The TAIL's
+    destination sets v0 = 7 and returns to the harness.
     """
     return (
-        _j(0x1010), _addu(_V1, _SP, 0),           # 0x1000 entry: tail to 0x1010
-        _jal(0x1010), _NOP,                       # 0x1008 discovery anchor (dead)
-        _addiu(_V0, 0, 7), _jr(_RA), _NOP,        # 0x1010
+        _j(0x1018), _addu(_V1, _SP, 0),           # 0x1000 entry: tail to 0x1018
+        _jal(0x1018), _NOP,                       # 0x1008 discovery anchor (dead)
+        _jr(_RA), _NOP,                           # 0x1010 anchor's return point
+        _addiu(_V0, 0, 7), _jr(_RA), _NOP,        # 0x1018
     )
 
 
@@ -2994,7 +2996,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
             "T5-call-body-does-not-drain", _entry_tail_program(), (0,),
             {"recomp.h": ("    fn(s);\n    if (sr_tail_transfer.pending) sr_tail_drain(s);\n",
                           "    fn(s);\n")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 7,
+            lambda r: r[0][0] == 0 and r[0][2].get("v0") == 0 and r[0][2].get("v1") == _PROBE_SP,
         )
         # A computed step applies its restore while the next computed transfer is pending:
         # F runs in H's frame instead of the live one.
