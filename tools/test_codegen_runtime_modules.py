@@ -1309,7 +1309,11 @@ class RelocatedImmediateEmission(unittest.TestCase):
         decoded = ("((((sr_m7_base + 0x{0:08x}u) + 4u) & 0xF0000000u) | "
                    "((MEM_R32((sr_m7_base + 0x{0:08x}u)) & 0x03FFFFFFu) << 2))")
         self.assertIn(f"uint32_t _t = {decoded.format(0x00)};", text)
-        self.assertIn("if (dispatch_call_checked(s, _t, (sr_m7_base + 0x00000008u))) return;", text)
+        self.assertIn(
+            "if (_t != (sr_m7_base + 0x00000008u)) { "
+            "if (dispatch_call_checked(s, _t, (sr_m7_base + 0x00000008u))) return; }",
+            text,
+        )
         self.assertIn("m7_00000020(s);", text)
         self.assertIn(f"uint32_t _t = {decoded.format(0x10)};", text)
         self.assertIn("sr_tail_record(s, _t, NULL, _sp_entry, 1u); return;", text)
@@ -1317,19 +1321,6 @@ class RelocatedImmediateEmission(unittest.TestCase):
         self.assertIn("s->r[3] = (0u + 0x00000002u);", text, "the j's slot runs")
         for link_target in (0x300, 0x400):
             self.assertNotIn(f"0x{link_target:08x}u", text)
-
-        # This unrelocated word points at its link in the file. A runtime module may
-        # be placed elsewhere, so only an actual target equal to its runtime link
-        # can bypass the checked dispatch.
-        image = WordImage()
-        image.words = dict(image.words)
-        image.words[0x00] = 0x0C000002
-        shifted = "\n".join(codegen.emit_function(image, 0x00, [(0x00, 0x28)], {0x00, 0x20}))
-        self.assertIn(
-            "if (_t != (sr_m7_base + 0x00000008u)) { "
-            "if (dispatch_call_checked(s, _t, (sr_m7_base + 0x00000008u))) return; }",
-            shifted,
-        )
 
     def test_variable_import_sites_read_their_immediate_from_memory(self):
         # The runtime linker patches these words when the exporter loads, in any image:

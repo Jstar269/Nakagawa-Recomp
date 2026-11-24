@@ -4732,7 +4732,7 @@ def _emit_slot_exit(ctx, out, addr, ran="slot already ran inline"):
         out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* {ran}; skip its labelled duplicate */")
 
 
-def _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw):
+def _emit_unrelocated_jal(ctx, out, addr, ds, dsw):
     """``jal`` the loader leaves as linked."""
     resumable = ctx.resumable
     resume = G((addr + 8) & 0xFFFFFFFF)
@@ -4741,10 +4741,8 @@ def _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw):
     out.extend(delay_slot_lines(ds, dsw, addr,
                                 resumable=resumable, indent="      ", options=ctx.options))
     call = emit_checked_dispatch_call('_t', resume)
-    if is_jal_pc_read(addr, w):
-        # The runtime address can differ from link space in a placed module.
-        call = f"if (_t != {resume}) {{ {call} }}"
-    out.append(f"      {call} }}")
+    # Placement can make a link-space external target equal the runtime link.
+    out.append(f"      if (_t != {resume}) {{ {call} }} }}")
     _emit_slot_exit(ctx, out, addr)
 
 
@@ -5072,7 +5070,7 @@ def _emit_control_transfer(ctx, out, consumed, addr, w):
     if ds not in ctx.labels:
         consumed.add(ds)
     if op == 3 and ADDRESS_SPACE.unrelocated_jump(addr):
-        _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw)
+        _emit_unrelocated_jal(ctx, out, addr, ds, dsw)
     elif op == 3:
         _emit_jal(ctx, out, addr, w, ds, dsw)
     elif op == 0 and fn == 0x09:

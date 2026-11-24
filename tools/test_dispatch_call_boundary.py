@@ -1393,6 +1393,26 @@ int main(int argc, char **argv) {
     const int no_bounds = argc > 2 && strcmp(argv[2], "no-bounds") == 0;
     g_probe_host_entry = argc > 3 && strcmp(argv[2], "host-entry") == 0
         ? (uint32_t)strtoul(argv[3], NULL, 0) : 0u;
+#ifdef PROBE_RUNTIME_MODULE
+    const SrModuleCode *module = sr_module_code_at(0);
+    SrModuleBindDetail detail;
+    if (!g_probe_host_entry || !module ||
+        sr_module_code_bind(module, g_probe_host_entry - PROBE_MODULE_OFFSET, &detail)
+            != SR_MODULE_BIND_OK ||
+        !sr_lookup(g_probe_host_entry)) {
+        fprintf(stderr, "runtime module probe did not bind its generated body\n");
+        return 31;
+    }
+    static const uint32_t module_words[] = { PROBE_MODULE_WORDS };
+    for (size_t i = 0; i < sizeof module_words / sizeof module_words[0]; i++)
+        MEM_W32(g_probe_host_entry + (uint32_t)(4u * i), module_words[i]);
+    if (g_probe_host_entry + 12u != PROBE_MODULE_TARGET) {
+        /* A distinct, interpreter-owned leaf when the runtime link does not match. */
+        if (!sr_exec_span_register(PROBE_MODULE_TARGET, PROBE_MODULE_TARGET + 8u)) return 32;
+        MEM_W32(PROBE_MODULE_TARGET, 0x03e00008u);  /* jr ra */
+        MEM_W32(PROBE_MODULE_TARGET + 4u, 0x24420001u);  /* addiu v0, v0, 1 */
+    }
+#endif
 #ifdef SR_TAIL_DRAIN
     if (argc > 2 && !neighbour && !pair && !no_bounds && !g_probe_host_entry) {   /* a broken protocol (#855) must stop with its named fault */
         CpuState other;
@@ -1477,6 +1497,7 @@ def _mutated_copy(source: Path, work: Path, mutation: tuple[str, str] | None) ->
 def _build_depth_probe(
     words: tuple[int, ...], work: Path, *, codegen_args: tuple[str, ...] = (),
     mutate: dict[str, tuple[str, str]] | None = None, vector: int | None = None,
+    runtime_module: tuple[int, int, tuple[int, ...]] | None = None,
 ) -> tuple[Path | None, str]:
     """Translate a source-owned fixture and link it into the depth-probe harness.
 
@@ -1528,12 +1549,16 @@ def _build_depth_probe(
     if config.returncode != 0:
         return None, config.stderr + config.stdout
     harness = work / "depth_probe_harness.c"
-    harness.write_text(
-        _DEPTH_PROBE_HARNESS.replace("PROBE_SP", f"0x{_PROBE_SP:08x}u")
-        .replace("PROBE_BASE", f"0x{_PROBE_BASE:08x}u")
-        .replace("PROBE_WORDS", ", ".join(f"0x{w & 0xFFFFFFFF:08x}u" for w in words)),
-        encoding="utf-8", newline="\n",
-    )
+    fixture = (_DEPTH_PROBE_HARNESS.replace("PROBE_SP", f"0x{_PROBE_SP:08x}u")
+               .replace("PROBE_BASE", f"0x{_PROBE_BASE:08x}u")
+               .replace("PROBE_WORDS", ", ".join(f"0x{w & 0xFFFFFFFF:08x}u" for w in words)))
+    if runtime_module is not None:
+        offset, target, module_words = runtime_module
+        fixture = (f"#define PROBE_RUNTIME_MODULE\n#define PROBE_MODULE_OFFSET {offset}u\n"
+                   f"#define PROBE_MODULE_TARGET {target}u\n"
+                   f"#define PROBE_MODULE_WORDS {', '.join(f'0x{w:08x}u' for w in module_words)}\n"
+                   + fixture)
+    harness.write_text(fixture, encoding="utf-8", newline="\n")
     if "recomp.c" in mutate or "recomp.h" in mutate:
         # The harness reaches recomp.c and recomp.h through dispatch_isolation_selftest.c's
         # quoted includes, which search the including file's directory first; copy them.
@@ -1559,6 +1584,7 @@ def _build_depth_probe(
             *((f"-DPROBE_VECTOR=0x{vector:08x}u",) if vector is not None else ()),
             "-I", str(work), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
             str(harness), str(generated), str(work / "probe_0.c"),
+            *(str(path) for path in sorted(work.glob("nk_lib_*.c"))),
             str(guest_interp), str(PERF),
             str(sr_coro),
             str(ROOT / "src" / "rt" / "cpu_lle.c"),
@@ -3443,6 +3469,42 @@ class GeneratedCallDepthTests(unittest.TestCase):
                     self.assertGreater(fields.get("interp", 0), 0, output)
                 else:
                     self.assertEqual(fields.get("interp"), 0, output)
+
+    def test_jal_runtime_placement_compares_the_actual_target_and_link(self):
+        from tools.test_codegen_runtime_modules import ladder
+
+        base = 0x09000000
+        offset = ladder.OVERLAY_MIX_OFF
+        target = base + offset + 12
+        # The mix body has no relocation sites. Its file-space jump target is
+        # external, so the loaded address determines whether it equals its link.
+        words = (
+            _addu(_T0, _RA, 0), _jal(target), _addu(_A0, _RA, 0),
+            _addiu(_V0, _V0, 100), _addu(_RA, _T0, 0),
+            _jr(_RA), _addiu(_V0, _V0, 10),
+        )
+        image = bytearray(ladder.build_overlay_prx(ladder.OVERLAYS[0]))
+        struct.pack_into("<7I", image, ladder.OVERLAY_TEXT_FILE_OFFSET + offset, *words)
+        with scratch_dir.TemporaryDirectory(prefix="jal_runtime_placement_") as tmp:
+            work = Path(tmp)
+            module = work / "placement.prx"
+            module.write_bytes(image)
+            exe, build_output = _build_depth_probe(
+                (_jr(_RA), _NOP), work,
+                codegen_args=(f"--extra-elf={module}@runtime",),
+                runtime_module=(offset, target, words),
+            )
+            self.assertIsNotNone(exe, build_output)
+            for placement, result, interpreted in ((base, 110, 0), (base + 0x10000, 111, 2)):
+                with self.subTest(placement=hex(placement)):
+                    entry = placement + offset
+                    rc, output, fields = _run_depth_probe(exe, 0, "host-entry", hex(entry))
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(fields.get("v0"), result, output)
+                    self.assertEqual(fields.get("a0"), entry + 12, output)
+                    self.assertEqual(fields.get("sp"), _PROBE_SP, output)
+                    self.assertEqual(fields.get("interp"), interpreted, output)
+                    self.assertEqual(fields.get("unwinds"), 0, output)
 
     def test_jal_pc_read_hands_off_to_an_independently_registered_entry(self):
         with mock.patch.dict(os.environ, {"SR_DISPLOG": "1"}):
