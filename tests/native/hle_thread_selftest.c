@@ -36704,6 +36704,427 @@ static void test_ge_raster_cells_match_psp(void) {
     }
 }
 
+/* ==== GE weight cells (PSP-GE-WEIGHT-001, #343) ====
+ * The lists of probe_ge_sample.c's CASE=ge-weight, through production dispatch and the software
+ * GE, checked against the raw windows a PSP-3000 recorded (docs/HARDWARE_ORACLE.md;
+ * tests/fixtures/psp_oracle/ge_corpus.json). Sample s is a quad covering pixel (16 + s, 8): slot 0
+ * holds 1.0 through bone 0 (the identity plus t0 pixels), the target slot's bone moves the quad
+ * down 16 w pixels, and every other bone is off the window with a zero weight. So a sample lands
+ * on row 8 + s (f32-neg: 24 - s, f32-c1: 8) in its own column: any other row, a second pixel or
+ * none measures a different weight scale, sign, slot order or vertex layout. */
+
+#define GW_LIST 0x08900000u        /* display list in main RAM */
+#define GW_VERTS 0x08904000u       /* the 16 samples' vertices */
+#define GW_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GW_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GW_STRIDE 64u
+#define GW_ROWS 32u
+#define GW_WX 16u                  /* window x 16..31, y 8..24 */
+#define GW_WY 8u
+#define GW_WW 16u
+#define GW_WH 17u
+#define GW_N (GW_WW * GW_WH)
+#define GW_SAMPLES 16u
+#define GW_VTX_PER_SAMPLE 6u
+#define GW_VTX_COUNT (GW_SAMPLES * GW_VTX_PER_SAMPLE)
+#define GW_MAX_VTX_BYTES 48u       /* eight float weights, colour, float position */
+#define GW_BONES 8u
+#define GW_LIST_WORDS 224u
+
+enum { GW_U8 = 1, GW_U16 = 2, GW_F32 = 3 };
+
+/* fmt: VTYPE bits 9-10; count: weights per vertex; target: the slot whose bone moves the quad
+   (0: none); base, step: the target weight of sample s is base + step s, raw for u8 and u16 and
+   in sixteenths for float; t0: bone 0's y translation in pixels. */
+struct gw_cell {
+    const char *name;
+    uint8_t fmt, count, target;
+    int32_t base, step, t0;
+};
+
+#define GW_CELL_COUNT 16u
+static const struct gw_cell gw_cells[GW_CELL_COUNT] = {
+    {"f32-w1", GW_F32, 2u, 1u, 0, 1, 0},
+    {"u8-w1", GW_U8, 2u, 1u, 0, 8, 0},
+    {"u16-w1", GW_U16, 2u, 1u, 0, 0x800, 0},
+    {"u8-hi", GW_U8, 2u, 1u, 0x80, 8, -16},
+    {"u16-hi", GW_U16, 2u, 1u, 0x8000, 0x800, -16},
+    {"f32-neg", GW_F32, 2u, 1u, 0, -1, 16},
+    {"f32-c1", GW_F32, 1u, 0u, 0, 0, 0},
+    {"f32-c3", GW_F32, 3u, 2u, 0, 1, 0},
+    {"f32-c4", GW_F32, 4u, 3u, 0, 1, 0},
+    {"f32-c5", GW_F32, 5u, 4u, 0, 1, 0},
+    {"f32-c6", GW_F32, 6u, 5u, 0, 1, 0},
+    {"f32-c7", GW_F32, 7u, 6u, 0, 1, 0},
+    {"f32-c8", GW_F32, 8u, 7u, 0, 1, 0},
+    {"u8-c3", GW_U8, 3u, 2u, 0, 8, 0},
+    {"u8-c5", GW_U8, 5u, 4u, 0, 8, 0},
+    {"u16-c3", GW_U16, 3u, 2u, 0, 0x800, 0},
+};
+
+/* The window digest each cell left on a PSP-3000 (firmware 6.6.0, probe case ge-weight,
+ * docs/HARDWARE_ORACLE.md; tests/fixtures/psp_oracle/ge_corpus.json). Index k is gw_cells[k]. */
+static const struct {
+    const char *name;
+    uint64_t psp;
+} s_gw_psp[GW_CELL_COUNT] = {
+    {"f32-w1", 0x7272338f6f65a625ull},
+    {"u8-w1", 0x7272338f6f65a625ull},
+    {"u16-w1", 0x7272338f6f65a625ull},
+    {"u8-hi", 0x7272338f6f65a625ull},
+    {"u16-hi", 0x7272338f6f65a625ull},
+    {"f32-neg", 0x3c99dede733b6e25ull},
+    {"f32-c1", 0xbff6b75764ccfe25ull},
+    {"f32-c3", 0x7272338f6f65a625ull},
+    {"f32-c4", 0x7272338f6f65a625ull},
+    {"f32-c5", 0x7272338f6f65a625ull},
+    {"f32-c6", 0x7272338f6f65a625ull},
+    {"f32-c7", 0x7272338f6f65a625ull},
+    {"f32-c8", 0x7272338f6f65a625ull},
+    {"u8-c3", 0x7272338f6f65a625ull},
+    {"u8-c5", 0x7272338f6f65a625ull},
+    {"u16-c3", 0x7272338f6f65a625ull},
+};
+
+/* The input-sensitivity pass recodes each u8 weight byte b to round(128*b/255)
+ * so the stock w/128 decoder approximates the w/255 scale. A separate scratch
+ * build decodes the original vertex bytes with 1.0f / 255.0f in read_weights.
+ * Exactly the four u8 cells fail its PSP comparison and the other twelve match. */
+static int32_t gw_u8_wrong_scale(int32_t raw)
+{
+    const int32_t rebased = (raw * 128 + 127) / 255;
+    return rebased < 0 ? 0 : rebased > 255 ? 255 : rebased;
+}
+
+static uint32_t gw_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t gw_weight_bytes(const struct gw_cell *c)
+{
+    return c->count * (c->fmt == GW_F32 ? 4u : c->fmt == GW_U16 ? 2u : 1u);
+}
+
+static uint32_t gw_colour_offset(const struct gw_cell *c)
+{
+    return (gw_weight_bytes(c) + 3u) & ~3u;
+}
+
+static uint32_t gw_vertex_size(const struct gw_cell *c)
+{
+    return gw_colour_offset(c) + 4u + 12u;
+}
+
+static void gw_put_weight(uint8_t *v, const struct gw_cell *c, uint32_t slot, int32_t raw,
+                          int wrong_u8_scale)
+{
+    if (c->fmt == GW_U8 && wrong_u8_scale) raw = gw_u8_wrong_scale(raw);
+    if (c->fmt == GW_F32) {
+        const uint32_t bits = gw_fbits((float)raw / 16.0f);
+        memcpy(v + 4u * slot, &bits, 4u);
+    } else if (c->fmt == GW_U16) {
+        const uint16_t half = (uint16_t)raw;
+        memcpy(v + 2u * slot, &half, 2u);
+    } else {
+        v[slot] = (uint8_t)raw;
+    }
+}
+
+/* Every sample's six vertices for cell c into `dst`; returns the vertex size. With
+ * wrong_u8_scale, every 8-bit weight becomes the byte a w / 255 decoder would consume. */
+static uint32_t gw_vertices(const struct gw_cell *c, uint8_t *dst, int wrong_u8_scale)
+{
+    static const float corner[GW_VTX_PER_SAMPLE][2] = {
+        {-0.375f, -0.375f}, {0.625f, -0.375f}, {-0.375f, 0.625f},
+        {-0.375f, 0.625f}, {0.625f, -0.375f}, {0.625f, 0.625f},
+    };
+    const uint32_t size = gw_vertex_size(c);
+    const uint32_t coff = gw_colour_offset(c);
+    const int32_t one = c->fmt == GW_F32 ? 16 : c->fmt == GW_U16 ? 0x8000 : 0x80;
+    memset(dst, 0, GW_VTX_COUNT * GW_MAX_VTX_BYTES);
+    for (uint32_t s = 0; s < GW_SAMPLES; s++) {
+        const uint32_t colour = 0xff000000u | (0x30u << 16) | (0xc0u << 8) | (0x10u * s + 0x0fu);
+        const float px = (float)(GW_WX + s);
+        const float py = (float)GW_WY;
+        for (uint32_t k = 0; k < GW_VTX_PER_SAMPLE; k++) {
+            uint8_t *v = dst + (s * GW_VTX_PER_SAMPLE + k) * size;
+            gw_put_weight(v, c, 0u, one, wrong_u8_scale);
+            if (c->target != 0u) {
+                gw_put_weight(v, c, c->target, c->base + c->step * (int32_t)s, wrong_u8_scale);
+            }
+            memcpy(v + coff, &colour, 4u);
+            const float pos[3] = {(px + corner[k][0] - 32.0f) / 32.0f,
+                                  (py + corner[k][1] - 16.0f) / 16.0f, 0.0f};
+            memcpy(v + coff + 4u, pos, sizeof(pos));
+        }
+    }
+    return size;
+}
+
+/* The draw's display list for vertex words at `vtx` (physical address); returns the word count.
+   Every state the draw reads is set. */
+static uint32_t gw_list(const struct gw_cell *c, uint32_t vtx, uint32_t vtype, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    static const float ident43[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    static const float proj[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const uint32_t full = (GW_STRIDE - 1u) | ((GW_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GW_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GW_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GW_W(0x9c, GW_FB_OFFSET);
+    GW_W(0x9d, GW_STRIDE);
+    GW_W(0xd2, 3u);             /* 8888 */
+    GW_W(0x9e, GW_ZB_OFFSET);
+    GW_W(0x9f, GW_STRIDE);
+    GW_W(0x15, 0);
+    GW_W(0x16, full);
+    GW_W(0xd4, 0);
+    GW_W(0xd5, full);
+    GW_W(0xd6, 0);
+    GW_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(off_units[i], 0);  /* lighting, culling, texturing, fog, dither, blending, tests */
+    }
+    GW_W(0x1e, 0);              /* texture off */
+    GW_W(0xc9, 0);
+    GW_W(0x50, 0);              /* flat shading */
+    GW_W(0xd3, 0);              /* clear mode off */
+    GW_W(0xe7, 1);              /* depth writes off */
+    GW_W(0xe8, 0);
+    GW_W(0xe9, 0);
+    GW_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GW_W(0xd8, 1);              /* colour test ALWAYS */
+    GW_W(0xd9, 0);
+    GW_W(0xda, 0);
+    GW_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GW_W(0xdd, 0);              /* KEEP, KEEP, KEEP */
+    GW_W(0xde, 1);              /* depth test ALWAYS */
+    GW_W(0xdf, 0x32u);
+    GW_W(0xe0, 0);
+    GW_W(0xe1, 0);
+    GW_W(0xe6, 3);              /* logic op COPY */
+    GW_W(0xcf, 0);
+    GW_W(0xcd, 0);
+    GW_W(0xce, 0);
+    GW_W(0x53, 0);              /* MATERIALUPDATE: vertex colour is the only colour source */
+    GW_W(0x2c, gw_fbits(1.0f) >> 8);   /* morph weight 0; one morph target */
+    /* Bones: 0 is the identity plus t0 pixels in y; the target slot's bone is the zero matrix
+       plus 16 pixels (one clip unit); every other bone the zero matrix plus 64 pixels. */
+    GW_W(0x2a, 0);
+    for (uint32_t b = 0; b < GW_BONES; b++) {
+        float m[12] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 0.0f};
+        if (b == 0u) {
+            memcpy(m, ident43, sizeof(m));
+            m[10] = (float)c->t0 / 16.0f;
+        } else if (c->target != 0u && b == c->target) {
+            m[10] = 1.0f;
+        }
+        for (uint32_t i = 0; i < 12u; i++) {
+            GW_W(0x2b, gw_fbits(m[i]) >> 8);
+        }
+    }
+    GW_W(0x3a, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(0x3b, gw_fbits(ident43[i]) >> 8);
+    }
+    GW_W(0x3c, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(0x3d, gw_fbits(ident43[i]) >> 8);
+    }
+    GW_W(0x3e, 0);
+    for (uint32_t i = 0; i < 16u; i++) {
+        GW_W(0x3f, gw_fbits(proj[i]) >> 8);
+    }
+    GW_W(0x42, gw_fbits(32.0f) >> 8);   /* viewport: x = 32 + 32 X, y = 16 + 16 Y */
+    GW_W(0x43, gw_fbits(16.0f) >> 8);
+    GW_W(0x44, 0);
+    GW_W(0x45, gw_fbits(2048.0f) >> 8);
+    GW_W(0x46, gw_fbits(2048.0f) >> 8);
+    GW_W(0x47, gw_fbits(32768.0f) >> 8);
+    GW_W(0x4c, (2048u - 32u) << 4);
+    GW_W(0x4d, (2048u - 16u) << 4);
+    GW_W(0x12, vtype);
+    GW_W(0x01, vtx);
+    GW_W(0x04, (3u << 16) | GW_VTX_COUNT);   /* triangles */
+    GW_W(0x0f, 0);
+    GW_W(0x0c, 0);
+#undef GW_W
+    return n;
+}
+
+/* FNV-1a 64 over the window's 272 words, each little-endian: ge_window_fnv1a64. */
+static uint64_t gw_digest(const uint32_t *px)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < GW_N; i++) {
+        for (uint32_t b = 0; b < 4u; b++) {
+            h ^= (px[i] >> (8u * b)) & 0xffu;
+            h *= 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+
+/* The window row (0-based, row 0 is y 8) sample s lands on, per the probe's model. */
+static int gw_sample_row(const struct gw_cell *c, uint32_t s)
+{
+    if (strcmp(c->name, "f32-neg") == 0) return 24 - (int)s;
+    if (strcmp(c->name, "f32-c1") == 0) return 8;
+    return 8 + (int)s;
+}
+
+/* Every sample lights exactly one pixel, in column s and its model row, with its 24 colour
+ * bits. Returns the number of samples that do not. */
+static unsigned gw_pixels_wrong(const struct gw_cell *c, const uint32_t *px)
+{
+    unsigned wrong = 0;
+    for (uint32_t s = 0; s < GW_SAMPLES; s++) {
+        const int row = gw_sample_row(c, s) - (int)GW_WY;
+        const uint32_t rgb = 0x0030c000u | (0x10u * s + 0x0fu);
+        for (uint32_t y = 0; y < GW_WH; y++) {
+            const uint32_t got = px[y * GW_WW + s];
+            if ((int)y == row) {
+                if ((got & 0x00ffffffu) != rgb) wrong++;
+            } else if (got != 0u) {
+                wrong++;
+            }
+        }
+    }
+    return wrong;
+}
+
+/* One cell through production dispatch and the software GE; fills the window and returns 1 when
+ * the list is accepted and completes. */
+static int gw_run_cell(const struct gw_cell *c, uint32_t px[GW_N], int wrong_u8_scale)
+{
+    CpuState cpu;
+    const uint32_t fb = 0x04000000u + GW_FB_OFFSET;
+    (void)gw_vertices(c, (uint8_t *)SR_HOST(GW_VERTS), wrong_u8_scale);
+    /* Transform mode: 8888 colour (bits 2-4 = 7), float position (bits 7-8 = 3), the weight
+       format in bits 9-10 and the weight count less one in bits 14-16. */
+    const uint32_t vtype = (7u << 2) | (3u << 7) | ((uint32_t)c->fmt << 9) |
+                           ((uint32_t)(c->count - 1u) << 14);
+    memset(SR_HOST(fb), 0, GW_STRIDE * GW_ROWS * 4u);
+    const uint32_t words = gw_list(c, GW_VERTS, vtype, (uint32_t *)SR_HOST(GW_LIST));
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = GW_LIST;
+    const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = qid;
+    const int ok = words > 0u && (qid & 0xFF000000u) == 0x35000000u &&
+                   sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) == 0u;
+    for (uint32_t i = 0; i < GW_N; i++) {
+        const uint32_t at = (GW_WY + i / GW_WW) * GW_STRIDE + GW_WX + i % GW_WW;
+        px[i] = MEM_R32(fb + at * 4u);
+    }
+    return ok;
+}
+
+/* Run every PSP-GE-WEIGHT-001 cell through the software GE with its original
+ * vertices or the recoded u8 input. Mark each differing PSP digest and return
+ * the count. For original input, print divergent windows in the corpus format. */
+static unsigned gw_run_cells(int wrong_u8_scale, unsigned char diverged[GW_CELL_COUNT],
+                             unsigned *names_ok, unsigned *synced)
+{
+    uint32_t px[GW_N];
+    unsigned count = 0;
+    reset_fixture();
+    sr_hle_init();
+    *names_ok = 1;
+    *synced = 1;
+    for (uint32_t k = 0; k < GW_CELL_COUNT; k++) {
+        const struct gw_cell *c = &gw_cells[k];
+        if (!gw_run_cell(c, px, wrong_u8_scale)) *synced = 0;
+        if (strcmp(s_gw_psp[k].name, c->name) != 0) *names_ok = 0;
+        const uint64_t digest = gw_digest(px);
+        diverged[k] = digest != s_gw_psp[k].psp;
+        if (!diverged[k]) continue;
+        count++;
+        if (wrong_u8_scale) continue;
+        fprintf(stderr, "GE-WEIGHT %s software=0x%016llx psp=0x%016llx", c->name,
+                (unsigned long long)digest, (unsigned long long)s_gw_psp[k].psp);
+        for (uint32_t i = 0; i < GW_N; i++)
+            fprintf(stderr, "%s%08x", i % GW_WW ? " " : "\n  ", (unsigned)px[i]);
+        fprintf(stderr, "\n");
+    }
+    return count;
+}
+
+/* The recoded u8 input and exactly the PSP-GE-WEIGHT-001 cells whose windows it must change. */
+#define GW_SENSITIVITY_CELLS 8
+static const struct {
+    int wrong_u8_scale;
+    const char *rule;
+    const char *cells[GW_SENSITIVITY_CELLS];
+} s_gw_wrong_inputs[] = {
+    {1, "u8 weights recoded by round(128 w / 255)", {"u8-w1", "u8-hi", "u8-c3", "u8-c5", NULL}},
+};
+
+/* Every PSP-GE-WEIGHT-001 cell matches the PSP's window digest under the measured rules, and
+ * the recoded u8 input above changes exactly its named cells, so the PSP data, not agreement
+ * with the software GE's own past output, pins the weight scale and slot order (#343). */
+static void test_ge_weight_cells_match_psp(void) {
+    unsigned char diverged[GW_CELL_COUNT];
+    unsigned names_ok = 0, synced = 0;
+    const unsigned count = gw_run_cells(0, diverged, &names_ok, &synced);
+    expect(names_ok, "PSP-GE-WEIGHT-001 digest table rows name the cells in table order");
+    expect(synced, "every PSP-GE-WEIGHT-001 list is accepted and completes");
+    expect(count == 0, "every PSP-GE-WEIGHT-001 cell matches the PSP window digest");
+
+    /* The model's pixels, so a rule that keeps the digest but moves a pixel cannot pass. */
+    {
+        uint32_t px[GW_N];
+        int drawn = 1;
+        unsigned bad = 0;
+        char what[256];
+        reset_fixture();
+        sr_hle_init();
+        for (uint32_t k = 0; k < GW_CELL_COUNT; k++) {
+            if (!gw_run_cell(&gw_cells[k], px, 0)) drawn = 0;
+            const unsigned w = gw_pixels_wrong(&gw_cells[k], px);
+            if (w != 0u) {
+                snprintf(what, sizeof what, "%s: %u pixel(s) off the model row", gw_cells[k].name, w);
+                expect(0, what);
+                bad++;
+            }
+        }
+        snprintf(what, sizeof what, "each sample lights one pixel in column s and its model row, in its "
+                 "colour (every list drawn: %s)", drawn ? "yes" : "no");
+        expect(drawn && bad == 0, what);
+    }
+
+    for (size_t m = 0; m < sizeof(s_gw_wrong_inputs) / sizeof(s_gw_wrong_inputs[0]); m++) {
+        unsigned mnames = 0, msynced = 0;
+        const unsigned wrong = gw_run_cells(s_gw_wrong_inputs[m].wrong_u8_scale, diverged, &mnames,
+                                            &msynced);
+        fprintf(stderr, "GE-WEIGHT input sensitivity (%s): %u of %u cells differ from the PSP:",
+                s_gw_wrong_inputs[m].rule, wrong, (unsigned)GW_CELL_COUNT);
+        for (uint32_t k = 0; k < GW_CELL_COUNT; k++)
+            if (diverged[k]) fprintf(stderr, " %s", gw_cells[k].name);
+        fprintf(stderr, "\n");
+        unsigned named = 0, caught = 0;
+        for (size_t n = 0; n < GW_SENSITIVITY_CELLS && s_gw_wrong_inputs[m].cells[n] != NULL; n++) {
+            named++;
+            unsigned hit = 0;
+            for (uint32_t k = 0; k < GW_CELL_COUNT; k++)
+                if (strcmp(gw_cells[k].name, s_gw_wrong_inputs[m].cells[n]) == 0 && diverged[k]) hit = 1;
+            if (!hit)
+                fprintf(stderr, "GE-WEIGHT input sensitivity: named cell %s matches the PSP\n",
+                        s_gw_wrong_inputs[m].cells[n]);
+            caught += hit;
+        }
+        expect(msynced && named > 0 && caught == named && wrong == named,
+               "the u8 input-sensitivity recoding changes exactly its named PSP cells");
+    }
+}
+
 /* A clear that writes alpha (stencil) but not colour keeps the colour it clears over
  * (compose_px_rgba), and dither must not move that kept colour: dither offsets the colour
  * the pixel writes, and this clear writes none. Before, the kept colour was dithered and
@@ -68720,6 +69141,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_stall_alias_linear_from_uncached_list();
     test_ge_linear_filter_stays_inside_region();
     test_ge_raster_cells_match_psp();
+    test_ge_weight_cells_match_psp();
     test_ge_alpha_only_clear_keeps_colour_under_dither();
     test_ge_depth_bounds_and_through_z_match_psp();
     test_ge_mip_cells_software_contract();
