@@ -54525,7 +54525,7 @@ static void test_route_program_advances_only_on_observed_state(void) {
     sr_perf_windows_enabled = 1;
     rt_hex(hexA, 0x20); rt_hex(hexB, 0x80);
     snprintf(body, sizeof body,
-             "# route program\n"
+             "# route program\r\n"
              "CHECKPOINT MAIN_MENU %s\n"
              "CHECKPOINT SINGLE_PLAYER_MENU %s\n"
              "WAIT MAIN_MENU 1000\n"
@@ -54534,9 +54534,10 @@ static void test_route_program_advances_only_on_observed_state(void) {
              "END\n", hexA, hexB);
     rt_write(body);
     expect(sr_route_load(RT_PATH) == 1, "a route program loads");
-    const uint8_t empty_sha[32] = {0};
-    expect(s_perf_route_observable == 3u && memcmp(s_perf_route_sha, empty_sha, sizeof empty_sha) != 0,
-           "the file parser binds measured route bytes and leaves END out of the selectable steps");
+    uint8_t expected_sha[32];
+    sr_vfpu_sha256((const uint8_t *)body, strlen(body), expected_sha);
+    expect(s_perf_route_observable == 3u && memcmp(s_perf_route_sha, expected_sha, sizeof expected_sha) == 0,
+           "the file parser binds exact route bytes including CRLF and leaves END out of the selectable steps");
     expect(sr_route_status() == RT_RUNNING, "a loaded route program is running");
     rt_sig(sigA, 0x20); rt_sig(sigB, 0x80);
 
