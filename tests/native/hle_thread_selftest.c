@@ -9599,19 +9599,27 @@ static void test_net_inet_lifecycle_without_network(int stop_at_socket) {
     sr_hle_test_partition_reset();
 }
 
-/* #2999: drive the two lifecycle imports without creating a resolver or making a host lookup. */
+static int resolver_test_start_inet_stack(void) {
+    return net_call(0x1579a159u /* LoadNetModule */, 1u /* COMMON */, 0, 0, 0, 0) == 0u &&
+           net_call(0x1579a159u /* LoadNetModule */, 3u /* INET */, 0, 0, 0, 0) == 0u &&
+           net_call(0x39af39a6u /* NetInit */, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           net_call(0x17943399u /* InetInit */, 0, 0, 0, 0, 0) == 0u;
+}
+
+/* #2999: exercise local lifecycle, including the reference-derived initial cell without the
+ * prior object operations in the PSP test. Parent and LoadExec reset cases verify runtime scope. */
 static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
     enum {
-        NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
-        NID_INET_INIT = 0x17943399u, NID_INET_TERM = 0xa9ed66b9u,
+        NID_NET_TERM = 0x281928a9u, NID_INET_TERM = 0xa9ed66b9u,
         NID_RESOLVER_INIT = 0xf3370e61u, NID_RESOLVER_TERM = 0x6138194au,
         NID_RESOLVER_CREATE = 0x244172afu, NID_RESOLVER_LOOKUP = 0x224c5f44u,
-        NID_LOAD_NET = 0x1579a159u, NID_UNLOAD_NET = 0x64d50c56u,
+        NID_UNLOAD_NET = 0x64d50c56u,
         NET_COMMON = 1u, NET_INET = 3u,
     };
     extern void sr_hle_test_partition_reset(void);
     extern int sr_hle_test_net_inited(void);
     extern uint32_t sr_hle_test_net_pool_uid(void);
+    const int initial_failures = s_failures;
     const uint32_t loaded_end = s_fixture_loaded_end;
     reset_fixture();
     sr_hle_init();
@@ -9632,10 +9640,7 @@ static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
     expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
                sr_hle_test_unmodelled_stops() == stops + 1u,
            "Resolver lifecycle: Init before Inet was started stops by name");
-    const int inet_ready = net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
-                           net_call(NID_LOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
-                           net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
-                           net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u;
+    const int inet_ready = resolver_test_start_inet_stack();
     expect(inet_ready, "Resolver lifecycle: normal offline utility, Net and Inet startup");
     const uint32_t pool = sr_hle_test_net_pool_uid();
     expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
@@ -9658,10 +9663,10 @@ static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
 
     const int resolver_ready = net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u;
     expect(resolver_ready && sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
-           "Resolver lifecycle: first disconnected Init returns zero and preserves the Net pool");
+           "Resolver lifecycle: initial Init without prior object operations preserves the Net pool");
     if (stop_at_lookup) {
         /* Never exercise a lookup if a future change registers this import. */
-        if (inet_ready && resolver_ready && !lookup_registered) {
+        if (inet_ready && resolver_ready && !lookup_registered && s_failures == initial_failures) {
             sr_sched_on = 1;
             (void)net_call(NID_RESOLVER_LOOKUP, 0, 0, 0, 0, 0);
         }
@@ -9685,13 +9690,21 @@ static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
                net_call(NID_UNLOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
                net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u,
            "Resolver lifecycle: normal Inet and core teardown follows Resolver Term");
+    expect(resolver_test_start_inet_stack(), "Resolver lifecycle: the parent Inet stack can start again");
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 6u,
+           "Resolver lifecycle: repeat Term does not carry into the rebuilt Inet stack");
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 7u,
+           "Resolver lifecycle: re-init in a later Inet lifetime stops by name");
     sr_hle_loadexec_reset_guest_state();
-    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
-               net_call(NID_LOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
-               net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
-               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u &&
+    expect(resolver_test_start_inet_stack() &&
                net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u,
-           "Resolver lifecycle: a new program starts Resolver in its fresh state");
+           "Resolver lifecycle: the new program can Init after a terminated predecessor");
+    sr_hle_loadexec_reset_guest_state();
+    expect(resolver_test_start_inet_stack() &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: the new program can Init after an active predecessor");
     sr_hle_loadexec_reset_guest_state();
     s_fixture_loaded_end = loaded_end;
     sr_hle_test_partition_reset();

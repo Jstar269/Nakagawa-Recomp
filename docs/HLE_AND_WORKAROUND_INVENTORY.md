@@ -1340,11 +1340,12 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
   - Evidence: PSPAutotests tests/net (70e72391, recorded on a PSP): sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0 in every net test with no access point connected, and again after sceNetTerm (net/adhoc/socketids)
 - **`h_NetResolverInit`** (`sceNet`): `sceNetResolverInit` (0xf3370e61)
-  - Limitation: tracks only lifecycle in the disconnected Inet stack with WLAN on; unsupported ordering stops by name; resolver objects, DNS and host transport remain outside the handler
+  - Limitation: tracks only lifecycle in the disconnected Inet stack with WLAN on; first Init without prior object operations is PPSSPP-derived and logs once; unsupported ordering stops by name; resolver objects, DNS and host transport remain outside the handler
   - Evidence: tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network
-  - Evidence: PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): after normal Net/Inet setup and AP Term, first Resolver Init returns 0 and duplicate Init returns 0x80000020
+  - Evidence: PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): after normal Net/Inet setup, AP Term and a preceding resolver Create/lookup/Stop/Delete, first Init returns 0 and duplicate Init returns 0x80000020
+  - Evidence: PPSSPP Core/HLE/sceNetResolver.cpp:sceNetResolverInit (cdf563b85c42c275ec2835a0883f48d63a9c9406): Init consults only the initialized flag; equivalence of Init without prior resolver object operations is reference-derived
 - **`h_NetResolverTerm`** (`sceNet`): `sceNetResolverTerm` (0x6138194a)
-  - Limitation: clears active Resolver in the disconnected Inet stack with WLAN on; Term before successful Init stops by name; LoadExec resets the lifecycle state
+  - Limitation: clears active Resolver and permits repeated Term in the same disconnected Inet lifetime with WLAN on; Term without successful Init in this lifetime stops by name; LoadExec resets the lifecycle state
   - Evidence: tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network
   - Evidence: PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): first and repeated Resolver Term return 0 after Init and deletion of the resolver objects
 - **`h_NetTerm`** (`sceNet`): `sceNetTerm` (0x281928a9)
