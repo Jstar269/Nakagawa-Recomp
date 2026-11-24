@@ -596,6 +596,8 @@ static void vtime_refresh(void);
  * made the guest observe fewer VBLANK episodes than display periods while guest
  * VCOUNT (which has always advanced by the full elapsed count) said otherwise. */
 static uint32_t s_pending_vblanks;
+/* Undelivered episodes in the batch detached by scheduler_service_pending. */
+static uint32_t s_vblank_batch_remaining;
 /* Readout-only prefix of service episodes owed under a previous pace.
  * It can include episodes in the batch currently being serviced. */
 static uint64_t s_readout_old_vblanks;
@@ -1624,7 +1626,7 @@ static void pace_set_speed(uint32_t speed) {
     if (g_ace_on && speed == 1u) {
         /* Owed episodes and any as-yet unlatched edges through this
          * virtual time came from the old pace. Delivery still runs normally. */
-        s_readout_old_vblanks = s_pending_vblanks;
+        s_readout_old_vblanks = (uint64_t)s_pending_vblanks + s_vblank_batch_remaining;
         s_readout_old_clock_us = s_ff_pace_anchor_ns >= s_clock_epoch_ns
             ? (s_ff_pace_anchor_ns - s_clock_epoch_ns) / 1000u : 0u;
     }
@@ -2026,7 +2028,8 @@ static void scheduler_latch_due_events(void) {
                 sr_perf_vblank_collapse(s_pending_vblanks, due - 1u);
                 due = 1u;
                 s_pending_vblanks = 0;
-                s_readout_old_vblanks = 0;
+                if (s_readout_old_vblanks > s_vblank_batch_remaining)
+                    s_readout_old_vblanks = s_vblank_batch_remaining;
                 old_clock = 1;
             }
             break;
@@ -2777,9 +2780,12 @@ static void scheduler_service_pending(void) {
                  * coalesced flag (one more episode and one more VCOUNT at resume) is left to a
                  * period that comes due under the mask. */
                 s_pending_vblanks = episodes - i;
+                if (s_readout_old_vblanks > s_pending_vblanks)
+                    s_readout_old_vblanks = s_pending_vblanks;
                 episodes = i;      /* what the guest actually received */
                 break;
             }
+            s_vblank_batch_remaining = episodes - i - 1u;
             deliver_vblank();
             sched_auto_load_vblank();
             /* The waiting GE finish callbacks run at this episode's return, before the next
@@ -2795,6 +2801,7 @@ static void scheduler_service_pending(void) {
                 sr_cpu_link_clear(s_cpu);
             }
         }
+        s_vblank_batch_remaining = 0u;
         sr_perf_vblank_service(episodes);
     }
     s_servicing_interrupts = 0;

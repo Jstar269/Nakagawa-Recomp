@@ -7366,6 +7366,58 @@ static void test_ace_readout_fast_forward_backlog(int mixed_latch) {
     s_ff_pace_anchor_ns = prev_pace_anchor;
 }
 
+static void auto_load_readout_flip_after_exit(int active) {
+    if (!active) g_test_readout_flip_on_vblank = 1;
+}
+
+static void test_ace_readout_auto_load_detached_backlog(void) {
+    static const char line[] =
+        "v1;tier=enhanced;af=0;text=off;readout=on;notice=off;wide=off;"
+        "smooth=off;sas=off;tess=off;twin=off;load=auto";
+    auto_load_clock_fixture(1, 0);
+    s_vbl_next_us = 0u;
+    g_auto_load_silent = 1;
+    (void)ace_init_spec(line, NULL);
+    sched_auto_load_audio_hooks(auto_load_silent_fixture, auto_load_readout_flip_after_exit);
+    sched_auto_load_disc_read();
+    scheduler_progress_time();
+    scheduler_service_pending();
+    expect(sched_auto_load_active(), "automatic load starts on a real delivered VBLANK");
+
+    g_test_host_ns += 31u * 1001000000ull / (60u * SCHED_AUTO_LOAD_SPEED);
+    scheduler_progress_time();
+    const uint32_t queued = s_pending_vblanks;
+    expect(queued == 31u, "automatic load accrues 31 accelerated source episodes");
+    const unsigned before = g_test_vblank_delivered;
+    scheduler_service_pending();
+    const unsigned start = g_test_vblank_delivered;
+    expect(!sched_auto_load_active() && !sched_fast_forward_on() &&
+               !g_test_readout_flip_on_vblank && start - before == queued,
+           "automatic load expires mid-batch with an overlapping flip and all episodes delivered");
+
+    const uint64_t first_ns = g_test_host_ns;
+    for (unsigned edge = 1u; edge <= 60u; ++edge) {
+        g_test_host_ns = first_ns + (uint64_t)edge * 1001000000ull / 60u;
+        scheduler_progress_time();
+        if (edge <= 40u) scheduler_service_pending();
+        if (edge % 3u == 0u) {
+            if (edge <= 40u) ace_note_target_draw(0u);
+            (void)ace_flip(0u, 0x22000u, sr_display_vcount(), g_test_host_ns);
+        }
+    }
+    expect(g_test_vblank_delivered - start == 40u && s_pending_vblanks == 20u,
+           "automatic load witness delivers only 40 normal-speed episodes in one second");
+    AceReadoutView view = {0};
+    expect(ace_readout_view(&view) && strcmp(view.text, "\xE2\x80\x94 13 FPS") == 0,
+           "automatic load detached debt leaves FPS visible with unqualified speed");
+    fprintf(stderr, "auto-load detached debt readout: %s\n", view.text);
+    sched_auto_load_reset();
+    sched_auto_load_audio_hooks(NULL, NULL);
+    (void)ace_init_spec("off", NULL);
+    ff_reset();
+    reset_sched();
+}
+
 int main(int argc, char **argv) {
     g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
@@ -7524,6 +7576,7 @@ int main(int argc, char **argv) {
     test_ace_readout_display_service(READOUT_GUEST_MASK);
     test_ace_readout_fast_forward_backlog(0);
     test_ace_readout_fast_forward_backlog(1);
+    test_ace_readout_auto_load_detached_backlog();
     test_display_isvblank_uses_live_edge_time();
     test_display_wait_uses_live_window_before_blocking();
     test_display_wait_ignores_late_delivery_anchor();
