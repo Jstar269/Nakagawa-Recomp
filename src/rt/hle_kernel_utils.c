@@ -77,10 +77,15 @@ static uint32_t h_Memcpy(CpuState *s) {
     }
     return dst;
 }
-/* PSP's three std-fd imports intentionally alias the stdout handle (1).  The
- * descriptor table still reserves 0/1/2 with distinct standard identities so
- * ordinary file allocation and I/O dispatch never infer identity from a number. */
-static uint32_t h_StdFd(CpuState *s) { (void)s; return 1; }
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, PSP-3000): the three imports return three
+ * distinct kernel UIDs, none of them 1, the same three in both measured launch contexts (the
+ * XMB and the game context, each launched through PSPLink). hle_internal.h holds the values and
+ * what is unmeasured about them. Each names its reserved standard entry of the descriptor
+ * table, which the sceIo* handlers reach through hle_io_guest_fd(). Returning a handle claims
+ * nothing about a call made with it: a read from Stdin is unmeasured. */
+static uint32_t h_KernelStdin(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDIN; }
+static uint32_t h_KernelStdout(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDOUT; }
+static uint32_t h_KernelStderr(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDERR; }
 
 static uint32_t h_KernelPrintf(CpuState *s) {
     char fmt_check[1024];   /* the whole format must be readable, NUL-terminated guest text */
@@ -155,8 +160,8 @@ void hle_register_init_kernel_utils_2(void) {
 /* The std handles, shared by sr_hle_init() and the ThreadMan harness so the
  * PSP-HLE-STDIO-001 cells dispatch the production mapping. */
 void hle_register_std_handle_handlers(void) {
-    sr_hle_register(0x172d316e, "sceKernelStdin", h_StdFd);
-    sr_hle_register(0xa6bab2e9, "sceKernelStdout", h_StdFd);
-    sr_hle_register(0xf78ba90a, "sceKernelStderr", h_StdFd);
+    sr_hle_register(0x172d316e, "sceKernelStdin", h_KernelStdin);
+    sr_hle_register(0xa6bab2e9, "sceKernelStdout", h_KernelStdout);
+    sr_hle_register(0xf78ba90a, "sceKernelStderr", h_KernelStderr);
 }
 #endif

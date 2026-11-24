@@ -343,7 +343,13 @@ static uint32_t h_IoOpen(CpuState *s) {
 
 uint32_t h_IoWrite(CpuState *s) {
     /* a0=fd, a1=src, a2=count. Returns bytes written. */
-    uint32_t fd = A0, src = A1, count = A2;
+    uint32_t fd = hle_io_guest_fd(A0), src = A1, count = A2;
+    /* PSP-HLE-STDIO-001 measures a write through the Stdout and the Stderr handle, in the XMB
+     * and in the game context alike (a one-byte write returns 1). UNMEASURED: a write through
+     * the Stdin handle, which has no result to keep and stops at a named boundary; a count above
+     * one byte, which returns the count. */
+    if (hle_std_handle_stream(A0) == 0)
+        return hle_io_std_handle_boundary(IO_STD_UNMEASURED_WRITE_STDIN, "sceIoWrite", 0);
     if (fd >= (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) || !s_fds[fd].used)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     Fd *f = &s_fds[fd];
@@ -402,6 +408,10 @@ uint32_t h_IoWrite(CpuState *s) {
 static uint32_t io_read_payload(CpuState *s) {
     /* a0=fd, a1=dst, a2=count. Returns bytes read. */
     uint32_t fd = A0, dst = A1, count = A2;
+    /* A standard handle reads as its stream did before the handles were told apart. No PSP
+     * cell measures a read through any of them, a read from Stdin least of all (the probe does
+     * not run one): the answer below is the runtime's earlier one, not a PSP result. */
+    fd = hle_io_guest_fd(fd);
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
         return 0x80010009; /* baseline behavior preserved for standard streams */
     if (hle_fd_is_raw_umd(fd)) {
@@ -697,7 +707,7 @@ static int io_read_caller_can_wait(void) {
 }
 
 uint32_t h_IoRead(CpuState *s) {
-    const uint32_t fd = A0;
+    const uint32_t fd = hle_io_guest_fd(A0);
     const int on_umd = fd < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) && s_fds[fd].used &&
                        s_fds[fd].on_umd;
     if (!on_umd || !io_read_caller_can_wait()) return io_read_now(s);
@@ -761,7 +771,7 @@ static uint32_t io_sync_seek_destination(const Fd *f, int64_t offset, uint32_t w
  * keeps io_seek_destination, as sceIoLseekAsync's does. */
 static uint32_t io_lseek32(CpuState *s, int synchronous) {
     /* a0=fd, a1=offset, a2=whence. Returns new position (32-bit). */
-    uint32_t fd = A0; int32_t off = (int32_t)A1; uint32_t whence = A2;
+    uint32_t fd = hle_io_guest_fd(A0); int32_t off = (int32_t)A1; uint32_t whence = A2;
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
         return 0x80010009; /* baseline behavior preserved for standard streams */
     if (hle_fd_is_raw_umd(fd)) {
@@ -790,7 +800,7 @@ uint32_t io_lseek32_async_complete(CpuState *s) { return io_lseek32(s, 0); }
 static uint32_t h_IoLseek(CpuState *s) {
     /* a0=fd, a2/a3=aligned 64-bit offset (a1 is skipped), t0=whence.
      * Returns the 64-bit position in v0:v1. */
-    uint32_t fd = A0;
+    uint32_t fd = hle_io_guest_fd(A0);
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD) {
         s->r[3] = 0;
         return 0x80010009; /* baseline behavior preserved for standard streams */
@@ -828,24 +838,29 @@ static uint32_t h_IoLseek(CpuState *s) {
 }
 static uint32_t h_IoIoctl(CpuState *s) {
     /* a0=fd, a1=cmd, a2=indata, a3=inlen, t0=outdata, t1=outlen */
-    return h_io_ioctl_args(A0, A1, A2, A3, stack_arg(s, 0), stack_arg(s, 1));
+    return h_io_ioctl_args(hle_io_guest_fd(A0), A1, A2, A3, stack_arg(s, 0), stack_arg(s, 1));
 }
 static uint32_t h_IoClose(CpuState *s) {
-    uint32_t fd = A0;
+    uint32_t fd = hle_io_guest_fd(A0);
     if (fd >= (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) || !s_fds[fd].used)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (s_fds[fd].kind == FD_KIND_DIRECTORY)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (s_fds[fd].async.state == IO_ASYNC_PENDING)
         return SCE_ERROR_KERNEL_ASYNC_BUSY;
-    /* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, 2026-11-06, PSP-3000): closing the Stdout
-     * handle returns 0x800200D1 and closes nothing; a later write still returns its count.
-     * sceKernelStdin and sceKernelStderr hand out the Stdout handle too (the PSP's three distinct
-     * handles are not modelled yet, #2397), so a close through them answers the same.
-     * UNMEASURED: closing the Stdin or Stderr stream itself (descriptors 0 and 2), which keeps
-     * the result it had before, and sceIoCloseAsync of any std stream, which still closes it. */
+    /* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, PSP-3000): in both measured launch contexts
+     * closing the Stdout handle is refused and closes nothing; a later write still returns its
+     * count and sceKernelStdout returns the same handle. The error is the game context's
+     * (HLE_STD_CLOSE_REFUSED_GAME_CONTEXT, hle_internal.h); the XMB launches answered
+     * 0x800200D1. The descriptor number 1 answers as the Stdout handle does, as before.
+     * UNMEASURED in either context: closing the Stdin or the Stderr handle, which answers the
+     * Stdout refusal (hle_io_std_handle_close_refusal); closing descriptor 0 or 2 by its number,
+     * which keeps the result it had before; sceIoCloseAsync of a standard handle
+     * (h_IoCloseAsync). */
     if (s_fds[fd].kind == FD_KIND_STD && s_fds[fd].std_stream == 1u)
-        return 0x800200d1u;
+        return HLE_STD_CLOSE_REFUSED_GAME_CONTEXT;
+    if (hle_std_handle_stream(A0) >= 0)
+        return hle_io_std_handle_close_refusal(hle_std_handle_stream(A0));
     hle_fd_release(&s_fds[fd], s_fds[fd].kind == FD_KIND_STD);
     s_closed_res[fd] = 0;
     return 0;
@@ -1722,7 +1737,7 @@ static uint32_t h_IoOpenAsync(CpuState *s) {
 }
 
 static uint32_t h_IoReadAsync(CpuState *s) {
-    uint32_t fd = A0;
+    uint32_t fd = hle_io_guest_fd(A0);
     if (fd >= sizeof(s_fds) / sizeof(s_fds[0]))
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (!s_fds[fd].used)
@@ -1746,7 +1761,12 @@ static uint32_t h_IoReadAsync(CpuState *s) {
 }
 
 static uint32_t h_IoWriteAsync(CpuState *s) {
-    uint32_t fd = A0;
+    uint32_t fd = hle_io_guest_fd(A0);
+    /* As sceIoWrite: no PSP cell covers a write through the Stdin handle. UNMEASURED too, and
+     * kept: a queued write through the Stdout or the Stderr handle completes as sceIoWrite. */
+    if (hle_std_handle_stream(A0) == 0)
+        return hle_io_std_handle_boundary(IO_STD_UNMEASURED_WRITE_ASYNC_STDIN,
+                                          "sceIoWriteAsync", 0);
     if (fd >= sizeof(s_fds) / sizeof(s_fds[0]))
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (!s_fds[fd].used)
@@ -1767,7 +1787,7 @@ static uint32_t h_IoWriteAsync(CpuState *s) {
 }
 
 static uint32_t h_IoLseekAsync(CpuState *s) {
-    uint32_t fd = A0;
+    uint32_t fd = hle_io_guest_fd(A0);
     if (fd >= sizeof(s_fds) / sizeof(s_fds[0]) || !s_fds[fd].used)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (s_fds[fd].async.state == IO_ASYNC_PENDING) return SCE_ERROR_KERNEL_ASYNC_BUSY;
@@ -1778,11 +1798,11 @@ static uint32_t h_IoLseekAsync(CpuState *s) {
 }
 
 static uint32_t h_IoLseek32Async(CpuState *s) {
-    return io_async_submit(A0, IO_ASYNC_LSEEK32, A1, A2, 0u, 0u, 0u);
+    return io_async_submit(hle_io_guest_fd(A0), IO_ASYNC_LSEEK32, A1, A2, 0u, 0u, 0u);
 }
 
 static uint32_t h_IoIoctlAsync(CpuState *s) {
-    uint32_t fd = A0, in = A2, inlen = A3;
+    uint32_t fd = hle_io_guest_fd(A0), in = A2, inlen = A3;
     if (fd >= sizeof(s_fds) / sizeof(s_fds[0]) || !s_fds[fd].used)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (s_fds[fd].async.state == IO_ASYNC_PENDING) return SCE_ERROR_KERNEL_ASYNC_BUSY;
@@ -1797,6 +1817,7 @@ static uint32_t h_IoIoctlAsync(CpuState *s) {
 
 static uint32_t io_async_query(uint32_t fd, uint32_t result_addr, int wait,
                                IoRawDeviceBoundary raw_boundary, const char *api) {
+    fd = hle_io_guest_fd(fd);   /* the argument of the guest: a standard handle names its stream */
     uint32_t raw_error = hle_io_raw_async_fd_boundary(fd, raw_boundary, api);
     if (raw_error != 0u) return raw_error;
     if (fd >= sizeof(s_fds) / sizeof(s_fds[0]))
@@ -1853,7 +1874,7 @@ static uint32_t h_IoWaitAsyncCB(CpuState *s) {
 }
 
 static uint32_t h_IoChangeAsyncPriority(CpuState *s) {
-    uint32_t fd = A0;
+    uint32_t fd = hle_io_guest_fd(A0);
     if (fd >= sizeof(s_fds) / sizeof(s_fds[0]) || !s_fds[fd].used)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     uint32_t raw_error = hle_io_raw_async_fd_boundary(
@@ -1864,7 +1885,7 @@ static uint32_t h_IoChangeAsyncPriority(CpuState *s) {
 }
 
 static uint32_t h_IoSetAsyncCallback(CpuState *s) {
-    uint32_t fd = A0, callback = A1;
+    uint32_t fd = hle_io_guest_fd(A0), callback = A1;
     if (fd >= sizeof(s_fds) / sizeof(s_fds[0]) || !s_fds[fd].used)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     uint32_t raw_error = hle_io_raw_async_fd_boundary(
@@ -1877,6 +1898,15 @@ static uint32_t h_IoSetAsyncCallback(CpuState *s) {
 }
 
 static uint32_t h_IoCloseAsync(CpuState *s) {
+    /* PSP-HLE-STDIO-001 measures only the synchronous close of Stdout, which closes nothing in
+     * either launch context.
+     * UNMEASURED: sceIoCloseAsync of a standard handle. Queueing a close that then succeeds
+     * would invent a result, so it stops at a named boundary and nothing is queued or closed.
+     * Descriptor 0, 1 or 2 named by its number keeps the queued close it had before. */
+    const int std_stream = hle_std_handle_stream(A0);
+    if (std_stream >= 0)
+        return hle_io_std_handle_boundary(IO_STD_UNMEASURED_CLOSE_ASYNC, "sceIoCloseAsync",
+                                          std_stream);
     return io_async_submit(A0, IO_ASYNC_CLOSE, 0u, 0u, 0u, 0u, 0u);
 }
 
