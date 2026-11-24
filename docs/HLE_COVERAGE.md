@@ -26,9 +26,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 73 |
 | `ppsspp-derived` | 179 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 298 | 183 |
+| `synthetic` | 300 | 183 |
 | `unverified` | 174 | 22 |
-| total | 715 | 366 |
+| total | 717 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -141,6 +141,7 @@ a title that translates none has generated code unchanged.
 | `0x17099f0a` | `sceVideocodecInit` | videocodec | `unverified` | no recorded evidence |
 | `0x172d316e` | `sceKernelStdin` | kernel_utils | `unverified` | no recorded evidence |
 | `0x17768e14` | `sceRegSetKeyValue` | system | `synthetic` | HLE selftest dispatch |
+| `0x17943399` | `sceNetInetInit` | network | `synthetic` | HLE selftest dispatch |
 | `0x17c1684e` | `sceKernelReferThreadStatus` | kernel_thread | `synthetic` | HLE selftest dispatch |
 | `0x18260574` | `sceKernelReceiveMbx` | kernel_sync | `hardware-measured` | PSP oracle PSP-KERNEL-001 |
 | `0x1839852a` | `sceKernelMemcpy` | kernel_utils | `unverified` | no recorded evidence |
@@ -558,6 +559,7 @@ a title that translates none has generated code unchanged.
 | `0xa85880d0` | `scePowerCheckWlanCoexistenceClock` | power | `unverified` | generic success handler; performs none of the API contract |
 | `0xa8e8c846` | `sceKernelReferMbxStatus` | kernel_sync | `hardware-measured` | PSP oracle PSP-KERNEL-001 |
 | `0xa9c2cb9a` | `sceKernelReferMutexStatus` | kernel_sync | `synthetic` | HLE selftest dispatch; unlinked hardware note |
+| `0xa9ed66b9` | `sceNetInetTerm` | network | `synthetic` | HLE selftest dispatch |
 | `0xaa73c935` | `sceKernelExitThread` | kernel_thread | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xab1abe07` | `sceHttpInit` | network | `synthetic` | HLE selftest dispatch |
 | `0xab49e76a` | `sceGeListEnQueue` | ge | `synthetic` | HLE selftest dispatch |

@@ -9504,6 +9504,101 @@ static uint32_t net_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, ui
     return sr_syscall(&cpu, nid);
 }
 
+/* #2968: only the public offline lifecycle is modelled. All cells go
+ * through the dispatcher, including the two spellings of utility IO. */
+static void test_net_inet_lifecycle_without_network(int stop_at_socket) {
+    enum {
+        NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
+        NID_INET_INIT = 0x17943399u, NID_INET_TERM = 0xa9ed66b9u,
+        NID_INET_SOCKET = 0x8b7b220fu,
+        NID_LOAD_NET = 0x1579a159u, NID_UNLOAD_NET = 0x64d50c56u,
+        NID_LOAD_MODULE = 0x2a2b3de0u, NID_UNLOAD_MODULE = 0xe49bfe92u,
+        NET_COMMON = 1u, NET_INET = 3u, MODULE_INET = 0x102u,
+    };
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_net_inited(void);
+    extern uint32_t sr_hle_test_net_pool_uid(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    sr_hle_init();
+    const int init_registered = sr_hle_test_is_registered(NID_INET_INIT);
+    const int term_registered = sr_hle_test_is_registered(NID_INET_TERM);
+    expect(init_registered, "Inet lifecycle registers the fresh Init NID");
+    expect(term_registered, "Inet lifecycle registers the active Term NID");
+    expect(!sr_hle_test_is_registered(NID_INET_SOCKET), "Inet lifecycle leaves sceNetInetSocket unsupported");
+    if (!init_registered || !term_registered) return;
+
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_loadexec_reset_guest_state();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u,
+           "Inet lifecycle: early Term stops by name");
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 2u,
+           "Inet lifecycle: Init without setup stops by name");
+    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+               net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "Inet lifecycle: starting core Net supplies its pool");
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Inet lifecycle: loading INET is still needed after core Net starts");
+    expect(net_call(NID_LOAD_MODULE, MODULE_INET, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: generic utility loading shares the legacy INET state");
+    const uint32_t pool = sr_hle_test_net_pool_uid();
+    const int inet_started = net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u;
+    expect(inet_started && sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: fresh Init returns zero and preserves the core allocator");
+    if (stop_at_socket) {
+        /* The child must use the normal named-stop path. Never invoke a socket
+         * handler if a future change registers one for this NID. */
+        if (inet_started && !sr_hle_test_is_registered(NID_INET_SOCKET)) {
+            sr_sched_on = 1;
+            (void)net_call(NID_INET_SOCKET, 2u, 2u, 0, 0, 0);
+        }
+        return;
+    }
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 4u,
+           "Inet lifecycle: duplicate Inet Init stops by name");
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 5u &&
+               sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: early core Term leaves the pool and active Inet alone");
+    expect(net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) ==
+               SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 6u &&
+               sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: core re-Init while Inet is live preserves the pool");
+    expect(net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               net_call(NID_UNLOAD_MODULE, MODULE_INET, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 8u,
+           "Inet lifecycle: utility unloads cannot remove the active modules");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: active Inet Term returns zero and leaves core Net alive");
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: core Net Term and both unloads work after Inet Term");
+
+    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+               net_call(NID_LOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 9u,
+           "Inet lifecycle: loaded modules do not substitute for core Net initialization");
+    expect(net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: a new ordinary setup after teardown succeeds");
+    sr_hle_loadexec_reset_guest_state();
+    expect(!sr_hle_test_net_inited() &&
+               net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 10u,
+           "Inet lifecycle: the LoadExec reset clears active Inet as well as core Net");
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
 static void test_net_core_without_network(void) {
     enum {
         NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
@@ -68305,6 +68400,17 @@ static int hle_selftest_main(int argc, char **argv) {
 
     if (argc > 1 && strcmp(argv[1], "--adhocctl-handler-fault-child") == 0)
         return run_adhocctl_handler_fault_child();
+    if (argc > 1 && strcmp(argv[1], "--inet-socket-stop-child") == 0) {
+        test_net_inet_lifecycle_without_network(1);
+        free(g_mem_base);
+        return 98;
+    }
+    if (argc > 1 && strcmp(argv[1], "--inet-offline") == 0) {
+        test_net_inet_lifecycle_without_network(0);
+        fprintf(stderr, "inet-offline: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--adhocctl") == 0) {
         test_adhocctl_lone_console();
         test_adhocctl_teardown();
@@ -68465,6 +68571,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_edram_addr_translation();
     test_named_refusals();
     test_net_core_without_network();
+    test_net_inet_lifecycle_without_network(0);
     test_refer_system_status();
     test_ctrl_read_latch();
     test_ctrl_peek_latch_keeps_the_latch();
