@@ -2428,6 +2428,8 @@ int      gui_stick_dead_zone(void);              /* the input profile's stick de
                                                     counts (ace_stick_host_counts); 0 without one */
 int      gui_pad_present(void);                  /* 1 when a game controller is connected */
 void     gui_ace_vblank(uint32_t vcount);        /* Ace Mode's smooth motion: a held frame's VBLANK */
+/* The GPU presenter reports an accepted image that bypassed guest CPU bytes. */
+void     sr_display_note_gpu_present(void);
 /* Returns 1 only when the selected presenter accepted the validated frame. */
 int      gui_present(uint32_t fbaddr, int fmt, uint32_t stride);
 void     gui_pump(void);                         /* service the window's pending events */

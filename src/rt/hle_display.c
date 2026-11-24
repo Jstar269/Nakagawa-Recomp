@@ -186,6 +186,50 @@ static int display_host_span_valid(const DisplayFrameState *fb) {
     return sr_guest_span_readable(fb->addr, bytes);
 }
 
+/* Only accepted CPU-backed presents have a guest-byte baseline. A GPU-resident
+ * frame can be newer than guest memory, so observing its old CPU image would
+ * neither detect its changes nor be a reason to request a readback. */
+enum { SCANOUT_WIDTH = 480, SCANOUT_HEIGHT = 272 };
+static struct {
+    DisplayFrameState frame;
+    uint8_t pixels[SCANOUT_HEIGHT][SCANOUT_WIDTH * 4];
+} s_cpu_scanout;
+static int s_present_used_gpu;
+
+void sr_display_note_gpu_present(void) {
+    s_present_used_gpu = 1;
+}
+
+static void display_remember_scanout(void) {
+    if (s_present_used_gpu) {
+        s_cpu_scanout.frame.addr = 0;
+        return;
+    }
+    const uint32_t bpp = s_display_active.fmt == 3 ? 4u : 2u;
+    const size_t pitch = (size_t)s_display_active.stride * bpp;
+    const uint8_t *src = SR_HOST_LINEAR(s_display_active.addr);
+    for (unsigned row = 0; row < SCANOUT_HEIGHT; row++)
+        memcpy(s_cpu_scanout.pixels[row], src + row * pitch, SCANOUT_WIDTH * bpp);
+    s_cpu_scanout.frame = s_display_active;
+}
+
+static int display_static_scanout_changed(void) {
+    const DisplayFrameState *fb = &s_display_active;
+    const DisplayFrameState *shown = &s_cpu_scanout.frame;
+    if (!s_display_configured || !fb->addr || fb->addr != shown->addr ||
+        fb->fmt != shown->fmt || fb->stride != shown->stride || !gui_on())
+        return 0;
+    /* The exact descriptor passed the host-read span check at presentation.
+     * Check guest backing bytes, without syncing or changing GE ownership. */
+    const uint32_t bpp = fb->fmt == 3 ? 4u : 2u;
+    const size_t pitch = (size_t)fb->stride * bpp;
+    const uint8_t *src = SR_HOST_LINEAR(fb->addr);
+    for (unsigned row = 0; row < SCANOUT_HEIGHT; row++)
+        if (memcmp(s_cpu_scanout.pixels[row], src + row * pitch, SCANOUT_WIDTH * bpp) != 0)
+            return 1;
+    return 0;
+}
+
 static void display_present_frame(void) {
     if (!gui_on() || !s_display_active.addr) return;
     if (!display_host_span_valid(&s_display_active)) {
@@ -193,9 +237,11 @@ static void display_present_frame(void) {
                 s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         return;
     }
+    s_present_used_gpu = 0;
     int presented = gui_present(s_display_active.addr, s_display_active.fmt,
                                 (uint32_t)s_display_active.stride);
     if (presented) {
+        display_remember_scanout();
         if (sr_perf_enabled) sr_perf_present_frame(s_display_active.addr, s_vcount);
         SR_FLIGHT_RECORD_CLASS(SR_FLIGHT_CLASS_PRESENT, SR_FLIGHT_KIND_PRESENT_FRAME,
                                s_display_active.addr, (uint32_t)s_display_active.fmt,
@@ -249,7 +295,7 @@ static uint64_t s_flip_counted_seq;
  * that showed the frame has already serviced an armed capture, and an arm nobody serviced
  * (a skipped output slot, a presenter that declined the frame) resolves here as "nothing
  * attempted", so a later present can never publish this frame's path with newer pixels. */
-static void display_present_active(void) {
+static void display_present_active(int guest_flip) {
     /* Dark-picture watch (fbcap.h): every SR_PICTURE_PROBE_EVERY VBLANKs, a present no file
      * capture wanted carries a picture probe. A presenter that serves it from host memory
      * does so inside this present, so its result is taken right after; one that reads it
@@ -268,13 +314,13 @@ static void display_present_active(void) {
     /* Ace Mode's 30 Hz detector (ace.h) sees every flip here, before the presenter's own slot
      * rule can drop a second flip in one VBLANK. Off, nothing is read. */
     int new_frame = 0;
-    if (g_ace_on && s_display_active.addr) {
+    if (guest_flip && g_ace_on && s_display_active.addr) {
         uint32_t bytes = (uint32_t)(s_display_active.stride > 0 ? s_display_active.stride : 512) *
                          272u * (s_display_active.fmt == 3 ? 4u : 2u);
         new_frame = ace_flip(s_display_active.addr & 0x1FFFFFu, bytes, s_vcount,
                              sr_host_monotonic_ms() * 1000000ull);
     }
-    if (ace_pad_requested() && s_flip_set) {
+    if (guest_flip && ace_pad_requested() && s_flip_set) {
         /* A new frame set after a read no earlier frame was charged with is measured from that
          * read's poll. Any other present, a repeat of the frame shown or a new frame set with no
          * read since the last measured one, is counted, not measured: the age of an older read
@@ -288,10 +334,12 @@ static void display_present_active(void) {
         }
         s_flip_set = 0;
     }
-    /* A recording counts the guest's own flips beside the picture (videorec.h). */
-    sr_videorec_guest_flip();
-    /* So do the host mip chain's windows, before the presenter's slot rule drops any. */
-    gegpu_note_guest_flip();
+    if (guest_flip) {
+        /* The recording and host mip-chain windows count the guest's flips
+         * before the presenter's slot rule can drop any. */
+        sr_videorec_guest_flip();
+        gegpu_note_guest_flip();
+    }
     display_present_frame();
     sr_capture_cancel();
     uint32_t brightest;
@@ -847,7 +895,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
         fbcap_arm_for_present(s_vcount, &s_display_active, 0u, s_framebuf != 0);
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
-        display_present_active();
+        display_present_active(1);
         screenshot_after_present();
     } else {
         s_setfb.latched++;
@@ -1131,9 +1179,13 @@ void sr_vblank_tick(void) {
         fbcap_arm_for_present(s_vcount, &s_display_active, 0u, s_framebuf != 0);
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
-        display_present_active();
+        display_present_active(1);
         screenshot_after_present();
         display_after_present(s_vcount);
+    } else if (display_static_scanout_changed()) {
+        /* A guest may change the visible pixels without another SetFrameBuf.
+         * A refused host present leaves the old baseline for the next VBLANK. */
+        display_present_active(0);
     }
     if (g_ace_on) gui_ace_vblank(s_vcount);
     /* SR_VIDEOREC_DIR (videorec.h): this VBLANK's video frame is the newest picture presented

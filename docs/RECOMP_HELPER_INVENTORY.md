@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **556** (declared in `recomp.h`: 471)
-- reach class: emitter-reached 89, production-runtime-only 424, selftest-only 0, address-only 8, none 35
-- provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 502
+- helpers: **557** (declared in `recomp.h`: 472)
+- reach class: emitter-reached 89, production-runtime-only 425, selftest-only 0, address-only 8, none 35
+- provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 503
 
 ## Helpers
 
@@ -315,6 +315,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_ctrl_live_buttons` | `rt/hle_input.c` | yes | production-runtime-only | `rt/hle_input.c`: upstream_derived |
 | `sr_display_advance_vcount` | `rt/hle_route.c` | yes | production-runtime-only | `rt/hle_route.c`: upstream_derived |
 | `sr_display_bounds_field` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
+| `sr_display_note_gpu_present` | `rt/hle_display.c` | yes | production-runtime-only | `rt/hle_display.c`: upstream_derived |
 | `sr_display_vcount` | `rt/hle_route.c` | yes | production-runtime-only | `rt/hle_route.c`: upstream_derived |
 | `sr_end_impl` | `rt/recomp.c` | yes | emitter-reached (via `sr_end`) | `rt/recomp.c`: upstream_derived |
 | `sr_enhancement_file_register` | `rt/hle_data.c` | yes | emitter-reached (direct) | `rt/hle_data.c`: upstream_derived |
