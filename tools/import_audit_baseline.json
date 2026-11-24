@@ -393,9 +393,9 @@
   },
   "0x172d316e": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStdin",
     "name": "sceKernelStdin",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x17768e14": {
     "classification": "dedicated",
@@ -2884,9 +2884,9 @@
   },
   "0xa6bab2e9": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStdout",
     "name": "sceKernelStdout",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xa703fe0f": {
     "classification": "dedicated",
@@ -4162,9 +4162,9 @@
   },
   "0xf78ba90a": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStderr",
     "name": "sceKernelStderr",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xf79472d7": {
     "classification": "dedicated",
