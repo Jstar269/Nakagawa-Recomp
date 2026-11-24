@@ -1780,8 +1780,10 @@ def _assemble(base: int, program: list, at: dict[str, int]) -> dict[int, int]:
 
 #: The address where --profile=hst emitted a native sprintf in place of the guest's own.
 FORMATTER = 0x000143B0
-#: A callable the HST profile seeds (tools/compat_overrides.py HST_ENTRY_ROLES); the fixture
-#: keeps it a leaf of its own so the profile's seed does not split the formatter's core.
+#: An address the HST profile used to seed as a callable entry, until #363 retired the six
+#: callable seeds. The fixture gave it a leaf of its own so that the seed did not split the
+#: formatter's core, and keeps those two words. Nothing in the fixture calls them or takes
+#: their address, so they are no entry now: they end the run of padding after the formatter.
 FORMATTER_LEAF = 0x00014430
 FORMATTER_CORE = 0x00014438
 FORMATTER_CASES = ("case_char", "case_string", "case_nibble", "case_skip")

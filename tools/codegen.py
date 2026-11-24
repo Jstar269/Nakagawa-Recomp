@@ -701,15 +701,12 @@ class _OmitAot:
 # HST compatibility inventory.  These are structural entry classifications, not
 # replacement behavior: every address is translated from the guest ELF.  Keep the
 # profile explicit so unrelated zero-based MIPS ELFs do not inherit title addresses.
-HST_MANUAL_CALLABLES = {
-    0x0005A648: "address-taken-tiny-leaf",
-    0x00042998: "address-taken-tiny-leaf",
-    0x0003DB3C: "address-taken-tiny-leaf",
-    0x000E1724: "address-taken-tiny-leaf",
-    0x000E3B24: "address-taken-tiny-leaf",
-    0x00014430: "address-taken-tiny-leaf",
-}
-
+#
+# Only resume entries are left.  The six callable seeds the profile used to add here
+# ("address-taken-tiny-leaf") are retired (#363): the analyzer finds a leaf entered only
+# through a pointer on its own (analyze._is_address_taken_entry and the data-pointer
+# census), so a callable entry comes from the image under every profile and no profile
+# adds one.
 HST_RESUME_OWNERS = {
     0x000310B0: 0x00030FDC,
     0x00021C78: 0x00021AC0,
@@ -749,13 +746,6 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
             old = catalog.get(candidate.addr)
             if old is None:
                 continue
-            if "hst-profile" in old.provenance or (
-                profile == "hst" and candidate.addr in HST_MANUAL_CALLABLES
-            ):
-                raise RuntimeError(
-                    f"DUAL-ROLE ENTRY DETECTED: direct-j resume "
-                    f"0x{candidate.addr:08x} overlaps a profile callable"
-                )
             provenance = set(old.provenance)
             provenance.update({"direct-j", "frame-balance-verified"})
             catalog[candidate.addr] = EntryInfo(
@@ -790,13 +780,6 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
                         f"derived as a continuation of 0x{old.owner:08x} and of "
                         f"0x{owner:08x}"
                     )
-            elif "hst-profile" in old.provenance or (
-                profile == "hst" and candidate.addr in HST_MANUAL_CALLABLES
-            ):
-                raise RuntimeError(
-                    f"DUAL-ROLE ENTRY DETECTED: direct-branch resume "
-                    f"0x{candidate.addr:08x} overlaps a profile callable"
-                )
             provenance = set(old.provenance)
             provenance.update({"direct-branch", "frame-balance-verified"})
             catalog[candidate.addr] = EntryInfo(
@@ -809,14 +792,6 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
 
     if profile is None or profile == "none":
         return catalog
-
-    for addr, why in HST_MANUAL_CALLABLES.items():
-        if not in_ranges(addr, ranges):
-            continue
-        old = catalog.get(addr)
-        provenance = set(old.provenance if old else ())
-        provenance.update({"hst-profile", why})
-        catalog[addr] = EntryInfo(addr, True, False, None, frozenset(provenance))
 
     for addr, owner in HST_RESUME_OWNERS.items():
         if not in_ranges(addr, ranges):
