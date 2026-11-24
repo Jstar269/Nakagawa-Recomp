@@ -130,13 +130,16 @@ static unsigned char ascii_fold(unsigned char byte) {
     return byte >= 'A' && byte <= 'Z' ? (unsigned char)(byte + ('a' - 'A')) : byte;
 }
 
-static bool ascii_equal_ignoring_case(const char *a, const char *b) {
-    for (;; ++a, ++b) {
-        unsigned char ca = ascii_fold((unsigned char)*a);
-        unsigned char cb = ascii_fold((unsigned char)*b);
-        if (ca != cb) return false;
-        if (ca == '\0') return true;
+static int ascii_compare_ignoring_case(const char *a, const char *b) {
+    while (*a && ascii_fold((unsigned char)*a) == ascii_fold((unsigned char)*b)) {
+        ++a;
+        ++b;
     }
+    return (int)ascii_fold((unsigned char)*a) - (int)ascii_fold((unsigned char)*b);
+}
+
+static bool ascii_equal_ignoring_case(const char *a, const char *b) {
+    return ascii_compare_ignoring_case(a, b) == 0;
 }
 
 bool nk_memstick_layout_is_reserved_name(const char *name) {
@@ -936,21 +939,47 @@ static bool unit_collect_entry(const char *name, bool is_dir, void *opaque) {
 
 static int unit_compare_entries(const void *left, const void *right) {
     const UnitEntry *a = left, *b = right;
-    const unsigned char *name_a = (const unsigned char *)a->name;
-    const unsigned char *name_b = (const unsigned char *)b->name;
-    while (*name_a && ascii_fold(*name_a) == ascii_fold(*name_b)) {
-        ++name_a;
-        ++name_b;
+    return ascii_compare_ignoring_case(a->name, b->name);
+}
+
+static bool unit_read_entries(const char *path, UnitEntries *entries) {
+    size_t skipped = 0u;
+    if (!unit_plain_directory(path) ||
+        !nk_platform_list_dir_counted(path, unit_collect_entry, entries, &skipped) ||
+        entries->failed || skipped != 0u) return false;
+    if (entries->count > 1u)
+        qsort(entries->items, entries->count, sizeof(*entries->items), unit_compare_entries);
+    for (size_t i = 1; i < entries->count; ++i) {
+        if (unit_compare_entries(&entries->items[i - 1u], &entries->items[i]) == 0) return false;
     }
-    return (int)ascii_fold(*name_a) - (int)ascii_fold(*name_b);
+    return true;
+}
+
+static void unit_free_entries(UnitEntries *entries) {
+    for (size_t i = 0; i < entries->count; ++i) free(entries->items[i].name);
+    free(entries->items);
+}
+
+typedef struct {
+    NkFileWriteTime value;
+    bool present;
+} UnitWriteTime;
+
+static int unit_compare_times(NkFileWriteTime a, NkFileWriteTime b) {
+    if (a.seconds != b.seconds) return a.seconds < b.seconds ? -1 : 1;
+    if (a.nanoseconds != b.nanoseconds) return a.nanoseconds < b.nanoseconds ? -1 : 1;
+    return 0;
 }
 
 /* Hash the bytes actually read, also writing them when we're building an unpublished copy. */
-static bool unit_file_digest(const char *path, const char *copy, uint8_t digest[32]) {
+static bool unit_file_digest(const char *path, const char *copy, uint8_t digest[32],
+                             UnitWriteTime *latest) {
     FILE *source = nk_platform_open_regular_file(path);
     if (!source) return false;
     FILE *target = copy ? nk_fopen_utf8(copy, "wb") : NULL;
     bool ok = !copy || target;
+    NkFileWriteTime modified;
+    if (ok && latest) ok = nk_platform_file_write_time(source, &modified);
     NkSha256 hash;
     nk_sha256_init(&hash);
     unsigned char buffer[8192];
@@ -961,6 +990,12 @@ static bool unit_file_digest(const char *path, const char *copy, uint8_t digest[
         if (count < sizeof(buffer)) break;
     }
     ok = !ferror(source) && ok;
+    if (ok && latest) {
+        NkFileWriteTime after;
+        ok = nk_platform_file_write_time(source, &after) && !unit_compare_times(after, modified);
+        if (ok && (!latest->present || unit_compare_times(modified, latest->value) > 0))
+            *latest = (UnitWriteTime){modified, true};
+    }
     ok = fclose(source) == 0 && ok;
     if (target) {
         ok = nk_platform_sync_file(target) && ok;
@@ -972,21 +1007,16 @@ static bool unit_file_digest(const char *path, const char *copy, uint8_t digest[
 
 /* Each sorted directory hashes typed, NUL-terminated folded names and fixed-size
  * child digests. Empty directories and per-entry types are part of the fingerprint. */
-static bool unit_tree_digest(const char *path, const char *copy, uint8_t digest[32]) {
+static bool unit_tree_fingerprint(const char *path, const char *copy, uint8_t digest[32],
+                                  UnitWriteTime *latest) {
     UnitEntries entries = {0};
-    size_t skipped = 0u;
-    bool ok = unit_plain_directory(path) &&
-              nk_platform_list_dir_counted(path, unit_collect_entry, &entries, &skipped) &&
-              !entries.failed && skipped == 0u;
-    if (ok && entries.count > 1u)
-        qsort(entries.items, entries.count, sizeof(*entries.items), unit_compare_entries);
+    bool ok = unit_read_entries(path, &entries);
     NkSha256 hash;
     nk_sha256_init(&hash);
     for (size_t i = 0; ok && i < entries.count; ++i) {
         const UnitEntry *entry = &entries.items[i];
         char source[NK_MAX_PATH], target[NK_MAX_PATH];
-        if ((i && unit_compare_entries(entry - 1, entry) == 0) ||
-            !layout_join(path, entry->name, source) ||
+        if (!layout_join(path, entry->name, source) ||
             (copy && !layout_join(copy, entry->name, target))) {
             ok = false;
             break;
@@ -994,9 +1024,9 @@ static bool unit_tree_digest(const char *path, const char *copy, uint8_t digest[
         uint8_t child_digest[32];
         if (entry->is_dir) {
             ok = (!copy || nk_platform_mkdir_p_private(target)) &&
-                 unit_tree_digest(source, copy ? target : NULL, child_digest);
+                 unit_tree_fingerprint(source, copy ? target : NULL, child_digest, latest);
         } else {
-            ok = unit_file_digest(source, copy ? target : NULL, child_digest);
+            ok = unit_file_digest(source, copy ? target : NULL, child_digest, latest);
         }
         if (!ok) break;
         const uint8_t type = entry->is_dir ? 'd' : 'f';
@@ -1009,10 +1039,13 @@ static bool unit_tree_digest(const char *path, const char *copy, uint8_t digest[
         }
         nk_sha256_update(&hash, child_digest, sizeof(child_digest));
     }
-    for (size_t i = 0; i < entries.count; ++i) free(entries.items[i].name);
-    free(entries.items);
+    unit_free_entries(&entries);
     nk_sha256_finish(&hash, digest);
     return ok && (!copy || nk_platform_sync_dir(copy));
+}
+
+static bool unit_tree_digest(const char *path, const char *copy, uint8_t digest[32]) {
+    return unit_tree_fingerprint(path, copy, digest, NULL);
 }
 
 static bool unit_matches(const char *path, const uint8_t expected[32]) {
@@ -1064,12 +1097,47 @@ static NkMemstickCollisionResult unit_publish(const char *source, const uint8_t 
     return result;
 }
 
-static bool unit_source(const char *saves, const char *slot, const char *name,
-                        char out[NK_MAX_PATH], uint8_t digest[32]) {
+static bool unit_source_path(const char *saves, const char *slot, const char *name,
+                             char out[NK_MAX_PATH]) {
     char slot_path[NK_MAX_PATH], parent[NK_MAX_PATH];
     return layout_join(saves, slot, slot_path) && unit_plain_directory(slot_path) &&
            unit_savedata_directory(slot_path, false, parent) &&
-           unit_directory(parent, name, false, out) && unit_tree_digest(out, NULL, digest);
+           unit_directory(parent, name, false, out);
+}
+
+static bool unit_source(const char *saves, const char *slot, const char *name,
+                        char out[NK_MAX_PATH], uint8_t digest[32]) {
+    return unit_source_path(saves, slot, name, out) && unit_tree_digest(out, NULL, digest);
+}
+
+static bool unit_open_move(const char *saves_root, NkMemstickPaths *paths) {
+    char saves[NK_MAX_PATH];
+    if (!nk_platform_real_path(saves_root, saves, sizeof(saves)) ||
+        !nk_memstick_layout_paths(saves, paths) || !nk_platform_path_missing(paths->stick))
+        return false;
+    NkMemstickLayout layout;
+    if (nk_memstick_layout_read(saves, &layout, NULL, 0u) != NK_MEMSTICK_LAYOUT_OK) return false;
+    const bool moving = layout.state == NK_MEMSTICK_STATE_MOVING;
+    nk_memstick_layout_free(&layout);
+    return moving;
+}
+
+static NkMemstickCollisionResult unit_publish_to_layout(const NkMemstickPaths *paths,
+                                                         const char *source,
+                                                         const uint8_t expected[32],
+                                                         const char *slot,
+                                                         const char *name,
+                                                         bool keep) {
+    const char *store = keep ? paths->kept_copies : paths->staging;
+    char kept_slot[NK_MAX_PATH], parent[NK_MAX_PATH];
+    if (!unit_ensure_layout_directory(paths->saves, paths->migration) ||
+        !unit_ensure_layout_directory(paths->saves, store)) return NK_MEMSTICK_COLLISION_IO;
+    if (keep) {
+        if (!unit_directory(store, slot, true, kept_slot)) return NK_MEMSTICK_COLLISION_IO;
+        store = kept_slot;
+    }
+    if (!unit_savedata_directory(store, true, parent)) return NK_MEMSTICK_COLLISION_IO;
+    return unit_publish(source, expected, parent, name, paths->migration);
 }
 
 NkMemstickCollisionResult nk_memstick_copy_save_collision(const char *saves_root,
@@ -1082,41 +1150,301 @@ NkMemstickCollisionResult nk_memstick_copy_save_collision(const char *saves_root
         !component_valid(winner_name) || !component_valid(loser_name) ||
         !ascii_equal_ignoring_case(winner_name, loser_name)) return NK_MEMSTICK_COLLISION_INVALID;
 
-    char saves[NK_MAX_PATH], winner[NK_MAX_PATH], loser[NK_MAX_PATH];
+    char winner[NK_MAX_PATH], loser[NK_MAX_PATH];
     uint8_t win_digest[32], lose_digest[32];
     NkMemstickPaths paths;
-    if (!nk_platform_real_path(saves_root, saves, sizeof(saves)) ||
-        !nk_memstick_layout_paths(saves, &paths) || !nk_platform_path_missing(paths.stick))
-        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
-    NkMemstickLayout layout;
-    if (nk_memstick_layout_read(saves, &layout, NULL, 0u) != NK_MEMSTICK_LAYOUT_OK)
-        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
-    const bool moving = layout.state == NK_MEMSTICK_STATE_MOVING;
-    nk_memstick_layout_free(&layout);
-    if (!moving) return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    if (!unit_open_move(saves_root, &paths)) return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
 
-    if (!unit_source(saves, winner_slot, winner_name, winner, win_digest) ||
-        !unit_source(saves, loser_slot, loser_name, loser, lose_digest))
+    if (!unit_source(paths.saves, winner_slot, winner_name, winner, win_digest) ||
+        !unit_source(paths.saves, loser_slot, loser_name, loser, lose_digest))
         return NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE;
 
-    char primary[NK_MAX_PATH];
-    if (!unit_ensure_layout_directory(saves, paths.migration) ||
-        !unit_ensure_layout_directory(saves, paths.staging) ||
-        !unit_savedata_directory(paths.staging, true, primary)) return NK_MEMSTICK_COLLISION_IO;
     const bool identical = memcmp(win_digest, lose_digest, sizeof(win_digest)) == 0;
     if (!identical) {
-        char kept_slot[NK_MAX_PATH], alternate[NK_MAX_PATH];
-        if (!unit_ensure_layout_directory(saves, paths.kept_copies) ||
-            !unit_directory(paths.kept_copies, loser_slot, true, kept_slot) ||
-            !unit_savedata_directory(kept_slot, true, alternate)) return NK_MEMSTICK_COLLISION_IO;
-        NkMemstickCollisionResult kept_result =
-            unit_publish(loser, lose_digest, alternate, loser_name, paths.migration);
+        NkMemstickCollisionResult kept_result = unit_publish_to_layout(&paths, loser, lose_digest,
+                                                                       loser_slot, loser_name, true);
         if (kept_result != NK_MEMSTICK_COLLISION_COPIED) return kept_result;
     }
-    NkMemstickCollisionResult result = unit_publish(winner, win_digest, primary, winner_name,
-                                                    paths.migration);
+    NkMemstickCollisionResult result = unit_publish_to_layout(&paths, winner, win_digest,
+                                                              winner_slot, winner_name, false);
     if (result != NK_MEMSTICK_COLLISION_COPIED) return result;
     if (!unit_matches(winner, win_digest) || !unit_matches(loser, lose_digest))
         return NK_MEMSTICK_COLLISION_SOURCE_CHANGING;
     return identical ? NK_MEMSTICK_COLLISION_IDENTICAL : NK_MEMSTICK_COLLISION_COPIED;
+}
+
+/* ---- Whole-save planning and replay ---- */
+
+typedef struct {
+    NkMemstickPlanUnit unit;
+    UnitWriteTime latest;
+    bool prefix_owner;
+} PlanCandidate;
+
+typedef struct {
+    PlanCandidate *items;
+    size_t count;
+    size_t capacity;
+} PlanCandidates;
+
+static bool plan_disc_prefix(const char *name, const char *disc_id) {
+    if (!disc_id || !*disc_id) return false;
+    for (; *disc_id; ++name, ++disc_id) {
+        if (ascii_fold((unsigned char)*name) != ascii_fold((unsigned char)*disc_id))
+            return false;
+    }
+    return true;
+}
+
+static int plan_input_order(const void *left, const void *right) {
+    const NkMemstickPlanInput *a = left, *b = right;
+    return ascii_compare_ignoring_case(a->slot, b->slot);
+}
+
+typedef struct {
+    const NkMemstickPlanInput *inputs;
+    NkMemstickPlanSource *sources;
+    size_t count;
+} PlanSlots;
+
+static bool plan_find_slot(const char *name, bool is_dir, void *opaque) {
+    PlanSlots *slots = opaque;
+    size_t low = 0u, high = slots->count;
+    while (low < high) {
+        size_t i = low + (high - low) / 2u;
+        int order = ascii_compare_ignoring_case(name, slots->inputs[i].slot);
+        if (order < 0) high = i;
+        else if (order > 0) low = i + 1u;
+        else {
+            NkMemstickPlanSource *source = &slots->sources[i];
+            if (!is_dir || source->status != NK_MEMSTICK_PLAN_SOURCE_ABSENT) {
+                memcpy(source->slot, slots->inputs[i].slot, strlen(slots->inputs[i].slot) + 1u);
+                source->status = NK_MEMSTICK_PLAN_SOURCE_UNREADABLE;
+            } else {
+                memcpy(source->slot, name, strlen(name) + 1u);
+                source->status = NK_MEMSTICK_PLAN_SOURCE_READABLE;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
+static int plan_candidate_order(const void *left, const void *right) {
+    const PlanCandidate *a = left, *b = right;
+    int by_key = ascii_compare_ignoring_case(a->unit.name, b->unit.name);
+    if (by_key) return by_key;
+    if (a->prefix_owner != b->prefix_owner) return a->prefix_owner ? -1 : 1;
+    if (a->latest.present != b->latest.present) return a->latest.present ? -1 : 1;
+    int by_age = unit_compare_times(b->latest.value, a->latest.value);
+    if (by_age) return by_age;
+    return ascii_compare_ignoring_case(a->unit.slot, b->unit.slot);
+}
+
+static bool plan_append(PlanCandidates *candidates, const PlanCandidate *candidate) {
+    if (candidates->count == candidates->capacity) {
+        size_t capacity = candidates->capacity ? candidates->capacity * 2u : 16u;
+        if (capacity <= candidates->capacity || capacity > SIZE_MAX / sizeof(*candidates->items))
+            return false;
+        PlanCandidate *items = realloc(candidates->items, capacity * sizeof(*items));
+        if (!items) return false;
+        candidates->items = items;
+        candidates->capacity = capacity;
+    }
+    candidates->items[candidates->count++] = *candidate;
+    return true;
+}
+
+static bool plan_read_source(const char *saves, const NkMemstickPlanInput *input,
+                             NkMemstickPlanSource *source, PlanCandidates *candidates) {
+    char slot[NK_MAX_PATH], psp[NK_MAX_PATH], parent[NK_MAX_PATH];
+    if (!layout_join(saves, source->slot, slot)) {
+        source->status = NK_MEMSTICK_PLAN_SOURCE_UNREADABLE;
+        return true;
+    }
+    if (source->status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE) return true;
+    if (source->status == NK_MEMSTICK_PLAN_SOURCE_ABSENT) {
+        /* Unsupported entries are omitted from the enumeration. If its exact
+           name exists anyway, don't treat that legacy source as absent. */
+        if (!nk_platform_path_missing(slot)) source->status = NK_MEMSTICK_PLAN_SOURCE_UNREADABLE;
+        return true;
+    }
+    source->status = NK_MEMSTICK_PLAN_SOURCE_UNREADABLE;
+    if (!unit_plain_directory(slot) || !unit_directory(slot, "PSP", false, psp)) return true;
+    if (nk_platform_path_missing(psp)) {
+        source->status = NK_MEMSTICK_PLAN_SOURCE_READABLE;
+        return true;
+    }
+    if (!unit_directory(psp, "SAVEDATA", false, parent)) return true;
+    if (nk_platform_path_missing(parent)) {
+        source->status = NK_MEMSTICK_PLAN_SOURCE_READABLE;
+        return true;
+    }
+
+    UnitEntries entries = {0};
+    bool readable = unit_read_entries(parent, &entries);
+    const size_t before = candidates->count;
+    bool allocated = true;
+    for (size_t i = 0; readable && allocated && i < entries.count; ++i) {
+        const UnitEntry *entry = &entries.items[i];
+        if (!entry->is_dir) continue;
+        PlanCandidate candidate = {0};
+        char from[NK_MAX_PATH];
+        readable = layout_join(parent, entry->name, from) &&
+                   nk_shared_text_copy(candidate.unit.name, sizeof(candidate.unit.name),
+                                        entry->name, NK_SHARED_TEXT_COPY_REQUIRE_FIT) &&
+                   unit_tree_fingerprint(from, NULL, candidate.unit.digest, &candidate.latest);
+        if (readable) {
+            memcpy(candidate.unit.slot, source->slot, strlen(source->slot) + 1u);
+            candidate.prefix_owner = plan_disc_prefix(entry->name, input->disc_id);
+            allocated = plan_append(candidates, &candidate);
+        }
+    }
+    unit_free_entries(&entries);
+    if (readable && allocated) source->status = NK_MEMSTICK_PLAN_SOURCE_READABLE;
+    else candidates->count = before;
+    return allocated;
+}
+
+void nk_memstick_save_plan_free(NkMemstickSavePlan *plan) {
+    if (!plan) return;
+    free(plan->units);
+    free(plan->sources);
+    memset(plan, 0, sizeof(*plan));
+}
+
+static bool plan_elect(PlanCandidates *candidates, NkMemstickSavePlan *out) {
+    if (!candidates->count) return true;
+    qsort(candidates->items, candidates->count, sizeof(*candidates->items), plan_candidate_order);
+    out->units = malloc(candidates->count * sizeof(*out->units));
+    if (!out->units) return false;
+    out->unit_count = candidates->count;
+    size_t group = 0u;
+    for (size_t i = 0; i < out->unit_count; ++i) {
+        NkMemstickPlanUnit *row = &out->units[i];
+        *row = candidates->items[i].unit;
+        if (!ascii_equal_ignoring_case(out->units[group].name, row->name)) group = i;
+        row->decision = group == i ? NK_MEMSTICK_PLAN_STAGE : NK_MEMSTICK_PLAN_KEEP;
+        row->copy_of = i;
+        for (size_t prior = group; prior < i; ++prior) {
+            if (memcmp(out->units[prior].digest, row->digest, sizeof(row->digest)) == 0) {
+                row->copy_of = out->units[prior].copy_of;
+                row->decision = NK_MEMSTICK_PLAN_DEDUPLICATE;
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+bool nk_memstick_plan_savedata(const char *saves_root, const NkMemstickPlanInput *inputs,
+                               size_t input_count, NkMemstickSavePlan *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (input_count > NK_MEMSTICK_LAYOUT_MAX_SOURCES || (input_count && !inputs)) return false;
+    char saves[NK_MAX_PATH];
+    NkMemstickPaths paths;
+    if (!nk_platform_real_path(saves_root, saves, sizeof(saves)) ||
+        !nk_memstick_layout_paths(saves, &paths) || !nk_platform_dir_exists(saves)) return false;
+    for (size_t i = 0; i < input_count; ++i) {
+        if (!slot_valid(inputs[i].slot) || strlen(inputs[i].slot) >= NK_MAX_PATH ||
+            (inputs[i].disc_id && inputs[i].disc_id[0] &&
+             (!component_valid(inputs[i].disc_id) ||
+              strlen(inputs[i].disc_id) >= NK_MAX_DISC_ID_LEN))) return false;
+    }
+    NkMemstickPlanInput *sorted = NULL;
+    if (input_count) {
+        sorted = malloc(input_count * sizeof(*sorted));
+        out->sources = calloc(input_count, sizeof(*out->sources));
+        if (!sorted || !out->sources) {
+            free(sorted);
+            nk_memstick_save_plan_free(out);
+            return false;
+        }
+        memcpy(sorted, inputs, input_count * sizeof(*sorted));
+        qsort(sorted, input_count, sizeof(*sorted), plan_input_order);
+    }
+    out->active_stick_present = !nk_platform_path_missing(paths.stick);
+    out->source_count = input_count;
+    PlanCandidates candidates = {0};
+    bool ok = true;
+    for (size_t i = 0; ok && i < input_count; ++i) {
+        ok = !i || plan_input_order(&sorted[i - 1u], &sorted[i]) != 0;
+        memcpy(out->sources[i].slot, sorted[i].slot, strlen(sorted[i].slot) + 1u);
+        out->sources[i].status = NK_MEMSTICK_PLAN_SOURCE_ABSENT;
+    }
+    if (ok && input_count) {
+        PlanSlots slots = {sorted, out->sources, input_count};
+        size_t skipped = 0u;
+        ok = nk_platform_list_dir_counted(saves, plan_find_slot, &slots, &skipped);
+    }
+    for (size_t i = 0; ok && i < input_count; ++i) {
+        ok = plan_read_source(saves, &sorted[i], &out->sources[i], &candidates);
+    }
+    if (ok) ok = plan_elect(&candidates, out);
+    free(candidates.items);
+    free(sorted);
+    if (!ok) nk_memstick_save_plan_free(out);
+    return ok;
+}
+
+static bool plan_source_matches(const NkMemstickPaths *paths, const NkMemstickPlanUnit *row,
+                                char path[NK_MAX_PATH]) {
+    return unit_source_path(paths->saves, row->slot, row->name, path) &&
+           unit_matches(path, row->digest);
+}
+
+NkMemstickCollisionResult nk_memstick_replay_savedata(const char *saves_root,
+                                                      const NkMemstickSavePlan *plan,
+                                                      size_t first_unit) {
+    if (!plan || !plan->units || first_unit >= plan->unit_count ||
+        plan->units[first_unit].decision != NK_MEMSTICK_PLAN_STAGE ||
+        (plan->source_count && !plan->sources)) return NK_MEMSTICK_COLLISION_INVALID;
+    NkMemstickPaths paths;
+    if (!unit_open_move(saves_root, &paths)) return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    for (size_t i = 0; i < plan->source_count; ++i) {
+        if (plan->sources[i].status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE)
+            return NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE;
+    }
+
+    const NkMemstickPlanUnit *winner = &plan->units[first_unit];
+    char source[NK_MAX_PATH];
+    size_t end = first_unit;
+    for (; end < plan->unit_count; ++end) {
+        const NkMemstickPlanUnit *row = &plan->units[end];
+        if (!slot_valid(row->slot) || !component_valid(row->name))
+            return NK_MEMSTICK_COLLISION_INVALID;
+        if (!ascii_equal_ignoring_case(row->name, winner->name)) break;
+        if (row->decision == NK_MEMSTICK_PLAN_DEDUPLICATE) {
+            if (row->copy_of < first_unit || row->copy_of >= end ||
+                plan->units[row->copy_of].decision == NK_MEMSTICK_PLAN_DEDUPLICATE ||
+                memcmp(row->digest, plan->units[row->copy_of].digest, sizeof(row->digest)) != 0)
+                return NK_MEMSTICK_COLLISION_INVALID;
+        } else if (row->copy_of != end || (end != first_unit && row->decision != NK_MEMSTICK_PLAN_KEEP)) {
+            return NK_MEMSTICK_COLLISION_INVALID;
+        }
+        if (!plan_source_matches(&paths, row, source)) return NK_MEMSTICK_COLLISION_SOURCE_CHANGING;
+    }
+
+    /* Publish recoverable alternates before the staged winner. Repetition uses the
+       same destinations, fingerprints and no-clobber checks as the two-source copy. */
+    for (size_t i = first_unit + 1u; i < end; ++i) {
+        const NkMemstickPlanUnit *row = &plan->units[i];
+        if (row->decision == NK_MEMSTICK_PLAN_DEDUPLICATE) continue;
+        if (!unit_source_path(paths.saves, row->slot, row->name, source))
+            return NK_MEMSTICK_COLLISION_SOURCE_CHANGING;
+        NkMemstickCollisionResult result = unit_publish_to_layout(&paths, source, row->digest,
+                                                                  row->slot, row->name, true);
+        if (result != NK_MEMSTICK_COLLISION_COPIED) return result;
+    }
+    if (!unit_source_path(paths.saves, winner->slot, winner->name, source))
+        return NK_MEMSTICK_COLLISION_SOURCE_CHANGING;
+    NkMemstickCollisionResult result = unit_publish_to_layout(&paths, source, winner->digest,
+                                                              winner->slot, winner->name, false);
+    if (result != NK_MEMSTICK_COLLISION_COPIED) return result;
+    for (size_t i = first_unit; i < end; ++i) {
+        if (!plan_source_matches(&paths, &plan->units[i], source))
+            return NK_MEMSTICK_COLLISION_SOURCE_CHANGING;
+    }
+    return result;
 }

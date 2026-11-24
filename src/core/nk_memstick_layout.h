@@ -143,6 +143,68 @@ NkMemstickCollisionResult nk_memstick_copy_save_collision(const char *saves_root
                                                           const char *loser_slot,
                                                           const char *loser_name);
 
+/* The caller supplies legacy slot names from its game catalog and recognized old
+ * slots. disc_id is an optional actual PSP disc ID, even when slot is a title
+ * alias. The planner never guesses eligibility from an unrelated folder name. */
+typedef struct {
+    const char *slot;
+    const char *disc_id;
+} NkMemstickPlanInput;
+
+typedef enum {
+    NK_MEMSTICK_PLAN_STAGE,
+    NK_MEMSTICK_PLAN_KEEP,
+    NK_MEMSTICK_PLAN_DEDUPLICATE
+} NkMemstickPlanDecision;
+
+typedef struct {
+    char slot[NK_MAX_PATH];
+    char name[NK_MAX_PATH];
+    uint8_t digest[32];
+    NkMemstickPlanDecision decision;
+    /* Index of the stored equivalent version. A materialized version refers to itself. */
+    size_t copy_of;
+} NkMemstickPlanUnit;
+
+typedef enum {
+    NK_MEMSTICK_PLAN_SOURCE_READABLE,
+    NK_MEMSTICK_PLAN_SOURCE_ABSENT,
+    NK_MEMSTICK_PLAN_SOURCE_UNREADABLE
+} NkMemstickPlanSourceStatus;
+
+typedef struct {
+    char slot[NK_MAX_PATH];
+    NkMemstickPlanSourceStatus status;
+} NkMemstickPlanSource;
+
+typedef struct {
+    NkMemstickPlanUnit *units;
+    size_t unit_count;
+    NkMemstickPlanSource *sources;
+    size_t source_count;
+    bool active_stick_present;
+} NkMemstickSavePlan;
+
+/* Read-only first-migration plan for whole PSP/SAVEDATA folders. Entries group by
+ * ASCII-folded save name. Each group's first row goes to staging. The rest are
+ * differing versions for Kept copies or rows naming their equivalent copy.
+ * Prefer a matching disc ID prefix, then the latest member write time, then the
+ * folded slot name. Empty folders have no write time. Sources are ordered by
+ * folded slot name and refused sources contribute no units. The active stick is
+ * kept separate from legacy candidates and only its presence is reported. On
+ * failure out is empty. Free a successful plan before reusing it. */
+bool nk_memstick_plan_savedata(const char *saves_root, const NkMemstickPlanInput *inputs,
+                               size_t input_count, NkMemstickSavePlan *out);
+void nk_memstick_save_plan_free(NkMemstickSavePlan *plan);
+
+/* Apply the group starting with first_unit. The caller holds the stick lock and
+ * supplies its original plan. Validate its source fingerprints before copying.
+ * The existing moving-record and no-active-stick guards still apply. Refuse
+ * plans with unreadable sources until the controller resolves those sources. */
+NkMemstickCollisionResult nk_memstick_replay_savedata(const char *saves_root,
+                                                      const NkMemstickSavePlan *plan,
+                                                      size_t first_unit);
+
 typedef enum {
     NK_MEMSTICK_STATE_MOVING = 0,
     NK_MEMSTICK_STATE_READY

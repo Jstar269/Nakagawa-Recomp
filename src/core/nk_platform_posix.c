@@ -980,6 +980,17 @@ FILE *nk_platform_open_regular_file(const char *path) {
     return file;
 }
 
+bool nk_platform_file_write_time(FILE *file, NkFileWriteTime *out) {
+    struct stat st;
+    if (!file || !out || fstat(fileno(file), &st) != 0 || !S_ISREG(st.st_mode)) return false;
+#if defined(__APPLE__)
+    *out = (NkFileWriteTime){st.st_mtimespec.tv_sec, (uint32_t)st.st_mtimespec.tv_nsec};
+#else
+    *out = (NkFileWriteTime){st.st_mtim.tv_sec, (uint32_t)st.st_mtim.tv_nsec};
+#endif
+    return true;
+}
+
 FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
     if (opened_shared) *opened_shared = false;
     if (!path || !*path) {

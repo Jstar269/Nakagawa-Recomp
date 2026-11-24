@@ -577,6 +577,14 @@ bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
  * open. NULL on refusal or failure. */
 FILE *nk_platform_open_regular_file(const char *path);
 
+typedef struct {
+    int64_t seconds;
+    uint32_t nanoseconds;
+} NkFileWriteTime;
+
+/* Last-write time of an open regular file, in Unix seconds and nanoseconds. */
+bool nk_platform_file_write_time(FILE *file, NkFileWriteTime *out);
+
 /* Open the file at `path` for reading in binary mode and, while the stream stays
  * open, keep other programs from changing it where the platform can. Windows:
  * the handle shares reads only, so no other open may write to, replace, rename
