@@ -774,18 +774,20 @@ the device is created with no feature outside Ace.
   11.1 names as already guest-visible; the other items are host-only unless section 11 admits them.
 - **Host work:** the detector and the readout count flips, draws and host waits; their cost runs on the scheduler
   thread like any renderer cost.
-- **PC LIMITED and GPU LIMITED (#2623).** The speed readout judges each second of wall time. A second is limited when a
-  VBLANK slot was skipped, or when the scheduler idled under 2 % of it while frames came slower than the frame-rate
-  class allows (`ace_readout_judge` in `src/rt/ace.c`). A limited second reads GPU LIMITED when the scheduler's
-  thread spent at least as long blocked on GPU fences as the second fell behind, so that without those waits the
-  game would have kept up; any other limited second reads PC LIMITED (the CPU, or anything else on the host). How far
-  a second fell behind is the larger of its skipped slots (1001/60 ms each) and, against a class of k VBLANKs a frame,
-  the second's length less k VBLANKs for each new frame (`ace_readout_behind_ns`). The GPU waits are measured on the
-  scheduler's thread, which also replays the GE and presents: the GE renderer's fence waits (a submission slot
-  reused, a drain at a CPU-visible boundary, a readback) and the presenter's wait for its frame's fence
-  (`ace_note_gpu_wait`). They are read only by the readout and the report, never by the guest. Both verdicts use
-  the warning colour, and the report's `pc_limited_seconds` counts both, with `gpu_limited_seconds` the GPU LIMITED
-  ones. `ace-selftest` pins the rule with synthetic windows and through the feed.
+- **Speed readout (#2960).** FPS counts new guest display frames. Speed compares serviced guest
+  VBLANKs against the wall time of the same window at 60000/1001 Hz. A 20 FPS scene can run at
+  full speed, including after a 30 FPS menu. The readout warns when the display clock falls
+  behind by more than 3% and more than one VBLANK period, which allows for window endpoints between
+  display edges. A window that includes guest-masked deadlines, receives service owed under
+  fast forward, or runs without the paced clock shows FPS and a dash for speed. A pause resets
+  the readout window.
+- **PC LIMITED and GPU LIMITED (#2623).** The warning says GPU LIMITED when measured scheduler
+  waits on GPU fences cover the display-clock shortfall. Other qualified shortfalls say PC
+  LIMITED. The GE renderer's submission-slot, drain and readback waits and the presenter's
+  fence wait feed that attribution. The report's `pc_limited_seconds` counts both verdicts.
+  `gpu_limited_seconds` counts the GPU subset. `ace-selftest` checks these rules and
+  `sched-selftest` exercises real VBLANK service, including an expired idle-pacer deadline after
+  the scheduler already serviced its edges.
 - **Pixels:** texture filtering (anisotropic, for transformed draws with linear minification) changes framebuffer
   pixels, and every present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps
   the filtered picture: the same class as a render scale above 1x, and the launcher says so. The launch notice, the
@@ -1963,7 +1965,7 @@ window's keys turn it on, and it never runs in an Authentic run.
   deterministic clock, seeded with the host queue's depth when fast forward starts, so the game paces its sound as it
   would on a PSP. When it stops, the guest reads the host queue again, which drained while nothing was pushed.
 - **The speed readout and the Ace report.** Their window is a second of wall time, so time at the fast-forward speed is
-  never judged: the readout hides while fast forward runs, skipped slots are not counted, no second counts as PC
+  never judged: the readout hides while fast forward runs and no second counts as PC
   LIMITED in the report, and the first full second at normal speed brings the readout back (`ace_note_fast_forward`
   in `src/rt/ace.h`). Smooth motion makes no in-betweens while it runs (section 10.6), so the report's
   `smooth_motion` block and in-between count hold only pictures made at normal speed.
