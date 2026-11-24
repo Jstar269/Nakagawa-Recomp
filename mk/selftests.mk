@@ -1264,6 +1264,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --scale 4 --case dst-read
 	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_RUN) --case pipeline-minmax
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
