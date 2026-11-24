@@ -2851,6 +2851,18 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
+    if (row->part[PLAYER_PART_UPSCALE] == 1 &&
+        app->fsr1_session_preset == player_app_graphics_preset(app) &&
+        app->fsr1_session_refusal != NK_FSR1_REFUSAL_NONE) {
+        const char *why = app->fsr1_session_refusal == NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE
+            ? "The graphics queue has no compute for FSR 1."
+            : "FSR 1 could not start.";
+        const int n = snprintf(out, cap, "%s stays selected. %s This session uses normal scaling.",
+                               row->label, why);
+        if (n > 0 && (size_t)n < cap) return true;
+        out[0] = '\0';
+        return false;
+    }
     /* The parts it sets, "with A, B and C on" or "with A on and B off", in short words (crisp
        text, FSR 1, full 32-bit colour): the line must stay one line, so the page fits 960 x 540
        and 853 x 480 (test_player_screens.c). */
@@ -6733,6 +6745,8 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
     player_clear_stalled_game_notice(app, false);
     app->stalled_game_restore_game_front_requested = false;
     app->render_path_known = false;
+    app->fsr1_session_preset = PLAYER_PRESET_CUSTOM;
+    app->fsr1_session_refusal = NK_FSR1_REFUSAL_NONE;
     app->render_path_disc[0] = '\0';
     app->render_effects = 0u;
     app->render_effects_text[0] = '\0';
@@ -7109,6 +7123,10 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
     snprintf(app->running_title, sizeof(app->running_title), "%s", work->game.title_name);
     snprintf(app->running_iso_path, sizeof(app->running_iso_path), "%s", work->game.iso_path);
     app->running_play_mode = work->play_mode;
+    if (work->play_mode != PLAYER_PLAY_AUTHENTIC &&
+        app->launch_session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1) {
+        app->fsr1_session_preset = work->settings.graphics_preset;
+    }
     app->running_start_ms = (int64_t)time(NULL) * 1000;
     /* The library may have changed while the work ran: find the game again. */
     if (game_index < 0 || game_index >= app->game_count ||
@@ -7695,6 +7713,14 @@ void player_app_consume_render_path_line(PlayerApp *app, const char *line) {
     NkRenderPath path;
     NkRenderFallbackEvent fallback;
     if (!app) return;
+    NkFsr1Refusal refusal = nk_fsr1_refusal_event_parse(line);
+    if (refusal != NK_FSR1_REFUSAL_NONE) {
+        if (app->fsr1_session_preset != PLAYER_PRESET_CUSTOM &&
+            app->fsr1_session_refusal == NK_FSR1_REFUSAL_NONE) {
+            app->fsr1_session_refusal = refusal;
+        }
+        return;
+    }
     if (nk_render_fallback_event_parse(line, &fallback)) {
         const uint16_t bit = (uint16_t)(1u << fallback.reason);
         if (app->render_effects & bit) return;
