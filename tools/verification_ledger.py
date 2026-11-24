@@ -180,6 +180,11 @@ VFPU_MEASURED_SELFTESTS = {
         "reason": "runs vus2i and vs2i at .s/.p over the twelve measured source words through the AOT body and "
                   "the interpreter and compares the output words",
     },
+    "vfpu-interp-selftest:check_vus2i_t_measured": {
+        "oracle_id": "PSP-VFPU-RESERVED-001",
+        "reason": "replays vus2i-t-p0 (0xd03a8008, C200, C000, identity prefixes) through the AOT body and "
+                  "the interpreter against the published four result words",
+    },
     "vfpu-interp-selftest:check_vfpu_wide_dot_measured": {
         "oracle_id": "PSP-VFPU-WIDEDOT-001",
         "reason": "replays cells of the PSP-3000 vfpu-wide-dot-matrix run (vdot, vhdp, vcrsp, vqmul, vtfm4, "

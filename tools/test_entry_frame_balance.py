@@ -869,9 +869,16 @@ class JumpRegionBoundaryTests(unittest.TestCase):
         self.assertIn(target, covered)
         self.assertEqual(analyze.direct_j_edges(jump_elf, jump_ranges), {target: (source,)})
 
-        call_elf, call_ranges = image(emit(source, jal(target), NOP, jr(RA), NOP))
+        # A target past the link address still needs the PC+4 region, but is an ordinary call.
+        callee = 0x1000000C
+        call_elf, call_ranges = image(emit(source, jal(callee), NOP, jr(RA), NOP, jr(RA), NOP))
         evidence = analyze.code_pointer_evidence(call_elf, call_ranges)
-        self.assertIn(target, evidence["jal"])
+        self.assertEqual(evidence["jal"], {callee})
+
+        # The crossed-region link address itself is a PC read, not a callable seed.
+        pc_read_elf, pc_read_ranges = image(emit(source, jal(target), NOP, jr(RA), NOP))
+        pc_read_evidence = analyze.code_pointer_evidence(pc_read_elf, pc_read_ranges)
+        self.assertEqual(pc_read_evidence["jal"], set())
 
     def test_codegen_emits_the_transfer_into_the_pc_plus_four_region(self):
         # The analyzer traces and seeds 0x10000004 for this `j`; codegen must emit the

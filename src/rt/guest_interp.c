@@ -2035,9 +2035,11 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
              * frame and this interpreted caller resumes at its link address. Handing
              * off through the loop-top AOT check below would return AOT_HANDOFF once
              * the callee returned and silently drop the rest of the interpreted
-             * caller. An unlinked transfer keeps the TAIL handoff. */
+             * caller. An unlinked transfer keeps the TAIL handoff. So does a JAL
+             * to its own link: it writes the link register and continues at that address. */
+            const int jal_pc_read = (opcode >> 26) == 3u && transfer.target == pc + 8u;
             if (transfer.taken && transfer.link_register >= 0 &&
-                sr_lookup(transfer.target) &&
+                !jal_pc_read && sr_lookup(transfer.target) &&
                 !sr_stale_block_is_stale(transfer.target)) {
                 const uint32_t resume_pc = pc + 8u;
                 s->pc = transfer.target;
