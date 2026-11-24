@@ -224,8 +224,8 @@ static void write_text_file(const char *path, const char *text) {
     assert(fclose(file) == 0);
 }
 
-/* The whole file as a NUL-terminated string; the caller frees it. */
-static char *read_text_file(const char *path) {
+/* Read the whole file and append a NUL outside its reported length. */
+static char *read_file_contents(const char *path, size_t *size) {
     FILE *file = fopen(path, "rb");
     char *text;
     long length;
@@ -237,9 +237,14 @@ static char *read_text_file(const char *path) {
     text = (char *)malloc((size_t)length + 1u);
     assert(text != NULL);
     assert(fread(text, 1, (size_t)length, file) == (size_t)length);
+    if (size) *size = (size_t)length;
     text[length] = '\0';
     fclose(file);
     return text;
+}
+
+static char *read_text_file(const char *path) {
+    return read_file_contents(path, NULL);
 }
 
 #define TEST_ISO_SECTOR_BYTES 2048u
@@ -7412,18 +7417,27 @@ static void versioned_path(char *out, size_t out_size, const char *name) {
 }
 
 static void versioned_copy_fixture(const char *fixture, const char *destination) {
-    char *bytes = read_text_file(fixture);
-    write_text_file(destination, bytes);
+    size_t size;
+    char *bytes = read_file_contents(fixture, &size);
+    write_binary_file(destination, (const unsigned char *)bytes, size);
     free(bytes);
+}
+
+static bool versioned_bytes_equal(const char *path, const char *original, size_t original_size) {
+    if (!nk_platform_file_exists(path)) return false;
+    size_t size;
+    char *bytes = read_file_contents(path, &size);
+    bool same = size == original_size && memcmp(bytes, original, size) == 0;
+    free(bytes);
+    return same;
 }
 
 static bool versioned_file_equals(const char *path, const char *fixture) {
     if (!nk_platform_file_exists(path)) return false;
-    char *left = read_text_file(path);
-    char *right = read_text_file(fixture);
-    bool same = strcmp(left, right) == 0;
-    free(left);
-    free(right);
+    size_t size;
+    char *bytes = read_file_contents(fixture, &size);
+    bool same = versioned_bytes_equal(path, bytes, size);
+    free(bytes);
     return same;
 }
 
@@ -7436,12 +7450,6 @@ static void versioned_release_fixture(char *out, size_t size, const char *releas
     assert(written > 0 && (size_t)written < size);
 }
 
-static void versioned_expect_original(const char *fixture, const char *original) {
-    char *kept = read_text_file(fixture);
-    assert(strcmp(kept, original) == 0);
-    free(kept);
-}
-
 static void test_preview_settings(PlayerApp *app, const char *release, bool v003) {
     char fixture[96];
     char path[NATIVE_TEST_PATH_MAX + 64];
@@ -7449,8 +7457,9 @@ static void test_preview_settings(PlayerApp *app, const char *release, bool v003
     versioned_release_fixture(fixture, sizeof(fixture), release, "settings.json");
     versioned_path(path, sizeof(path), "settings.json");
     versioned_path(backup, sizeof(backup), "settings.json.v2.bak");
-    char *original = read_text_file(fixture);
-    write_text_file(path, original);
+    size_t original_size;
+    char *original = read_file_contents(fixture, &original_size);
+    write_binary_file(path, (const unsigned char *)original, original_size);
     for (unsigned pass = 0; pass < 2u; ++pass) {
         assert(player_app_load_settings(app, path) == NK_OK);
         assert(!app->settings_newer_schema && !app->settings_unreadable);
@@ -7461,6 +7470,12 @@ static void test_preview_settings(PlayerApp *app, const char *release, bool v003
         assert(settings->high_contrast_choice == PLAYER_SYSTEM_CHOICE_OFF);
         assert(settings->interface_size_pct == 125 && settings->text_size_pct == 150);
         assert(settings->master_volume == (v003 ? 57 : 42));
+        assert(settings->library_sort == PLAYER_LIBRARY_SORT_NAME);
+        assert(!settings->share_system_libraries);
+        assert(strcmp(settings->rebuild_prompt_version, v003 ? "0.0.3" : "0.0.2") == 0);
+        assert(settings->launcher_window_position_valid && !settings->launcher_window_maximized);
+        assert(settings->launcher_window_x == 24 && settings->launcher_window_y == 36);
+        assert(settings->launcher_window_width == 1440 && settings->launcher_window_height == 810);
         assert(strcmp(settings->picker_folder, "<drive>:\\SyntheticFixture\\Images") == 0);
         assert(settings->title_play_count == 1);
         assert(strcmp(settings->title_play[0].key, "TEST80003") == 0);
@@ -7476,12 +7491,12 @@ static void test_preview_settings(PlayerApp *app, const char *release, bool v003
             assert(strcmp(settings->title_packs[0].path, "//fixtures.invalid/synthetic-fixtures/texture-pack") == 0);
         }
         if (pass == 0u) {
-            assert(versioned_file_equals(path, fixture));
+            assert(versioned_bytes_equal(path, original, original_size));
             assert(player_app_save_settings(app, path) == NK_OK);
         }
     }
     assert(!nk_platform_file_exists(backup));
-    versioned_expect_original(fixture, original);
+    assert(versioned_bytes_equal(fixture, original, original_size));
     free(original);
     versioned_remove(path);
     printf("[PLAYER_STATE_TEST] %s settings.json: schema 2 round-trip PASS\n", release);
@@ -7581,8 +7596,9 @@ static void test_preview_library(NkLibrary *library, NkLibrary *reloaded, const 
     versioned_release_fixture(fixture, sizeof(fixture), release, "library.json");
     versioned_path(path, sizeof(path), "library.json");
     versioned_path(backup, sizeof(backup), "library.json.bak");
-    char *original = read_text_file(fixture);
-    write_text_file(path, original);
+    size_t original_size;
+    char *original = read_file_contents(fixture, &original_size);
+    write_binary_file(path, (const unsigned char *)original, original_size);
     assert(nk_library_load(library, path) == NK_OK);
     assert(library->count == 2 && library->newer_schema_version == 0);
     const NkGameEntry *one = nk_library_find_by_disc_id(library, "TEST80003");
@@ -7597,14 +7613,14 @@ static void test_preview_library(NkLibrary *library, NkLibrary *reloaded, const 
     assert(one->is_prepared && one->assets_staged && one->status == NK_STATUS_PREPARED);
     assert(strcmp(two->title_name, "Synthetic Preview Two \xE6\x97\xA5\xE6\x9C\xAC") == 0);
     assert(two->is_experimental && two->source_image_path[0] == '\0');
-    assert(versioned_file_equals(path, fixture));
+    assert(versioned_bytes_equal(path, original, original_size));
     assert(nk_library_save(library, path) == NK_OK);
-    assert(versioned_file_equals(backup, fixture));
+    assert(versioned_bytes_equal(backup, original, original_size));
     assert(nk_library_load(reloaded, path) == NK_OK);
     assert(reloaded->count == library->count);
     assert(memcmp(reloaded->entries, library->entries,
                   sizeof(library->entries[0]) * (size_t)library->count) == 0);
-    versioned_expect_original(fixture, original);
+    assert(versioned_bytes_equal(fixture, original, original_size));
     free(original);
     versioned_remove(backup);
     versioned_remove(path);
@@ -7698,6 +7714,13 @@ static void test_versioned_user_data(void) {
                            native_test_get_root(), nk_platform_path_separator());
     assert(written > 0 && (size_t)written < sizeof(s_versioned_root));
     assert(nk_platform_mkdir_p(s_versioned_root));
+    const unsigned char bytes[] = "{}\n";
+    char probe[NATIVE_TEST_PATH_MAX + 64];
+    versioned_path(probe, sizeof(probe), "trailing-nul.json");
+    write_binary_file(probe, bytes, sizeof(bytes));
+    assert(!versioned_bytes_equal(probe, (const char *)bytes, sizeof(bytes) - 1u));
+    assert(versioned_bytes_equal(probe, (const char *)bytes, sizeof(bytes)));
+    versioned_remove(probe);
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
     test_versioned_settings(app);

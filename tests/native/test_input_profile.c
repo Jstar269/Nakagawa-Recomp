@@ -3073,7 +3073,7 @@ static void test_stick_keys(void) {
 
 #define VERSIONED_PROFILE_ROOT SR_SELFTEST_BUILD_ROOT "/versioned_input_profile"
 
-static char *versioned_read(const char *path) {
+static char *versioned_read_contents(const char *path, size_t *length) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     assert(fseek(f, 0, SEEK_END) == 0);
@@ -3083,24 +3083,32 @@ static char *versioned_read(const char *path) {
     char *text = (char *)malloc((size_t)size + 1u);
     assert(text != NULL);
     assert(fread(text, 1, (size_t)size, f) == (size_t)size);
+    if (length) *length = (size_t)size;
     text[size] = '\0';
     fclose(f);
     return text;
 }
 
-static void versioned_write(const char *path, const char *text) {
+static char *versioned_read(const char *path) {
+    return versioned_read_contents(path, NULL);
+}
+
+static void versioned_write_bytes(const char *path, const char *bytes, size_t size) {
     FILE *f = fopen(path, "wb");
     assert(f != NULL);
-    assert(fwrite(text, 1, strlen(text), f) == strlen(text));
+    assert(fwrite(bytes, 1, size, f) == size);
     assert(fclose(f) == 0);
 }
 
-static bool versioned_same(const char *path, const char *fixture) {
-    char *left = versioned_read(path);
-    char *right = versioned_read(fixture);
-    bool same = left && right && strcmp(left, right) == 0;
-    free(left);
-    free(right);
+static void versioned_write(const char *path, const char *text) {
+    versioned_write_bytes(path, text, strlen(text));
+}
+
+static bool versioned_bytes_equal(const char *path, const char *expected, size_t expected_size) {
+    size_t size;
+    char *bytes = versioned_read_contents(path, &size);
+    bool same = bytes && size == expected_size && memcmp(bytes, expected, size) == 0;
+    free(bytes);
     return same;
 }
 
@@ -3112,12 +3120,13 @@ static void versioned_profile_case(const char *fixture, int version, int title_c
     char path[512], backup[560], diag[256];
     snprintf(path, sizeof(path), VERSIONED_PROFILE_ROOT "/profile_v%d.json", version);
     snprintf(backup, sizeof(backup), "%s.v%d.bak", path, version);
-    char *original = versioned_read(fixture);
+    size_t original_size;
+    char *original = versioned_read_contents(fixture, &original_size);
     assert(original != NULL && "run from the repository root");
     char schema[48];
     snprintf(schema, sizeof(schema), "\"schema_version\": %d,", version);
     assert(strstr(original, schema) != NULL);
-    versioned_write(path, original);
+    versioned_write_bytes(path, original, original_size);
     remove(backup);
 
     assert(nk_input_profile_file_load(&doc, path, diag, sizeof(diag)) == NK_OK);
@@ -3162,10 +3171,10 @@ static void versioned_profile_case(const char *fixture, int version, int title_c
         }
     }
 
-    assert(versioned_same(path, fixture));
+    assert(versioned_bytes_equal(path, original, original_size));
     assert(nk_input_profile_file_save(&doc, path, diag, sizeof(diag)) == NK_OK);
     if (version < NK_INPUT_PROFILE_SCHEMA_VERSION) {
-        assert(versioned_same(backup, fixture));
+        assert(versioned_bytes_equal(backup, original, original_size));
     } else {
         FILE *none = fopen(backup, "rb");
         assert(none == NULL);
@@ -3181,9 +3190,7 @@ static void versioned_profile_case(const char *fixture, int version, int title_c
         assert(strcmp(reloaded.title_disc_id[i], doc.title_disc_id[i]) == 0);
         assert(memcmp(&reloaded.title[i], &doc.title[i], sizeof(doc.title[i])) == 0);
     }
-    char *kept = versioned_read(fixture);
-    assert(kept != NULL && strcmp(kept, original) == 0);
-    free(kept);
+    assert(versioned_bytes_equal(fixture, original, original_size));
     free(original);
     remove(backup);
     remove(path);
@@ -3613,6 +3620,12 @@ static void test_versioned_profile_files(void) {
     printf("[INPUT_PROFILE_TEST] Versioned files: earlier players' profiles load, migrate "
            "and keep a backup; a newer one is kept...\n");
     assert(nk_platform_mkdir_p(VERSIONED_PROFILE_ROOT));
+    const char probe[] = "{}\n";
+    const char *probe_path = VERSIONED_PROFILE_ROOT "/trailing-nul.json";
+    versioned_write_bytes(probe_path, probe, sizeof(probe));
+    assert(!versioned_bytes_equal(probe_path, probe, sizeof(probe) - 1u));
+    assert(versioned_bytes_equal(probe_path, probe, sizeof(probe)));
+    remove(probe_path);
     versioned_profile_case("tests/fixtures/user_data/input_profile_v1.json", 1, 0);
     versioned_profile_case("tests/fixtures/user_data/input_profile_v2.json", 2, 1);
     versioned_profile_case("tests/fixtures/user_data/v0.0.1/input_profile.json", 3, 1);
@@ -3635,12 +3648,13 @@ static void test_versioned_profile_files(void) {
         remove(path);
         remove(backup);
         assert(nk_input_profile_save(&five, path, diag, sizeof(diag)) == NK_OK);
-        char *text = versioned_read(path);
+        size_t text_size;
+        char *text = versioned_read_contents(path, &text_size);
         assert(text != NULL);
         char *version = strstr(text, "\"schema_version\": 6,");
         assert(version != NULL);
         version[strlen("\"schema_version\": ")] = '5';
-        versioned_write(path, text);
+        versioned_write_bytes(path, text, text_size);
 
         assert(nk_input_profile_file_load(&doc, path, diag, sizeof(diag)) == NK_OK);
         assert(doc.schema_version == NK_INPUT_PROFILE_SCHEMA_VERSION);
@@ -3649,14 +3663,12 @@ static void test_versioned_profile_files(void) {
         assert(memcmp(&doc.global.aim, &five.aim, sizeof(five.aim)) == 0);
 
         assert(nk_input_profile_file_save(&doc, path, diag, sizeof(diag)) == NK_OK);
-        char *kept = versioned_read(backup);
-        assert(kept != NULL && strcmp(kept, text) == 0);
+        assert(versioned_bytes_equal(backup, text, text_size));
         char *saved = versioned_read(path);
         assert(saved != NULL && strstr(saved, "\"schema_version\": 6,") != NULL);
         assert(nk_input_profile_file_load(&reloaded, path, diag, sizeof(diag)) == NK_OK);
         assert(memcmp(&reloaded.global, &doc.global, sizeof(doc.global)) == 0);
         free(text);
-        free(kept);
         free(saved);
         remove(backup);
         remove(path);
@@ -3679,9 +3691,7 @@ static void test_versioned_profile_files(void) {
     nk_input_profile_file_init_default(&doc);
     assert(nk_input_profile_file_save(&doc, path, diag, sizeof(diag)) == NK_ERROR_NEWER_SCHEMA);
     assert(strstr(diag, newer_field) != NULL);
-    char *kept = versioned_read(path);
-    assert(kept != NULL && strcmp(kept, newer) == 0);
-    free(kept);
+    assert(versioned_bytes_equal(path, newer, strlen(newer)));
 
     /* A profile that is there but cannot be read is never replaced: its version is
      * unknown and may be a newer player's. No memory to read it into, and (on
@@ -3701,9 +3711,7 @@ static void test_versioned_profile_files(void) {
     assert(found == NK_USER_DATA_VERSION_IO_FAILED);
     assert(CloseHandle(locked));
 #endif
-    kept = versioned_read(path);
-    assert(kept != NULL && strcmp(kept, newer) == 0);
-    free(kept);
+    assert(versioned_bytes_equal(path, newer, strlen(newer)));
     remove(path);
 
     /* A newer profile over this build's size bound (a later player may allow a
@@ -3724,11 +3732,9 @@ static void test_versioned_profile_files(void) {
         versioned_write(large_path, large);
         nk_input_profile_file_init_default(&doc);
         assert(nk_input_profile_file_save(&doc, large_path, diag, sizeof(diag)) == NK_OK);
-        char *backed_up = versioned_read(large_backup);
-        assert(backed_up != NULL && strcmp(backed_up, large) == 0);
+        assert(versioned_bytes_equal(large_backup, large, strlen(large)));
         char *replaced = versioned_read(large_path);
         assert(replaced != NULL && strstr(replaced, "\"schema_version\": 6,") != NULL);
-        free(backed_up);
         free(replaced);
         free(large);
         remove(large_backup);
