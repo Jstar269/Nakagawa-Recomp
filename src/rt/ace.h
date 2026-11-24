@@ -98,6 +98,7 @@ static inline int ace_wide_fill_blocked_by_smooth(int wide_requested, int smooth
 typedef enum { ACE_TIER_ENHANCED = 0, ACE_TIER_ACE = 1 } AceTier;
 typedef enum { ACE_SAS_OFF = 0, ACE_SAS_SINC = 1 } AceSas;
 typedef enum { ACE_SHADOW_OFF = 0, ACE_SHADOW_SOFT = 1 } AceShadow;
+typedef enum { ACE_LOAD_OFF = 0, ACE_LOAD_FAST = 1, ACE_LOAD_AUTO = 2 } AceLoad;
 
 typedef struct {
     int on;          /* 0: authentic (off, unset or refused); every field below is then 0 */
@@ -113,7 +114,7 @@ typedef struct {
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
     int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
                         (guest-visible, 11.3.11) */
-    int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
+    int load;        /* AceLoad: title-declared fast waits or automatic disc-load fast-forward */
     int depth;       /* depth=32: 0 off (the PSP's 16-bit depth), else 32: the Vulkan renderer's depth
                         buffer holds unrounded depth (guest-visible, 10.20 and 11.3.12) */
     int twin;        /* full 32-bit colour: 16-bit games drawn on a host twin, no dither (host-only) */

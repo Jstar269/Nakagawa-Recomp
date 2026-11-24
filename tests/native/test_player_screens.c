@@ -89,6 +89,11 @@ typedef struct {
 } EnhancedWords;
 static const char *const k_enhanced_ssaa_labels[] = {"2x", "4x", "4x anyway", "Off"};
 static const char *const k_enhanced_texscale_labels[] = {"2x", "3x", "4x", "5x", "6x", "Off"};
+enum { AUTO_LOAD_CHOICE, ACE_WAITS_CHOICE, LOAD_OFF_CHOICE };
+static const char *const k_enhanced_load_labels[] = {
+    NK_UI_STR(ADAPTER_LOADING_AUTOMATIC), NK_UI_STR(ADAPTER_LOADING_SHORT_WAITS),
+    NK_UI_STR(SETTINGS_OFF)
+};
 #define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
 static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_FILTERING] = ENHANCED_WORDS(k_enhanced_af_labels),
@@ -102,7 +107,7 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels),
     [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_load_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
     [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
@@ -648,13 +653,21 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                 !settings.enhanced_on ? "Play mode is Authentic." : NULL;
             settings.enhanced_rows[i].tag =
                 part == PLAYER_PART_CULL || part == PLAYER_PART_STICK ||
-                part == PLAYER_PART_LOAD || part == PLAYER_PART_PAD ||
+                part == PLAYER_PART_PAD ||
                 part == PLAYER_PART_SHADOW ? "Ace only" : NULL;
             CHECK(k_enhanced_words[part].count > 0,
                   "every Settings > Enhanced part has its words in this test");
             settings.enhanced_rows[i].labels = k_enhanced_words[part].labels;
             settings.enhanced_rows[i].label_count = k_enhanced_words[part].count;
             settings.enhanced_rows[i].library_value = title ? followed[i] : NULL;
+            if (part == PLAYER_PART_LOAD && title &&
+                settings.enhanced_mode_index != PLAYER_PLAY_ACE) {
+                settings.enhanced_rows[i].unavailable_label = ACE_WAITS_CHOICE + 1;
+                if (strcmp(value, k_enhanced_load_labels[ACE_WAITS_CHOICE]) == 0) {
+                    settings.enhanced_rows[i].on = false;
+                    settings.enhanced_rows[i].sentence = NK_UI_STR(ADAPTER_LOADING_ACE_REQUIRED);
+                }
+            }
             /* As player_ui_nk.c marks a row: the value among the part's words, after the
                library's choice on a game's page; a row following the library marks that
                choice, and Smooth motion off for a game's 60 FPS game logic marks Off. */
@@ -4677,9 +4690,9 @@ static void test_settings_pages(void) {
                   message);
             part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, ENHANCED_TEST_CHOICE_ID(i, word + 1),
                                  NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
-            if (enhanced_part_is_ace_only(i)) {
+            if (enhanced_part_is_ace_only(i) || (i == PLAYER_PART_LOAD && word == ACE_WAITS_CHOICE)) {
                 CHECK(part.kind == PLAYER_UI_ACTION_NONE,
-                      "outside Ace a click on an Ace-only part's value changes nothing");
+                      "outside Ace a click on an Ace-only value changes nothing");
             } else {
                 CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
                           part.title_index == (size_t)i && part.choice_index == word,
@@ -6191,6 +6204,44 @@ static void test_enhanced_stale_ace_steps_from_ace(void) {
     g_enhanced_mode_index = -1;
 }
 
+static void test_enhanced_load_choices_without_ace(void) {
+    const NkUiId row = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_LOAD);
+    const int saved_tab = g_enhanced_tab;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_ADVANCED;
+    g_enhanced_mode_index = PLAYER_PLAY_ENHANCED;
+    g_enhanced_mode_count = 3;
+
+    PlayerUiAction step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV,
+                                        NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == AUTO_LOAD_CHOICE,
+          "a title in Enhanced can choose Automatic without a package");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = k_enhanced_load_labels[AUTO_LOAD_CHOICE];
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == LOAD_OFF_CHOICE,
+          "Right skips the Ace waits choice on a title in Enhanced");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = k_enhanced_load_labels[LOAD_OFF_CHOICE];
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == AUTO_LOAD_CHOICE,
+          "Left skips the Ace waits choice on a title in Enhanced");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = k_enhanced_load_labels[ACE_WAITS_CHOICE];
+    g_enhanced_mode_index = PLAYER_PLAY_ACE;
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == LOAD_OFF_CHOICE,
+          "a saved Ace waits choice remains editable after its package is unavailable");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = NULL;
+    g_enhanced_mode_count = 0;
+    g_enhanced_mode_index = -1;
+    g_enhanced_tab = saved_tab;
+}
+
 /* Main's #2686 gave an activation to the control focused when it was pressed
    (test_activation_belongs_to_its_focus in test_nk_ui_core.c): an Enter just before a held
    Down repeats, both in one frame's queue, is not the next control's. On Settings > Enhanced
@@ -6957,7 +7008,7 @@ static void test_enhanced_selected_value_styles(void) {
                 const char *word = value >= 0 ? k_enhanced_words[part].labels[value] : NULL;
                 const int marked = value < 0 ? 0 : value + (title ? 1 : 0);
                 const int boxes = k_enhanced_words[part].count + (title ? 1 : 0);
-                const bool dimmed = title && enhanced_part_is_ace_only(part);
+                const bool dimmed_row = title && enhanced_part_is_ace_only(part);
                 const bool off = word != NULL && strcmp(word, "Off") == 0;
                 NkUi *ui = NULL;
                 const NkUiDrawList *draw;
@@ -6968,6 +7019,8 @@ static void test_enhanced_selected_value_styles(void) {
                 g_enhanced_tab = enhanced_tab_of(part);
                 draw = flow_case_layout(pages[g], 1280, 1600, &ui);
                 for (int box = 0; box < boxes; ++box) {
+                    const bool dimmed = dimmed_row ||
+                        (title && part == PLAYER_PART_LOAD && box == ACE_WAITS_CHOICE + 1);
                     const NkUiId id = ENHANCED_TEST_CHOICE_ID(part, box);
                     uint32_t fill = 0u;
                     uint32_t edge = 0u;
@@ -12465,6 +12518,7 @@ int main(int argc, char **argv) {
     test_enhanced_walk_at_every_text_size();
     test_enhanced_title_with_an_ellipsis();
     test_enhanced_stale_ace_steps_from_ace();
+    test_enhanced_load_choices_without_ace();
     test_enhanced_row_takes_the_press_made_on_it();
     test_enhanced_pacing_says_all_games();
     test_enhanced_wheel_scrolls_past_the_focused_row();

@@ -231,8 +231,9 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 }
                 break;
             case ACE_KEY_LOAD:
-                if (strcmp(v, "off") == 0) { c.load = 0; ok = 1; }
-                else if (strcmp(v, "fast") == 0) { c.load = 1; ok = 1; }
+                if (strcmp(v, "off") == 0) { c.load = ACE_LOAD_OFF; ok = 1; }
+                else if (strcmp(v, "fast") == 0) { c.load = ACE_LOAD_FAST; ok = 1; }
+                else if (strcmp(v, "auto") == 0) { c.load = ACE_LOAD_AUTO; ok = 1; }
                 if (ok && c.load && !ACE_HAS_LOAD) {
                     why_set(why, why_cap, "load is not part of this build"); return 0;
                 }
@@ -320,7 +321,7 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     if (c.cull && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "cull needs tier=ace"); return 0; }
     if (c.stick && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "stick needs tier=ace"); return 0; }
     /* An Ace item (contract 11.3.10): it changes guest timing, for one title's declared waits. */
-    if (c.load && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
+    if (c.load == ACE_LOAD_FAST && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
     /* Late pad sampling acts at a title package's update boundary (contract 11.3.9): Ace only. */
     if (c.pad && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "pad needs tier=ace"); return 0; }
     /* An Ace item (contract 11.3.13): it needs the title's own package to declare its shadows. */
@@ -365,7 +366,8 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
     }
     /* Likewise load, after stick: a missing load is off. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->load) {
-        const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
+        const int m = snprintf(out + n, cap - (size_t)n, ";load=%s",
+                               c->load == ACE_LOAD_AUTO ? "auto" : "fast");
         n = m < 0 ? -1 : n + m;
     }
     /* Likewise depth, after load: a missing depth is the PSP's 16 bits. */
@@ -577,9 +579,11 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: stick remap %d (the host stick starts past the game's square dead "
                         "zone of %d counts; the game reads changed stick values)\n",
                 s_req.stick, s_req.stick);
-    if (s_req.load)
+    if (s_req.load == ACE_LOAD_FAST)
         fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
                         "guest timing changes)\n");
+    if (s_req.load == ACE_LOAD_AUTO)
+        fprintf(stderr, "ACE_MODE: load auto (automatic fast-forward during detected disc loads)\n");
     if (s_req.depth)
         fprintf(stderr, "ACE_MODE: depth %d (the host depth buffer keeps unrounded depth, so surfaces "
                         "within one 16-bit step of each other can draw in a different order; guest "
@@ -828,7 +832,7 @@ void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts) {
 }
 
 int nk_ace_load_fast(const char *site, uint32_t pc) {
-    if (!g_ace_on || !s_eff.load) return 0;
+    if (!g_ace_on || s_eff.load != ACE_LOAD_FAST) return 0;
     s_confirmed[ACE_FEATURE_LOAD] = 1;   /* a declared wait was reached with the part on */
     if (s_load_paced) return 0;          /* the guard fired: the stock call runs */
     if (!s_load_update_skipped) {
@@ -846,7 +850,7 @@ int nk_ace_load_fast(const char *site, uint32_t pc) {
 }
 
 void nk_ace_load_update(void) {
-    if (!g_ace_on || !s_eff.load || s_load_paced) return;
+    if (!g_ace_on || s_eff.load != ACE_LOAD_FAST || s_load_paced) return;
     if (!s_load_update_skipped) s_load_run = 0;   /* the update that ended skipped nothing */
     s_load_update_skipped = 0;
 }
@@ -919,7 +923,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
-    if (s_eff.load) used = words_add(out, cap, used, "short loads");
+    if (s_eff.load == ACE_LOAD_FAST) used = words_add(out, cap, used, "short loads");
+    if (s_eff.load == ACE_LOAD_AUTO) used = words_add(out, cap, used, "automatic load fast-forward");
     if (s_eff.mips) used = words_add(out, cap, used, "smooth far textures");
     if (s_eff.pad) used = words_add(out, cap, used, "late pad sampling");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
@@ -1705,10 +1710,12 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.stick) ACE_PUT("  \"stick\": {\"counts\": %d, \"host_dead_zone\": %d, "
                              "\"samples_remapped\": %llu},\n",
                              s_req.stick, s_stick_host, s_stick_samples);
-    if (s_req.load) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n  \"load_skip_max_run\": %u,\n"
+    if (s_req.load == ACE_LOAD_FAST) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n  \"load_skip_max_run\": %u,\n"
                             "  \"load_paced\": %s,\n",
                             s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
                             s_load_paced ? "true" : "false");
+    if (s_req.load == ACE_LOAD_AUTO)
+        ACE_PUT("  \"load_auto\": %s,\n", s_eff.load == ACE_LOAD_AUTO ? "true" : "false");
     if (s_req.depth) ACE_PUT("  \"depth\": %d,\n", s_eff.depth ? s_eff.depth : 16);
     if (s_req.ssaa) ACE_PUT("  \"ssaa\": %d,\n", s_eff.ssaa ? s_eff.ssaa : 1);
     if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
@@ -1873,7 +1880,8 @@ void ace_finish(void) {
                 : f == ACE_FEATURE_STICK
                 ? "did not run: no live stick sample left its rest position in analog mode"
                 : f == ACE_FEATURE_LOAD
-                ? "did not run: this title's build declares no load part, or none of its waits was reached"
+                ? (s_req.load == ACE_LOAD_AUTO ? "did not run: no eligible silent disc load was detected"
+                    : "did not run: this title's build declares no load part, or none of its waits was reached")
                 : f == ACE_FEATURE_PEAK
                 ? "did not run: this build has no SAS mixer or no host audio backend"
                 : f == ACE_FEATURE_TEXPACK ? "did not run: only the Vulkan renderer draws texture packs"
@@ -1888,7 +1896,8 @@ void ace_finish(void) {
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
-    if (s_req.load) fprintf(stderr, "ACE_MODE: load waits skipped %llu (longest run %u logic updates; %s)\n",
+    if (s_req.load == ACE_LOAD_FAST)
+        fprintf(stderr, "ACE_MODE: load waits skipped %llu (longest run %u logic updates; %s)\n",
                             s_load_skipped, s_load_run_max,
                             s_load_paced ? "paced updates, skipping stopped" : "no pacing seen");
     if (s_req.pad && (s_latency.count || s_latency.without_read))

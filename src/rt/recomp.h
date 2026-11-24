@@ -2632,6 +2632,17 @@ int sched_fast_forward_on(void);
 uint32_t sched_fast_forward_speed(void);
 /* How many times fast forward has started in this run (0 before the first). */
 uint32_t sched_fast_forward_epoch(void);
+/* Automatic disc-load fast-forward. Activity is recorded by the guest I/O,
+ * controller and audio boundaries, on the scheduler's thread. */
+#define SCHED_AUTO_LOAD_SPEED 16u
+void sched_auto_load_disc_read(void);
+void sched_auto_load_input(int active);
+void sched_auto_load_host_input(uint32_t buttons, uint8_t lx, uint8_t ly);
+void sched_auto_load_audible(void);
+void sched_auto_load_quit(void);
+void sched_auto_load_audio_hooks(int (*silent)(void), void (*transition)(int active));
+int sched_auto_load_enabled(void);
+int sched_auto_load_active(void);
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);

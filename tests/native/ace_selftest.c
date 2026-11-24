@@ -187,8 +187,8 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;stick=64;stick=32", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate stick");
     }
-    /* load (contract 11.3.10): optional like cull; load=fast needs an Ace line, any other value
-       is refused, and a line without it formats as before. */
+    /* An absent load slot formats as before. The title's fast waits need Ace,
+       while automatic disc-load fast-forward is available in either tier. */
     {
         static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
         char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
@@ -212,6 +212,14 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=enhanced;load=fast", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "load needs tier=ace") == 0,
               "load=fast in an Enhanced line is refused (%s)", why);
+        static const char *const tiers[] = { "enhanced", "ace" };
+        for (size_t i = 0; i < sizeof(tiers) / sizeof(tiers[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;tier=%s;load=auto", base, tiers[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.load == 2,
+                  "load=auto is the shared third load value in tier=%s (%s)", tiers[i], why);
+            CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, ";load=auto") != NULL,
+                  "load=auto round-trips in tier=%s (%s)", tiers[i], out);
+        }
         static const char *const bad[] = { "on", "1", "x2", "faster", "FAST" };
         for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
             snprintf(spec, sizeof(spec), "%s;tier=ace;load=%s", base, bad[i]);

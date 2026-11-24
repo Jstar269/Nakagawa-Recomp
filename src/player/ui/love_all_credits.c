@@ -15,6 +15,8 @@ const LoveAllCredit g_love_all_credits[] = {
      "Henrik Rydg\303\245rd and contributors"},
     {LOVE_ALL_HEADING, "Other upstreams",
      NULL},
+    {LOVE_ALL_ENTRY, "Yakumo",
+     "TeamGDB"},
     {LOVE_ALL_ENTRY, "FFmpeg n4.4",
      "the FFmpeg developers"},
     {LOVE_ALL_ENTRY, "pspdecrypt",

@@ -332,9 +332,8 @@ typedef enum {
                                   title whose catalog entry declares a stick dead zone. Appended: the
                                   enum fixes the Settings > Enhanced rows and the saved order; the Ace
                                   line still writes stick before cull */
-    PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
-                                  a title's package declares return at once; guest timing changes. Ace
-                                  only; a title without a load part ignores it */
+    PLAYER_PART_LOAD,          /* loading speed: 0 off, 1 fast (Ace package waits), 2 auto
+                                  (silent disc loads in Enhanced or Ace) */
     PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
                                   Appended; the Ace line writes twin after tess */
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
@@ -2150,7 +2149,7 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
- * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
+ * ";load=fast" follows only for Ace and ";load=auto" for Enhanced or Ace. A missing load is off.
  * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier: the resolved
  * factor, so plain 4x at a render scale of 3x or 4x writes ";ssaa=2" (player_ssaa_factor).
  * ";peak=limit" follows ssaa, before texpack, with the Unclipped sound part on, in either tier;
@@ -2228,6 +2227,9 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part);
 void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index);
 /* The title's own value for a part: -1 follows the library. */
 int player_app_title_part(const PlayerApp *app, int game_index, int part);
+/* The package-wait choice is offered when this title is in Ace with a usable package.
+   Only waits declared by the built package can be shortened. */
+bool player_app_title_can_choose_short_waits(const PlayerApp *app, int game_index);
 /* The title's "Last session" line from the report under the user data folder; false, with
  * out empty, when there is none. */
 bool player_app_ace_last_session(const PlayerApp *app, int game_index, char *out, size_t cap);

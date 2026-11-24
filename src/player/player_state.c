@@ -16,6 +16,7 @@
 
 
 #include "player_state.h"
+#include "../ui/nk_ui_text.h"
 #include "ace.h"
 #include "texrepl.h"
 #include "nk_font.h"
@@ -1284,7 +1285,12 @@ static const int k_part_tess_values[] = {2, 3, 4, 0};
 static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
-static const char *const k_part_load_words[] = {"fast", "off"};
+static const int k_part_load_values[] = {ACE_LOAD_AUTO, ACE_LOAD_FAST, ACE_LOAD_OFF};
+static const char *const k_part_load_labels[] = {
+    NK_UI_STR(ADAPTER_LOADING_AUTOMATIC), NK_UI_STR(ADAPTER_LOADING_SHORT_WAITS),
+    NK_UI_STR(SETTINGS_OFF)
+};
+static const char *const k_part_load_words[] = {"auto", "fast", "off"};
 /* 4x anyway follows 4x, so a row that steps to 4x and shows the warning steps next to the choice
    that keeps it (player_ssaa_factor). A file with "4" and no "4-anyway" is plain 4x. */
 static const int k_part_ssaa_values[] = {2, 4, PLAYER_SSAA_4_ANYWAY, 0};
@@ -1344,11 +1350,10 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"stick", "Stick dead zone",
      "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, true},
-    /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
-       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
-    {"load", "Short loads",
-     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0, true},
+    /* The legacy fast value still selects the declared waits of an Ace package. Auto
+       has no package dependency. Both values change guest timing and stay out of presets. */
+    {"load", NK_UI_STR(ADAPTER_LOADING_SPEED), NK_UI_STR(ADAPTER_LOADING_DESCRIPTION),
+     3, k_part_load_values, k_part_load_labels, k_part_load_words, ACE_LOAD_OFF, false},
     {"twin", "Full 32-bit colour",
      "Shows 16-bit games in full colour, without dither. Uses more memory.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
@@ -3834,15 +3839,20 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
             return false;
         }
     }
-    /* A missing stick, load, shadow or cull is off (contract 11.2 item 2): the line carries each key only
+    /* A missing stick, shadow or cull is off (contract 11.2 item 2): the line carries each key only
        when it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
        that count, not the part's word. */
     if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_STICK] == 1 && play->stick_counts >= 1 &&
         play->stick_counts <= ACE_STICK_COUNTS_MAX) {
         if (!launch_line_append(out, cap, &used, ";stick=%d", play->stick_counts)) return false;
     }
-    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_LOAD] == 1) {
-        if (!launch_line_append_on(out, cap, &used, PLAYER_PART_LOAD)) return false;
+    /* The two loading modes share one slot. Fast is still for Ace's package-declared waits. */
+    const int load = play->part[PLAYER_PART_LOAD];
+    if ((load == ACE_LOAD_AUTO && (play->mode == PLAYER_PLAY_ENHANCED || play->mode == PLAYER_PLAY_ACE)) ||
+        (load == ACE_LOAD_FAST && play->mode == PLAYER_PLAY_ACE)) {
+        if (!launch_line_append(out, cap, &used, ";load=%s", enhanced_part_word(PLAYER_PART_LOAD, load))) {
+            return false;
+        }
     }
     /* Supersampling is an Enhanced part (contract 10.21): Enhanced and Ace carry it when it is on. */
     if (play->part[PLAYER_PART_SSAA] == 2 || play->part[PLAYER_PART_SSAA] == 4) {
@@ -4198,6 +4208,12 @@ int player_app_title_part(const PlayerApp *app, int game_index, int part) {
     return title ? title->part[part] : -1;
 }
 
+bool player_app_title_can_choose_short_waits(const PlayerApp *app, int game_index) {
+    return app && game_index >= 0 && game_index < app->game_count &&
+           player_app_title_play_mode(app, game_index) == PLAYER_PLAY_ACE &&
+           app->title_enhancements[game_index].available;
+}
+
 void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
     if (!app || !info || game_index < 0 || game_index >= app->game_count) return;
@@ -4205,7 +4221,12 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     if (!title_play_entry(app, game_index, &entry)) return;
     /* Library default, then each of the part's values in order, then the library's again. */
     int index = entry.part[part] < 0 ? -1 : enhanced_part_value_index(part, entry.part[part]);
-    entry.part[part] = index + 1 < info->value_count ? info->values[index + 1] : -1;
+    int next = index + 1;
+    if (part == PLAYER_PART_LOAD && next < info->value_count &&
+        info->values[next] == ACE_LOAD_FAST && !player_app_title_can_choose_short_waits(app, game_index)) {
+        ++next;
+    }
+    entry.part[part] = next < info->value_count ? info->values[next] : -1;
     if (!player_app_title_play_store(app, &entry)) return;
     player_dev_log_add(app, "settings", "Enhanced %s for %s: %s", info->key, entry.key,
                        entry.part[part] < 0 ? "library default"
@@ -4224,6 +4245,8 @@ void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index
     if (title >= 0) {
         PlayerTitlePlay entry;
         int value = value_index < 0 ? -1 : info->values[value_index];
+        if (part == PLAYER_PART_LOAD && value == ACE_LOAD_FAST &&
+            !player_app_title_can_choose_short_waits(app, title)) return;
         if (!title_play_entry(app, title, &entry) || entry.part[part] == value) return;
         entry.part[part] = value;
         title_play_store(&app->settings, &entry);

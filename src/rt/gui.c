@@ -780,6 +780,9 @@ static void sync_sdl_input_state(void) {
 static void sync_sdl_input(void) {
     s_input_poll_ns = sched_host_now_ns();
     sync_sdl_input_state();
+    /* This poll runs on the scheduler's thread. Stop on live input even
+     * while the guest's next VBLANK or Ctrl latch is masked. */
+    sched_auto_load_host_input(s_buttons, s_lx, s_ly);
 }
 #endif
 
@@ -2154,6 +2157,8 @@ void gui_pump(void) {
         if (msg.message == WM_QUIT) { gui_quit_request(); continue; }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
+        if (sched_auto_load_enabled())
+            sched_auto_load_host_input(read_keys(), 128u, 128u);
     }
 #endif
 }
@@ -3299,6 +3304,8 @@ uint64_t sr_perf_now_ns_impl(void) { selftest_unexpected("sr_perf_now_ns_impl");
 static uint32_t s_stub_held;          /* buttons down now */
 static uint32_t s_stub_pulse;         /* pressed and released since the last consume */
 static uint32_t s_stub_tap;           /* what the next held present's event read records */
+static uint8_t s_stub_lx = 128u, s_stub_ly = 128u;
+static unsigned s_stub_auto_load_vetoes;
 static int      s_stub_held_result = -2; /* -2: sdl3vk_present_held is not expected */
 static unsigned s_stub_held_calls;
 static unsigned s_stub_stop_due_calls;
@@ -3309,7 +3316,13 @@ uint32_t sdl3vk_consume_button_pulses(void) {
     s_stub_pulse = 0;
     return pulses;
 }
-void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
+void sdl3vk_analog(uint8_t *lx, uint8_t *ly) {
+    if (lx) *lx = s_stub_lx;
+    if (ly) *ly = s_stub_ly;
+}
+void sched_auto_load_host_input(uint32_t buttons, uint8_t lx, uint8_t ly) {
+    if (buttons || lx != 128u || ly != 128u) ++s_stub_auto_load_vetoes;
+}
 int sdl3vk_pad_present(void) { return 1; }
 /* Each input read takes the stick dead zone from the session's input profile; NULL (no profile)
  * gives 0, which is what every test but the dead-zone one expects. */
@@ -3343,6 +3356,22 @@ SrPauseVerdict sched_pause_request(SrPauseSource source) {
 }
 int sr_exit_request_stop_due(void) { s_stub_stop_due_calls++; return 0; }
 int sr_capture_is_armed(void) { return 0; }
+
+static void selftest_auto_load_host_poll_veto(void) {
+    const unsigned before = s_stub_auto_load_vetoes;
+    s_stub_lx = 190u;
+    sync_sdl_input();
+    assert(s_stub_auto_load_vetoes == before + 1u);
+    s_stub_lx = 128u;
+    s_stub_pulse = 0x4000u;
+    sync_sdl_input();
+    assert(s_stub_auto_load_vetoes == before + 2u);
+    /* The input veto observes queued taps, leaving them for the guest. */
+    assert(gui_buttons() == 0x4000u && s_stub_pulse == 0x4000u);
+    s_stub_pulse = 0u;
+    sync_sdl_input();
+    assert(s_stub_auto_load_vetoes == before + 2u);
+}
 
 /* The held present reads the window's events, as every present does: the tap lands there. */
 static int (*s_stub_presenter)(VkImage src);   /* when set, it makes the held present */
@@ -4259,6 +4288,9 @@ static void selftest_cpu_source_span_covers_the_read(void) {
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+#ifdef SR_SDL3VK
+    selftest_auto_load_host_poll_veto();
+#endif
     s_present_cap = present_cap_from_value(NULL);
     assert(PSP_SCANOUT_PERIOD_NS == 16683333ull);
     assert(present_period_ns() == PSP_SCANOUT_PERIOD_NS);

@@ -399,7 +399,7 @@ uint32_t h_IoWrite(CpuState *s) {
     f->off += done; if (f->off > f->size) f->size = f->off;
     return done;
 }
-uint32_t io_read_now(CpuState *s) {
+static uint32_t io_read_payload(CpuState *s) {
     /* a0=fd, a1=dst, a2=count. Returns bytes read. */
     uint32_t fd = A0, dst = A1, count = A2;
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
@@ -498,6 +498,17 @@ uint32_t io_read_now(CpuState *s) {
                     s_vcount_fwd, fd, f->off - done, count, dst, done);
     }
     return done;
+}
+
+uint32_t io_read_now(CpuState *s) {
+    const uint32_t fd = A0;
+    const uint32_t result = io_read_payload(s);
+    /* Both synchronous and asynchronous reads publish their completed
+     * bytes here. Requests, EOF, failures and other devices are not loads. */
+    if (result && !(result & 0x80000000u) &&
+        fd < sizeof(s_fds) / sizeof(s_fds[0]) && s_fds[fd].on_umd)
+        sched_auto_load_disc_read();
+    return result;
 }
 
 /* The UMD drive's read time (#1296, #2361). On a PSP a thread that reads from the disc waits
