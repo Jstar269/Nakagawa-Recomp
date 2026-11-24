@@ -42219,15 +42219,7 @@ static void test_display_static_scanout(void) {
     expect(s_test_gui_present_calls == presents + 2u && s_test_gui_first_pixel == 0xff112233u,
            "the changed scanout is tried again after a host decline");
 
-    s_test_gui_gpu_source = 1;
-    expect(display_set(vram_alias, 512, 3, 0) == 0u, "the presenter accepts a direct GPU image");
-    s_test_gui_gpu_source = 0;
     presents = s_test_gui_present_calls;
-    MEM_W32(vram, 0xffa1b2c3u);
-    sr_display_advance_vcount(1u);
-    sr_vblank_tick();
-    expect(s_test_gui_present_calls == presents, "the CPU observer leaves GPU-direct scanout alone");
-
     expect(display_set(0, 0, 0, 1) == 0u, "the guest queues display-off");
     sr_display_advance_vcount(1u);
     sr_vblank_tick();
@@ -42235,6 +42227,56 @@ static void test_display_static_scanout(void) {
     sr_display_advance_vcount(1u);
     sr_vblank_tick();
     expect(s_test_gui_present_calls == presents, "writing a retired display buffer does not refresh it");
+    s_test_gui_sample_pixel = 0;
+    s_test_gui_on = 0;
+}
+
+static void test_display_gpu_scanout_cpu_writes(void) {
+    const uint32_t active = 0x04000000u;
+    const uint32_t alias = 0x44000000u;
+    const uint32_t rendered = 0xff13579bu;
+    const uint32_t cpu_pixel = 0xff2468acu;
+    reset_fixture();
+    sr_hle_init();
+    s_test_gui_on = 1;
+    s_test_gui_sample_pixel = 1;
+    s_test_gui_gpu_source = 1;
+    expect(display_set(alias, 512, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "the guest's explicit flip shows a GPU-resident image");
+
+    /* A renderer may deliver its pixels back to guest memory without a CPU
+     * store commitment. Changing those bytes alone must not wake scanout. */
+    memcpy(SR_HOST_LINEAR(active), &rendered, sizeof rendered);
+    sr_gpu_vram_dirty(active, sizeof rendered);
+    MEM_W32(active + 480u * 4u, 0xff123456u);
+    MEM_W32(0x04100000u, 0xff123456u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 1u,
+           "GPU readback, row padding and a different VRAM buffer leave scanout alone");
+
+    s_test_gui_refuse_once = 1;
+    MEM_W32(active, cpu_pixel);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 2u && s_test_gui_first_pixel != cpu_pixel,
+           "a CPU write to the displayed GPU target requests one host refresh");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 3u && s_test_gui_last_addr == alias &&
+               s_test_gui_first_pixel == cpu_pixel,
+           "a declined refresh retries and reaches the presenter with the written pixel");
+    const unsigned long presents = s_test_gui_present_calls;
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents && s_test_gpu_guest_flips == 1u,
+           "accepted refresh consumes the CPU update and preserves the guest flip count");
+
+    s_test_gui_refuse_once = 0;
+    s_test_gui_gpu_source = 0;
+    expect(display_set(0, 0, 0, 1) == 0u, "the guest queues display-off after GPU scanout");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
     s_test_gui_sample_pixel = 0;
     s_test_gui_on = 0;
 }
@@ -68488,6 +68530,7 @@ static int hle_selftest_main(int argc, char **argv) {
 
     if (argc > 1 && strcmp(argv[1], "--display-static-scanout") == 0) {
         test_display_static_scanout();
+        test_display_gpu_scanout_cpu_writes();
         fprintf(stderr, "display-static-scanout: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
@@ -68881,6 +68924,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
     test_display_static_scanout();
+    test_display_gpu_scanout_cpu_writes();
     test_display_narrow_stride_span();
     test_display_get_mode_span();
     test_time_domains_are_coherent();

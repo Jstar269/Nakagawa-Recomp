@@ -186,14 +186,15 @@ static int display_host_span_valid(const DisplayFrameState *fb) {
     return sr_guest_span_readable(fb->addr, bytes);
 }
 
-/* Only accepted CPU-backed presents have a guest-byte baseline. A GPU-resident
- * frame can be newer than guest memory, so observing its old CPU image would
- * neither detect its changes nor be a reason to request a readback. */
+/* The last accepted CPU-backed image supplies a byte baseline. An accepted
+ * GPU-resident image instead watches commits to its visible VRAM rows. Its
+ * guest backing bytes can be stale, so no comparison or readback is needed. */
 enum { SCANOUT_WIDTH = 480, SCANOUT_HEIGHT = 272 };
 static struct {
     DisplayFrameState frame;
+    int gpu;
     uint8_t pixels[SCANOUT_HEIGHT][SCANOUT_WIDTH * 4];
-} s_cpu_scanout;
+} s_shown_scanout;
 static int s_present_used_gpu;
 
 void sr_display_note_gpu_present(void) {
@@ -201,36 +202,55 @@ void sr_display_note_gpu_present(void) {
 }
 
 static void display_remember_scanout(void) {
+    const int previous_gpu = s_shown_scanout.gpu;
+    const uint32_t bpp = s_display_active.fmt == 3 ? 4u : 2u;
+    const uint32_t pitch = (uint32_t)s_display_active.stride * bpp;
+    const uint32_t row_bytes = SCANOUT_WIDTH * bpp;
+    s_shown_scanout.frame = s_display_active;
+    s_shown_scanout.gpu = s_present_used_gpu;
     if (s_present_used_gpu) {
-        s_cpu_scanout.frame.addr = 0;
+        /* The descriptor passed display_host_span_valid above. Watch only
+         * the pixels the host displays, including when VRAM writes are aliased. */
+        const uint32_t first = SR_PHYS(s_display_active.addr);
+        const uint32_t end = first + (SCANOUT_HEIGHT - 1u) * pitch + row_bytes;
+        ge_watch_cpu_scanout(first, end, pitch, row_bytes);
         return;
     }
-    const uint32_t bpp = s_display_active.fmt == 3 ? 4u : 2u;
-    const size_t pitch = (size_t)s_display_active.stride * bpp;
+    if (previous_gpu) ge_watch_cpu_scanout(0, 0, 0, 0);
     const uint8_t *src = SR_HOST_LINEAR(s_display_active.addr);
     for (unsigned row = 0; row < SCANOUT_HEIGHT; row++)
-        memcpy(s_cpu_scanout.pixels[row], src + row * pitch, SCANOUT_WIDTH * bpp);
-    s_cpu_scanout.frame = s_display_active;
+        memcpy(s_shown_scanout.pixels[row], src + row * pitch, row_bytes);
+}
+
+static int display_scanout_matches(void) {
+    const DisplayFrameState *fb = &s_display_active;
+    const DisplayFrameState *shown = &s_shown_scanout.frame;
+    return fb->addr == shown->addr && fb->fmt == shown->fmt && fb->stride == shown->stride;
 }
 
 static int display_static_scanout_changed(void) {
     const DisplayFrameState *fb = &s_display_active;
-    const DisplayFrameState *shown = &s_cpu_scanout.frame;
-    if (!s_display_configured || !fb->addr || fb->addr != shown->addr ||
-        fb->fmt != shown->fmt || fb->stride != shown->stride || !gui_on())
+    if (!s_display_configured || !fb->addr || !display_scanout_matches() || !gui_on())
         return 0;
+    if (s_shown_scanout.gpu)
+        return ge_scanout_cpu_written();
     /* The exact descriptor passed the host-read span check at presentation.
      * Check guest backing bytes, without syncing or changing GE ownership. */
     const uint32_t bpp = fb->fmt == 3 ? 4u : 2u;
     const size_t pitch = (size_t)fb->stride * bpp;
     const uint8_t *src = SR_HOST_LINEAR(fb->addr);
     for (unsigned row = 0; row < SCANOUT_HEIGHT; row++)
-        if (memcmp(s_cpu_scanout.pixels[row], src + row * pitch, SCANOUT_WIDTH * bpp) != 0)
+        if (memcmp(s_shown_scanout.pixels[row], src + row * pitch, SCANOUT_WIDTH * bpp) != 0)
             return 1;
     return 0;
 }
 
 static void display_present_frame(void) {
+    if (!display_scanout_matches()) {
+        if (s_shown_scanout.gpu) ge_watch_cpu_scanout(0, 0, 0, 0);
+        s_shown_scanout.frame.addr = 0;
+        s_shown_scanout.gpu = 0;
+    }
     if (!gui_on() || !s_display_active.addr) return;
     if (!display_host_span_valid(&s_display_active)) {
         fprintf(stderr, "DISPLAY_PRESENT: refusing invalid span addr=0x%08x stride=%d fmt=%d\n",

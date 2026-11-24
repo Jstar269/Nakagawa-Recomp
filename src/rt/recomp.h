@@ -376,6 +376,11 @@ extern volatile int g_sr_vram_read_pending;
 void sr_ge_vram_read_prepare(uint32_t physical_addr, uint32_t width);
 void sr_ge_vram_write_prepare(uint32_t physical_addr, uint32_t width);
 void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width);
+/* Watch CPU stores in the visible rows of one validated GPU scanout.
+ * first/end are canonical VRAM addresses, end exclusive. Zero disables it.
+ * Rearming after an accepted present clears the previous write indication. */
+void ge_watch_cpu_scanout(uint32_t first, uint32_t end, uint32_t pitch, uint32_t visible_row);
+int ge_scanout_cpu_written(void);
 static inline void sr_guest_vram_read_prepare_bytes(uint32_t addr, uint32_t width);
 
 /* --- Guest-memory span validation (issue #15) --------------------------------
