@@ -126,6 +126,8 @@ typedef enum {
     NK_MEMSTICK_COLLISION_SOURCE_CHANGING,
     NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT,
     NK_MEMSTICK_COLLISION_COPY_MISMATCH,
+    NK_MEMSTICK_COLLISION_JOURNAL_MISSING,
+    NK_MEMSTICK_COLLISION_JOURNAL_DAMAGED,
     NK_MEMSTICK_COLLISION_IO
 } NkMemstickCollisionResult;
 
@@ -152,9 +154,9 @@ typedef struct {
 } NkMemstickPlanInput;
 
 typedef enum {
-    NK_MEMSTICK_PLAN_STAGE,
-    NK_MEMSTICK_PLAN_KEEP,
-    NK_MEMSTICK_PLAN_DEDUPLICATE
+    NK_MEMSTICK_PLAN_STAGE = 0,
+    NK_MEMSTICK_PLAN_KEEP = 1,
+    NK_MEMSTICK_PLAN_DEDUPLICATE = 2
 } NkMemstickPlanDecision;
 
 typedef struct {
@@ -167,9 +169,9 @@ typedef struct {
 } NkMemstickPlanUnit;
 
 typedef enum {
-    NK_MEMSTICK_PLAN_SOURCE_READABLE,
-    NK_MEMSTICK_PLAN_SOURCE_ABSENT,
-    NK_MEMSTICK_PLAN_SOURCE_UNREADABLE
+    NK_MEMSTICK_PLAN_SOURCE_READABLE = 0,
+    NK_MEMSTICK_PLAN_SOURCE_ABSENT = 1,
+    NK_MEMSTICK_PLAN_SOURCE_UNREADABLE = 2
 } NkMemstickPlanSourceStatus;
 
 typedef struct {
@@ -204,6 +206,23 @@ void nk_memstick_save_plan_free(NkMemstickSavePlan *plan);
 NkMemstickCollisionResult nk_memstick_replay_savedata(const char *saves_root,
                                                       const NkMemstickSavePlan *plan,
                                                       size_t first_unit);
+
+/* Freeze an immutable PSP/SAVEDATA plan under .nakagawa-migration/psp-savedata in MOVING,
+ * before making a staged copy. Repeating begin with the same plan is safe.
+ * plan.json carries schema 1, source slots and statuses, and the
+ * ordered unit records (slot, name, SHA-256, decision and equivalent row).
+ * progress.json binds the first unfinished row to the plan's SHA-256.
+ * Resume opens that plan from disk, verifies the sources and any checkpointed
+ * outputs, and commits progress only after a complete group's verified copy.
+ * max_groups limits new work per call (0 means all remaining groups).
+ * The caller holds the stick lock for both operations. COPIED means success.
+ * Only a successful resume sets *complete, which covers this plan's scope.
+ * The outer layout remains MOVING. Neither operation promotes the stick. */
+NkMemstickCollisionResult nk_memstick_savedata_move_begin(const char *saves_root,
+                                                          const NkMemstickSavePlan *plan);
+NkMemstickCollisionResult nk_memstick_savedata_move_resume(const char *saves_root,
+                                                           size_t max_groups,
+                                                           bool *complete);
 
 typedef enum {
     NK_MEMSTICK_STATE_MOVING = 0,

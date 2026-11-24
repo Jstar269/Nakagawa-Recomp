@@ -3523,6 +3523,189 @@ static void test_memstick_save_planner(const char *base) {
     for (size_t i = 0; i < 2u; ++i) nk_memstick_save_plan_free(&plans[i]);
 }
 
+static int memstick_journal_probe(const char *phase, const char *saves) {
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0));
+    if (!strcmp(phase, "interrupt")) {
+        NkMemstickLayout moving;
+        assert(nk_memstick_layout_init(&moving, NK_MEMSTICK_STATE_MOVING, "test"));
+        assert(nk_memstick_layout_write(saves, &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+        nk_memstick_layout_free(&moving);
+        const NkMemstickPlanInput inputs[] = {
+            {"TEST00001", "TEST00001"}, {"TEST00002", "TEST00002"}, {"Z-ABSENT", NULL},
+        };
+        NkMemstickSavePlan plan;
+        assert(nk_memstick_plan_savedata(saves, inputs, 3u, &plan));
+        assert(plan.unit_count == 3u && plan.units[1].decision == NK_MEMSTICK_PLAN_KEEP);
+        assert(nk_memstick_savedata_move_begin(saves, &plan) == NK_MEMSTICK_COLLISION_COPIED);
+        assert(nk_memstick_savedata_move_begin(saves, &plan) == NK_MEMSTICK_COLLISION_COPIED);
+        const NkMemstickPlanInput without_ownership[] = {
+            {"TEST00001", NULL}, {"TEST00002", NULL}, {"Z-ABSENT", NULL},
+        };
+        NkMemstickSavePlan different;
+        assert(nk_memstick_plan_savedata(saves, without_ownership, 3u, &different));
+        assert(!strcmp(different.units[0].slot, "TEST00002"));
+        assert(nk_memstick_savedata_move_begin(saves, &different) ==
+               NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT);
+        nk_memstick_save_plan_free(&different);
+        /* Leave a genuine committed copy with no checkpoint and no process
+           state or graceful unwind for the next invocation to depend on. */
+        assert(nk_memstick_replay_savedata(saves, &plan, 0u) == NK_MEMSTICK_COLLISION_COPIED);
+        _Exit(84);
+    }
+    bool complete = true;
+    NkMemstickCollisionResult result = nk_memstick_savedata_move_resume(
+        saves, !strcmp(phase, "partial") ? 1u : 0u, &complete);
+    if (!strcmp(phase, "partial")) {
+        assert(result == NK_MEMSTICK_COLLISION_COPIED && !complete);
+    } else if (!strcmp(phase, "source-changed")) {
+        assert(result == NK_MEMSTICK_COLLISION_SOURCE_CHANGING && !complete);
+    } else if (!strcmp(phase, "target-changed")) {
+        assert(result == NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT && !complete);
+    } else if (!strcmp(phase, "checkpoint-invalid")) {
+        assert(result == NK_MEMSTICK_COLLISION_JOURNAL_DAMAGED && !complete);
+    } else if (!strcmp(phase, "active-stick")) {
+        assert(result == NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED && !complete);
+    } else {
+        assert(!strcmp(phase, "complete"));
+        assert(result == NK_MEMSTICK_COLLISION_COPIED && complete);
+    }
+    nk_platform_file_lock_release(&lock);
+    return 0;
+}
+
+static void memstick_start_journal_probe(const char *saves, const char *phase, int expected) {
+    char exe[NK_MAX_PATH], log[NK_MAX_PATH];
+    assert(nk_platform_get_executable_path(exe, sizeof(exe)));
+    memstick_fixture_path(log, saves, "fixture-process.log");
+    const char *args[] = {exe, "--memstick-journal-probe", phase, saves, NULL};
+    NkProcessHandle process;
+    assert(nk_platform_spawn_process(exe, args, NULL, NULL, log, &process));
+    int code = nk_platform_wait_process(&process, -1);
+    nk_platform_close_process(&process);
+    if (code != expected) {
+        char *detail = read_text_file(log);
+        fprintf(stderr, "journal probe %s: exit %d expected %d\n%s", phase, code, expected,
+                detail ? detail : "");
+        free(detail);
+    }
+    assert(code == expected);
+}
+
+static void test_memstick_journal_restart(const char *base) {
+    puts("[LAUNCH_TEST] Shared Memory Stick durable plan and fresh-process restart");
+    char saves[NK_MAX_PATH], path[NK_MAX_PATH], legacy[NK_MAX_PATH], kept[NK_MAX_PATH];
+    char checkpoint[NK_MAX_PATH], immutable[NK_MAX_PATH], pending[NK_MAX_PATH];
+    char slot_record[NK_MAX_PATH];
+    memstick_fixture_path(saves, base, "memstick-journal");
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001A");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(legacy, path, "DATA.BIN");
+    memstick_write_aged_file(legacy, "winner-01", 1700000000u);
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001a");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(legacy, path, "DATA.BIN");
+    memstick_write_aged_file(legacy, "archive-a", 1700003000u);
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/ZZZ");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(legacy, path, "DATA.BIN");
+    memstick_write_aged_file(legacy, "remaining", 1700001000u);
+
+    NkMemstickPaths layout;
+    assert(nk_memstick_layout_paths(saves, &layout));
+    assert(nk_platform_mkdir_p(layout.migration));
+    memstick_fixture_path(slot_record, layout.migration, "psp-savedata-plan.json");
+    write_file_utf8(slot_record, "unchanged per-slot record");
+    memstick_fixture_path(checkpoint, layout.migration, "psp-savedata/progress.json");
+    memstick_fixture_path(immutable, layout.migration, "psp-savedata/plan.json");
+    memstick_fixture_path(kept, layout.kept_copies, "TEST00002/PSP/SAVEDATA/test00001a/DATA.BIN");
+    memstick_fixture_path(pending, layout.staging, "PSP/SAVEDATA/ZZZ");
+    memstick_start_journal_probe(saves, "interrupt", 84);
+    assert(nk_platform_path_missing(checkpoint));
+    assert(nk_platform_path_missing(pending));
+    assert_file_text(kept, "archive-a");
+    char *frozen = read_text_file(immutable);
+    assert(frozen && strstr(frozen, "TEST00001A"));
+
+    memstick_start_journal_probe(saves, "partial", 0);
+    assert(nk_platform_path_missing(pending));
+    char *progress = read_text_file(checkpoint);
+    assert(progress && strstr(progress, "\"next_unit\":2"));
+
+    /* An older player changed a source from the already checkpointed group. */
+    memstick_fixture_path(legacy, saves, "TEST00001/PSP/SAVEDATA/TEST00001A/DATA.BIN");
+    memstick_write_aged_file(legacy, "winner-02", 1700000000u);
+    memstick_start_journal_probe(saves, "source-changed", 0);
+    assert(nk_platform_path_missing(pending));
+    assert_file_text(legacy, "winner-02");
+    assert_file_text(checkpoint, progress);
+    memstick_write_aged_file(legacy, "winner-01", 1700000000u);
+
+    /* A known absent slot appeared while the old player had control. */
+    memstick_fixture_path(path, saves, "Z-ABSENT");
+    assert(nk_platform_mkdir_p(path));
+    memstick_start_journal_probe(saves, "source-changed", 0);
+    assert(nk_platform_remove_empty_dir(path));
+    assert_file_text(checkpoint, progress);
+    assert(nk_platform_path_missing(pending));
+
+    /* An edited kept copy with identical length and timestamp is still user data. */
+    memstick_write_aged_file(kept, "archive-a", 1700004000u);
+    memstick_write_aged_file(kept, "archive-b", 1700004000u);
+    memstick_start_journal_probe(saves, "target-changed", 0);
+    assert_file_text(kept, "archive-b");
+    assert_file_text(checkpoint, progress);
+    assert(nk_platform_path_missing(pending));
+    memstick_write_aged_file(kept, "archive-a", 1700004000u);
+
+    const char *foreign = "{\"schema_version\":1,\"plan_sha256\":\""
+                          "0000000000000000000000000000000000000000000000000000000000000000"
+                          "\",\"next_unit\":2}\n";
+    write_file_utf8(checkpoint, foreign);
+    memstick_start_journal_probe(saves, "checkpoint-invalid", 0);
+    assert_file_text(checkpoint, foreign);
+    assert_file_text(immutable, frozen);
+    assert_file_text(slot_record, "unchanged per-slot record");
+    write_file_utf8(checkpoint, progress);
+
+    assert(nk_platform_mkdir_p(layout.stick));
+    memstick_fixture_path(path, layout.stick, "USER.BIN");
+    write_file_utf8(path, "active original");
+    memstick_start_journal_probe(saves, "active-stick", 0);
+    assert_file_text(path, "active original");
+    memstick_fixture_path(path, saves, "fixture-active");
+    assert(nk_rename_noreplace_utf8(layout.stick, path) == 0);
+
+    memstick_start_journal_probe(saves, "complete", 0);
+    char *done = read_text_file(checkpoint);
+    assert(done && strstr(done, "\"next_unit\":3"));
+    uint64_t done_identity[3], repeated_identity[3];
+    nk_platform_file_change_identity(checkpoint, &done_identity[0], &done_identity[1],
+                                      &done_identity[2]);
+    assert(done_identity[1] || done_identity[2]);
+    memstick_start_journal_probe(saves, "complete", 0);
+    nk_platform_file_change_identity(checkpoint, &repeated_identity[0], &repeated_identity[1],
+                                      &repeated_identity[2]);
+    assert(memcmp(done_identity, repeated_identity, sizeof(done_identity)) == 0);
+    assert_file_text(checkpoint, done);
+    assert_file_text(immutable, frozen);
+    assert_file_text(legacy, "winner-01");
+    assert_file_text(kept, "archive-a");
+    memstick_fixture_path(path, pending, "DATA.BIN");
+    assert_file_text(path, "remaining");
+    memstick_fixture_path(path, saves, "fixture-active/USER.BIN");
+    assert_file_text(path, "active original");
+    NkMemstickLayout moving;
+    assert(nk_memstick_layout_read(saves, &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    assert(moving.state == NK_MEMSTICK_STATE_MOVING);
+    nk_memstick_layout_free(&moving);
+    free(done);
+    free(progress);
+    free(frozen);
+}
+
 /* #2744: the shared Memory Stick is <saves>/Memory Stick on every platform and in every override,
  * and its layout record <saves>/nakagawa-saves.json is schema_version 1, with a newer one refused
  * by name (SAVES_LAYOUT_NEWER) and a damaged or unreadable one kept, never replaced. Synthetic
@@ -3985,6 +4168,9 @@ static void test_memstick_layout(const char *base, char sep) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "--memstick-journal-probe") == 0) {
+        return memstick_journal_probe(argv[2], argv[3]);
+    }
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return write_launch_environment_probe();
     }
@@ -4011,6 +4197,7 @@ int main(int argc, char **argv) {
     test_memstick_layout(base, sep);
     test_memstick_save_collision(base);
     test_memstick_save_planner(base);
+    test_memstick_journal_restart(base);
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);
