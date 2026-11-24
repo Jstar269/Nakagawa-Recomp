@@ -9430,6 +9430,38 @@ class FirstRunRouteTests(unittest.TestCase):
         self.assertIn("library is empty", completed.stderr)
         self.assertNotIn("has no prepared runtime", completed.stderr)
 
+    def test_headless_acceptance_reports_missing_runtime_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix=".first-run-no-runtime-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            user_root = scratch / "user data"
+            user_root.mkdir()
+            (user_root / "library.json").write_text(json.dumps({
+                "schema_version": 1,
+                "games": [{
+                    "disc_id": "TEST00006", "title_name": "Synthetic Display Smoke",
+                    "iso_path": str(scratch / "display.iso"), "title_id": "display-smoke-v1",
+                }],
+            }), encoding="utf-8")
+            args = ["--empty", f"--user-data-root={user_root}", "--launch-index=0",
+                    "--headless-launch"]
+            for requested_frames in (None, "--headless-accept-presented-frames=1"):
+                with self.subTest(requested_frames=requested_frames):
+                    completed = self.run_route(
+                        scratch, [*args, requested_frames] if requested_frames else args,
+                    )
+                    output = completed.stdout + completed.stderr
+                    self.assertEqual(completed.returncode, 3, output)
+                    self.assertIn("Launch index 0 has no prepared runtime; PLAY NOW is unavailable.",
+                                  completed.stderr)
+                    self.assertNotIn("PLAY NOW available", completed.stdout)
+                    self.assertEqual(
+                        [line for line in output.splitlines() if "HEADLESS_ACCEPTANCE" in line],
+                        ["[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable"]
+                        if requested_frames else [],
+                        output,
+                    )
+            self.assertEqual(list((user_root / "cache").glob("player-boot-*.events")), [])
+
     def test_launch_title_names_a_library_game_by_disc_id(self) -> None:
         """#2152: --launch-title (what an Add to Steam shortcut runs) finds the game by its
         disc ID, or disc ID and image SHA-1 when two images share it, and takes the
