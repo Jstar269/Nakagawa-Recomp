@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+from typing import cast
 import unittest
 from unittest import mock
 
@@ -266,14 +267,15 @@ class ReleaseValidationTests(unittest.TestCase):
         self.data["settings"] = dict(self.settings, jobs=1, priority="normal")
         for row in self.data["titles"]:
             row["run_settings"] = dict(self.settings)
+        self.plan_sources: list[dict[str, str | int]] = [
+            {"source": row["source"], "size_bytes": row["size_bytes"],
+             "sha1": row["verification"]["sha1"]}
+            for row in self.data["titles"]
+        ]
         self.plan = {
             "format": "nakagawa-compat-release-plan", "schema_version": 1,
             "settings": dict(self.settings),
-            "sources": [
-                {"source": row["source"], "size_bytes": row["size_bytes"],
-                 "sha1": row["verification"]["sha1"]}
-                for row in self.data["titles"]
-            ],
+            "sources": self.plan_sources,
         }
         self.doc.write_text(f"Before\n{compat_table.DOC_BEGIN}\nold\n"
                             f"{compat_table.DOC_END}\nAfter\n", encoding="utf-8")
@@ -285,7 +287,7 @@ class ReleaseValidationTests(unittest.TestCase):
         args = [str(self.source), "--write-doc", str(self.doc), "--json", str(self.output)]
         if release:
             args.extend(("--release-plan", str(self.plan_path)))
-        return compat_table.main(args)
+        return cast(int, compat_table.main(args))
 
     def assert_refuses(self, reason: str) -> None:
         before = (self.doc.read_bytes(), self.output.read_bytes())
@@ -330,7 +332,7 @@ class ReleaseValidationTests(unittest.TestCase):
         row = self.data["titles"][1]
         row["verification"]["sha1"] = "ba" * 20
         self.assert_refuses("release corpus identity differs from the plan")
-        row["verification"]["sha1"] = self.plan["sources"][1]["sha1"]
+        row["verification"]["sha1"] = self.plan_sources[1]["sha1"]
         row["verification"]["size_bytes"] = row["size_bytes"] + 1
         self.assert_refuses("release corpus identity is unverified")
 
@@ -346,7 +348,7 @@ class ReleaseValidationTests(unittest.TestCase):
                     duplicate_of=previous["source"])
         copy.pop("run_settings")
         self.data["titles"].append(copy)
-        self.plan["sources"].append(dict(self.plan["sources"][0], source=copy["source"]))
+        self.plan_sources.append(dict(self.plan_sources[0], source=copy["source"]))
         self.assertEqual(self.run_export(), 0)
         summary = json.loads(self.output.read_text(encoding="utf-8"))
         self.assertEqual(summary["counted"], 1)
