@@ -2349,13 +2349,11 @@ One console is one data point; see §11. Nothing here closes issue #70
   `test_ge_weight_cells_match_psp` in `tests/native/hle_thread_selftest.c` runs the sixteen display lists
   through production dispatch and the software GE: every cell's 17 window rows match the PSP's, checked by
   the corpus window digest and by the one pixel each sample must light (column s, its modelled row, its
-  vertex colour). It then repeats the four u8 cells with an input-sensitivity encoding: each 8-bit weight
-  byte `b` is recoded to `round(128 b / 255)`, the byte a `w / 255` decoder would consume for the same
-  weight, and the stock `w / 128` decoder must change exactly those four windows (`u8-w1`, `u8-hi`,
-  `u8-c3`, `u8-c5`) while the other twelve keep their PSP digests. This is a check on the recorded input,
-  not a renderer mode: `read_weights` never consults a switch. The decoder-level evidence is a separately
-  compiled scratch build whose `read_weights` multiplies by `1.0f / 255.0f`; there exactly the four u8
-  cells fail and the other twelve still match.
+  vertex colour). The input-sensitivity pass recodes each u8 weight byte `b` to `round(128*b/255)` so the
+  stock `w/128` decoder approximates the `w/255` scale. Exactly the four u8 windows must change
+  (`u8-w1`, `u8-hi`, `u8-c3`, `u8-c5`), and the other twelve must still match their PSP digests.
+  The separate scratch decoder build uses `1.0f / 255.0f` in `read_weights` on the original input.
+  In that build, exactly the four u8 cells fail and the other twelve still match.
 
 - **PSP-3000 single-case run of the `insn-trace` probe on commit `84568280` (2026-10-29)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000, case 119 in `tests/fixtures/psp_oracle/probe_insn_trace.c` with

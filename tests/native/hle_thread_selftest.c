@@ -36440,12 +36440,10 @@ static const struct {
     {"u16-c3", 0x7272338f6f65a625ull},
 };
 
-/* An input-sensitivity check, not a renderer mode: the test feeds the stock w / 128 decoder
- * the byte a w / 255 decoder would have consumed for the same weight, round(128 b / 255),
- * and requires the window to change (128 b / 255 = b / 1.992, so every 8-bit weight below
- * 255 lands lower). The renderer has no switch for it. The decoder-level evidence is a
- * separately compiled scratch build whose read_weights multiplies by 1.0f / 255.0f: there
- * exactly the four u8 cells fail the PSP comparison and the other twelve still match. */
+/* The input-sensitivity pass recodes each u8 weight byte b to round(128*b/255)
+ * so the stock w/128 decoder approximates the w/255 scale. A separate scratch
+ * build decodes the original vertex bytes with 1.0f / 255.0f in read_weights.
+ * Exactly the four u8 cells fail its PSP comparison and the other twelve match. */
 static int32_t gw_u8_wrong_scale(int32_t raw)
 {
     const int32_t rebased = (raw * 128 + 127) / 255;
@@ -36683,11 +36681,9 @@ static int gw_run_cell(const struct gw_cell *c, uint32_t px[GW_N], int wrong_u8_
     return ok;
 }
 
-/* Every PSP-GE-WEIGHT-001 cell through the software GE. wrong_u8_scale injects the vertex
- * bytes a w / 255 u8 decoder would consume; 0 is the measured rule. diverged[k] says whether
- * cell k's window differs from the PSP's digest; returns how many do. Under the measured rules
- * a diverging cell prints its software window in the corpus's row format for comparison with
- * the raw hardware rows. */
+/* Run every PSP-GE-WEIGHT-001 cell through the software GE with its original
+ * vertices or the recoded u8 input. Mark each differing PSP digest and return
+ * the count. For original input, print divergent windows in the corpus format. */
 static unsigned gw_run_cells(int wrong_u8_scale, unsigned char diverged[GW_CELL_COUNT],
                              unsigned *names_ok, unsigned *synced)
 {
