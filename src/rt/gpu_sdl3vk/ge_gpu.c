@@ -3032,6 +3032,7 @@ typedef struct {
 typedef struct {
     unsigned descriptor_binds, scissors, blend_constants;
     unsigned render_pass_begins;
+    unsigned dst_set_binds, dst_read_draws;
 } GegpuSelftestRecordCommands;
 static GegpuSelftestRecordCommands s_selftest_record_commands;
 #endif
@@ -3101,6 +3102,9 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 2, 1,
                             rmw ? (twin ? &t->trmw_set : &t->rmw_set) : (twin ? &s_tdst_set : &s_dst_set),
                             0, NULL);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    s_selftest_record_commands.dst_set_binds++;
+#endif
 
     VkPipeline cur = VK_NULL_HANDLE;
     /* Dynamic state and set 0 belong to this command buffer and this compatible layout. A fresh
@@ -3171,6 +3175,9 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
             vkCmdDraw(s_cmd, b->count, 1, b->first - tv0, param_base - p0);
         else
             vkCmdDraw(s_cmd, b->count, 1, b->first - v0, 0);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+        if (batch_reads_dst(b)) s_selftest_record_commands.dst_read_draws++;
+#endif
     }
     vkCmdEndRenderPass(s_cmd);
     if (twin && !rmw) t->tlayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -7478,6 +7485,7 @@ static int blend_dual_fix(uint32_t sfp, uint32_t dfp, uint32_t fixa, uint32_t fi
  *  - two DISTINCT FIX constants
  * min/max (eq 3/4) are exact in fixed function: both PSP and VK ignore the factors. */
 static int blend_needs_shader(uint32_t sfp, uint32_t dfp, uint32_t eq, uint32_t fixa, uint32_t fixb) {
+    if (eq == 3 || eq == 4) return 0;
     return eq >= 5 || (sfp >= 6 && sfp <= 9) || (dfp >= 6 && dfp <= 9) ||
            blend_dual_fix(sfp, dfp, fixa, fixb);
 }
