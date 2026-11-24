@@ -2349,6 +2349,15 @@ One console is one data point; see §11. Nothing here closes issue #70
   - *Layout:* weights, then the colour aligned to 4 bytes, then the position, with the vertex size a multiple of
     4, for three and five u8 weights and three u16 weights.
 
+  `test_ge_weight_cells_match_psp` in `tests/native/hle_thread_selftest.c` runs the sixteen display lists
+  through production dispatch and the software GE: every cell's 17 window rows match the PSP's, checked by
+  the corpus window digest and by the one pixel each sample must light (column s, its modelled row, its
+  vertex colour). The input-sensitivity pass recodes each u8 weight byte `b` to `round(128*b/255)` so the
+  stock `w/128` decoder approximates the `w/255` scale. Exactly the four u8 windows must change
+  (`u8-w1`, `u8-hi`, `u8-c3`, `u8-c5`), and the other twelve must still match their PSP digests.
+  The separate scratch decoder build uses `1.0f / 255.0f` in `read_weights` on the original input.
+  In that build, exactly the four u8 cells fail and the other twelve still match.
+
 - **PSP-3000 single-case run of the `insn-trace` probe on commit `84568280` (2026-10-29)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000, case 119 in `tests/fixtures/psp_oracle/probe_insn_trace.c` with
   `insn_trace_tramp.S` and `insn_trace_fixtures.h`. One launch on its own boot after the `transport-write`
