@@ -444,7 +444,7 @@ int main(void) {{
     def _assert_measured(self, flags):
         got = self._run(flags)
         self.assertEqual(len(got), len(self.MEASURED))
-        for (name, _, a, b, want_lo, want_hi), (lo, hi) in zip(self.MEASURED, got):
+        for (name, _, a, b, want_lo, want_hi), (lo, hi) in zip(self.MEASURED, got, strict=True):
             with self.subTest(insn=name, rs=f"0x{a:08x}", rt=f"0x{b:08x}", flags=flags):
                 self.assertEqual((f"0x{lo:08x}", f"0x{hi:08x}"),
                                  (f"0x{want_lo:08x}", f"0x{want_hi:08x}"))
