@@ -2045,18 +2045,22 @@ static void repeat_launch_cache_from_status_check(PlayerApp *app, const char *us
                                                         info.runtime_source_reason);
 }
 
-/* Launches game 0, lets the child exit with code 7 before 500 ms and puts
- * Copy details for the card it raised in `report`. */
-static void repeat_launch_exit_early(PlayerApp *app, uint64_t launch_tick, char *report,
-                                     size_t report_size) {
-    set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
-    assert(player_app_launch_game(app, 0));
+/* Lets the child exit with code 7 before 500 ms and copies the resulting card. */
+static void repeat_launch_copy_early_exit(PlayerApp *app, uint64_t launch_tick,
+                                          char *report, size_t report_size) {
     app->launch_time_ms = launch_tick;
     assert(nk_launch_wait(&app->launch_session, 10000) == 7);
     assert(player_app_monitor_game_session(app, launch_tick + 100u));
     assert(!app->is_game_running);
     assert(strcmp(app->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
     assert(player_app_format_error_report(app, "test", report, report_size) > 0);
+}
+
+static void repeat_launch_exit_early(PlayerApp *app, uint64_t launch_tick, char *report,
+                                     size_t report_size) {
+    set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+    assert(player_app_launch_game(app, 0));
+    repeat_launch_copy_early_exit(app, launch_tick, report, report_size);
 }
 
 /* Catalog-epoch coherence probe (#670). Built only with the test seam macro,
@@ -21059,17 +21063,63 @@ int main(int argc, char **argv) {
                 "\"reason\":\"the source tree has no install record and no git metadata\"}";
             static char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
             char identity_a[65], identity_run[65], expected[96];
+            char completion_path[1100];
+            snprintf(completion_path, sizeof(completion_path),
+                     "%s%cpackages%c%s%c" NK_AOT_COMPLETION_MANIFEST, user_root, sep,
+                     sep, disc_id, sep);
 
+            /* A rebuild keeps the executable and image paths. Split the core
+               calls the launch worker uses to replace A with B at that boundary. */
             write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
                                         record_a);
-            assert(nk_launch_runtime_package_cache_identity(user_root, &rep->games[0],
-                                                            identity_a));
+            fixture_sha_file(completion_path, identity_a);
+            PlayerLaunchWork *work = (PlayerLaunchWork *)malloc(sizeof(*work));
+            assert(work != NULL);
+            assert(player_app_launch_begin(rep, 0, work));
+            assert(nk_launch_prepare_session(&work->session, &work->game, user_root) == NK_OK);
+            snprintf(work->session.boot_event_file_path,
+                     sizeof(work->session.boot_event_file_path), "%s", work->boot_event_file_path);
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_b);
+            fixture_sha_file(completion_path, identity_run);
+            assert(strncmp(identity_a, identity_run, 12) != 0);
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+            work->result = nk_launch_start(&work->session);
+            assert(work->result == NK_OK);
+            assert(player_app_launch_finish(rep, work));
+            free(work);
+            repeat_launch_copy_early_exit(rep, 6400, report_text, sizeof(report_text));
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+            NkRuntimePackageInfo cached_b;
+            assert(nk_launch_validate_runtime_package(user_root, &rep->games[0], &cached_b,
+                                                       NULL, 0) == NK_RUNTIME_PACKAGE_OK);
+            assert(cached_b.validation_cache_hit);
+            assert(strcmp(cached_b.completion_digest, identity_run) == 0);
+
+            /* Copy the same card after the library validates a rebuilt A. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_a);
+            fixture_sha_file(completion_path, identity_a);
+            repeat_launch_cache_from_status_check(rep, user_root);
+            assert(rep->runtime_package_cache[0].identity_valid);
+            assert(strstr(rep->runtime_package_cache[0].runtime_source, "aaaaaaaaaa") != NULL);
+            assert(strncmp(rep->runtime_package_cache[0].package_identity, identity_run, 12) != 0);
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
 
             /* B with no status stored: the run's own identity and source. */
             write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
                                         record_b);
-            assert(nk_launch_runtime_package_cache_identity(user_root, &rep->games[0],
-                                                            identity_run));
+            fixture_sha_file(completion_path, identity_run);
             assert(strcmp(identity_run, identity_a) != 0);
             memset(&rep->runtime_package_cache[0], 0, sizeof(rep->runtime_package_cache[0]));
             repeat_launch_exit_early(rep, 6600, report_text, sizeof(report_text));
@@ -21083,12 +21133,10 @@ int main(int argc, char **argv) {
             write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
                                         record_a);
             repeat_launch_cache_from_status_check(rep, user_root);
-            assert(nk_launch_runtime_package_cache_identity(user_root, &rep->games[0],
-                                                            identity_a));
+            fixture_sha_file(completion_path, identity_a);
             write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
                                         record_b);
-            assert(nk_launch_runtime_package_cache_identity(user_root, &rep->games[0],
-                                                            identity_run));
+            fixture_sha_file(completion_path, identity_run);
             repeat_launch_exit_early(rep, 6800, report_text, sizeof(report_text));
             snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
                      identity_run);
@@ -21101,8 +21149,7 @@ int main(int argc, char **argv) {
 
             /* A package from before the record, A's status still stored: no source line. */
             write_repeat_launch_package(user_root, disc_id, self_path, source_media_json, NULL);
-            assert(nk_launch_runtime_package_cache_identity(user_root, &rep->games[0],
-                                                            identity_run));
+            fixture_sha_file(completion_path, identity_run);
             repeat_launch_exit_early(rep, 7000, report_text, sizeof(report_text));
             snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
                      identity_run);

@@ -202,11 +202,8 @@ typedef struct {
     /* NkGameEntry.enhancement_hook_only: no timing package in the build. */
     bool enhancement_hook_only;
     bool package_launch;
-    /* The package this session launches, as nk_launch_prepare_session validated it
-       (#2998): its status cache key (nk_launch_runtime_package_cache_identity), empty
-       when the package changed while it was validated, and the runtime source commit
-       record it carries (NkRuntimePackageInfo's three fields, #2875). All empty when
-       package_launch is false. */
+    /* The final validation's completion digest and runtime source record (#2998),
+       saved after a package child starts. Empty until a package has spawned. */
     char package_identity[65];
     char runtime_source_commit[41];
     char runtime_source_origin[16];
