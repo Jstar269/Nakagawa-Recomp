@@ -875,10 +875,9 @@ class AndroidBundledDemoTests(unittest.TestCase):
             self.assertEqual((library, title, image_title), (library, library, library))
             self.assertIn(library, demos)
 
-    def test_nk_demos_bundles_the_desktop_demos_layout_whole(self) -> None:
+    def test_nk_demos_bundles_the_listed_files_in_the_desktop_layout(self) -> None:
         self.assertIn('findProperty("nk.demos")', self.gradle)
-        self.assertIn('demos?.let { root -> from(root) { into("app/demos") } }', self.gradle)
-        parse = self.gradle[self.gradle.index("val demos: File? ="):]
+        parse = self.gradle[self.gradle.index("val demoPackages: List<DemoPackage> ="):]
         parse = parse[:parse.index("\nval nativeTargets")]
         # One package per ABI, and these are arm64 builds.
         self.assertIn('require(abis == listOf("arm64-v8a"))', parse)
@@ -886,6 +885,19 @@ class AndroidBundledDemoTests(unittest.TestCase):
         self.assertIn('executable.startsWith("lib") && executable.endsWith(".so")', parse)
         self.assertIn("elfMachine(File(dir, executable)) == 183", parse)
         self.assertIn('File(root, "images/${dir.name}.iso").isFile', parse)
+        self.assertIn("DemoPackage(dir, completionArtifacts(property, dir))", parse)
+        # Exactly what each completion manifest lists, plus the manifest, the disc image and the
+        # notices, in the desktop layout; never the whole folder (a stray file would ship).
+        listed = self.gradle[self.gradle.index("fun completionArtifacts("):]
+        listed = listed[:listed.index("\n}\n")]
+        self.assertIn('require(File(dir, path).isFile)', listed)
+        self.assertIn('path.split(\'/\').none { it == "." || it == ".." }', listed)
+        stage = self.gradle[self.gradle.index('val stageBundledAssets = tasks.register<Sync>'):]
+        stage = stage[:stage.index("\n}\n")]
+        self.assertIn('include(demo.listed + "completion-manifest.json")', stage)
+        self.assertIn('into("app/demos/packages/${demo.dir.name}")', stage)
+        self.assertIn('"images/${demo.dir.name}.iso")) { into("app/demos/images") }', stage)
+        self.assertNotIn("from(root) {", stage)
 
     def test_every_file_a_package_lists_reaches_the_apk(self) -> None:
         """aapt leaves out names starting with "." or folders starting with "_" by default; a

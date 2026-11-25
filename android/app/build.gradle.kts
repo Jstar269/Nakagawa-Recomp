@@ -7,10 +7,12 @@
 // Properties (-P on the command line or ~/.gradle/gradle.properties; nothing machine-specific is
 // kept in the repository):
 //   nk.demos    a showcase demos folder (tests/fixtures/showcase/showcase.py build --target
-//               android writes it: packages/<disc>/, images/<disc>.iso, data/), bundled whole as
-//               demos/. The app unpacks it into its files folder, where the launcher's showcase
-//               discovery finds and validates it as it does on the desktop, and Play starts each
-//               package's own lib<game>.so. arm64-v8a only.
+//               android writes it: packages/<disc>/, images/<disc>.iso, THIRD_PARTY_NOTICES/),
+//               bundled as demos/: each package's completion-manifest.json and the files it
+//               lists, the disc images and the notices. The app unpacks it into its files folder,
+//               where the launcher's showcase discovery finds and validates it as it does on the
+//               desktop, and Play starts each package's own lib<game>.so. arm64-v8a only. The
+//               packages hold the build machine's paths: such an APK is a local build, never shared.
 //   nk.titles   <title-id>=<package-dir>[;...]  packages built on a PC whose generated C is
 //               compiled into libnk_title_<title-id>.so; each package's package.json and runtime
 //               image are bundled as titles/<title-id>/{package.json,<title-id>_image.bin}, for
@@ -95,7 +97,30 @@ fun elfMachine(file: File): Int? {
     return (header[18].toInt() and 0xff) or ((header[19].toInt() and 0xff) shl 8)
 }
 
-val demos: File? = (findProperty("nk.demos") as String?)?.let { File(it) }?.also { root ->
+/** An nk.demos package: its folder (packages/<disc>) and the files its completion manifest lists. */
+data class DemoPackage(val dir: File, val listed: List<String>)
+
+/** The files a package's completion-manifest.json lists, each a plain relative path to a file. */
+fun completionArtifacts(property: String, dir: File): List<String> {
+    val file = File(dir, "completion-manifest.json")
+    require(file.isFile) { "$property: $dir holds no completion-manifest.json; build the package there" }
+    val parsed = try {
+        groovy.json.JsonSlurper().parse(file)
+    } catch (e: Exception) {
+        throw IllegalArgumentException("$property: $file is not readable JSON: ${e.message}")
+    }
+    val artifacts = ((parsed as? Map<*, *>)?.get("artifacts") as? List<*>).orEmpty()
+        .map { (it as? Map<*, *>)?.get("path") as? String }
+    require(artifacts.isNotEmpty() && artifacts.all { it != null }) { "$property: $file lists no artifacts" }
+    return artifacts.filterNotNull().onEach { path ->
+        // Copied by name below: no pattern characters, no way out of the package folder.
+        require(Regex("[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*").matches(path) &&
+            path.split('/').none { it == "." || it == ".." }) { "$property: $file lists '$path'" }
+        require(File(dir, path).isFile) { "$property: $path, listed in $file, is missing; build the package again" }
+    }
+}
+
+val demoPackages: List<DemoPackage> = (findProperty("nk.demos") as String?)?.let { File(it) }?.let { root ->
     require(abis == listOf("arm64-v8a")) {
         "nk.demos packages are built for arm64-v8a only; set -Pnk.abis=arm64-v8a"
     }
@@ -103,7 +128,7 @@ val demos: File? = (findProperty("nk.demos") as String?)?.let { File(it) }?.also
     require(packages.isNotEmpty()) {
         "nk.demos '$root' holds no packages/<disc>; run showcase.py build --target android with that folder as NK_SHOWCASE_DEMO_ROOT"
     }
-    for (dir in packages) {
+    packages.map { dir ->
         val property = "nk.demos package ${dir.name}"
         val executable = packageExecutable(property, dir, readPackage(property, dir))
         require(executable.startsWith("lib") && executable.endsWith(".so") && !executable.contains('/')) {
@@ -115,8 +140,10 @@ val demos: File? = (findProperty("nk.demos") as String?)?.let { File(it) }?.also
         require(File(root, "images/${dir.name}.iso").isFile) {
             "nk.demos '$root' holds no images/${dir.name}.iso for package ${dir.name}"
         }
+        DemoPackage(dir, completionArtifacts(property, dir))
     }
-}
+}.orEmpty()
+val demos: File? = (findProperty("nk.demos") as String?)?.let { File(it) }
 val nativeTargets: List<String> =
     listOf("nakagawa_player", "SDL3-shared", "SDL3_ttf-shared") + titles.map { "nk_title_${it.id}" }
 val bundledAssets: File = layout.buildDirectory.dir("generated/nk-assets").get().asFile
@@ -146,8 +173,16 @@ val stageBundledAssets = tasks.register<Sync>("stageBundledAssets") {
         from(title.image) { into("app/titles/${title.id}"); rename { "${title.id}_image.bin" } }
         from(File(title.dir, "package.json")) { into("app/titles/${title.id}") }
     }
-    // Every file as the package's completion-manifest.json lists it: the launcher validates each.
-    demos?.let { root -> from(root) { into("app/demos") } }
+    // Each package's completion-manifest.json and exactly the files it lists (the launcher
+    // validates each), its disc image, and the demos' notices; nothing else under nk.demos.
+    demos?.let { root -> from(File(root, "THIRD_PARTY_NOTICES")) { into("app/demos/THIRD_PARTY_NOTICES") } }
+    for (demo in demoPackages) {
+        from(demo.dir) {
+            include(demo.listed + "completion-manifest.json")
+            into("app/demos/packages/${demo.dir.name}")
+        }
+        from(File(demo.dir.parentFile.parentFile, "images/${demo.dir.name}.iso")) { into("app/demos/images") }
+    }
 }
 
 android {
