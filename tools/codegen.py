@@ -4550,6 +4550,10 @@ def sv_points(elf, insns, labels, hst_profile=False, options=None):
         return {}
     if ENHANCEMENT_ACE_SITES and (insns & set(ENHANCEMENT_ACE_SITES.keys())):
         return {}
+    # A labelled delay slot's copy is skipped by its transfer's fall-through, which enters
+    # the next word with the slot run inline, annulled or followed by a call: a join, as a
+    # label is (the emitter's planned skip targets).
+    labels = set(labels) | set(_dup_slot_skips(elf, insns, labels).values())
     points, total = {}, 0
     regs: list[int | None] = [None] * 32
     regs[0] = 0
