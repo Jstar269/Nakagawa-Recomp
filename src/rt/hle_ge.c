@@ -446,6 +446,19 @@ static uint32_t h_GeListEnQueue(CpuState *s) {
         signal_stacks = MEM_R32(A3 + 8u);
         if (signal_stacks >= 256u) return 0x80000104u;   /* SCE_ERROR_INVALID_SIZE */
     }
+    /* A title compiled with SDK 2.00 or later may not enqueue a list whose address is already
+     * on the active queue (queued, stalled or paused), whichever mirror names it: the driver
+     * returns SCE_ERROR_BUSY before it takes a slot (uofw src/kd/ge/ge.c _sceGeListEnQueue,
+     * UCACHED compare; PPSSPP GPUCommon::EnqueueList agrees; UNMEASURED on a PSP). An older
+     * title's duplicate is queued. */
+    if (g_sdk_version > 0x01FFFFFFu) {
+        for (int i = 0; i < GE_LIST_MAX; i++) {
+            int st = s_ge_lists[i].status;
+            if ((st == GE_LIST_QUEUED || st == GE_LIST_STALLED || st == GE_LIST_PAUSED) &&
+                ((s_ge_lists[i].start_pc ^ list) & 0x0FFFFFFFu) == 0u)
+                return GE_ERROR_LIST_BUSY;
+        }
+    }
     int slot = ge_free_pop();
     uint32_t list_id = slot >= 0 ? ge_list_id(slot) : GE_ERROR_OUT_OF_MEMORY;
     SR_FLIGHT_RECORD_CLASS(SR_FLIGHT_CLASS_GE, SR_FLIGHT_KIND_GE_LIST_ENQUEUE,

@@ -39302,6 +39302,47 @@ static void test_ge_enqueue_refuses_misaligned_addresses(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* A title compiled with SDK 2.00 or later that enqueues a list whose address is already on
+ * the GE's active queue (queued, stalled or paused, ignoring the uncached mirror) gets
+ * SCE_ERROR_BUSY (0x80000021) and nothing is queued (uofw src/kd/ge/ge.c _sceGeListEnQueue
+ * compares UCACHED addresses; PPSSPP GPUCommon::EnqueueList returns 0x80000021 for SDK
+ * > 0x01FFFFFF; UNMEASURED on a PSP). An older title's duplicate is queued as before. Once the
+ * list has run to its END it has left the active queue, and the same address enqueues again. */
+static void test_ge_enqueue_busy_on_active_list(void) {
+    const uint32_t dl = 0x08928000u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(dl, 0x0f000000u);       /* FINISH */
+    MEM_W32(dl + 4u, 0x0c000000u);  /* END */
+
+    sr_hle_test_set_compiled_sdk_version(0x02080000u);
+    const uint32_t a = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl, 0xffffffffu, 0u);
+    expect(a == 0x35000000u && gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 3u,
+           "a list enqueued with an empty ring stalls at its start");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "SDK 2.00+: enqueueing the address of a stalled list is 0x80000021");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl | 0x40000000u, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "SDK 2.00+: the same list through the uncached mirror is 0x80000021 too");
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u,
+           "a refused duplicate takes no list slot");
+
+    expect(gsw_call(NID_SCE_GE_LIST_UPDATE_STALL_ADDR, a, dl + 8u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 0u,
+           "the stalled list runs to its END once its stall address moves");
+    const uint32_t b = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect((b & 0xff000000u) == 0x35000000u && b != a,
+           "a completed list has left the active queue: its address enqueues again");
+
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+    const uint32_t c = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl, 0xffffffffu, 0u);
+    const uint32_t d = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect(c == 0x35000000u && d == 0x35000040u && gsw_call(NID_SCE_GE_LIST_SYNC, d, 1u, 0u, 0u) == 1u,
+           "before SDK 2.00 a duplicate address is queued behind the stalled list");
+    sr_hle_test_ge_lists_reset();
+}
+
 /* A SIGNAL whose behaviour is JUMP (0x10), CALL (0x11), RET (0x12) or their relative (0x13,
  * 0x14) and origin (0x15, 0x16) forms, with the END after it, moves the list: the GE driver's
  * interrupt handler jumps, or saves the caller on the list's stack and calls, or returns
@@ -69646,6 +69687,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
     test_ge_enqueue_refuses_misaligned_addresses();
+    test_ge_enqueue_busy_on_active_list();
     test_ge_signal_jump_call_ret();
     test_ge_list_call_ret_faults_and_long_runs();
     test_ge_block_transfer_unmeasured_stride_is_named();
