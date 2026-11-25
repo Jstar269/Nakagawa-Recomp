@@ -494,6 +494,7 @@ static uint32_t io_read_payload(CpuState *s) {
     uint8_t tmp[4096];
     uint32_t done = 0;
     if (f->host && io_host_seek(f->host, f->off) != 0) return 0x80010005u;
+    if (f->host) clearerr(f->host);   /* an earlier write's error is not this read's */
     while (done < count) {
         uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
         if (f->host) { size_t got = fread(tmp, 1, n, f->host); if (got < n) n = (uint32_t)got; }
@@ -504,6 +505,13 @@ static uint32_t io_read_payload(CpuState *s) {
         for (uint32_t k = 0; k < n; k++) MEM_W8(dst + done + k, tmp[k]);
         done += n;
         if (n == 0) break;
+    }
+    /* fread stops short both at the end of the file and on a host error; only the first is
+     * the end of the guest's file. A failed host read answers the host I/O error with the
+     * position unchanged, never a short count the guest takes for the end. */
+    if (f->host && ferror(f->host)) {
+        clearerr(f->host);
+        return 0x80010005u;
     }
     if (f->host && perf_started)
         sr_perf_storage_read(SR_PERF_STORAGE_VFS, done, perf_started, done == count);

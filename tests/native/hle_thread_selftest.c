@@ -5302,6 +5302,59 @@ static void test_fd_namespace(void) {
             remove(full_host);
         }
     }
+    /* A host read that fails must not reach the guest as the end of the file. A directory
+     * opened as a stream fails every read (EISDIR); it stands in for the host stream of an
+     * ordinary three-byte ms0: file, and the production sceIoRead runs against it. The read
+     * answers the host I/O error and leaves the position where it was. */
+    {
+        char failing_host[256];
+        fd_host_path(failing_host, sizeof(failing_host), "ms0:/");
+        FILE *failing = fopen(failing_host, "rb");
+        if (!failing) {
+            printf("hle_thread_selftest: SKIP failing-read sceIoRead (a directory does not open)\n");
+        } else {
+            fd_set_path(&cpu, path_addr, "ms0:/NAKAGAWA_READ_ERROR.BIN");
+            uint32_t rd_fd = sr_hle_test_io_open(&cpu);
+            fd_guest_copy(payload_addr, "abc", 3u);
+            fd_set_write(&cpu, rd_fd, payload_addr, 3u);
+            expect(rd_fd < 64u && sr_hle_test_io_write(&cpu) == 3u,
+                   "the failing-read fixture holds three bytes");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rd_fd; cpu.r[5] = 0u; cpu.r[6] = 0u;   /* SEEK_SET 0 */
+            (void)sr_hle_test_io_lseek32(&cpu);
+            FILE *real_host = rd_fd < 64u ? sr_hle_test_io_replace_host(rd_fd, failing) : NULL;
+            if (real_host) {
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = rd_fd; cpu.r[5] = payload_addr + 0x40u; cpu.r[6] = 3u;
+                uint32_t failed_read = sr_hle_test_io_read(&cpu);
+                expect(failed_read == 0x80010005u,
+                       "sceIoRead answers the host I/O error when the host read fails");
+                if (failed_read != 0x80010005u)
+                    fprintf(stderr, "  failing-read sceIoRead: 0x%08x (want 0x80010005)\n",
+                            failed_read);
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = rd_fd; cpu.r[5] = 0u; cpu.r[6] = 1u;   /* SEEK_CUR */
+                expect(sr_hle_test_io_lseek32(&cpu) == 0u,
+                       "a failed host read leaves the position unchanged");
+                (void)sr_hle_test_io_replace_host(rd_fd, real_host);
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = rd_fd; cpu.r[5] = payload_addr + 0x40u; cpu.r[6] = 3u;
+                expect(sr_hle_test_io_read(&cpu) == 3u &&
+                           MEM_R8(payload_addr + 0x40u) == 'a' &&
+                           MEM_R8(payload_addr + 0x42u) == 'c',
+                       "the descriptor reads its bytes once the host read works again");
+            }
+            if (rd_fd < 64u) {
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = rd_fd;
+                (void)sr_hle_test_io_close(&cpu);
+            }
+            fclose(failing);
+            char rd_host[256];
+            fd_host_path(rd_host, sizeof(rd_host), "ms0:/NAKAGAWA_READ_ERROR.BIN");
+            remove(rd_host);
+        }
+    }
 #endif
 
     /* Standard descriptor operations */
