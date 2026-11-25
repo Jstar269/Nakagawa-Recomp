@@ -113,6 +113,32 @@ class StaticVerifyTests(unittest.TestCase):
             for reg, _ in checks:
                 self.assertNotEqual(reg, 4, f"r4 asserted after syscall at 0x{addr:x}")
 
+    def test_labelled_delay_slot_value_is_not_asserted_past_the_slot(self):
+        # 0x1000 lands on the delay slot of the beql at 0x1008. emit_function runs that slot
+        # inline at the beql (annulled when it is not taken) and jumps over its labelled copy
+        # to 0x1010 (_dup_slot_skips), so 0x1010 is reached without the copy having run: the
+        # lui's a2 is no constant there. The two words after the slot still form a run.
+        words = {
+            0x1000: (0x04 << 26) | (4 << 21) | 2,    # beq a0, zero, 0x100C
+            0x1004: 0,
+            0x1008: (0x14 << 26) | (5 << 21) | 5,    # beql a1, zero, 0x1020
+            0x100C: (0x0F << 26) | (6 << 16) | 0x1234,  # lui a2, 0x1234 (slot and label)
+            0x1010: (0x0D << 26) | (7 << 16) | 5,    # ori a3, zero, 5
+            0x1014: (0x0D << 26) | (8 << 16) | 6,    # ori t0, zero, 6
+            0x1018: 0x03E00008,
+            0x101C: 0,
+            0x1020: 0x03E00008,
+            0x1024: 0,
+        }
+        elf, insns, labels = _mk(words, labels={0x100C, 0x1020})
+        pts = codegen.sv_plan(elf, insns, labels, options=self.options)
+        self.assertEqual(pts, {0x1014: [(7, 5), (8, 6)]})
+        text = "\n".join(codegen.emit_function(elf, 0x1000, [(0x1000, 0x1028)], {0x1000},
+                                               options=self.options))
+        self.assertIn("goto L_00001010; /* slot already ran inline (or was annulled)", text)
+        self.assertNotIn("sr_sv_check(s, 0x00001014u, 6,", text)
+        self.assertIn("sr_sv_check(s, 0x00001014u, 7, 0x00000005u);", text)
+
     def test_disabled_by_default(self):
         words = {0x6000: (0x0F << 26) | (4 << 16) | 1,
                  0x6004: (0x0D << 26) | (4 << 21) | (4 << 16) | 2}
