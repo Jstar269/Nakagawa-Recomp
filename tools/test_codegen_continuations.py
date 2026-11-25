@@ -1129,7 +1129,7 @@ class StateResumeTests(unittest.TestCase):
             "       sr_begin(s, 0x0000101cu, 0x00000000u); (void)0; sr_end(s, 0u, 0);",
             "      if (_c) { if (sr_aot_return_boundary_begin(s, 0x00001020u, 0x00001018u, 1u)) return; "
             "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return; } }",
-            "    { uint32_t _sr_return_target = s->r[31];",
+            "    { uint32_t _sr_return_target = (s->r[31] & ~3u);",
             "      SR_AOT_RETURN_CAPTURE(s, _sr_return_target);",
             "      sr_begin(s, 0x00001020u, 0x03e00008u); sr_end(s, 0u, 0);",
             "    sr_begin(s, 0x00001024u, 0x00000000u); (void)0; sr_end(s, 0u, 0);",

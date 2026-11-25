@@ -385,7 +385,7 @@ MUTANTS: tuple[Mutant, ...] = (
             # spelled through the generator's address space, G(addr), which a
             # runtime-placed module translates base-relative.
             (
-                "    out.append(f\"    {{ uint32_t _t = {R(a)};\")\n"
+                "    out.append(f\"    {{ uint32_t _t = {emit_latched_target(a)};\")\n"
                 "    out.append(f\"      {emit_code_pointer_check('_t', addr)}\")\n"
                 "    out.append(f\"      sr_begin(s, {G(addr)}, 0x{w:08x}u); "
                 "{link}sr_end(s, 0u, 0);\")\n"
@@ -395,7 +395,7 @@ MUTANTS: tuple[Mutant, ...] = (
                 "{link}sr_end(s, 0u, 0);\")\n"
                 "    out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,\n"
                 "                                indent=\"      \", options=ctx.options))\n"
-                "    out.append(f\"    {{ uint32_t _t = {R(a)};\")\n"
+                "    out.append(f\"    {{ uint32_t _t = {emit_latched_target(a)};\")\n"
                 "    out.append(f\"      {emit_code_pointer_check('_t', addr)}\")",
                 1,
             ),
@@ -726,7 +726,7 @@ LLVM_MUTANTS: tuple[Mutant, ...] = (
         "llvm-computed-transfer-timing",
         "LLVM BACKEND: jalr/jr read their target after the delay slot (PR #126 regression)",
         [(
-            "            latched = self.R(t.target_reg)                     # PR #126: latched at the transfer\n"
+            "            latched = self.latched_target(t.target_reg)        # PR #126: latched at the transfer\n"
             "            self.code_pointer_check(latched, t.addr)\n"
             "            self.begin(t.addr, t.word)\n"
             "            if t.link_reg is not None:\n"
@@ -738,7 +738,7 @@ LLVM_MUTANTS: tuple[Mutant, ...] = (
             "                self.W(t.link_reg, link_value)\n"
             "            self.end()\n"
             "            self.instruction(_require_delay_slot(t))\n"
-            "            latched = self.R(t.target_reg)\n"
+            "            latched = self.latched_target(t.target_reg)\n"
             "            self.code_pointer_check(latched, t.addr)\n",
             1,
         )],

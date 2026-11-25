@@ -1636,14 +1636,20 @@ static SrGuestInterpCtl classify_control(
 
     if (primary == 0x00u) {
         const uint32_t funct = opcode & 0x3fu;
+        /* The PSP ignores bits 1:0 of a jr/jalr target: a jump to an aligned address + 1,
+         * + 2 or + 3 runs the aligned word, links next+0, and the PC carries no low bits
+         * (pspautotests e37443a6 tests/cpu/jump/unaligned.expected, recorded on a PSP:
+         * `ran=003`, `link=next+0`, `bal ra=next+0`). The latched target is the aligned
+         * one, so the null, ownership and return-boundary checks below judge that address,
+         * as generated code does (emit_latched_target in tools/codegen.py). */
         if (funct == 0x08u && (opcode & 0x001fffc0u) == 0u) {  /* jr rs */
-            out->target = read_gpr(s, rs);
+            out->target = read_gpr(s, rs) & ~3u;
             out->taken = 1;
             out->computed = 1;
             return SR_CTL_TRANSFER;
         }
         if (funct == 0x09u && (opcode & 0x001f07c0u) == 0u) {  /* jalr rd, rs */
-            out->target = read_gpr(s, rs);
+            out->target = read_gpr(s, rs) & ~3u;
             out->computed = 1;
             /* rd == 0 links nowhere; the generated code omits the write for the
              * same encoding, so the two lanes agree by construction. */
@@ -1956,7 +1962,9 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
             /* The branch owns its delay slot: the AOT tier is NOT reconsulted at
              * pc+4, and a handoff is permitted only once the slot has completed.
              * A control transfer inside the slot is rejected by the executor
-             * before any effect is applied. */
+             * before any effect is applied. No decoded form has a misaligned target
+             * (classify_control clears bits 1:0 of a jr/jalr one); this stays the
+             * floor's check on that. */
             if (transfer.taken && (transfer.target & 3u) != 0u) {
                 set_fault(fault, pc, opcode, transfer.target, 1);
                 return SR_GUEST_INTERP_MISALIGNED_PC;

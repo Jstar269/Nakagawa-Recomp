@@ -1237,19 +1237,18 @@ class PublicFixtureTest(unittest.TestCase):
     # the existing cells. On the old inputs, both codegens produce identical files.
     # On the expanded inputs, the only codegen difference is in the relocated PRX:
     # the new JAL keeps its link write and slot but has no synthetic callee at its link.
-    # #3031 adds an `mfhi v0` after the muldiv cell's INT_MIN / -1 div, so every later cosim
-    # address moves by four bytes. On that same input, main's codegen and this one differ only
-    # in the three div lines' overflow branch, which now writes `s->hi=0u` for
-    # `s->hi=0xFFFFFFFFu`.
+    # Every digest changes because a jr/jalr latches its target with bits 1:0 clear, as the PSP
+    # runs it (`_t = (s->r[N] & ~3u)`, codegen.emit_latched_target); nothing else in any output
+    # differs. The cosim guest also gains the jrlow cells.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "6645951c37c9ae4ee578d3d6e7033ff28f93cea259e5361229c9a973caaf4614",
-        ("cosim", "exec"): "7fcdd2b3ad308bd182f2778449bff5573be6e22f88bd6786528c3887461c7a74",
-        ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
-        ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
-        ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",
-        ("production_smoke", "exec"): "acbdb8137bd7571cb89a9e869887a5a0b23358bf2d2d66cc31debf08d2871cfe",
-        ("snapshot", "prx"): "de84e29d48cb0dc50af0e01b629164536e0891d9c92dbd9dfd41c7c8e9c91d17",
-        ("snapshot", "exec"): "690e7881258920bc57859594e9b8a1c119fbc830ac9466a849a55f40504e4fb2",
+        ("cosim", "prx"): "73dff4be0b837917f9ff99c1278d89611aea86deefb6dd0ab6d5b17cd7c4f4ad",
+        ("cosim", "exec"): "2f5e936f75b32b85aec2d783107dfdf885cdee7a2052d6f17b5f9233719c0d72",
+        ("display_smoke", "prx"): "9d003fad6b10ceb2246b75b9fd15a1f9da009f9da2769e69b4c117c9dfa2dce2",
+        ("display_smoke", "exec"): "bf16654d5c6c04009194ebd52145c9392b773760e9e920fc7f08f1957d40201e",
+        ("production_smoke", "prx"): "d7708c6c84d4e8bf47988cce66ebee1223435360883b268e49d2feac7333197d",
+        ("production_smoke", "exec"): "77bb5eda3e87d99152eca0029c6eee04316bb7c74888c2519accc1c318e2b2cf",
+        ("snapshot", "prx"): "f8c8e950be519899c4af93669f577cf09ce9ea1e0fd9debaaca500132b3b8916",
+        ("snapshot", "exec"): "ee5e1de99992d161d56a98ea21c305ea457dfe4a6c463d7830efae1189e1d4b0",
     }
 
     def test_generated_output_is_byte_identical_to_main(self):

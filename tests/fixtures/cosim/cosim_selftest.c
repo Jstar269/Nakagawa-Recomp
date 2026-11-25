@@ -1307,6 +1307,38 @@ static int run_case(const CosimCase *test, const char *trace_dir) {
             expect_lane_word(test, lane, "original sp", lane->state.r[29], COSIM_STACK, &failed);
             expect_lane_word(test, lane, "original ra", lane->state.r[31], COSIM_RETURN, &failed);
         }
+    } else if (strcmp(test->name, "jrlow") == 0 || strcmp(test->name, "jrlowx") == 0 ||
+               strcmp(test->name, "jrlowtail") == 0) {
+        /* The PSP ignores bits 1:0 of a jr/jalr target (pspautotests e37443a6
+         * tests/cpu/jump/unaligned.expected, recorded on a PSP): the entry's first word runs
+         * (`ran=003`), the link is the jalr's own (`link=next+0`) and the PC the callee runs
+         * at carries no low bits (`bal ra=next+0`). $t0 keeps the target as the guest formed
+         * it, so its low bits show the cell really transferred to an unaligned address. */
+        const int tail = strcmp(test->name, "jrlowtail") == 0;
+        const uint32_t low_bits = tail ? 3u : strcmp(test->name, "jrlow") == 0 ? 2u : 1u;
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned li = 0u; li < 2u; li++) {
+            const CosimLane *lane = lanes[li];
+            const uint32_t entry = lane->state.r[8] & ~3u;
+            expect_lane_word(test, lane, "target low bits", lane->state.r[8] & 3u, low_bits,
+                             &failed);
+            if (tail) {
+                expect_lane_word(test, lane, "leaf A marker", lane->state.r[3], 0x00a1u, &failed);
+                expect_lane_word(test, lane, "leaf A ran once", lane->state.r[2], 0x10u, &failed);
+                expect_lane_word(test, lane, "leaf A return address", lane->state.r[5],
+                                 COSIM_RETURN, &failed);
+                continue;
+            }
+            expect_lane_word(test, lane, "leaf marker", lane->state.r[17], 0x00c3u, &failed);
+            expect_lane_word(test, lane, "slot, leaf and one continuation", lane->state.r[2],
+                             0x131u, &failed);
+            expect_lane_word(test, lane, "jalr link (next+0)", lane->state.r[6],
+                             test->address + 0x1cu, &failed);
+            expect_lane_word(test, lane, "bal link in the leaf (next+0)", lane->state.r[7],
+                             entry + 0x14u, &failed);
+            expect_lane_word(test, lane, "return address with bits 1:0 set", lane->state.r[10],
+                             (test->address + 0x1cu) | 3u, &failed);
+        }
     } else if (strcmp(test->name, "xcall") == 0) {
         expect_lane_word(test, &aot, "float result from f12 in f0", aot.state.r[16],
                          aot.state.fi[12], &failed);
@@ -1953,6 +1985,54 @@ static int run_link_register_shape(void) {
     return failures;
 }
 
+/* What a jr still refuses once bits 1:0 of its target are cleared. The jrlow cells prove
+ * the PSP rule (pspautotests e37443a6 tests/cpu/jump/unaligned.expected, recorded on a
+ * PSP); here the cleared target is a bad one, so the refusal names what is wrong with the
+ * aligned address and not its low bits. */
+static int run_jr_low_bit_refusals(void) {
+    static const struct {
+        const char *name;
+        uint32_t target;
+        SrGuestInterpResult result;
+        uint32_t fault_pc;
+    } cases[] = {
+        { "unowned + 2", (uint32_t)COSIM_UNOWNED + 2u, SR_GUEST_INTERP_NOT_EXECUTABLE,
+          (uint32_t)COSIM_UNOWNED },
+        { "null + 3", 3u, SR_GUEST_INTERP_NULL_CODE_POINTER, (uint32_t)COSIM_NEGPAD },
+    };
+    int failures = 0;
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        install_lane(0);
+        seed_window();
+        MEM_W32(COSIM_NEGPAD + 0u, enc_r(8u, 0u, 0u, 0u, 0x08u));     /* jr $t0 */
+        MEM_W32(COSIM_NEGPAD + 4u, 0u);
+        MEM_W32(COSIM_NEGPAD + 8u, enc_r(0u, 0u, 0u, 0u, 0x0Du));     /* break sentinel */
+
+        CpuState state;
+        CosimCase seed = { "jrlowrefuse", 0u, 0u, "jr low-bit refusal", 0u, 0u, NULL };
+        seed_state(&state, &seed);
+        state.r[8] = cases[i].target;
+        SrGuestInterpFault fault;
+        memset(&fault, 0, sizeof fault);
+        s_cpu = &state;
+        const SrGuestInterpResult result =
+            sr_guest_interp_run(&state, (uint32_t)COSIM_NEGPAD, &fault);
+        s_cpu = NULL;
+        if (result != cases[i].result || fault.pc != cases[i].fault_pc) {
+            fprintf(stderr, "COSIM JRLOW FAIL: jr to %s (0x%08x): result=%s at 0x%08x, "
+                    "expected %s at 0x%08x" NEWLINE, cases[i].name, cases[i].target,
+                    sr_guest_interp_result_name(result), fault.pc,
+                    sr_guest_interp_result_name(cases[i].result), cases[i].fault_pc);
+            failures++;
+        }
+    }
+    if (failures == 0) {
+        fprintf(stderr, "cosim: jr low-bit refusals OK (an unowned target and a null one "
+                "stop by name once bits 1:0 are cleared)" NEWLINE);
+    }
+    return failures;
+}
+
 /* ---- behavioral form census ----------------------------------------------------- */
 /*
  * "Every form the interpreter implements exists because a cell executes it" was
@@ -2220,6 +2300,7 @@ static int run_negative_corpus(void) {
     }
     g_negative_failures += run_control_encoding_sweep();
     g_negative_failures += run_link_register_shape();
+    g_negative_failures += run_jr_low_bit_refusals();
     g_negative_failures += run_form_census();
     return g_negative_failures;
 }
