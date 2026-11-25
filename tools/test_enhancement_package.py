@@ -930,6 +930,105 @@ class _SynthTimingElfFixture(unittest.TestCase):
 class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
     """Verify authentic byte-identity, all 6 transform classes, fail-closed digest rejection, and AOT cache epoch."""
 
+    def test_timing_run_identity_observes_generated_startup(self) -> None:
+        """Run separately compiled synthetic startup registrations and the real diagnostic."""
+        if GCC is None:
+            self.skipTest("TOOLCHAIN_MISSING: needs a host compiler to run generated startup")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            elf_path = root / "fixture.elf"
+            elf = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+            package, symbols = self._make_package_and_symbols(elf)
+            harness = root / "startup.c"
+            harness.write_text(
+                '#include "recomp.h"\n'
+                'void sr_register_all(void);\n'
+                'void sr_register_chunk_0(void) {}\n'
+                'void sr_exec_span_reset(void) {}\n'
+                'int sr_exec_span_register(uint32_t start, uint32_t end) { return end > start; }\n'
+                'void sr_enhancement_register_updates(const volatile uint32_t *counter) { (void)counter; }\n'
+                'int main(void) { sr_register_all(); return 0; }\n',
+                encoding="ascii",
+            )
+
+            def build(name, revision, declaration=None, *, symbol_indent=None):
+                out = root / name
+                out.mkdir()
+                flags = [f"--record-timing-identity=TEST30340:{revision}"] if revision else []
+                if declaration is not None:
+                    package_path = out / "timing.json"
+                    package_path.write_text(json.dumps(declaration), encoding="utf-8")
+                    package_path.with_suffix(".symbols.json").write_text(
+                        json.dumps(symbols, indent=symbol_indent), encoding="utf-8")
+                    flags.append(f"--enhancement-package={package_path}")
+                rc, log, _ = self._run_codegen(elf_path, out / "out.c", flags)
+                self.assertEqual(rc, 0, log)
+                exe = out / "startup.exe"
+                compiler = _run([
+                    GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(ROOT / "src/rt"),
+                    "-I", str(ROOT / "src/core"), "-o", str(exe), str(harness), str(out / "out.c"),
+                    str(ROOT / "src/core/nk_shared_helpers.c"),
+                ], capture_output=True, text=True)
+                self.assertEqual(compiler.returncode, 0, compiler.stderr)
+                return exe
+
+            def observe(exe, name, setting):
+                event_file = root / f"{name}.events"
+                env = {**os.environ, "SR_EXPERIMENTAL_60HZ": setting, "SR_BOOT_EVENT_FILE": str(event_file)}
+                run = _run([str(exe)], env=env, check=True, capture_output=True, text=True)
+                if not event_file.exists():
+                    # The legacy generated registration writes its ordinary stderr
+                    # progress, but has no timing observation to send to the boot file.
+                    event_file.write_text(run.stderr, encoding="utf-8")
+                result = _run([
+                    sys.executable, "-B", str(ROOT / "tools/enhancement_package.py"),
+                    "--inspect-timing-run", str(event_file),
+                ], check=True, capture_output=True, text=True)
+                return json.loads(result.stdout)
+
+            stock = build("stock", "1.00")
+            timed = build("timed", "1.00", package)
+            legacy = build("legacy", None)
+            revision = build("other-revision", "1.01")
+            changed = build("changed-declaration", "1.00", dict(package, version="1.1.0"))
+            changed_symbols = build("changed-sidecar", "1.00", package, symbol_indent=2)
+            mismatched = build("mismatched-declaration", "1.01", package)
+
+            stock_identity = observe(stock, "stock", "1")
+            self.assertEqual(stock_identity, {
+                "status": "observed", "mode": "stock", "disc_id": "TEST30340", "disc_version": "1.00",
+                "executable_sha256": hashlib.sha256(elf).hexdigest(),
+            })
+            inactive = observe(timed, "timed-off", "0")
+            active = observe(timed, "timed-on", "1")
+            self.assertEqual(inactive, dict(active, mode="stock"))
+            self.assertEqual(active, {
+                **stock_identity, "mode": "timing", "declaration_id": package["id"],
+                "declaration_sha256": enhancement_package.compute_package_digest(validate_package(package)),
+                "symbol_map_sha256": hashlib.sha256(json.dumps(symbols).encode()).hexdigest(),
+            })
+            self.assertEqual(observe(legacy, "legacy", "1"), {"status": "unavailable"})
+            self.assertEqual(observe(mismatched, "mismatched", "1"), {"status": "unavailable"})
+            self.assertEqual(observe(revision, "revision", "1"), dict(stock_identity, disc_version="1.01"))
+
+            newer = observe(changed, "changed", "1")
+            self.assertEqual(newer["declaration_id"], active["declaration_id"])
+            self.assertNotEqual(newer["declaration_sha256"], active["declaration_sha256"])
+            other_symbols = observe(changed_symbols, "other-symbols", "1")
+            self.assertEqual(other_symbols["declaration_sha256"], active["declaration_sha256"])
+            self.assertNotEqual(other_symbols["symbol_map_sha256"], active["symbol_map_sha256"])
+
+            event_text = (root / "timed-on.events").read_text(encoding="utf-8")
+            for name, text in (
+                ("two launches", event_text * 2),
+                ("truncated record", event_text + "BOOT_EVENT phase=timing_package"),
+                ("program replaced", event_text + "BOOT_EVENT phase=loadexec_restart\n"),
+            ):
+                with self.subTest(name=name):
+                    ambiguous = root / "ambiguous.events"
+                    ambiguous.write_text(text, encoding="utf-8")
+                    self.assertEqual(enhancement_package.inspect_timing_run(ambiguous), {"status": "unavailable"})
+
     def test_authentic_mode_output_and_transforms_and_fail_closed_digest(self) -> None:
         """Verify authentic output stays untouched, all 6 transforms apply when enabled, and 1 wrong digest fails closed."""
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -73,6 +73,10 @@ class CodegenOptions:
     # (they were untranslatable) and emit helper calls in both modes.
     lle_cpu: bool = False
 
+    # The validated disc identity from the normal native package builder. An absent
+    # option preserves existing codegen callers' original output.
+    timing_run_identity: tuple[str, str] | None = None
+
     # LLE import seam (PR 3): when True, generated import stubs route through
     # sr_import_call(s, nid, stub_pc) instead of calling sr_syscall(s, nid)
     # directly, so the stub honors the per-domain HLE/LLE selection in
@@ -6507,6 +6511,7 @@ def _command_line_parser():
     parser.add_argument("--omit-aot", action="append", default=[], metavar="ADDR[,ADDR...]",
                         help="leave these entries to the dispatcher instead of direct C calls")
     value("--enhancement-package", "enhancement package to apply")
+    value("--record-timing-identity", "observe native startup timing for a verified DISC_ID:DISC_VERSION")
     value("--code-hook-package", "a guest_memory_code_hook package applied beside --enhancement-package")
     value("--enhancement-data-root", "the title's extracted files, for package data_files")
     value("--region-split-threshold", "split regions at this many conditional edges, or off")
@@ -6762,6 +6767,11 @@ def _apply_options(cli, checked, options):
     The options are set only once every option has been accepted. Each default (the switch absent)
     reproduces the historical output byte for byte.
     """
+    if cli.record_timing_identity is not None:
+        disc_id, _, disc_version = cli.record_timing_identity.partition(":")
+        if enhancement_package.timing_disc_identity(disc_id, disc_version) is None:
+            raise _Refusal(2, "--record-timing-identity expects DISC_ID:DISC_VERSION\n")
+        options.timing_run_identity = disc_id, disc_version
     if cli.static_verify:
         options.static_verify = True
     if cli.lle_cpu:
@@ -6799,7 +6809,7 @@ def _apply_options(cli, checked, options):
 
 def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, data_root,
                         read_words, read_loaded_data):
-    """The validated package and the {symbol: address} map its sites resolve through.
+    """The validated package, the resolved symbols and any effective adjacent sidecar digest.
 
     A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only through its own
     site map, after its keyed digests match this executable. A private one uses the ELF's own
@@ -6808,11 +6818,13 @@ def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, 
     """
     from pathlib import Path
     if enhancement_package.is_published_package(pkg_validated):
-        return enhancement_package.resolve_published_package(
+        resolved, sym_map = enhancement_package.resolve_published_package(
             pkg_validated, executable=elf.data, read_words_fn=read_words,
             read_data_fn=read_loaded_data, data_root=data_root,
         )
+        return resolved, sym_map, None
     sym_map = enhancement_package.extract_elf_func_symbols(elf)
+    sidecar_digest = None
     if symbol_map_path is not None:
         # The guest symbol map names the package's sites too, in place of the
         # <package>.symbols.json sidecar.
@@ -6820,8 +6832,9 @@ def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, 
     else:
         sidecar = Path(pkg_path).with_suffix(".symbols.json")
         if sidecar.is_file():
-            sym_map.update(enhancement_package.load_symbol_map(sidecar))
-    return pkg_validated, sym_map
+            sidecar_symbols, sidecar_digest = enhancement_package.load_symbol_map_with_digest(sidecar)
+            sym_map.update(sidecar_symbols)
+    return pkg_validated, sym_map, sidecar_digest
 
 
 def _refuse_uncallable_control_sites(sites):
@@ -6880,7 +6893,7 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
         raise enhancement_package.EnhancementPackageError(
             f"code-hook package {pkg['id']!r}: target_title_id {pkg['target_title_id']!r} is not "
             f"the enhancement package's {enhancement_pkg['target_title_id']!r} (fail-closed refusal)")
-    pkg, sym_map = _package_symbol_map(elf, pkg, code_hook_pkg_path, symbols, symbol_map_path, None,
+    pkg, sym_map, _ = _package_symbol_map(elf, pkg, code_hook_pkg_path, symbols, symbol_map_path, None,
                                        read_words, read_loaded_data)
     sites = enhancement_package.verify_and_resolve_sites(
         pkg,
@@ -6980,11 +6993,13 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
         try:
             pkg_raw = enhancement_package.load_package(enhancement_pkg_path)
             pkg_validated = enhancement_package.validate_package(pkg_raw)
+            declaration_digest = enhancement_package.compute_package_digest(pkg_validated)
+            declaration_disc_id = pkg_validated.get("disc_id")
             elf_sha256 = hashlib.sha256(elf.data).hexdigest()
             # Instruction words as codegen reads them, and initialised data as the loader
             # places it (enhancement_package.elf_readers).
             _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
-            pkg_validated, sym_map = _package_symbol_map(
+            pkg_validated, sym_map, sidecar_digest = _package_symbol_map(
                 elf, pkg_validated, enhancement_pkg_path, symbols, symbol_map_path,
                 enhancement_data_root, _read_words, _read_loaded_data)
 
@@ -7051,6 +7066,11 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 "version": pkg_validated["version"],
                 "epoch": enhancement_package.AOT_ENHANCEMENT_PACKAGE_EPOCH,
                 "digest": enhancement_package.compute_package_digest(pkg_validated),
+                "declaration_digest": declaration_digest,
+                "disc_id": declaration_disc_id,
+                "game_version": pkg_validated.get("game_version"),
+                "timing": pkg_validated["category"] == "timing_frame_presentation",
+                "symbol_map_sha256": sidecar_digest,
                 "sites_count": len(ENHANCEMENT_SITES),
                 "data_sites_count": len(ENHANCEMENT_DATA_PATCHES),
                 "data_files_count": len(ENHANCEMENT_DATA_FILES),
@@ -7154,6 +7174,27 @@ def _symbol_names(symbol_map_path, name_imports, symbols, import_nids, emitted, 
     return renames, symbol_table
 
 
+def _timing_run_observation(elf, identity):
+    """Emit only observations tied to the verified primary image's startup."""
+    if identity is None:
+        return []
+    disc_id, disc_version = identity
+    package = ENHANCEMENT_PKG_META
+    timing = package is not None and package["timing"]
+    if timing and (package["game_version"] != disc_version
+                   or package["disc_id"] not in (None, disc_id)):
+        # Preserve launch semantics for existing local declarations, but don't
+        # report a mismatched declaration as an observed timing identity.
+        return []
+    declaration_id = package["id"] if timing else "-"
+    declaration_digest = package["declaration_digest"] if timing else "-"
+    symbols = (package["symbol_map_sha256"] or "-") if timing else "-"
+    mode = "nk_enhancement_on()" if timing else "0"
+    facts = (disc_id, disc_version, hashlib.sha256(elf.data).hexdigest(),
+             declaration_id, declaration_digest, symbols)
+    return [f"    nk_shared_timing_run_observed({mode}, {', '.join(c_string(value) for value in facts)});"]
+
+
 def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resume_owners, dispatch_boundaries,
                         *, stack_census, module_translations, symbol_table, module_record, main_var_imports,
                         main_var_exports, main_func_exports, fixed_var_imports, exec_spans, stale_funcs,
@@ -7170,6 +7211,9 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
         "#include <stdio.h>",
         ""
     ]
+    timing_run_observation = _timing_run_observation(elf, options.timing_run_identity)
+    if timing_run_observation:
+        main_out.extend(('#include "nk_shared_helpers.h"', ""))
     if ENHANCEMENT_PKG_META is not None:
         main_out.append(
             f"/* AOT Enhancement Epoch: {ENHANCEMENT_PKG_META['epoch']} "
@@ -7324,6 +7368,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     main_out.append(f'    fprintf(stderr, "sr_register_all: starting {len(emitted)} registrations\\n");')
     for i in range(num_files):
         main_out.append(f"    sr_register_chunk_{i}();")
+    main_out.extend(timing_run_observation)
     main_out.append('    fprintf(stderr, "sr_register_all: completed\\n");\n}')
     return main_out
 

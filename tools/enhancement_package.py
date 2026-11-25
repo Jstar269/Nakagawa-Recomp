@@ -1356,13 +1356,28 @@ def extract_elf_symbol_names(elf: Any) -> set[str]:
     return names
 
 
+def _symbol_map_bytes(path: Path) -> bytes:
+    if not path.is_file():
+        raise EnhancementPackageError(f"Symbol map file not found: {path}")
+    return path.read_bytes()
+
+
 def load_symbol_map(path: Path | str) -> dict[str, int]:
     """Load an optional sidecar symbol map JSON (mapping symbolic function name -> vaddr)."""
     sym_path = Path(path)
-    if not sym_path.is_file():
-        raise EnhancementPackageError(f"Symbol map file not found: {sym_path}")
+    return _parse_symbol_map(sym_path, _symbol_map_bytes(sym_path))
+
+
+def load_symbol_map_with_digest(path: Path | str) -> tuple[dict[str, int], str]:
+    """Bind the SHA-256 to the same sidecar bytes that supply the compiled symbols."""
+    sym_path = Path(path)
+    data = _symbol_map_bytes(sym_path)
+    return _parse_symbol_map(sym_path, data), hashlib.sha256(data).hexdigest()
+
+
+def _parse_symbol_map(sym_path: Path, data: bytes) -> dict[str, int]:
     try:
-        raw = json.loads(sym_path.read_text(encoding="utf-8"))
+        raw = json.loads(data.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise EnhancementPackageError(f"Failed to parse symbol map JSON {sym_path}: {exc}") from exc
     if not isinstance(raw, dict):
@@ -5058,9 +5073,57 @@ def _publish_main(args: argparse.Namespace) -> int:
     return 0
 
 
+def timing_disc_identity(disc_id: object, disc_version: object) -> str | None:
+    """Return the Make-safe identity of a revision, only when both disc facts are known."""
+    if (isinstance(disc_id, str) and DISC_ID_RE.fullmatch(disc_id)
+            and isinstance(disc_version, str) and DISC_VERSION_RE.fullmatch(disc_version)):
+        return f"{disc_id}:{disc_version}"
+    return None
+
+
+_TIMING_RUN_PREFIX = "BOOT_EVENT phase=timing_package"
+_TIMING_RUN_PATTERN = re.compile(
+    _TIMING_RUN_PREFIX
+    + r" mode=(?P<mode>stock|timing) disc_id=(?P<disc_id>[A-Z]{4}[0-9]{5}) "
+    + r"disc_version=(?P<disc_version>[0-9]{1,2}\.[0-9]{2}) "
+    + r"executable_sha256=(?P<executable_sha256>[0-9a-f]{64}) "
+    + r"declaration_id=(?P<declaration_id>-|[a-z0-9][a-z0-9._-]{0,63}) "
+    + r"declaration_sha256=(?P<declaration_sha256>-|[0-9a-f]{64}) "
+    + r"symbol_map_sha256=(?P<symbol_map_sha256>-|[0-9a-f]{64})(?: t_ns=[0-9]+)?"
+)
+
+
+def inspect_timing_run(path: Path) -> dict[str, Any]:
+    """Read one normal native run log, with no inference from the package or launcher settings."""
+    unavailable = {"status": "unavailable"}
+    observation: dict[str, str] | None = None
+    with path.open(encoding="utf-8", errors="replace") as log:
+        for raw in log:
+            if raw.startswith("BOOT_EVENT phase=loadexec_restart"):
+                return unavailable
+            if not raw.startswith(_TIMING_RUN_PREFIX):
+                continue
+            match = _TIMING_RUN_PATTERN.fullmatch(raw.rstrip("\r\n"))
+            if observation is not None or match is None:
+                return unavailable
+            observation = match.groupdict()
+            has_declaration = observation["declaration_id"] != "-"
+            if has_declaration != (observation["declaration_sha256"] != "-"):
+                return unavailable
+            if not has_declaration and (
+                observation["mode"] != "stock" or observation["symbol_map_sha256"] != "-"
+            ):
+                return unavailable
+    if observation is None:
+        return unavailable
+    return {"status": "observed", **{key: value for key, value in observation.items() if value != "-"}}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Nakagawa enhancement package declarations.")
     parser.add_argument("packages", nargs="*", type=Path, help="Package JSON files to validate.")
+    parser.add_argument("--inspect-timing-run", type=Path, metavar="RUN_LOG",
+                        help="Read observed timing inputs from one local native run log as JSON.")
     draft = parser.add_argument_group("draft a 60 Hz package from a title's executable")
     draft.add_argument("--draft", type=Path, metavar="ELF",
                        help="Decrypted executable (for example the package cache's selected.elf).")
@@ -5090,6 +5153,15 @@ def main(argv: list[str] | None = None) -> int:
     publish.add_argument("--disc-version", help="The disc version (PARAM.SFO DISC_VERSION), for example 1.01.")
     publish.add_argument("--data-root", type=Path, help="The title's extracted files, for data_files.")
     args = parser.parse_args(argv)
+    if args.inspect_timing_run is not None:
+        if args.packages or args.publish is not None or args.compare_rates is not None or args.draft is not None:
+            parser.error("--inspect-timing-run is inspected on its own")
+        try:
+            print(json.dumps(inspect_timing_run(args.inspect_timing_run), sort_keys=True))
+        except OSError as exc:
+            print(f"timing run: cannot read log: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if args.publish is not None:
         if args.elf is None or not args.disc_id or not args.disc_version or args.out is None:
             parser.error("--publish needs --elf, --disc-id, --disc-version and --out")

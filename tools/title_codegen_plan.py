@@ -2525,8 +2525,16 @@ def build_package(
             if arg.startswith("--extra-elf=")
         ]
         link_map = build_workspace / f"{selected_name}.map"
+        import enhancement_package
         import nk_powershell
         build_environment = nk_powershell.powershell_env(os.environ)
+        codegen_user_args = os.environ.get("CODEGEN_USER_ARGS", "")
+        # The AOT cache key already binds this independently verified title input identity.
+        if title_input_identity_file is not None:
+            disc = title_input_identity["disc"]
+            timing_identity = enhancement_package.timing_disc_identity(disc["id"], disc["disc_version"])
+            if timing_identity is not None:
+                codegen_user_args = f"{codegen_user_args} --record-timing-identity={timing_identity}".strip()
         # The optimization the cache key above names is what Make compiles with.
         build_environment.update(
             package_cache.package_optimization(build_environment)
@@ -2551,7 +2559,7 @@ def build_package(
                 if plan["codegen_profile"] != "none"
                 else ""
             ),
-            "CODEGEN_USER_ARGS": os.environ.get("CODEGEN_USER_ARGS", ""),
+            "CODEGEN_USER_ARGS": codegen_user_args,
             "LINK_MAP": link_map.as_posix(),
             "PUBLIC_SAFE": "1",
             "NK_AOT_PREGENERATED": "1" if pregenerated else "0",
