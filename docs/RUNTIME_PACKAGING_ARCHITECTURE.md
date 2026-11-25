@@ -729,24 +729,22 @@ written over, and registry load makes no other write.
 
 ### Flags and environment variables
 
-The code table is authoritative: a player option exists only when it is in
-`k_player_cli_options` (`src/player/main.c:4345-4384`); `--help` prints that
-table, and `player_cli_normalize` checks the whole command line against it
-before anything else reads it (`src/player/main.c:4406-4463`). The classes below
-define the stability policy. Add each new option to the code table and give it
-a class here.
+The player defines its options in `k_player_cli_options` in
+`src/player/main.c`. The help command prints the visible entries, and
+`player_cli_normalize` validates arguments against the same table. Add each new
+option to the table and assign it a stability class below.
 
 | Class | Options | Contract and source |
 | --- | --- | --- |
-| Stable user-facing, printed in `--help` | `--help`, `--version`, `--user-data-root`, `--iso`, `--stage`, `--stage-only`, `--launch-now`, `--launch-title`, `--launch-index`, `--runtime-root`, `--manifest-overlay`, `--experimental-60hz`, `--cheats`, `--cheats-file` | These are the flags a person or launcher may write. `--launch-title` is what Add to Steam writes (`docs/SETUP.md:321-324`), and `--user-data-root` moves the whole per-user folder (`docs/SETUP.md:868-872`). |
+| Stable user-facing, printed in `--help` | `--help`, `--version`, `--user-data-root`, `--iso`, `--stage`, `--stage-only`, `--launch-now`, `--launch-title`, `--launch-index`, `--runtime-root`, `--manifest-overlay`, `--experimental-60hz`, `--cheats`, `--cheats-file` | These are the flags a person or launcher may write. Add to Steam writes `--launch-title` into the shortcut. An explicit `--user-data-root` selects the per-user folder. See [Start a game from another launcher](SETUP.md#start-a-game-from-another-launcher). |
 | Documented QA, capture and scripted-run flags | `--screenshot`, `--headless-launch`, `--headless-accept-presented-frames`, `--headless-timeout-ms` | `--screenshot` and `--headless-launch` appear in `--help`. The two acceptance options have `help == NULL`. [Title testing](TITLE_TESTING.md) describes the QA and capture routes. These flags may change without the notice period for stable user-facing options. |
 | Hidden but accepted | `--runtime-bin`, `--view`, `--width`, `--height`, `--render-scale`, `--demo`, `--empty`, `--wizard` | `help == NULL` in the same table. `--runtime-bin` is the old spelling of `--runtime-root`; the others are harness or launcher internals, not a user contract. |
 | Removed, kept as a tombstone | `--ui <ignored>` | Retained in `k_player_cli_options` in `src/player/main.c` so shortcuts made before removal can still pass `--ui=next`. |
 | Compile-gated test options | `--ui-test-events`, `--ui-test-screenshot`, `--ui-test-error-code`, `--ui-test-iso-path`, `--ui-test-wait-background`, `--ui-test-catalog-reload-path`, `--ui-test-catalog-reload-count` | `k_player_cli_options` in `src/player/main.c` includes these only with `NK_PLAYER_UI_REGRESSION_TEST`. |
 
-A command line that names an unknown option, leaves a stray argument, omits a
-value, or gives a value to a switch is refused by name and exits 2; nothing is
-ignored in silence (`src/player/main.c:4414-4462`; the exit code is stated at `:4331-4333`).
+`player_cli_normalize` rejects an unknown option, a stray argument, a missing
+value or a value supplied to a switch. The `cli_good` check in `main` prints
+the diagnostic and returns exit code 2 (`src/player/main.c`).
 Stable user-facing flags follow the notice policy below. Hidden and test flags
 may change or disappear. The current legacy spellings have their own behavior.
 `--runtime-bin` still names the runtime root, and `--ui=next` is accepted with
