@@ -4283,6 +4283,71 @@ static void test_memstick_layout(const char *base, char sep) {
     nk_memstick_layout_free(NULL);
 }
 
+static void test_developer_executable_path_fit(const char *base, const char *iso_path) {
+    static NkLaunchSession session;
+    NkGameEntry game;
+    char absolute_base[NK_MAX_PATH], container[NK_MAX_PATH], root[NK_MAX_PATH];
+    char build_directory[NK_MAX_PATH + 20], fitting_path[NK_MAX_PATH + 40];
+    char overlong_path[NK_MAX_PATH + 48];
+    const char sep = nk_platform_path_separator();
+    const char name[] = "synthetic";
+    char build_suffix[32];
+    int suffix_length = snprintf(build_suffix, sizeof(build_suffix), "%cbuild%c%s", sep, sep, name);
+    assert(suffix_length > 0 && (size_t)suffix_length < sizeof(build_suffix));
+    const size_t relative_length = (size_t)suffix_length + 1u + strlen(name);
+    const size_t root_length = sizeof(session.executable_path) - 1u - relative_length;
+
+    printf("[LAUNCH_TEST] Developer executable at the path capacity\n");
+    fflush(stdout);
+    assert(nk_platform_absolute_path(base, absolute_base, sizeof(absolute_base)));
+#if defined(_WIN32) || defined(_WIN64)
+    /* Use the Windows extended-length spelling for the real long-path files. */
+    const char *prefix = "\\\\?\\";
+#else
+    const char *prefix = "";
+#endif
+    int written = snprintf(container, sizeof(container), "%s%s%cexe-path-fit",
+                           prefix, absolute_base, sep);
+    assert(written > 0 && (size_t)written + 2u <= root_length);
+    size_t used = (size_t)written;
+    memcpy(root, container, used + 1u);
+    while (used < root_length) {
+        size_t component = root_length - used - 1u;
+        if (component > 200u) component = 150u;
+        root[used++] = sep;
+        memset(root + used, 'r', component);
+        used += component;
+        root[used] = '\0';
+    }
+
+    assert(used + (size_t)suffix_length < sizeof(build_directory));
+    memcpy(build_directory, root, used);
+    memcpy(build_directory + used, build_suffix, (size_t)suffix_length + 1u);
+    snprintf(fitting_path, sizeof(fitting_path), "%s%c%s", build_directory, sep, name);
+    snprintf(overlong_path, sizeof(overlong_path), "%s.exe", fitting_path);
+    assert(strlen(fitting_path) == sizeof(session.executable_path) - 1u);
+    assert(strlen(overlong_path) >= sizeof(session.executable_path));
+    assert(nk_platform_mkdir_p(build_directory));
+    write_file_utf8(overlong_path, "synthetic overlong runtime");
+    assert(nk_platform_file_exists(overlong_path));
+
+    make_game(&game, iso_path);
+    assert(!nk_launch_runtime_available(root, game.title_id));
+    assert(nk_launch_prepare_session(&session, &game, root) == NK_ERROR_FILE_NOT_FOUND);
+    assert(strstr(session.last_error, "Runtime binary not found") != NULL);
+    assert(session.executable_path[0] == '\0');
+
+    write_file_utf8(fitting_path, "synthetic fitting runtime");
+    assert(nk_platform_file_exists(fitting_path));
+    assert(nk_launch_runtime_available(root, game.title_id));
+    /* The image is deliberately absent. Preparation must get as far as that
+       check, with the complete alternate executable path already saved. */
+    assert(nk_launch_prepare_session(&session, &game, root) == NK_ERROR_FILE_NOT_FOUND);
+    assert(strstr(session.last_error, "Runtime image not found") != NULL);
+    assert(strcmp(session.executable_path, fitting_path) == 0);
+    assert(nk_platform_remove_tree(container, NULL));
+}
+
 int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--memstick-journal-probe") == 0) {
         return memstick_journal_probe(argv[2], argv[3]);
@@ -4321,6 +4386,7 @@ int main(int argc, char **argv) {
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);
     write_file(iso_path, "NOT-A-REAL-ISO");
+    test_developer_executable_path_fit(base, iso_path);
 
     NkGameEntry game;
     NkLaunchSession session;
