@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import Literal
 import hashlib
 import os
 import random
@@ -36,7 +37,7 @@ class ReleaseArtifactTests(unittest.TestCase):
 
     commit = "a" * 40
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -100,7 +101,7 @@ class ReleaseArtifactTests(unittest.TestCase):
                 self.assertIn(code, problem)
 
     def test_renamed_guest_header_is_refused_even_with_a_size_and_hash_pin(self):
-        def elf(byte_order: str, machine: int) -> bytes:
+        def elf(byte_order: Literal["little", "big"], machine: int) -> bytes:
             return (b"\x7fELF\x01" + bytes([1 if byte_order == "little" else 2]) + bytes(12)
                     + machine.to_bytes(2, byte_order))
 
@@ -113,7 +114,8 @@ class ReleaseArtifactTests(unittest.TestCase):
                 status, problem = self._audit(self._zip(files))
                 self.assertEqual(status, 1)
                 self.assertIn(f"ARTIFACT_GUEST_CONTENT: docs/note.txt contains {kind}", problem)
-        for byte_order in ("little", "big"):
+        byte_orders: tuple[Literal["little", "big"], ...] = ("little", "big")
+        for byte_order in byte_orders:
             with self.subTest(byte_order=byte_order):
                 files = self._reference({**self.members, "source/test-header.txt": elf(byte_order, 62)})
                 self.assertEqual(self._audit(self._zip(files))[0], 0)

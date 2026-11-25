@@ -143,8 +143,10 @@ player hides a demo whose file no longer matches.
 are unsigned. A signature changes a file's SHA-256, so `gh attestation verify` passes on the unsigned file and
 fails on the signed one. Re-keying `bin/runtime-manifest.json` (below) changes a third attested file the same
 way. The tool therefore writes `signing-record.json` at the package root: the unsigned and the signed SHA-256
-of each signed file, the attested and the refreshed SHA-256 of the runtime manifest, and the signer. A
-downloader checks the attestations on the unsigned bundle, which the maintainer keeps with the release
+of each signed file, the attested and the refreshed SHA-256 of the runtime manifest, and the signer. For an older
+attested bundle with no original runtime manifest, the original inventory digest is explicitly `null`.
+Keep the complete verified pre-sign bundle to substantiate that absence and the original executable hashes.
+A downloader checks the attestations on the unsigned bundle, which the maintainer keeps with the release
 records (a workflow artifact expires after 90 days), and matches its hashes to the record. The release notes
 say so.
 

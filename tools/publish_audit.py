@@ -25,7 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import BinaryIO, Callable, Iterable, overload
+from typing import IO, Callable, Iterable, Literal, overload
 import unicodedata
 import zipfile
 import zlib
@@ -1326,6 +1326,8 @@ class ArtifactAuditError(ValueError):
 ARTIFACT_REFERENCE_FORMAT = "nakagawa-release-artifact-reference"
 ARTIFACT_SUMS = "SHA256SUMS.txt"
 _ARTIFACT_SIGNING_RECORD = "signing-record.json"
+_ARTIFACT_SIGNED_EXES = ("bin/nakagawa_player.exe", "bin/production_smoke.exe")
+_ARTIFACT_RUNTIME_MANIFEST = "bin/runtime-manifest.json"
 _ARTIFACT_SHOWCASE_IDS = frozenset(("TEST00007", "TEST00008"))
 _ARTIFACT_ISOS = frozenset(f"bin/demos/images/{name}.iso" for name in _ARTIFACT_SHOWCASE_IDS)
 _ARTIFACT_PREFIX_BYTES = 0x8006  # includes the ISO volume identifier
@@ -1347,13 +1349,14 @@ class ArtifactReference:
     source_commit: str
     files: dict[str, ArtifactPin]
     empty_folders: frozenset[str]
+    signing_originals: dict[str, str | None] | None = None
 
 
 @dataclass(frozen=True)
 class ArtifactMember:
     path: str
     size: int
-    open_bytes: Callable[[], BinaryIO] | None
+    open_bytes: Callable[[], IO[bytes]] | None
 
 
 def _artifact_path(name: str, *, directory: bool = False) -> str:
@@ -1383,7 +1386,7 @@ def _artifact_guest_kind(prefix: bytes) -> str | None:
     if prefix.startswith(b"\0PSF"):
         return "PSP PSF"
     if prefix.startswith(b"\x7fELF") and len(prefix) >= 20 and prefix[5] in (1, 2):
-        byte_order = "little" if prefix[5] == 1 else "big"
+        byte_order: Literal["little", "big"] = "little" if prefix[5] == 1 else "big"
         if int.from_bytes(prefix[18:20], byte_order) == 8:  # EM_MIPS
             return "MIPS ELF"
     if prefix.startswith((b"\0PBP", b"~PSP", b"~SCE")) or prefix[0x8001:0x8006] == b"CD001":
@@ -1431,7 +1434,8 @@ def _artifact_directory_members(root: Path) -> Iterable[ArtifactMember]:
             if child.is_dir(follow_symlinks=False):
                 pending.append(path)
             elif child.is_file(follow_symlinks=False):
-                yield ArtifactMember(name, child.stat(follow_symlinks=False).st_size, partial(path.open, "rb"))
+                open_binary: Callable[[Literal["rb"]], IO[bytes]] = path.open
+                yield ArtifactMember(name, child.stat(follow_symlinks=False).st_size, partial(open_binary, "rb"))
             else:
                 raise ArtifactAuditError(f"ARTIFACT_MEMBER_TYPE: {name} is not a regular file")
 
@@ -1529,7 +1533,8 @@ def _artifact_reference_file(path: Path) -> ArtifactReference:
     return _artifact_reference(record.get("source_commit"), files, directories)
 
 
-def _artifact_reference(commit: object, files: dict[str, ArtifactPin], directories: set[str]) -> ArtifactReference:
+def _artifact_reference(commit: object, files: dict[str, ArtifactPin], directories: set[str],
+                        signing_originals: dict[str, str | None] | None = None) -> ArtifactReference:
     if not isinstance(commit, str) or not _ARTIFACT_COMMIT.fullmatch(commit) or "toolchain.json" not in files:
         raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: expected frozen source identity and toolchain pin")
     # The writer produces this file from the same sorted member names. Derive its
@@ -1537,7 +1542,7 @@ def _artifact_reference(commit: object, files: dict[str, ArtifactPin], directori
     sums = "".join(f"{files[name].sha256}  {name}\n" for name in sorted(files, key=lambda name: name.encode("utf-8")))
     data = sums.encode("utf-8")
     files[ARTIFACT_SUMS] = ArtifactPin("distribution", len(data), hashlib.sha256(data).hexdigest())
-    return ArtifactReference(commit, files, frozenset(directories))
+    return ArtifactReference(commit, files, frozenset(directories), signing_originals)
 
 
 def _artifact_check_approved(path: str, actual: ArtifactPin, approved: Path | None) -> None:
@@ -1551,9 +1556,32 @@ def _artifact_check_approved(path: str, actual: ArtifactPin, approved: Path | No
         raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISMATCH: {path}")
 
 
+def _artifact_signing_originals(attested_bundle: Path, toolchain_pin: ArtifactPin) -> dict[str, str | None]:
+    """Pin the signed files back to the separately verified, pre-sign bundle."""
+    _artifact_check_approved("toolchain.json", toolchain_pin, attested_bundle / "toolchain.json")
+    attested_bin = attested_bundle / "bin"
+    if attested_bin.is_symlink() or attested_bin.is_junction() or not attested_bin.is_dir():
+        raise ArtifactAuditError("ARTIFACT_SIGNING_ORIGINALS: the attested bin/ is not a plain folder")
+    hashes: dict[str, str | None] = {}
+    for name in (*_ARTIFACT_SIGNED_EXES, _ARTIFACT_RUNTIME_MANIFEST):
+        original = attested_bundle / name
+        try:
+            mode = original.lstat().st_mode
+        except FileNotFoundError:
+            if name == _ARTIFACT_RUNTIME_MANIFEST:
+                hashes[name] = None
+                continue
+            raise ArtifactAuditError(f"ARTIFACT_SIGNING_ORIGINALS: missing {name}") from None
+        if not stat.S_ISREG(mode):
+            raise ArtifactAuditError(f"ARTIFACT_SIGNING_ORIGINALS: {name} is not a plain file")
+        with original.open("rb") as stream:
+            hashes[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+    return hashes
+
+
 def _artifact_reference_directory(path: Path, approved_bundle: Path | None,
-                                  approved_prereqs: Path | None) -> ArtifactReference:
-    for approved in (approved_bundle, approved_prereqs):
+                                  approved_prereqs: Path | None, attested_bundle: Path | None) -> ArtifactReference:
+    for approved in (approved_bundle, approved_prereqs, attested_bundle):
         if approved is not None:
             require_separate_artifact_paths(path, approved)
     seen: dict[str, tuple[str, bool]] = {}
@@ -1580,11 +1608,11 @@ def _artifact_reference_directory(path: Path, approved_bundle: Path | None,
                     _artifact_check_approved(member.path, pin, approved)
             files[member.path] = pin
     approved_bin = approved_bundle / "bin" if approved_bundle is not None else None
-    for prefix, approved in (("bin/", approved_bin), ("prereqs/", approved_prereqs)):
+    for path_prefix, approved in (("bin/", approved_bin), ("prereqs/", approved_prereqs)):
         if approved is None:
             continue
         for member in _artifact_directory_members(approved):
-            expected = prefix + member.path
+            expected = path_prefix + member.path
             if expected not in (directories if member.open_bytes is None else files):
                 raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISSING: {expected}")
     if approved_bundle is not None and "toolchain.json" in files:
@@ -1595,8 +1623,14 @@ def _artifact_reference_directory(path: Path, approved_bundle: Path | None,
         _artifact_check_approved(_ARTIFACT_SIGNING_RECORD, recorded, approved_record)
     elif approved_record is not None and (approved_record.exists() or approved_record.is_symlink()):
         raise ArtifactAuditError(f"ARTIFACT_REFERENCE_ROLE_MISSING: {_ARTIFACT_SIGNING_RECORD}")
+    signing_originals = None
+    if attested_bundle is not None:
+        if recorded is None or approved_bundle is None or "toolchain.json" not in files:
+            raise ArtifactAuditError("ARTIFACT_SIGNING_ORIGINALS: expected a signed layout and its toolchain pin")
+        require_separate_artifact_paths(attested_bundle, approved_bundle)
+        signing_originals = _artifact_signing_originals(attested_bundle, files["toolchain.json"])
     return _artifact_reference(_artifact_toolchain_commit(_artifact_load_json(path / "toolchain.json")),
-                               files, directories)
+                               files, directories, signing_originals)
 
 
 def _artifact_toolchain_commit(toolchain: object) -> object:
@@ -1605,24 +1639,26 @@ def _artifact_toolchain_commit(toolchain: object) -> object:
 
 
 def load_artifact_reference(path: Path, *, approved_bundle: Path | None = None,
-                            approved_prereqs: Path | None = None) -> ArtifactReference:
+                            approved_prereqs: Path | None = None,
+                            attested_bundle: Path | None = None) -> ArtifactReference:
     """Read a separately approved pin map, or pin an independent reference layout.
 
     The latter verifies package executable/image and prerequisite members against
     their separately verified build bundle and reconstructed prerequisite tree.
-    The release orchestrator verifies and supplies those inputs.
+    For signed bundles, the release orchestrator also verifies and supplies
+    the unchanged pre-sign bundle to bind the signing record to its originals.
     """
     try:
         if path.is_dir():
-            return _artifact_reference_directory(path, approved_bundle, approved_prereqs)
-        if approved_bundle is not None or approved_prereqs is not None:
+            return _artifact_reference_directory(path, approved_bundle, approved_prereqs, attested_bundle)
+        if any(item is not None for item in (approved_bundle, approved_prereqs, attested_bundle)):
             raise ArtifactAuditError("ARTIFACT_REFERENCE_INVALID: approved input directories require a layout reference")
         return _artifact_reference_file(path)
     except OSError as exc:
         raise ArtifactAuditError(f"ARTIFACT_REFERENCE_UNREADABLE: {exc}") from exc
 
 
-def _artifact_check_signing_record(data: bytes, pins: dict[str, ArtifactPin]) -> None:
+def _artifact_check_signing_record(data: bytes, reference: ArtifactReference) -> None:
     # These are SHA-256 relationships from the already approved derivative record.
     # SignTool verifies Authenticode when the release owner produces that record.
     try:
@@ -1633,8 +1669,8 @@ def _artifact_check_signing_record(data: bytes, pins: dict[str, ArtifactPin]) ->
             type(record.get("schema")) is not int or record["schema"] != 1 or record.get("digest_algorithm") != "sha256"):
         raise ArtifactAuditError("ARTIFACT_SIGNING_RECORD_INVALID: expected the version 1 SHA-256 signing record")
     groups = (
-        ("files", "unsigned_sha256", "signed_sha256", {"bin/nakagawa_player.exe", "bin/production_smoke.exe"}),
-        ("refreshed_files", "attested_sha256", "refreshed_sha256", {"bin/runtime-manifest.json"}),
+        ("files", "unsigned_sha256", "signed_sha256", set(_ARTIFACT_SIGNED_EXES)),
+        ("refreshed_files", "attested_sha256", "refreshed_sha256", {_ARTIFACT_RUNTIME_MANIFEST}),
     )
     for group, original_field, final_field, remaining in groups:
         rows = record.get(group)
@@ -1646,9 +1682,14 @@ def _artifact_check_signing_record(data: bytes, pins: dict[str, ArtifactPin]) ->
                 raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_INVALID: unexpected path in {group}")
             remaining.remove(path)
             original = row.get(original_field)
-            if not isinstance(original, str) or not _ARTIFACT_SHA256.fullmatch(original):
+            originals = reference.signing_originals
+            absent_inventory = (path == _ARTIFACT_RUNTIME_MANIFEST and original_field in row and
+                                original is None and originals is not None and originals[path] is None)
+            if not absent_inventory and (not isinstance(original, str) or not _ARTIFACT_SHA256.fullmatch(original)):
                 raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_INVALID: invalid {original_field} for {path}")
-            pin = pins.get(path)
+            if originals is not None and original != originals[path]:
+                raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_ORIGINAL_DIGEST: {path}")
+            pin = reference.files.get(path)
             if pin is None or pin.sha256 != row.get(final_field):
                 raise ArtifactAuditError(f"ARTIFACT_SIGNING_RECORD_DIGEST: {path}")
 
@@ -1677,7 +1718,7 @@ def _audit_artifact_members(members: Iterable[ArtifactMember], reference: Artifa
         if actual != pin:
             raise ArtifactAuditError(f"ARTIFACT_MEMBER_DIGEST: {member.path}")
         if member.path == _ARTIFACT_SIGNING_RECORD:
-            _artifact_check_signing_record(prefix, reference.files)
+            _artifact_check_signing_record(prefix, reference)
         elif member.path == "toolchain.json":
             try:
                 commit = _artifact_toolchain_commit(json.loads(prefix))
@@ -4331,22 +4372,24 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
                         help="independently approved release pin JSON or verified reference layout")
     parser.add_argument("--approved-bundle", type=Path,
                         help="separately verified candidate bundle for a layout reference")
+    parser.add_argument("--attested-bundle", type=Path,
+                        help="separately verified pre-sign bundle for a signed layout reference")
     parser.add_argument("--approved-prereqs", type=Path,
                         help="separately reconstructed pinned prerequisites for a layout reference")
     args = parser.parse_args(argv)
 
-    artifact_options = {"artifact", "artifact_reference", "approved_bundle", "approved_prereqs", "json"}
+    artifact_options = {"artifact", "artifact_reference", "approved_bundle", "approved_prereqs", "attested_bundle", "json"}
     if args.artifact is not None:
         if args.artifact_reference is None:
             parser.error("--artifact requires --artifact-reference")
         if any(val != parser.get_default(name) for name, val in vars(args).items() if name not in artifact_options):
             parser.error("--artifact cannot be combined with source-tree audit options")
         try:
-            for approved in (args.artifact_reference, args.approved_bundle, args.approved_prereqs):
+            for approved in (args.artifact_reference, args.approved_bundle, args.approved_prereqs, args.attested_bundle):
                 if approved is not None:
                     require_separate_artifact_paths(args.artifact, approved)
             reference = load_artifact_reference(args.artifact_reference, approved_bundle=args.approved_bundle,
-                                                approved_prereqs=args.approved_prereqs)
+                                                approved_prereqs=args.approved_prereqs, attested_bundle=args.attested_bundle)
             audit_artifact(args.artifact, reference)
         except ArtifactAuditError as exc:
             print(f"artifact audit: FAIL: {exc}", file=sys.stderr)
@@ -4357,7 +4400,8 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         else:
             print(f"artifact audit: OK ({len(reference.files)} files, source {reference.source_commit})")
         return 0
-    if any(getattr(args, name) is not None for name in ("artifact_reference", "approved_bundle", "approved_prereqs")):
+    if any(getattr(args, name) is not None for name in
+           ("artifact_reference", "approved_bundle", "approved_prereqs", "attested_bundle")):
         parser.error("release reference options require --artifact")
 
     if args.committed_tree and (args.candidate_root or args.worktree):

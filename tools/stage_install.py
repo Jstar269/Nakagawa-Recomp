@@ -829,7 +829,7 @@ def staged_source_commit(stage: Path) -> str:
 def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
                        verify_runtime=None, expected_commit: str | None = None,
                        artifact_reference: Path | None = None, approved_bundle: Path | None = None,
-                       approved_prereqs: Path | None = None) -> dict:
+                       approved_prereqs: Path | None = None, attested_bundle: Path | None = None) -> dict:
     """Write ``stage`` as a byte-reproducible ZIP at ``zip_path``; return its summary.
 
     ``SHA256SUMS.txt`` is rewritten first and ``bin/runtime-manifest.json`` is
@@ -866,12 +866,12 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
         raise InstallError("PORTABLE_ARTIFACT_REFERENCE_REQUIRED: supply an independent release reference")
     partial = zip_path.with_name(zip_path.name + ".part")
     try:
-        for approved in (artifact_reference, approved_bundle, approved_prereqs):
+        for approved in (artifact_reference, approved_bundle, approved_prereqs, attested_bundle):
             if approved is not None:
                 for candidate in (stage, zip_path, partial):
                     publish_audit.require_separate_artifact_paths(candidate, approved)
         reference = publish_audit.load_artifact_reference(artifact_reference, approved_bundle=approved_bundle,
-                                                          approved_prereqs=approved_prereqs)
+                                                          approved_prereqs=approved_prereqs, attested_bundle=attested_bundle)
     except publish_audit.ArtifactAuditError as exc:
         raise InstallError(f"PORTABLE_ARTIFACT_UNVERIFIED: {exc}") from exc
     if reference.source_commit != source_commit:
@@ -1276,6 +1276,8 @@ def main(argv=None) -> int:
                         help="independently approved pin JSON or verified layout for --portable-zip")
     parser.add_argument("--approved-bundle", type=Path,
                         help="separately verified candidate bundle for a layout reference")
+    parser.add_argument("--attested-bundle", type=Path,
+                        help="separately verified pre-sign bundle for a signed layout reference")
     parser.add_argument("--approved-prereqs", type=Path,
                         help="separately reconstructed pinned prerequisites for a layout reference")
     parser.add_argument("--record", type=Path,
@@ -1312,7 +1314,8 @@ def main(argv=None) -> int:
     if args.record is not None and args.portable_zip is None:
         parser.error("--record goes with --portable-zip")
     if args.portable_zip is None and any(path is not None for path in
-                                         (args.artifact_reference, args.approved_bundle, args.approved_prereqs)):
+                                         (args.artifact_reference, args.approved_bundle, args.approved_prereqs,
+                                          args.attested_bundle)):
         parser.error("release reference options go with --portable-zip")
     if args.dry_run and not args.uninstall:
         parser.error("--dry-run goes with --uninstall")
@@ -1342,12 +1345,14 @@ def main(argv=None) -> int:
         try:
             record_path = (None if args.record is None
                            else _check_record_path(args.record, args.portable_zip, args.zip_stage,
-                                                   args.artifact_reference, args.approved_bundle, args.approved_prereqs))
+                                                   args.artifact_reference, args.approved_bundle,
+                                                   args.approved_prereqs, args.attested_bundle))
             expected_commit = resolve_commit(args.revision)
             epoch = resolve_source_date_epoch(args.source_date_epoch, revision=args.revision)
             summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch,
                                          expected_commit=expected_commit, artifact_reference=args.artifact_reference,
-                                         approved_bundle=args.approved_bundle, approved_prereqs=args.approved_prereqs)
+                                         approved_bundle=args.approved_bundle, approved_prereqs=args.approved_prereqs,
+                                         attested_bundle=args.attested_bundle)
             if record_path is not None:
                 try:
                     record_path.parent.mkdir(parents=True, exist_ok=True)
