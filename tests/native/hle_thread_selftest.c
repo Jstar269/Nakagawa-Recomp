@@ -49437,6 +49437,89 @@ static void test_msgpipe_waiter_order(void) {
     }
 }
 
+/* pspautotests tests/threads/msgpipe/send.expected, "With interleaved send waits"
+ * (PSP-recorded): on a 0x100-byte pipe, sender 1 deposits 0x80 bytes, sender 2
+ * (0x100 bytes) blocks, and sender 3 (0x80 bytes) also blocks although 0x80
+ * bytes are free: Refer reports free=0x80 and sending=2. A new sender gets in
+ * line behind the senders already waiting instead of taking the free space.
+ * Scaled here to a four-byte pipe. */
+static void test_msgpipe_send_queues_behind_waiting_senders(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t GUEST_BUF = 0x08010000u;
+    const uint32_t GUEST_NAME = 0x08030000u;
+    const uint32_t GUEST_RES = 0x08040000u;
+    const uint32_t GUEST_INFO = 0x08050000u;
+    MEM_W8(GUEST_NAME, 's'); MEM_W8(GUEST_NAME + 1u, 'q'); MEM_W8(GUEST_NAME + 2u, 0u);
+    for (uint32_t i = 0; i < 8u; i++) MEM_W8(GUEST_BUF + i, (uint8_t)(0x70u + i));
+
+    TCB *owner = fixture_thread(0x30801u, TH_RUNNING, 60);
+    owner->started = 1;
+    int owner_index = (int)(owner - s_tcb);
+    s_cur = owner_index;
+    uint32_t pipe = selftest_msgpipe_create(GUEST_NAME, 0u, 4u);
+    expect(pipe != 0u && pipe < 0x80000000u, "send-queue fixture creates a four-byte FIFO pipe");
+    if (!pipe || pipe >= 0x80000000u) return;
+
+    CpuState cpu;
+    msgpipe_setup(&cpu, pipe, GUEST_BUF, 2u, 0u, GUEST_RES);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE) == 0u,
+           "first sender deposits half the pipe");
+
+    SelftestMsgPipeWaiterCtx big = {0}, small = {0};
+    selftest_msgpipe_waiter_start_sized(&big, 0x30802u, 40, pipe, GUEST_BUF + 2u, 4u,
+                                        GUEST_RES + 4u, 1, 0);
+    expect(!big.returned && big.tcb->state == TH_WAIT_OBJ,
+           "a whole-pipe sender waits for room");
+    selftest_msgpipe_waiter_start_sized(&small, 0x30803u, 40, pipe, GUEST_BUF + 6u, 2u,
+                                        GUEST_RES + 8u, 1, 0);
+    expect(!small.returned && small.tcb->state == TH_WAIT_OBJ,
+           "a later sender that fits the free space still waits behind the waiting sender");
+    s_cur = owner_index;
+    MEM_W32(GUEST_INFO, MSGPIPE_SELFTEST_INFO_SIZE);
+    expect(selftest_msgpipe_refer(pipe, GUEST_INFO) == 0u &&
+           MEM_R32(GUEST_INFO + 44u) == 2u && MEM_R32(GUEST_INFO + 48u) == 2u &&
+           MEM_R32(GUEST_INFO + 52u) == 0u,
+           "Refer reports the free half and two waiting senders, as the PSP records");
+
+    /* The queued senders are then served in arrival order. */
+    const uint32_t GUEST_OUT = 0x08020000u;
+    s_cur = owner_index;
+    msgpipe_setup(&cpu, pipe, GUEST_OUT, 2u, 0u, GUEST_RES + 12u);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_RECEIVE_MSG_PIPE) == 0u &&
+           MEM_R8(GUEST_OUT) == 0x70u && MEM_R8(GUEST_OUT + 1u) == 0x71u &&
+           big.tcb->state == TH_READY && small.tcb->state == TH_WAIT_OBJ,
+           "draining the pipe readies the first queued sender only");
+    if (big.tcb->state == TH_READY) selftest_msgpipe_waiter_resume(&big);
+    expect(big.returned && big.ret == 0u && MEM_R32(GUEST_RES + 4u) == 4u,
+           "the first queued sender fills the pipe");
+    s_cur = owner_index;
+    msgpipe_setup(&cpu, pipe, GUEST_OUT, 4u, 0u, GUEST_RES + 12u);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_RECEIVE_MSG_PIPE) == 0u &&
+           MEM_R8(GUEST_OUT) == 0x72u && MEM_R8(GUEST_OUT + 3u) == 0x75u &&
+           small.tcb->state == TH_READY,
+           "the first sender's bytes come out before the second sender runs");
+    if (small.tcb->state == TH_READY) selftest_msgpipe_waiter_resume(&small);
+    expect(small.returned && small.ret == 0u && MEM_R32(GUEST_RES + 8u) == 2u,
+           "the second queued sender then sends");
+    s_cur = owner_index;
+    msgpipe_setup(&cpu, pipe, GUEST_OUT, 2u, 0u, GUEST_RES + 12u);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_RECEIVE_MSG_PIPE) == 0u &&
+           MEM_R8(GUEST_OUT) == 0x76u && MEM_R8(GUEST_OUT + 1u) == 0x77u,
+           "the second sender's bytes come out last");
+
+    s_cur = owner_index;
+    cpu = (CpuState){0}; cpu.r[4] = pipe;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_MSG_PIPE) == 0u,
+           "send-queue fixture deletes");
+    /* A regression can strand a sender; the delete released it, so let it return. */
+    if (!big.returned) selftest_msgpipe_waiter_resume(&big);
+    if (!small.returned) selftest_msgpipe_waiter_resume(&small);
+    if (big.tcb->coro) { sr_coro_destroy(big.tcb->coro); big.tcb->coro = NULL; }
+    if (small.tcb->coro) { sr_coro_destroy(small.tcb->coro); small.tcb->coro = NULL; }
+    s_cur = -1;
+}
+
 static void test_msgpipe_repeated_transfer_skips_readied_waiter(int reverse_resume) {
     const uint32_t GUEST_BUF = 0x08010000u;
     const uint32_t GUEST_OUT = 0x08020000u;
@@ -71746,6 +71829,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msgpipe_departure_reconsiders_successor();
     test_msgpipe_invocation_lifetime();
     test_msgpipe_waiter_order();
+    test_msgpipe_send_queues_behind_waiting_senders();
     test_msgpipe_priority_wake_skips_ineligible_waiter();
     test_msgpipe_repeated_transfer_skips_readied_waiter(0);
     test_msgpipe_repeated_transfer_skips_readied_waiter(1);

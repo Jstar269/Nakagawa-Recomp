@@ -495,6 +495,18 @@ static uint32_t msg_pipe_transfer(MsgPipe *p, uint32_t buffer, uint32_t amount,
     return 0;
 }
 
+static int msg_pipe_waiter_waiting(const MsgPipeWaiter *waiter);
+
+/* Whether a sender queued ahead of `self` (every queued sender when `self` is
+ * 0) still waits. Waiters are kept in arrival order. */
+static int msg_pipe_sender_waiting_ahead(const MsgPipe *p, SrWaitHandle self) {
+    for (int i = 0; i < p->nwaiters; i++) {
+        if (self && p->waiters[i].invocation == self) return 0;
+        if (p->waiters[i].is_send && msg_pipe_waiter_waiting(&p->waiters[i])) return 1;
+    }
+    return 0;
+}
+
 static uint32_t msg_pipe_blocking_common(CpuState *s, int is_send, int is_cb) {
     /* Public PSPSDK identifies arg6 as timeout and leaves arg5 named unk2.
      * Preserve the current result-size model; arg5 hardware qualification is
@@ -523,7 +535,11 @@ static uint32_t msg_pipe_blocking_common(CpuState *s, int is_send, int is_cb) {
     if (is_send) p->send_calls++;
     else p->receive_calls++;
 
-    if (msg_pipe_transfer_ready(p, is_send, size, wait_mode, &amount)) {
+    /* pspautotests tests/threads/msgpipe/send.expected, "With interleaved send
+     * waits" (PSP-recorded): a sender that arrives while other senders wait gets
+     * in line behind them, even when the free space would fit its message. */
+    if (!(is_send && msg_pipe_sender_waiting_ahead(p, 0)) &&
+        msg_pipe_transfer_ready(p, is_send, size, wait_mode, &amount)) {
         uint32_t transfer_rc = msg_pipe_transfer(p, buffer, amount, resultp, is_send, &direct_wake);
         if (transfer_rc != 0u) return transfer_rc;
         msg_pipe_wake_after_transfer(p, is_send);
@@ -583,8 +599,10 @@ static uint32_t msg_pipe_blocking_common(CpuState *s, int is_send, int is_cb) {
         /* Callback code may have completed a transfer while this invocation
          * was running, when the scheduler could not wake it. Recheck the pipe
          * before marking this scope parked so that this call cannot miss that
-         * state change and sleep forever without another transfer edge. */
-        if (msg_pipe_transfer_ready(p, is_send, size, wait_mode, &amount)) {
+         * state change and sleep forever without another transfer edge. A
+         * sender still stays in line behind the senders queued before it. */
+        if (!(is_send && msg_pipe_sender_waiting_ahead(p, waiter_scope)) &&
+            msg_pipe_transfer_ready(p, is_send, size, wait_mode, &amount)) {
             uint32_t transfer_rc = msg_pipe_transfer(p, buffer, amount, resultp, is_send, &direct_wake);
             if (transfer_rc != 0u) {
                 result = transfer_rc;
