@@ -64,8 +64,8 @@
  *   version-1 record or none. It writes a temporary sibling, flushes it to the disk, renames it
  *   into place and syncs <saves>. The caller holds the stick lock, so there is one writer.
  *
- * This module only names paths and reads and writes the record: it creates no folder, moves
- * nothing and starts nothing. The move (nk_memstick_migrate.h) and the launcher use it. */
+ * The layout API names paths and reads and writes the record. The collision-copy API below
+ * prepares one save folder for first migration. Neither API starts a game. */
 
 #ifndef NK_MEMSTICK_LAYOUT_H
 #define NK_MEMSTICK_LAYOUT_H
@@ -116,6 +116,113 @@ typedef enum {
     /* SAVES_LAYOUT_INVALID: the caller passed a layout or name this module refuses. */
     NK_MEMSTICK_LAYOUT_INVALID
 } NkMemstickLayoutResult;
+
+typedef enum {
+    NK_MEMSTICK_COLLISION_COPIED = 0,      /* distinct whole units, both preserved */
+    NK_MEMSTICK_COLLISION_IDENTICAL,      /* one equivalent whole unit is enough */
+    NK_MEMSTICK_COLLISION_INVALID,        /* incompatible names or the same legacy slot */
+    NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED, /* no readable moving record, or active stick exists */
+    NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE,
+    NK_MEMSTICK_COLLISION_SOURCE_CHANGING,
+    NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT,
+    NK_MEMSTICK_COLLISION_COPY_MISMATCH,
+    NK_MEMSTICK_COLLISION_JOURNAL_MISSING,
+    NK_MEMSTICK_COLLISION_JOURNAL_DAMAGED,
+    NK_MEMSTICK_COLLISION_IO
+} NkMemstickCollisionResult;
+
+/* Copy one colliding PSP/SAVEDATA folder from two legacy slots during first migration.
+ * The caller holds the stick lock and passes the already selected winner first. A valid
+ * moving layout record is required and the shared stick must not exist yet. The slot
+ * and save names are single components, with distinct slots and equivalent save names
+ * under ASCII case folding. Legacy units are read-only. The winner goes to the staged
+ * stick and a differing loser to Kept copies/<loser_slot>/PSP/SAVEDATA using its own
+ * spelling. An existing complete, equivalent output can be reused on retry. A different
+ * output is never replaced. Callers still own election, the journal and stick promotion. */
+NkMemstickCollisionResult nk_memstick_copy_save_collision(const char *saves_root,
+                                                          const char *winner_slot,
+                                                          const char *winner_name,
+                                                          const char *loser_slot,
+                                                          const char *loser_name);
+
+/* The caller supplies legacy slot names from its game catalog and recognized old
+ * slots. disc_id is an optional actual PSP disc ID, even when slot is a title
+ * alias. The planner never guesses eligibility from an unrelated folder name. */
+typedef struct {
+    const char *slot;
+    const char *disc_id;
+} NkMemstickPlanInput;
+
+typedef enum {
+    NK_MEMSTICK_PLAN_STAGE = 0,
+    NK_MEMSTICK_PLAN_KEEP = 1,
+    NK_MEMSTICK_PLAN_DEDUPLICATE = 2
+} NkMemstickPlanDecision;
+
+typedef struct {
+    char slot[NK_MAX_PATH];
+    char name[NK_MAX_PATH];
+    uint8_t digest[32];
+    NkMemstickPlanDecision decision;
+    /* Index of the stored equivalent version. A materialized version refers to itself. */
+    size_t copy_of;
+} NkMemstickPlanUnit;
+
+typedef enum {
+    NK_MEMSTICK_PLAN_SOURCE_READABLE = 0,
+    NK_MEMSTICK_PLAN_SOURCE_ABSENT = 1,
+    NK_MEMSTICK_PLAN_SOURCE_UNREADABLE = 2
+} NkMemstickPlanSourceStatus;
+
+typedef struct {
+    char slot[NK_MAX_PATH];
+    NkMemstickPlanSourceStatus status;
+} NkMemstickPlanSource;
+
+typedef struct {
+    NkMemstickPlanUnit *units;
+    size_t unit_count;
+    NkMemstickPlanSource *sources;
+    size_t source_count;
+    bool active_stick_present;
+} NkMemstickSavePlan;
+
+/* Read-only first-migration plan for whole PSP/SAVEDATA folders. Entries group by
+ * ASCII-folded save name. Each group's first row goes to staging. The rest are
+ * differing versions for Kept copies or rows naming their equivalent copy.
+ * Prefer a matching disc ID prefix, then the latest member write time, then the
+ * folded slot name. Empty folders have no write time. Sources are ordered by
+ * folded slot name and refused sources contribute no units. The active stick is
+ * kept separate from legacy candidates and only its presence is reported. On
+ * failure out is empty. Free a successful plan before reusing it. */
+bool nk_memstick_plan_savedata(const char *saves_root, const NkMemstickPlanInput *inputs,
+                               size_t input_count, NkMemstickSavePlan *out);
+void nk_memstick_save_plan_free(NkMemstickSavePlan *plan);
+
+/* Apply the group starting with first_unit. The caller holds the stick lock and
+ * supplies its original plan. Validate its source fingerprints before copying.
+ * The existing moving-record and no-active-stick guards still apply. Refuse
+ * plans with unreadable sources until the controller resolves those sources. */
+NkMemstickCollisionResult nk_memstick_replay_savedata(const char *saves_root,
+                                                      const NkMemstickSavePlan *plan,
+                                                      size_t first_unit);
+
+/* Freeze an immutable PSP/SAVEDATA plan under .nakagawa-migration/psp-savedata in MOVING,
+ * before making a staged copy. Repeating begin with the same plan is safe.
+ * plan.json carries schema 1, source slots and statuses, and the
+ * ordered unit records (slot, name, SHA-256, decision and equivalent row).
+ * progress.json binds the first unfinished row to the plan's SHA-256.
+ * Resume opens that plan from disk, verifies the sources and any checkpointed
+ * outputs, and commits progress only after a complete group's verified copy.
+ * max_groups limits new work per call (0 means all remaining groups).
+ * The caller holds the stick lock for both operations. COPIED means success.
+ * Only a successful resume sets *complete, which covers this plan's scope.
+ * The outer layout remains MOVING. Neither operation promotes the stick. */
+NkMemstickCollisionResult nk_memstick_savedata_move_begin(const char *saves_root,
+                                                          const NkMemstickSavePlan *plan);
+NkMemstickCollisionResult nk_memstick_savedata_move_resume(const char *saves_root,
+                                                           size_t max_groups,
+                                                           bool *complete);
 
 typedef enum {
     NK_MEMSTICK_STATE_MOVING = 0,

@@ -39,6 +39,7 @@
 #include "psp_seal_fixture.h"
 #include "pgf_golden_vectors.h"
 #include "../../src/rt/recomp.h"
+#include "../../src/ui/nk_ui_text.h"
 /* The runtime's SR_ACE parser, built into this test by source (it uses the C library only),
  * so every line the player writes is checked against the parser that reads it (#2054). */
 #include "../../src/rt/ace.c"
@@ -4010,6 +4011,8 @@ static void test_error_cards_are_plain(void) {
                   "video playback") == 0);
     assert(strcmp(player_runtime_stop_feature("unsupported-import-sceutilitysavedatainitstart"),
                   "a system dialog") == 0);
+    assert(strcmp(player_runtime_stop_feature("osk-host-unavailable"),
+                  "the on-screen keyboard") == 0);
     assert(strcmp(player_runtime_stop_feature("unsupported-interpreter-form"),
                   "a processor feature") == 0);
     assert(strcmp(player_runtime_stop_feature("host-fiber-stack-exhausted"),
@@ -12596,6 +12599,106 @@ static void graphics_preset_session(const PlayerSettings *settings, NkRuntimeCon
     player_session_apply_graphics_preset(settings, r->on, config);
 }
 
+
+/* Exercise the player launch/boot-file consumer without starting a runtime child. */
+static void graphics_preset_boot_fixture(PlayerApp *app, PlayerLaunchWork *work,
+                                         PlayerPlayMode mode, const char *event) {
+    PlayerPlayResolved play;
+    char line[192];
+    app->is_game_running = false;
+    app->settings.enhanced.library = mode;
+    assert(player_app_launch_begin(app, 0, work));
+    graphics_preset_session(&work->settings, &work->session.config, &play, line, sizeof(line));
+    work->play_mode = play.mode;
+    assert(player_app_launch_finish(app, work));
+
+    FILE *f = nk_fopen_utf8(app->boot_event_file_path, "wb");
+    assert(f != NULL);
+    if (event) assert(fputs(event, f) >= 0);
+    assert(fputs("BOOT_EVENT phase=window_ready t_ns=100\n", f) >= 0);
+    assert(fclose(f) == 0);
+    assert(player_app_child_window_ready(app));
+    assert(nk_remove_utf8(app->boot_event_file_path) == 0);
+}
+
+static void test_graphics_preset_fsr1_refusal(void) {
+    const char *normal =
+        "Medium is used in Enhanced and Ace, with crisp text and FSR 1 on. Authentic uses your settings.";
+    const char *refusal =
+        "BOOT_EVENT phase=present_upscale_refused mode=fsr1 reason=queue_no_compute t_ns=90\n";
+    const char *supported = "BOOT_EVENT phase=present_upscale mode=fsr1 t_ns=90\n";
+#if NK_UI_ALTERNATE_CATALOG
+    char queue_note[192], startup_note[192];
+    const int queue_len = snprintf(queue_note, sizeof(queue_note),
+                                   NK_UI_STR(SETTINGS_PRESET_FSR1_QUEUE_REFUSED), "Medium");
+    const int startup_len = snprintf(startup_note, sizeof(startup_note),
+                                     NK_UI_STR(SETTINGS_PRESET_FSR1_STARTUP_REFUSED), "Medium");
+    assert(queue_len > 0 && (size_t)queue_len < sizeof(queue_note));
+    assert(startup_len > 0 && (size_t)startup_len < sizeof(startup_note));
+#else
+    const char *queue_note = "Medium stays selected. The graphics queue has no compute for FSR 1."
+                             " This session uses normal scaling.";
+    const char *startup_note = "Medium stays selected. FSR 1 could not start."
+                               " This session uses normal scaling.";
+#endif
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(*app));
+    PlayerApp *loaded = (PlayerApp *)calloc(1, sizeof(*loaded));
+    PlayerLaunchWork *work = (PlayerLaunchWork *)calloc(1, sizeof(*work));
+    assert(app && loaded && work);
+    player_app_settings_init_default(&app->settings);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
+    app->game_count = 1;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "%s", "TEST92150");
+    snprintf(app->games[0].title_name, sizeof(app->games[0].title_name), "%s", "FSR 1 preset fixture");
+    app->games[0].is_sample = true;
+
+    char note[192], settings_file[NK_MAX_PATH];
+    graphics_preset_boot_fixture(app, work, PLAYER_PLAY_ENHANCED, supported);
+    assert(app->launch_session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)) && strcmp(note, normal) == 0);
+
+    graphics_preset_boot_fixture(app, work, PLAYER_PLAY_ENHANCED, refusal);
+    if (!player_app_graphics_preset_note(app, note, sizeof(note)) || strcmp(note, queue_note) != 0) {
+        fprintf(stderr, "[PLAYER_STATE_TEST] FSR 1 selected-queue refusal did not reach the preset note\n");
+        exit(1);
+    }
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_MEDIUM);
+    assert(app->launch_session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1);
+    snprintf(settings_file, sizeof(settings_file), "%s%cfsr1-preset-settings.json",
+             native_test_get_root(), nk_platform_path_separator());
+    assert(player_app_save_settings(app, settings_file) == NK_OK);
+    assert(player_app_load_settings(loaded, settings_file) == NK_OK);
+    assert(player_app_graphics_preset(loaded) == PLAYER_PRESET_MEDIUM);
+    assert(player_app_graphics_preset_note(loaded, note, sizeof(note)) && strcmp(note, normal) == 0);
+    assert(nk_remove_utf8(settings_file) == 0);
+
+    graphics_preset_boot_fixture(app, work, PLAYER_PLAY_ENHANCED,
+        "BOOT_EVENT phase=present_upscale_refused mode=fsr1 reason=startup_failed t_ns=90\n");
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)) && strcmp(note, startup_note) == 0);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)) &&
+           strstr(note, "Ultra is used") && !strstr(note, "normal scaling"));
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
+
+    /* A fresh supported session can use another device. Its equal-size frames
+       do not produce a startup refusal. The previous notice must be gone. */
+    graphics_preset_boot_fixture(app, work, PLAYER_PLAY_ENHANCED, supported);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)) && strcmp(note, normal) == 0);
+    graphics_preset_boot_fixture(app, work, PLAYER_PLAY_ENHANCED,
+        "BOOT_EVENT phase=present_upscale_refused mode=anime4k reason=queue_no_compute\n");
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)) && strcmp(note, normal) == 0);
+
+    /* A stray refusal line cannot change the note for an Authentic launch. */
+    graphics_preset_boot_fixture(app, work, PLAYER_PLAY_AUTHENTIC, refusal);
+    assert(app->launch_session.config.present_upscale == NK_PRESENT_UPSCALE_OFF);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)) && strcmp(note, normal) == 0);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_MEDIUM);
+    free(app);
+    free(loaded);
+    free(work);
+    puts("[PLAYER_STATE_TEST] FSR 1 runtime refusal preserves the saved preset PASS");
+}
+
 static void test_graphics_presets(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800];
@@ -15634,6 +15737,11 @@ int main(int argc, char **argv) {
         free(probe);
         return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "--preset-fsr1-refusal") == 0) {
+        native_test_create_root("preset-fsr1-refusal");
+        test_graphics_preset_fsr1_refusal();
+        return 0;
+    }
     /* Copies of this binary stand in for the bundled python and child modes above. Any other
      * arguments are a mode this binary does not have: name them and stop, instead of running
      * the whole suite again inside a child (which would start its own children). */
@@ -15743,6 +15851,7 @@ int main(int argc, char **argv) {
     test_play_mode_twin_settings();
     test_player_nickname();
     test_graphics_presets();
+    test_graphics_preset_fsr1_refusal();
     test_play_mode_line_parses_in_runtime();
     test_play_mode_line_room();
     test_play_mode_upscale_settings();

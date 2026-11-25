@@ -108,17 +108,15 @@ int sr_osk_input(const WCHAR *desc, const WCHAR *initial, WCHAR *out, int cap) {
 
 #else /* !_WIN32 */
 
-#include <wchar.h>
+#include "osk_text_entry.h"
 
-/* No native dialog exists on this host. Returning 0 reports the field as
- * cancelled/unchanged, which is what the runtime already does for a keyboard
- * it cannot present; the guest's own utility-state machine still advances. */
+/* There is no native box to supply a live answer on this host. */
 int sr_osk_input(const wchar_t *desc, const wchar_t *initial, wchar_t *out, int cap) {
     (void)desc;
     (void)initial;
     (void)out;
     (void)cap;
-    return 0;
+    return SR_OSK_TEXT_UNAVAILABLE;
 }
 
 #endif /* _WIN32 */

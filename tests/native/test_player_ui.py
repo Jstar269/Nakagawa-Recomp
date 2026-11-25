@@ -9337,28 +9337,40 @@ class FirstRunRouteTests(unittest.TestCase):
             iso = scratch / "archive.iso"
             create_archive_title_iso(iso, disc_id="ULUS99996", title="Synthetic Archive",
                                      executable=build_plain_mips_elf())
-            user_root = scratch / "user-data"
-            (user_root / "manifests").mkdir(parents=True)
-            (user_root / "manifests" / "archive.json").write_text(
-                json.dumps(archive_title_manifest("ULUS99996", "archive-ulus99996")),
-                encoding="utf-8",
-            )
-            completed = subprocess.run(
-                [str(PLAYER_EXE), f"--user-data-root={user_root}", f"--iso={iso}",
-                 "--launch-now", "--headless-launch"],
-                cwd=ROOT, env=self.scratch_env(scratch), capture_output=True, text=True,
-                timeout=120, check=False,
-            )
-            output = completed.stdout + completed.stderr
-            self.assertIn("STAGING_RESULT status=PASS", completed.stdout, output)
-            self.assertEqual(completed.returncode, 4, output)
-            self.assertIn("--launch-now failed: Runtime package is missing", completed.stderr)
-            self.assertNotIn("data folder", completed.stderr)
-            library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
-            self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99996"])
-            self.assertTrue(library["games"][0]["assets_staged"])
-            self.assertTrue((user_root / "games" / "ULUS99996" / "xbdata" / "menu" /
-                             "assets.xb.d" / "data" / "raw.bin").is_file())
+            for requested_frames in (None, "--headless-accept-presented-frames=1"):
+                with self.subTest(requested_frames=requested_frames):
+                    user_root = scratch / ("acceptance-data" if requested_frames else "user-data")
+                    (user_root / "manifests").mkdir(parents=True)
+                    (user_root / "manifests" / "archive.json").write_text(
+                        json.dumps(archive_title_manifest("ULUS99996", "archive-ulus99996")),
+                        encoding="utf-8",
+                    )
+                    args = [f"--user-data-root={user_root}", f"--iso={iso}",
+                            "--launch-now", "--headless-launch"]
+                    if requested_frames:
+                        args.append(requested_frames)
+                    completed = subprocess.run(
+                        [str(PLAYER_EXE), *args],
+                        cwd=ROOT, env=self.scratch_env(scratch), capture_output=True, text=True,
+                        timeout=120, check=False,
+                    )
+                    output = completed.stdout + completed.stderr
+                    self.assertIn("STAGING_RESULT status=PASS", completed.stdout, output)
+                    self.assertEqual(completed.returncode, 4, output)
+                    self.assertIn("--launch-now failed: Runtime package is missing", completed.stderr)
+                    self.assertNotIn("data folder", completed.stderr)
+                    self.assertNotIn("Spawning runtime:", completed.stdout)
+                    self.assertEqual(
+                        [line for line in output.splitlines() if "HEADLESS_ACCEPTANCE" in line],
+                        ["[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable"]
+                        if requested_frames else [],
+                        output,
+                    )
+                    library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
+                    self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99996"])
+                    self.assertTrue(library["games"][0]["assets_staged"])
+                    self.assertTrue((user_root / "games" / "ULUS99996" / "xbdata" / "menu" /
+                                     "assets.xb.d" / "data" / "raw.bin").is_file())
 
     def test_dropped_uncatalogued_disc_keeps_its_profile_under_the_runtime_root(self) -> None:
         """Audit 2026-11-17 F-1fc4e8af: the runtime root owns experimental profiles.

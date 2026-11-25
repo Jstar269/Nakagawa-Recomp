@@ -649,13 +649,15 @@ class TestEnhancementPackageSchema(unittest.TestCase):
 
 def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
                               sections: tuple[tuple[str, int, int, int], ...] = (),
-                              symbols: tuple[tuple[str, int, int, int, int], ...] = ()) -> bytes:
-    """Write a minimal synthetic MIPS32 little-endian ET_EXEC ELF for testing.
+                              symbols: tuple[tuple[str, int, int, int, int], ...] = (),
+                              *, elf_type: int = 2) -> bytes:
+    """Write a minimal synthetic MIPS32 little-endian ELF for testing.
 
     ``sections`` adds a section header table of (name, addr, size, flags) PROGBITS
-    sections over the loaded image.
+    sections over the loaded image. A .bss section is zero-filled (NOBITS).
     """
     filesz = max(max(words) + 8, 0x1000)
+    memsz = max([filesz] + [addr + size for name, addr, size, _ in sections if name == ".bss"])
     payload_off = 52 + 32
     blob = bytearray(payload_off + filesz)
     blob[:8] = b"\x7fELF\x01\x01\x01\x00"
@@ -663,7 +665,7 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
         "<HHIIIIIHHHHHH",
         blob,
         16,
-        2,  # e_type = ET_EXEC
+        elf_type,
         8,  # e_machine = EM_MIPS
         1,
         entry,
@@ -677,7 +679,7 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
         0,
         0,
     )
-    struct.pack_into("<8I", blob, 52, 1, payload_off, 0, 0, filesz, filesz, 5, 4)
+    struct.pack_into("<8I", blob, 52, 1, payload_off, 0, 0, filesz, memsz, 5, 4)
     for addr, word in words.items():
         struct.pack_into("<I", blob, payload_off + addr, word)
     if sections or symbols:
@@ -726,9 +728,10 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
             ),
         ]
         for name, addr, size, flags in sections:
+            offset = payload_off + (filesz if name == ".bss" else addr)
             headers.append(struct.pack(
-                "<10I", section_name_offsets[name], 1, flags, addr,
-                payload_off + addr, size, 0, 0, 4, 0,
+                "<10I", section_name_offsets[name], 8 if name == ".bss" else 1, flags, addr,
+                offset, size, 0, 0, 4, 0,
             ))
         if symbols:
             strtab_index = len(headers)
@@ -820,12 +823,13 @@ class _SynthTimingElfFixture(unittest.TestCase):
         }
 
     @staticmethod
-    def _run_codegen(elf_path: Path, out_c: Path, extra_args: list[str] | None = None) -> tuple[int, str, dict[str, bytes]]:
+    def _run_codegen(elf_path: Path, out_c: Path, extra_args: list[str] | None = None,
+                     *, base: int = 0) -> tuple[int, str, dict[str, bytes]]:
         argv = [
             "codegen.py",
             str(elf_path),
             str(out_c),
-            "--base=0",
+            f"--base={base:x}",
             "--profile=none",
             "--funcs-per-chunk=4000",
         ]
@@ -2152,8 +2156,9 @@ class TestEnhancementDataTransforms(unittest.TestCase):
                 plan_data_value(transform, dtype, raw)
 
     def test_f32_data_overflow_is_reported_as_a_rescale_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "overflows when rescaled"):
-            plan_data_value("count_x2", "f32", struct.pack("<f", 3.0e38))
+        for transform in ("count_x2", "f32_x3"):
+            with self.subTest(transform=transform), self.assertRaisesRegex(ValueError, "overflows when rescaled"):
+                plan_data_value(transform, "f32", struct.pack("<f", 3.0e38))
 
     def test_f32_float_pair_overflow_is_a_named_refusal(self) -> None:
         bits = struct.unpack("<I", struct.pack("<f", 3.0e38))[0]
@@ -4864,10 +4869,10 @@ class TestPublishedPackages(_SynthTimingElfFixture):
     DISC = "ULUS99999"
     VERSION = "1.01"
 
-    def _readers(self, elf_bytes: bytes):
+    def _readers(self, elf_bytes: bytes, *, base: int = 0):
         from analyze import Elf
 
-        return enhancement_package.elf_readers(Elf(elf_bytes, base=0))
+        return enhancement_package.elf_readers(Elf(elf_bytes, base=base))
 
     def _publish(self, elf_bytes: bytes, pkg: dict[str, Any] | None = None) -> dict[str, Any]:
         private, symbols = self._make_package_and_symbols(elf_bytes)
@@ -5271,6 +5276,207 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 enhancement_package.resolve_published_package(
                     published, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data,
                     data_root=tmp / "data")
+
+    def test_data_only_timing_package_scales_f32_at_opt_in_startup(self) -> None:
+        """The normal and opted-in builds share the same synthetic code and differ only in data."""
+        from analyze import ET_SCE_PRX
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            stock = struct.pack("<f", 1.25)
+            data_addr = 0x00002000
+            bss_addr = 0x00003000
+            base = 0x08800000
+            placed_addr = base + data_addr
+            words = dict(self.words)
+            words[data_addr] = struct.unpack("<I", stock)[0]
+            elf_bytes = _write_synthetic_mips_elf(
+                elf_path, words, self.entry,
+                sections=((".text", 0x00001000, 0x700, 6), (".rodata.sceModuleInfo", 0x1900, 52, 2),
+                          (".data", data_addr, 4, 3),
+                          (".bss", bss_addr, 4, 3)), elf_type=ET_SCE_PRX)
+            private, _ = self._make_package_and_symbols(elf_bytes)
+            instruction_sites = private["sites"]
+            update_boundary = private.pop("update_boundary")
+            private.update(sites=[], capabilities=["timing_data"],
+                           rng_policy={"mode": "unmodified",
+                                       "reason": "The synthetic fixture uses no RNG."},
+                           data_sites=[{
+                               "id": "TIMING_SCALE", "symbol": "synth_interval",
+                               "offset": 0, "type": "f32",
+                               "stock_digest": hashlib.sha256(stock).hexdigest(),
+                               "transform": "f32_x3",
+                           }])
+            symbols = {"synth_interval": f"0x{placed_addr:08x}"}
+
+            def generate(label: str, options: list[str]) -> tuple[int, str, dict[str, bytes]]:
+                output_dir = tmp / label
+                output_dir.mkdir()
+                return self._run_codegen(elf_path, output_dir / "out.c", options, base=base)
+
+            rc, output, authentic = generate("authentic", [])
+            self.assertEqual(rc, 0, output)
+            local_path = tmp / "local.json"
+            local_path.write_text(json.dumps(private), encoding="utf-8")
+            local_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+            rc, output, generated = generate("local", [f"--enhancement-package={local_path}"])
+            self.assertEqual(rc, 0, output)
+
+            read_words, read_data = self._readers(elf_bytes, base=base)
+            published = enhancement_package.publish_package(
+                private, {"synth_interval": placed_addr}, executable=elf_bytes,
+                disc_id=self.DISC, disc_version=self.VERSION,
+                read_words_fn=read_words, read_data_fn=read_data)
+            self.assertEqual(published["site_map"], symbols)
+            self.assertEqual(published["rng_policy"], private["rng_policy"])
+            self.assertNotEqual(published["data_sites"][0]["stock_digest"],
+                                private["data_sites"][0]["stock_digest"])
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+            public_path = tmp / "public.json"
+            public_path.write_text(json.dumps(published), encoding="utf-8")
+            rc, output, public_generated = generate("public", [f"--enhancement-package={public_path}"])
+            self.assertEqual(rc, 0, output)
+            self.assertEqual(public_generated, generated)
+
+            load_site = dict(instruction_sites[5], transform="vblank_wait_skip")
+            with self.assertRaisesRegex(EnhancementPackageError, "cannot declare load instruction sites"):
+                validate_package(dict(private, update_boundary=update_boundary,
+                                      ace_parts={"load": {"sites": [load_site]}}))
+
+            probability_transform = "probability_per_update_x0.5"
+            probability_site = dict(private["data_sites"][0], transform=probability_transform)
+            probability_file = {
+                "id": "SYNTH_PROBABILITY", "path": "data/probability.csv",
+                "sha256": hashlib.sha256(b"Rate\n0.25\n").hexdigest(),
+                "format": "csv", "header_row": 0, "first_data_row": 1,
+                "cells": [{"column": "Rate", "type": "f32", "transform": probability_transform}],
+            }
+            for field, elements in (("data_sites", [probability_site]), ("data_files", [probability_file])):
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    EnhancementPackageError, "probability rescaling requires an RNG policy"
+                ):
+                    validate_package(dict(private, **{field: elements}))
+            for mode in ("rescale_probability", "subtick_30hz"):
+                with self.subTest(mode=mode):
+                    legacy = dict(private, sites=instruction_sites, update_boundary=update_boundary,
+                                  data_sites=[probability_site], data_files=[probability_file],
+                                  rng_policy={"mode": mode, "reason": "Legacy timing policy."})
+                    self.assertEqual(validate_package(legacy)["rng_policy"]["mode"], mode)
+
+            for label, value, diagnostic in (
+                ("local-mismatch", private, "Stock data digest mismatch"),
+                ("published-mismatch", published, "site_mismatch"),
+            ):
+                with self.subTest(label=label):
+                    bad = copy.deepcopy(value)
+                    bad["data_sites"][0]["stock_digest"] = "0" * 64
+                    path = tmp / f"{label}.json"
+                    path.write_text(json.dumps(bad), encoding="utf-8")
+                    if label == "local-mismatch":
+                        path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+                    rc, output, files = generate(label, [f"--enhancement-package={path}"])
+                    self.assertEqual(rc, 1, output)
+                    self.assertIn(diagnostic, output)
+                    self.assertEqual(files, {})
+
+            for label, offset, changes, diagnostic in (
+                ("no-data-sites", data_addr, {"data_sites": []}, "data_sites must be a non-empty array"),
+                ("integer-scale", data_addr, {"data_sites": [dict(private["data_sites"][0], type="u32")]},
+                 "f32_x3 requires type 'f32'"),
+                ("missing-data-rng-policy", data_addr,
+                 {"rng_policy": {"mode": "rescale_probability", "reason": "A code-site policy."}},
+                 "data-only timing packages must declare 'unmodified'"),
+                ("unmodified-rng-rewrite", data_addr, {"sites": [instruction_sites[4]]},
+                 "'unmodified' is only for data-only timing packages"),
+                ("unmodified-rng-gate", data_addr, {"sites": [instruction_sites[5]]},
+                 "'unmodified' is only for data-only timing packages"),
+                ("code-as-data", self.entry, {}, "initialised data"),
+                ("bss-as-data", bss_addr, {}, "initialised data"),
+            ):
+                with self.subTest(label=label):
+                    path = tmp / f"{label}.json"
+                    path.write_text(json.dumps(dict(private, **changes)), encoding="utf-8")
+                    path.with_suffix(".symbols.json").write_text(
+                        json.dumps({"synth_interval": f"0x{base + offset:08x}"}), encoding="utf-8")
+                    rc, output, files = generate(label, [f"--enhancement-package={path}"])
+                    self.assertEqual(rc, 1, output)
+                    self.assertIn(diagnostic, output)
+                    self.assertEqual(files, {})
+
+            rc, output, authentic_after = generate("authentic-after", [])
+            self.assertEqual(rc, 0, output)
+            self.assertEqual(authentic_after, authentic)
+            self.assertNotIn(b"nk_enhancement_apply_data", authentic["out.c"])
+            self.assertEqual(generated["out_0.c"], authentic["out_0.c"])
+            main = generated["out.c"].decode("utf-8")
+            self.assertIn("sites=0", main)
+            lines = main.splitlines()
+            start = lines.index("int nk_enhancement_on(void) {")
+            enabled = "\n".join(lines[start:lines.index("uint32_t nk_enhancement_updates;", start) + 1])
+            start = next(i for i, line in enumerate(lines) if line.startswith("static const uint8_t nk_enh_data_stock_0"))
+            apply_data = "\n".join(lines[start:lines.index("}", start) + 1])
+            hook = "    if (nk_enhancement_on()) nk_enhancement_apply_data();"
+            self.assertIn(hook, main[main.index("void sr_register_all(void)"):])
+            if GCC is None:
+                self.skipTest("TOOLCHAIN_MISSING: needs a host compiler for the emitted startup test")
+            harness = tmp / "startup.c"
+            stock_bytes = ", ".join(f"0x{byte:02x}" for byte in stock)
+            harness.write_text(
+                "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+                f"static uint8_t data[] = {{{stock_bytes}}};\n"
+                f"int sr_guest_span_writable(uint32_t addr, uint32_t len) {{ return addr == {placed_addr} && len == sizeof(data); }}\n"
+                "void *sr_host_address(uint32_t addr) { (void)addr; return data; }\n"
+                "void sr_enhancement_register_updates(uint32_t *p) { (void)p; }\n"
+                f"{enabled}\n{apply_data}\nint main(void) {{\n{hook}\n"
+                '    for (unsigned i = 0; i < sizeof(data); ++i) printf("%02x", (unsigned)data[i]);\n'
+                "    return 0;\n}\n", encoding="utf-8")
+            exe = tmp / "startup.exe"
+            _run([GCC, "-std=c11", "-Wall", "-Werror", "-o", str(exe), str(harness)],
+                 check=True, capture_output=True)
+            for setting, expected in ((None, 1.25), ("0", 1.25), ("01", 1.25), ("1", 3.75)):
+                env = os.environ.copy()
+                env.pop("SR_EXPERIMENTAL_60HZ", None)
+                if setting is not None:
+                    env["SR_EXPERIMENTAL_60HZ"] = setting
+                run = _run([str(exe)], env=env, check=True, capture_output=True, text=True)
+                self.assertEqual(run.stdout, struct.pack("<f", expected).hex(), setting)
+
+    def test_initialized_data_reader_uses_elf_placement_once(self) -> None:
+        from analyze import ET_SCE_PRX, Elf
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "synth.elf"
+            data_addr, bss_addr = 0x2000, 0x3000
+            stock = struct.pack("<f", 1.25)
+            words = dict(self.words)
+            words[data_addr] = struct.unpack("<I", stock)[0]
+            sections = ((".text", self.entry, 0x700, 6), (".data", data_addr, 4, 3),
+                        (".bss", bss_addr, 4, 3))
+            for elf_type, base in ((2, 0x08800000), (ET_SCE_PRX, 0), (ET_SCE_PRX, 0x08800000)):
+                with self.subTest(elf_type=elf_type, base=base):
+                    executable = _write_synthetic_mips_elf(
+                        path, words, self.entry, sections, elf_type=elf_type)
+                    elf = Elf(executable, base=base)
+                    _, read_data = enhancement_package.elf_readers(elf)
+                    delta = base if elf_type == ET_SCE_PRX else 0
+                    self.assertEqual(elf.read_at_vaddr(data_addr + delta, 4), stock)
+                    self.assertEqual(read_data(data_addr + delta, 4), stock)
+                    segment = elf.segments[0]
+                    self.assertEqual(
+                        enhancement_package._elf_file_backed_offset(elf, data_addr + delta, 4),
+                        segment["off"] + data_addr)
+                    file_end = segment["vaddr"] + segment["filesz"]
+                    self.assertEqual(enhancement_package._elf_file_backed_offset(elf, file_end - 2, 2),
+                                     segment["off"] + segment["filesz"] - 2)
+                    self.assertIsNone(enhancement_package._elf_file_backed_offset(elf, file_end - 2, 4))
+                    self.assertEqual(elf.read_at_vaddr(self.entry + delta, 4),
+                                     struct.pack("<I", self.words[self.entry]))
+                    self.assertIsNone(read_data(self.entry + delta, 4))
+                    if elf_type == ET_SCE_PRX:
+                        self.assertEqual(elf.read_at_vaddr(bss_addr + delta, 4), b"\0" * 4)
+                    self.assertIsNone(enhancement_package._elf_file_backed_offset(elf, bss_addr + delta, 4))
+                    self.assertIsNone(read_data(bss_addr + delta, 4))
 
     def test_publish_keeps_no_values_read_from_the_game_and_refuses_wrong_digests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -45,6 +45,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32) && !defined(_WIN64)
+#include <utime.h>
+#endif
+
 #if defined(_WIN32) || defined(_WIN64)
 #include <direct.h>
 #include <windows.h>
@@ -3225,6 +3229,599 @@ static void memstick_expect_read_ok(const NkMemstickPaths *paths, const char *te
     assert(got == NK_MEMSTICK_LAYOUT_OK);
 }
 
+static void memstick_fixture_path(char out[NK_MAX_PATH], const char *root, const char *relative) {
+    int length = snprintf(out, NK_MAX_PATH, "%s%c%s", root, nk_platform_path_separator(), relative);
+    assert(length > 0 && length < NK_MAX_PATH);
+}
+
+static void test_memstick_save_collision(const char *base) {
+    puts("[LAUNCH_TEST] Shared Memory Stick whole-save collision and retry");
+    char saves[NK_MAX_PATH], path[NK_MAX_PATH];
+    memstick_fixture_path(saves, base, "memstick-collision");
+    assert(nk_platform_mkdir_p(saves));
+    NkMemstickPaths layout;
+    assert(nk_memstick_layout_paths(saves, &layout));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, layout.lock, 0));
+    assert(nk_memstick_copy_save_collision(saves, "TEST00001", "TEST00001A",
+                                           "TEST00002", "test00001a") ==
+           NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED);
+    assert(nk_platform_path_missing(layout.staging));
+    NkMemstickLayout record;
+    assert(nk_memstick_layout_init(&record, NK_MEMSTICK_STATE_MOVING, "test"));
+    assert(nk_memstick_layout_write(saves, &record, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&record);
+
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001A/JOURNAL");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001A/JOURNAL/.pending");
+    write_file_utf8(path, "winner journal");
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001A/DATA.BIN");
+    write_file_utf8(path, "winner data");
+
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001a");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001a/data.bin");
+    write_file_utf8(path, "loser data!");
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001a/ICON0.PNG");
+    write_file_utf8(path, "loser icon");
+
+    /* This first-migration primitive cannot operate over a live shared stick. */
+    assert(nk_platform_mkdir_p(layout.stick));
+    memstick_fixture_path(path, layout.stick, "ACTIVE");
+    write_file_utf8(path, "active player data");
+    assert(nk_memstick_copy_save_collision(saves, "TEST00001", "TEST00001A",
+                                           "TEST00002", "test00001a") ==
+           NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED);
+    assert_file_text(path, "active player data");
+    assert(nk_platform_path_missing(layout.staging));
+    assert(nk_platform_path_missing(layout.kept_copies));
+    memstick_fixture_path(path, saves, "fixture-active");
+    assert(nk_rename_noreplace_utf8(layout.stick, path) == 0);
+
+    /* A differing old output blocks the primary promotion. The completed alternate
+       and both legacy folders must survive the failed attempt. */
+    char primary[NK_MAX_PATH], alternate[NK_MAX_PATH], blocked[NK_MAX_PATH];
+    memstick_fixture_path(primary, layout.staging, "PSP/SAVEDATA/TEST00001A");
+    memstick_fixture_path(alternate, layout.kept_copies, "TEST00002/PSP/SAVEDATA/test00001a");
+    assert(nk_platform_mkdir_p(primary));
+    memstick_fixture_path(blocked, primary, "DATA.BIN");
+    write_file_utf8(blocked, "preexisting copy");
+    assert(nk_memstick_copy_save_collision(saves, "TEST00001", "TEST00001A",
+                                           "TEST00002", "test00001a") ==
+           NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT);
+    assert_file_text(blocked, "preexisting copy");
+    memstick_fixture_path(path, alternate, "data.bin");
+    assert_file_text(path, "loser data!");
+    memstick_fixture_path(path, alternate, "ICON0.PNG");
+    assert_file_text(path, "loser icon");
+    memstick_fixture_path(path, alternate, "JOURNAL");
+    assert(nk_platform_path_missing(path));
+
+    /* Move the occupied synthetic destination to let a retry resume after the
+       kept copy was committed. The retry reuses that copy and completes the stick. */
+    memstick_fixture_path(path, saves, "fixture-occupied");
+    assert(nk_rename_noreplace_utf8(primary, path) == 0);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        assert(nk_memstick_copy_save_collision(saves, "TEST00001", "TEST00001A",
+                                               "TEST00002", "test00001a") ==
+               NK_MEMSTICK_COLLISION_COPIED);
+        assert_file_text(blocked, "winner data");
+        memstick_fixture_path(path, primary, "JOURNAL/.pending");
+        assert_file_text(path, "winner journal");
+        memstick_fixture_path(path, primary, "ICON0.PNG");
+        assert(nk_platform_path_missing(path));
+        memstick_fixture_path(path, alternate, "data.bin");
+        assert_file_text(path, "loser data!");
+    }
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001A/DATA.BIN");
+    assert_file_text(path, "winner data");
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001a/data.bin");
+    assert_file_text(path, "loser data!");
+    assert(nk_platform_path_missing(layout.stick));
+
+    /* Another save has identical structure and bytes despite spelling and insertion order. */
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001B/EMPTY");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001B/DATA.BIN");
+    write_file_utf8(path, "same bytes");
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001b");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001b/data.bin");
+    write_file_utf8(path, "same bytes");
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001b/empty");
+    assert(nk_platform_mkdir_p(path));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        assert(nk_memstick_copy_save_collision(saves, "TEST00001", "TEST00001B",
+                                               "TEST00002", "test00001b") ==
+               NK_MEMSTICK_COLLISION_IDENTICAL);
+        memstick_fixture_path(path, layout.staging, "PSP/SAVEDATA/TEST00001B/DATA.BIN");
+        assert_file_text(path, "same bytes");
+        memstick_fixture_path(path, layout.staging, "PSP/SAVEDATA/TEST00001B/EMPTY");
+        assert(nk_platform_dir_exists(path));
+        memstick_fixture_path(path, layout.kept_copies, "TEST00002/PSP/SAVEDATA/test00001b");
+        assert(nk_platform_path_missing(path));
+    }
+
+    /* Tree shape and file size match, but the bytes differ. */
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001C");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001C/DATA.BIN");
+    write_file_utf8(path, "one");
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001c");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001c/data.bin");
+    write_file_utf8(path, "two");
+    assert(nk_memstick_copy_save_collision(saves, "TEST00001", "TEST00001C",
+                                           "TEST00002", "test00001c") ==
+           NK_MEMSTICK_COLLISION_COPIED);
+    memstick_fixture_path(path, layout.staging, "PSP/SAVEDATA/TEST00001C/DATA.BIN");
+    assert_file_text(path, "one");
+    memstick_fixture_path(path, layout.kept_copies, "TEST00002/PSP/SAVEDATA/test00001c/data.bin");
+    assert_file_text(path, "two");
+
+#if !defined(_WIN32) && !defined(_WIN64)
+    /* An unreadable entry invalidates only its own source unit. A link in the
+       legacy tree can never leak its target into a published copy. */
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001c/link");
+    assert(symlink("data.bin", path) == 0);
+    assert(nk_memstick_copy_save_collision(saves, "TEST00001", "TEST00001C",
+                                           "TEST00002", "test00001c") ==
+           NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE);
+    memstick_fixture_path(path, layout.kept_copies, "TEST00002/PSP/SAVEDATA/test00001c/link");
+    assert(nk_platform_path_missing(path));
+#endif
+    nk_platform_file_lock_release(&lock);
+}
+
+static void memstick_write_aged_file(const char *path, const char *bytes, uint32_t seconds) {
+    write_file_utf8(path, bytes);
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NK_MAX_PATH];
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, NK_MAX_PATH) > 0);
+    HANDLE file = CreateFileW(wide, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(file != INVALID_HANDLE_VALUE);
+    const uint64_t ticks = (UINT64_C(11644473600) + seconds) * 10000000u;
+    FILETIME modified = {(DWORD)ticks, (DWORD)(ticks >> 32)};
+    assert(SetFileTime(file, NULL, NULL, &modified));
+    assert(CloseHandle(file));
+#else
+    struct utimbuf times = {(time_t)seconds, (time_t)seconds};
+    assert(utime(path, &times) == 0);
+#endif
+}
+
+#if !defined(_WIN32) && !defined(_WIN64)
+typedef struct {
+    const char *fixture;
+    const char *ordinary;
+    const char *skipped;
+    const char *unrelated;
+    const char *link_target;
+} MemstickSkippedNameCase;
+
+static void test_memstick_skipped_name_case(const char *base, const MemstickSkippedNameCase *fixture) {
+    printf("[LAUNCH_TEST] Shared Memory Stick rejects a case-folded skipped name in %s\n", fixture->fixture);
+    const NkMemstickPlanInput inputs[] = {{"test00001", NULL}, {"usable-slot", NULL}};
+    char saves[NK_MAX_PATH], target[NK_MAX_PATH], path[NK_MAX_PATH], data[NK_MAX_PATH];
+    char skipped[NK_MAX_PATH], immutable[NK_MAX_PATH], checkpoint[NK_MAX_PATH];
+    memstick_fixture_path(saves, base, fixture->fixture);
+    memstick_fixture_path(target, saves, "Usable-Slot");
+    memstick_fixture_path(path, target, "PSP/SAVEDATA/SAVE");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(data, path, "DATA.BIN");
+    write_file_utf8(data, "synthetic legacy save");
+    if (fixture->ordinary) {
+        memstick_fixture_path(path, saves, fixture->ordinary);
+        assert(nk_platform_mkdir_p(path));
+    }
+    memstick_fixture_path(target, saves, fixture->link_target);
+    memstick_fixture_path(path, saves, fixture->unrelated);
+    assert(symlink(target, path) == 0);
+    memstick_fixture_path(skipped, saves, fixture->skipped);
+
+    NkMemstickPaths layout;
+    NkMemstickSavePlan initial, current;
+    assert(nk_memstick_layout_paths(saves, &layout));
+    assert(nk_memstick_plan_savedata(saves, inputs, 2u, &initial));
+    assert(initial.source_count == 2u && initial.unit_count == 1u);
+    assert(initial.sources[0].status == (fixture->ordinary ? NK_MEMSTICK_PLAN_SOURCE_READABLE
+                                                          : NK_MEMSTICK_PLAN_SOURCE_ABSENT));
+    assert(initial.sources[1].status == NK_MEMSTICK_PLAN_SOURCE_READABLE);
+    assert(!strcmp(initial.sources[1].slot, "Usable-Slot"));
+
+    NkFileLock lock;
+    NkMemstickLayout moving;
+    assert(nk_platform_file_lock_acquire(&lock, layout.lock, 0));
+    assert(nk_memstick_layout_init(&moving, NK_MEMSTICK_STATE_MOVING, "test"));
+    assert(nk_memstick_layout_write(saves, &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&moving);
+    memstick_fixture_path(immutable, layout.migration, "psp-savedata/plan.json");
+    memstick_fixture_path(checkpoint, layout.migration, "psp-savedata/progress.json");
+
+    assert(symlink(target, skipped) == 0);
+    assert(nk_memstick_plan_savedata(saves, inputs, 2u, &current));
+    assert(current.source_count == 2u);
+    const int slot_status = current.sources[0].status;
+    assert(current.sources[1].status == NK_MEMSTICK_PLAN_SOURCE_READABLE && current.unit_count == 1u);
+    nk_memstick_save_plan_free(&current);
+    const NkMemstickCollisionResult begin = nk_memstick_savedata_move_begin(saves, &initial);
+    const bool wrote_plan = !nk_platform_path_missing(immutable);
+    assert(unlink(skipped) == 0);
+
+    assert(nk_memstick_savedata_move_begin(saves, &initial) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(symlink(target, skipped) == 0);
+    bool complete = true;
+    const NkMemstickCollisionResult resumed = nk_memstick_savedata_move_resume(saves, 0u, &complete);
+    const bool wrote_progress = !nk_platform_path_missing(checkpoint);
+    const bool wrote_staging = !nk_platform_path_missing(layout.staging);
+    assert_file_text(data, "synthetic legacy save");
+    if (slot_status != NK_MEMSTICK_PLAN_SOURCE_UNREADABLE ||
+        begin != NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE ||
+        resumed != NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE || complete) {
+        fprintf(stderr, "Skipped case-folded %s: status=%d begin=%d resume=%d complete=%d\n",
+                fixture->fixture, slot_status, (int)begin, (int)resumed, (int)complete);
+    }
+    assert(slot_status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE);
+    assert(begin == NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE && !wrote_plan);
+    assert(resumed == NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE && !complete);
+    assert(!wrote_progress && !wrote_staging);
+    assert(unlink(skipped) == 0);
+    assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) == NK_MEMSTICK_COLLISION_COPIED && complete);
+    memstick_fixture_path(path, layout.staging, "PSP/SAVEDATA/SAVE/DATA.BIN");
+    assert_file_text(path, "synthetic legacy save");
+
+    /* Check the same lookup when a completed output gains a skipped alias. */
+    if (fixture->ordinary) {
+        char output_alias[NK_MAX_PATH];
+        memstick_fixture_path(output_alias, layout.staging, "PSP/SAVEDATA/save");
+        assert(symlink(target, output_alias) == 0);
+        char *progress = read_text_file(checkpoint);
+        assert(progress);
+        assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) ==
+               NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT);
+        assert(!complete);
+        assert_file_text(checkpoint, progress);
+        assert_file_text(path, "synthetic legacy save");
+        assert_file_text(data, "synthetic legacy save");
+        assert(unlink(output_alias) == 0);
+        assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) == NK_MEMSTICK_COLLISION_COPIED && complete);
+        assert_file_text(checkpoint, progress);
+        free(progress);
+    }
+
+    nk_memstick_save_plan_free(&initial);
+    nk_platform_file_lock_release(&lock);
+}
+
+static void test_memstick_skipped_slot(const char *base) {
+    static const MemstickSkippedNameCase cases[] = {
+        {"memstick-skipped-slot", NULL, "TEST00001", "unrelated-link", "Usable-Slot"},
+        {"memstick-skipped-psp", "test00001/PSP", "test00001/psp", "test00001/unrelated-link",
+         "Usable-Slot/PSP"},
+        {"memstick-skipped-savedata", "test00001/PSP/SAVEDATA", "test00001/PSP/savedata",
+         "test00001/PSP/unrelated-link", "Usable-Slot/PSP/SAVEDATA"},
+    };
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i)
+        test_memstick_skipped_name_case(base, &cases[i]);
+}
+#endif
+
+static void test_memstick_save_planner(const char *base) {
+    puts("[LAUNCH_TEST] Shared Memory Stick legacy election and replay");
+    static const struct {
+        const char *folder;
+        const char *bytes;
+        uint32_t seconds;
+    } fixtures[] = {
+        {"TEST00001/PSP/SAVEDATA/TEST00001P", "prefix owner", 1700000000u},
+        {"TITLE-B/psp/savedata/test00001p", "alternate B!", 1700002000u},
+        {"test00003/PSP/SAVEDATA/TEST00001p", "alternate C!", 1700002000u},
+        {"TEST00001/PSP/SAVEDATA/SHARED", "duplicate C", 1700000000u},
+        {"TITLE-B/psp/savedata/shared", "newest to win", 1700002001u},
+        {"test00003/PSP/SAVEDATA/Shared", "duplicate C", 1700002000u},
+        {"TEST00001/PSP/SAVEDATA/LATE", "older slot A", 1700000000u},
+        {"test00003/PSP/SAVEDATA/late", "newer slot C", 1700003000u},
+        {"RESTORE-BACKUP/PSP/SAVEDATA/TEST00001P", "unrelated backup", 1700009000u},
+    };
+    const NkMemstickPlanInput inputs[] = {
+        {"TEST00003", "TEST00003"}, {"TEST00001", "TEST00001"},
+        {"TITLE-B", "TEST00002"}, {"Z-ABSENT", NULL},
+    };
+    const NkMemstickPlanInput reverse_inputs[] = {
+        {"Z-ABSENT", NULL}, {"TITLE-B", "TEST00002"},
+        {"TEST00001", "TEST00001"}, {"TEST00003", "TEST00003"},
+    };
+    char roots[2][NK_MAX_PATH], path[NK_MAX_PATH], parent[NK_MAX_PATH];
+    NkMemstickSavePlan plans[2];
+    NkMemstickPaths layouts[2];
+    const size_t fixture_count = sizeof(fixtures) / sizeof(fixtures[0]);
+    for (size_t run = 0; run < 2u; ++run) {
+        memstick_fixture_path(roots[run], base, run ? "planner-reverse" : "planner-forward");
+        assert(nk_platform_mkdir_p(roots[run]));
+        assert(nk_memstick_layout_paths(roots[run], &layouts[run]));
+        for (size_t n = 0; n < fixture_count; ++n) {
+            size_t i = run ? fixture_count - n - 1u : n;
+            memstick_fixture_path(parent, roots[run], fixtures[i].folder);
+            assert(nk_platform_mkdir_p(parent));
+            memstick_fixture_path(path, parent, "DATA.BIN");
+            memstick_write_aged_file(path, fixtures[i].bytes, fixtures[i].seconds);
+        }
+        if (run == 0u) {
+            memstick_fixture_path(parent, layouts[run].stick, "PSP/SAVEDATA/TEST00001P");
+            assert(nk_platform_mkdir_p(parent));
+            memstick_fixture_path(path, parent, "DATA.BIN");
+            write_file_utf8(path, "active stick");
+        }
+        assert(nk_memstick_plan_savedata(roots[run], run ? reverse_inputs : inputs, 4u, &plans[run]));
+        assert(plans[run].active_stick_present == (run == 0u));
+        assert(plans[run].source_count == 4u && plans[run].unit_count == 8u);
+        assert(!strcmp(plans[run].sources[1].slot, "test00003"));
+        assert(plans[run].sources[3].status == NK_MEMSTICK_PLAN_SOURCE_ABSENT);
+        assert(nk_platform_path_missing(layouts[run].record));
+        assert(nk_platform_path_missing(layouts[run].staging));
+        assert(nk_platform_path_missing(layouts[run].kept_copies));
+    }
+    for (size_t i = 0; i < plans[0].unit_count; ++i) {
+        const NkMemstickPlanUnit *a = &plans[0].units[i], *b = &plans[1].units[i];
+        assert(strcmp(a->slot, b->slot) == 0 && strcmp(a->name, b->name) == 0);
+        assert(memcmp(a->digest, b->digest, sizeof(a->digest)) == 0);
+        assert(a->decision == b->decision && a->copy_of == b->copy_of);
+    }
+    const NkMemstickSavePlan *plan = &plans[0];
+    const NkMemstickPlanUnit *rows = plan->units;
+    assert(!strcmp(rows[0].slot, "test00003") && !strcmp(rows[0].name, "late"));
+    assert(rows[0].decision == NK_MEMSTICK_PLAN_STAGE && rows[1].decision == NK_MEMSTICK_PLAN_KEEP);
+    assert(!strcmp(rows[2].slot, "TITLE-B") && !strcmp(rows[2].name, "shared"));
+    assert(rows[2].decision == NK_MEMSTICK_PLAN_STAGE);
+    assert(!strcmp(rows[3].slot, "test00003") && rows[3].decision == NK_MEMSTICK_PLAN_KEEP);
+    assert(!strcmp(rows[4].slot, "TEST00001") && rows[4].decision == NK_MEMSTICK_PLAN_DEDUPLICATE);
+    assert(rows[4].copy_of == 3u);
+    assert(!strcmp(rows[5].slot, "TEST00001") && !strcmp(rows[5].name, "TEST00001P"));
+    assert(rows[5].decision == NK_MEMSTICK_PLAN_STAGE);
+    assert(!strcmp(rows[6].slot, "test00003") && rows[6].decision == NK_MEMSTICK_PLAN_KEEP);
+    assert(!strcmp(rows[7].slot, "TITLE-B") && rows[7].decision == NK_MEMSTICK_PLAN_KEEP);
+
+    const NkMemstickPaths *layout = &layouts[0];
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, layout->lock, 0));
+    NkMemstickLayout moving;
+    assert(nk_memstick_layout_init(&moving, NK_MEMSTICK_STATE_MOVING, "test"));
+    assert(nk_memstick_layout_write(roots[0], &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&moving);
+    assert(nk_memstick_replay_savedata(roots[0], plan, 5u) == NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED);
+    memstick_fixture_path(path, layout->stick, "PSP/SAVEDATA/TEST00001P/DATA.BIN");
+    assert_file_text(path, "active stick");
+    assert(nk_platform_path_missing(layout->staging));
+    memstick_fixture_path(path, roots[0], "fixture-active-store");
+    assert(nk_rename_noreplace_utf8(layout->stick, path) == 0);
+
+    memstick_fixture_path(parent, roots[0], fixtures[2].folder);
+    memstick_fixture_path(path, parent, "DATA.BIN");
+    memstick_write_aged_file(path, "edited bytes", fixtures[2].seconds);
+    assert(nk_memstick_replay_savedata(roots[0], plan, 5u) == NK_MEMSTICK_COLLISION_SOURCE_CHANGING);
+    assert(nk_platform_path_missing(layout->staging));
+    assert(nk_platform_path_missing(layout->kept_copies));
+    memstick_write_aged_file(path, fixtures[2].bytes, fixtures[2].seconds);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        assert(nk_memstick_replay_savedata(roots[0], plan, 2u) == NK_MEMSTICK_COLLISION_COPIED);
+        assert(nk_memstick_replay_savedata(roots[0], plan, 5u) == NK_MEMSTICK_COLLISION_COPIED);
+    }
+    memstick_fixture_path(path, layout->staging, "PSP/SAVEDATA/TEST00001P/DATA.BIN");
+    assert_file_text(path, "prefix owner");
+    memstick_fixture_path(path, layout->kept_copies, "TITLE-B/PSP/SAVEDATA/test00001p/DATA.BIN");
+    assert_file_text(path, "alternate B!");
+    memstick_fixture_path(path, layout->kept_copies, "test00003/PSP/SAVEDATA/TEST00001p/DATA.BIN");
+    assert_file_text(path, "alternate C!");
+    memstick_fixture_path(path, layout->staging, "PSP/SAVEDATA/shared/DATA.BIN");
+    assert_file_text(path, "newest to win");
+    memstick_fixture_path(path, layout->kept_copies, "test00003/PSP/SAVEDATA/Shared/DATA.BIN");
+    assert_file_text(path, "duplicate C");
+    memstick_fixture_path(path, layout->kept_copies, "TEST00001/PSP/SAVEDATA/SHARED");
+    assert(nk_platform_path_missing(path));
+    memstick_fixture_path(path, roots[0], "fixture-active-store/PSP/SAVEDATA/TEST00001P/DATA.BIN");
+    assert_file_text(path, "active stick");
+
+    /* A candidate slot that is a file is explicit and never treated as moved. */
+    const NkMemstickPlanInput with_refusal[] = {{"TEST00001", "TEST00001"}, {"Z-BLOCKED", NULL}};
+    memstick_fixture_path(path, roots[0], "Z-BLOCKED");
+    write_file_utf8(path, "not a save directory");
+    NkMemstickSavePlan refused;
+    assert(nk_memstick_plan_savedata(roots[0], with_refusal, 2u, &refused));
+    assert(refused.source_count == 2u && refused.unit_count == 3u);
+    assert(refused.sources[1].status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE);
+    assert(nk_memstick_replay_savedata(roots[0], &refused, 0u) ==
+           NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE);
+    assert_file_text(path, "not a save directory");
+    nk_memstick_save_plan_free(&refused);
+    nk_platform_file_lock_release(&lock);
+    for (size_t i = 0; i < 2u; ++i) nk_memstick_save_plan_free(&plans[i]);
+}
+
+static int memstick_journal_probe(const char *phase, const char *saves) {
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0));
+    if (!strcmp(phase, "interrupt")) {
+        NkMemstickLayout moving;
+        assert(nk_memstick_layout_init(&moving, NK_MEMSTICK_STATE_MOVING, "test"));
+        assert(nk_memstick_layout_write(saves, &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+        nk_memstick_layout_free(&moving);
+        const NkMemstickPlanInput inputs[] = {
+            {"TEST00001", "TEST00001"}, {"TEST00002", "TEST00002"}, {"Z-ABSENT", NULL},
+        };
+        NkMemstickSavePlan plan;
+        assert(nk_memstick_plan_savedata(saves, inputs, 3u, &plan));
+        assert(plan.unit_count == 3u && plan.units[1].decision == NK_MEMSTICK_PLAN_KEEP);
+        assert(nk_memstick_savedata_move_begin(saves, &plan) == NK_MEMSTICK_COLLISION_COPIED);
+        assert(nk_memstick_savedata_move_begin(saves, &plan) == NK_MEMSTICK_COLLISION_COPIED);
+        const NkMemstickPlanInput without_ownership[] = {
+            {"TEST00001", NULL}, {"TEST00002", NULL}, {"Z-ABSENT", NULL},
+        };
+        NkMemstickSavePlan different;
+        assert(nk_memstick_plan_savedata(saves, without_ownership, 3u, &different));
+        assert(!strcmp(different.units[0].slot, "TEST00002"));
+        assert(nk_memstick_savedata_move_begin(saves, &different) ==
+               NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT);
+        nk_memstick_save_plan_free(&different);
+        /* Leave a genuine committed copy with no checkpoint and no process
+           state or graceful unwind for the next invocation to depend on. */
+        assert(nk_memstick_replay_savedata(saves, &plan, 0u) == NK_MEMSTICK_COLLISION_COPIED);
+        _Exit(84);
+    }
+    bool complete = true;
+    NkMemstickCollisionResult result = nk_memstick_savedata_move_resume(
+        saves, !strcmp(phase, "partial") ? 1u : 0u, &complete);
+    if (!strcmp(phase, "partial")) {
+        assert(result == NK_MEMSTICK_COLLISION_COPIED && !complete);
+    } else if (!strcmp(phase, "source-changed")) {
+        assert(result == NK_MEMSTICK_COLLISION_SOURCE_CHANGING && !complete);
+    } else if (!strcmp(phase, "target-changed")) {
+        assert(result == NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT && !complete);
+    } else if (!strcmp(phase, "checkpoint-invalid")) {
+        assert(result == NK_MEMSTICK_COLLISION_JOURNAL_DAMAGED && !complete);
+    } else if (!strcmp(phase, "active-stick")) {
+        assert(result == NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED && !complete);
+    } else {
+        assert(!strcmp(phase, "complete"));
+        assert(result == NK_MEMSTICK_COLLISION_COPIED && complete);
+    }
+    nk_platform_file_lock_release(&lock);
+    return 0;
+}
+
+static void memstick_start_journal_probe(const char *saves, const char *phase, int expected) {
+    char exe[NK_MAX_PATH], log[NK_MAX_PATH];
+    assert(nk_platform_get_executable_path(exe, sizeof(exe)));
+    memstick_fixture_path(log, saves, "fixture-process.log");
+    const char *args[] = {exe, "--memstick-journal-probe", phase, saves, NULL};
+    NkProcessHandle process;
+    assert(nk_platform_spawn_process(exe, args, NULL, NULL, log, &process));
+    int code = nk_platform_wait_process(&process, -1);
+    nk_platform_close_process(&process);
+    if (code != expected) {
+        char *detail = read_text_file(log);
+        fprintf(stderr, "journal probe %s: exit %d expected %d\n%s", phase, code, expected,
+                detail ? detail : "");
+        free(detail);
+    }
+    assert(code == expected);
+}
+
+static void test_memstick_journal_restart(const char *base) {
+    puts("[LAUNCH_TEST] Shared Memory Stick durable plan and fresh-process restart");
+    char saves[NK_MAX_PATH], path[NK_MAX_PATH], legacy[NK_MAX_PATH], kept[NK_MAX_PATH];
+    char checkpoint[NK_MAX_PATH], immutable[NK_MAX_PATH], pending[NK_MAX_PATH];
+    char slot_record[NK_MAX_PATH];
+    memstick_fixture_path(saves, base, "memstick-journal");
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/TEST00001A");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(legacy, path, "DATA.BIN");
+    memstick_write_aged_file(legacy, "winner-01", 1700000000u);
+    memstick_fixture_path(path, saves, "TEST00002/psp/savedata/test00001a");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(legacy, path, "DATA.BIN");
+    memstick_write_aged_file(legacy, "archive-a", 1700003000u);
+    memstick_fixture_path(path, saves, "TEST00001/PSP/SAVEDATA/ZZZ");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(legacy, path, "DATA.BIN");
+    memstick_write_aged_file(legacy, "remaining", 1700001000u);
+
+    NkMemstickPaths layout;
+    assert(nk_memstick_layout_paths(saves, &layout));
+    assert(nk_platform_mkdir_p(layout.migration));
+    memstick_fixture_path(slot_record, layout.migration, "psp-savedata-plan.json");
+    write_file_utf8(slot_record, "unchanged per-slot record");
+    memstick_fixture_path(checkpoint, layout.migration, "psp-savedata/progress.json");
+    memstick_fixture_path(immutable, layout.migration, "psp-savedata/plan.json");
+    memstick_fixture_path(kept, layout.kept_copies, "TEST00002/PSP/SAVEDATA/test00001a/DATA.BIN");
+    memstick_fixture_path(pending, layout.staging, "PSP/SAVEDATA/ZZZ");
+    memstick_start_journal_probe(saves, "interrupt", 84);
+    assert(nk_platform_path_missing(checkpoint));
+    assert(nk_platform_path_missing(pending));
+    assert_file_text(kept, "archive-a");
+    char *frozen = read_text_file(immutable);
+    assert(frozen && strstr(frozen, "TEST00001A"));
+
+    memstick_start_journal_probe(saves, "partial", 0);
+    assert(nk_platform_path_missing(pending));
+    char *progress = read_text_file(checkpoint);
+    assert(progress && strstr(progress, "\"next_unit\":2"));
+
+    /* An older player changed a source from the already checkpointed group. */
+    memstick_fixture_path(legacy, saves, "TEST00001/PSP/SAVEDATA/TEST00001A/DATA.BIN");
+    memstick_write_aged_file(legacy, "winner-02", 1700000000u);
+    memstick_start_journal_probe(saves, "source-changed", 0);
+    assert(nk_platform_path_missing(pending));
+    assert_file_text(legacy, "winner-02");
+    assert_file_text(checkpoint, progress);
+    memstick_write_aged_file(legacy, "winner-01", 1700000000u);
+
+    /* A known absent slot appeared while the old player had control. */
+    memstick_fixture_path(path, saves, "Z-ABSENT");
+    assert(nk_platform_mkdir_p(path));
+    memstick_start_journal_probe(saves, "source-changed", 0);
+    assert(nk_platform_remove_empty_dir(path));
+    assert_file_text(checkpoint, progress);
+    assert(nk_platform_path_missing(pending));
+
+    /* An edited kept copy with identical length and timestamp is still user data. */
+    memstick_write_aged_file(kept, "archive-a", 1700004000u);
+    memstick_write_aged_file(kept, "archive-b", 1700004000u);
+    memstick_start_journal_probe(saves, "target-changed", 0);
+    assert_file_text(kept, "archive-b");
+    assert_file_text(checkpoint, progress);
+    assert(nk_platform_path_missing(pending));
+    memstick_write_aged_file(kept, "archive-a", 1700004000u);
+
+    const char *foreign = "{\"schema_version\":1,\"plan_sha256\":\""
+                          "0000000000000000000000000000000000000000000000000000000000000000"
+                          "\",\"next_unit\":2}\n";
+    write_file_utf8(checkpoint, foreign);
+    memstick_start_journal_probe(saves, "checkpoint-invalid", 0);
+    assert_file_text(checkpoint, foreign);
+    assert_file_text(immutable, frozen);
+    assert_file_text(slot_record, "unchanged per-slot record");
+    write_file_utf8(checkpoint, progress);
+
+    assert(nk_platform_mkdir_p(layout.stick));
+    memstick_fixture_path(path, layout.stick, "USER.BIN");
+    write_file_utf8(path, "active original");
+    memstick_start_journal_probe(saves, "active-stick", 0);
+    assert_file_text(path, "active original");
+    memstick_fixture_path(path, saves, "fixture-active");
+    assert(nk_rename_noreplace_utf8(layout.stick, path) == 0);
+
+    memstick_start_journal_probe(saves, "complete", 0);
+    char *done = read_text_file(checkpoint);
+    assert(done && strstr(done, "\"next_unit\":3"));
+    uint64_t done_identity[3], repeated_identity[3];
+    nk_platform_file_change_identity(checkpoint, &done_identity[0], &done_identity[1],
+                                      &done_identity[2]);
+    assert(done_identity[1] || done_identity[2]);
+    memstick_start_journal_probe(saves, "complete", 0);
+    nk_platform_file_change_identity(checkpoint, &repeated_identity[0], &repeated_identity[1],
+                                      &repeated_identity[2]);
+    assert(memcmp(done_identity, repeated_identity, sizeof(done_identity)) == 0);
+    assert_file_text(checkpoint, done);
+    assert_file_text(immutable, frozen);
+    assert_file_text(legacy, "winner-01");
+    assert_file_text(kept, "archive-a");
+    memstick_fixture_path(path, pending, "DATA.BIN");
+    assert_file_text(path, "remaining");
+    memstick_fixture_path(path, saves, "fixture-active/USER.BIN");
+    assert_file_text(path, "active original");
+    NkMemstickLayout moving;
+    assert(nk_memstick_layout_read(saves, &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    assert(moving.state == NK_MEMSTICK_STATE_MOVING);
+    nk_memstick_layout_free(&moving);
+    free(done);
+    free(progress);
+    free(frozen);
+}
+
 /* #2744: the shared Memory Stick is <saves>/Memory Stick on every platform and in every override,
  * and its layout record <saves>/nakagawa-saves.json is schema_version 1, with a newer one refused
  * by name (SAVES_LAYOUT_NEWER) and a damaged or unreadable one kept, never replaced. Synthetic
@@ -3686,7 +4283,75 @@ static void test_memstick_layout(const char *base, char sep) {
     nk_memstick_layout_free(NULL);
 }
 
+static void test_developer_executable_path_fit(const char *base, const char *iso_path) {
+    static NkLaunchSession session;
+    NkGameEntry game;
+    char absolute_base[NK_MAX_PATH], container[NK_MAX_PATH], root[NK_MAX_PATH];
+    char build_directory[NK_MAX_PATH + 20], fitting_path[NK_MAX_PATH + 40];
+    char overlong_path[NK_MAX_PATH + 48];
+    const char sep = nk_platform_path_separator();
+    const char name[] = "synthetic";
+    char build_suffix[32];
+    int suffix_length = snprintf(build_suffix, sizeof(build_suffix), "%cbuild%c%s", sep, sep, name);
+    assert(suffix_length > 0 && (size_t)suffix_length < sizeof(build_suffix));
+    const size_t relative_length = (size_t)suffix_length + 1u + strlen(name);
+    const size_t root_length = sizeof(session.executable_path) - 1u - relative_length;
+
+    printf("[LAUNCH_TEST] Developer executable at the path capacity\n");
+    fflush(stdout);
+    assert(nk_platform_absolute_path(base, absolute_base, sizeof(absolute_base)));
+#if defined(_WIN32) || defined(_WIN64)
+    /* Use the Windows extended-length spelling for the real long-path files. */
+    const char *prefix = "\\\\?\\";
+#else
+    const char *prefix = "";
+#endif
+    int written = snprintf(container, sizeof(container), "%s%s%cexe-path-fit",
+                           prefix, absolute_base, sep);
+    assert(written > 0 && (size_t)written + 2u <= root_length);
+    size_t used = (size_t)written;
+    memcpy(root, container, used + 1u);
+    while (used < root_length) {
+        size_t component = root_length - used - 1u;
+        if (component > 200u) component = 150u;
+        root[used++] = sep;
+        memset(root + used, 'r', component);
+        used += component;
+        root[used] = '\0';
+    }
+
+    assert(used + (size_t)suffix_length < sizeof(build_directory));
+    memcpy(build_directory, root, used);
+    memcpy(build_directory + used, build_suffix, (size_t)suffix_length + 1u);
+    snprintf(fitting_path, sizeof(fitting_path), "%s%c%s", build_directory, sep, name);
+    snprintf(overlong_path, sizeof(overlong_path), "%s.exe", fitting_path);
+    assert(strlen(fitting_path) == sizeof(session.executable_path) - 1u);
+    assert(strlen(overlong_path) >= sizeof(session.executable_path));
+    assert(nk_platform_mkdir_p(build_directory));
+    write_file_utf8(overlong_path, "synthetic overlong runtime");
+    assert(nk_platform_file_exists(overlong_path));
+
+    make_game(&game, iso_path);
+    assert(!nk_launch_runtime_available(root, game.title_id));
+    assert(nk_launch_prepare_session(&session, &game, root) == NK_ERROR_FILE_NOT_FOUND);
+    assert(strstr(session.last_error, "Runtime binary not found") != NULL);
+    assert(session.executable_path[0] == '\0');
+
+    write_file_utf8(fitting_path, "synthetic fitting runtime");
+    assert(nk_platform_file_exists(fitting_path));
+    assert(nk_launch_runtime_available(root, game.title_id));
+    /* The image is deliberately absent. Preparation must get as far as that
+       check, with the complete alternate executable path already saved. */
+    assert(nk_launch_prepare_session(&session, &game, root) == NK_ERROR_FILE_NOT_FOUND);
+    assert(strstr(session.last_error, "Runtime image not found") != NULL);
+    assert(strcmp(session.executable_path, fitting_path) == 0);
+    assert(nk_platform_remove_tree(container, NULL));
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "--memstick-journal-probe") == 0) {
+        return memstick_journal_probe(argv[2], argv[3]);
+    }
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return write_launch_environment_probe();
     }
@@ -3711,10 +4376,17 @@ int main(int argc, char **argv) {
     assert(nk_platform_mkdir_p(base));
     test_homebrew_folder_named_as_picked(base);
     test_memstick_layout(base, sep);
+    test_memstick_save_collision(base);
+#if !defined(_WIN32) && !defined(_WIN64)
+    test_memstick_skipped_slot(base);
+#endif
+    test_memstick_save_planner(base);
+    test_memstick_journal_restart(base);
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);
     write_file(iso_path, "NOT-A-REAL-ISO");
+    test_developer_executable_path_fit(base, iso_path);
 
     NkGameEntry game;
     NkLaunchSession session;
