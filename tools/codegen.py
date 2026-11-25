@@ -25,7 +25,7 @@ import os
 import sys
 from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
-from io import StringIO
+from io import BufferedReader, RawIOBase, TextIOWrapper
 from typing import Any
 
 # The packaged Windows embeddable interpreter can omit this script's directory
@@ -884,48 +884,71 @@ def load_symbol_map(path):
     A malformed line, an address that does not fit 32 bits, or two different
     names (or sizes) for one address is an error naming the file and line.
     """
-    return _load_symbol_map_with_digest(path)[0]
+    with open(path, encoding="utf-8") as source:
+        return _parse_symbol_map(path, source)
+
+
+class _SymbolMapDigestReader(RawIOBase):
+    """Hash the source bytes before the text reader decodes and normalizes them."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+        self.digest = hashlib.sha256()
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        count = self.source.readinto(buffer)
+        if count:
+            self.digest.update(memoryview(buffer)[:count])
+        return count
 
 
 def _load_symbol_map_with_digest(path):
-    """Parse and hash the same bytes of an explicit guest symbol map."""
-    with open(path, "rb") as source:
-        raw = source.read()
-    symbols = {}
-    with StringIO(raw.decode("utf-8"), newline=None) as source:
-        for line_no, line in enumerate(source, 1):
-            text = line.strip()
-            if not text or text.startswith(("#", "//")):
-                continue
-            where = f"{path}:{line_no}"
-            match = _SYMBOL_MAP_LINE.fullmatch(text)
-            if match is None:
-                raise SymbolMapError(f"{where}: expected `name = 0xADDR;`, got {text!r}")
-            name, addr_text, comment = match.groups()
-            attributes = dict(_SYMBOL_MAP_ATTRIBUTE.findall(comment or ""))
-            if attributes.get("type", "func") != "func":
-                continue
-            addr = int(addr_text, 16)
-            if addr > 0xFFFFFFFF:
-                raise SymbolMapError(f"{where}: address {addr_text} does not fit 32 bits")
-            size = 0
-            if "size" in attributes:
-                try:
-                    size = int(attributes["size"], 0)
-                except ValueError:
-                    raise SymbolMapError(
-                        f"{where}: size {attributes['size']!r} is not a number") from None
-                if not 0 < size <= 0x100000000 - addr:
-                    raise SymbolMapError(
-                        f"{where}: size {attributes['size']} does not fit the address space")
-            previous = symbols.get(addr)
-            if previous is not None and previous != (name, size):
-                raise SymbolMapError(
-                    f"{where}: 0x{addr:08x} is already {previous[0]} "
-                    f"(size 0x{previous[1]:x}), not {name} (size 0x{size:x})")
-            symbols[addr] = (name, size)
-    return symbols, hashlib.sha256(raw).hexdigest()
+    """Parse and hash an explicit guest symbol map in one streaming read."""
+    with open(path, "rb", buffering=0) as raw:
+        reader = _SymbolMapDigestReader(raw)
+        with TextIOWrapper(BufferedReader(reader), encoding="utf-8") as source:
+            symbols = _parse_symbol_map(path, source)
+        return symbols, reader.digest.hexdigest()
 
+
+def _parse_symbol_map(path, source):
+    symbols = {}
+    for line_no, line in enumerate(source, 1):
+        text = line.strip()
+        if not text or text.startswith(("#", "//")):
+            continue
+        where = f"{path}:{line_no}"
+        match = _SYMBOL_MAP_LINE.fullmatch(text)
+        if match is None:
+            raise SymbolMapError(f"{where}: expected `name = 0xADDR;`, got {text!r}")
+        name, addr_text, comment = match.groups()
+        attributes = dict(_SYMBOL_MAP_ATTRIBUTE.findall(comment or ""))
+        if attributes.get("type", "func") != "func":
+            continue
+        addr = int(addr_text, 16)
+        if addr > 0xFFFFFFFF:
+            raise SymbolMapError(f"{where}: address {addr_text} does not fit 32 bits")
+        size = 0
+        if "size" in attributes:
+            try:
+                size = int(attributes["size"], 0)
+            except ValueError:
+                raise SymbolMapError(
+                    f"{where}: size {attributes['size']!r} is not a number") from None
+            if not 0 < size <= 0x100000000 - addr:
+                raise SymbolMapError(
+                    f"{where}: size {attributes['size']} does not fit the address space")
+        previous = symbols.get(addr)
+        if previous is not None and previous != (name, size):
+            raise SymbolMapError(
+                f"{where}: 0x{addr:08x} is already {previous[0]} "
+                f"(size 0x{previous[1]:x}), not {name} (size 0x{size:x})")
+        symbols[addr] = (name, size)
+    return symbols
 
 def site_names_from_symbol_map(symbols):
     """Turn a load_symbol_map result into {name: address} for enhancement-package sites.
@@ -7559,7 +7582,10 @@ def _translate(argv):
     if symbol_map_path is not None:
         # Read before the analysis so a bad map fails in a second, not after it.
         try:
-            symbols, explicit_map_digest = _load_symbol_map_with_digest(symbol_map_path)
+            if options.timing_run_identity is not None and enhancement_pkg_path is not None:
+                symbols, explicit_map_digest = _load_symbol_map_with_digest(symbol_map_path)
+            else:
+                symbols = load_symbol_map(symbol_map_path)
         except (OSError, UnicodeDecodeError, SymbolMapError) as exc:
             sys.stderr.write(f"codegen: symbol map: {exc}\n")
             return 2
