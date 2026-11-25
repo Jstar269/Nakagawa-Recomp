@@ -4290,8 +4290,12 @@ static void test_developer_executable_path_fit(const char *base, const char *iso
     char build_directory[NK_MAX_PATH + 20], fitting_path[NK_MAX_PATH + 40];
     char overlong_path[NK_MAX_PATH + 48];
     const char sep = nk_platform_path_separator();
-    const size_t root_length =
-        sizeof(session.executable_path) - sizeof("/build/synthetic/synthetic");
+    const char name[] = "synthetic";
+    char build_suffix[32];
+    int suffix_length = snprintf(build_suffix, sizeof(build_suffix), "%cbuild%c%s", sep, sep, name);
+    assert(suffix_length > 0 && (size_t)suffix_length < sizeof(build_suffix));
+    const size_t relative_length = (size_t)suffix_length + 1u + strlen(name);
+    const size_t root_length = sizeof(session.executable_path) - 1u - relative_length;
 
     printf("[LAUNCH_TEST] Developer executable at the path capacity\n");
     fflush(stdout);
@@ -4316,8 +4320,8 @@ static void test_developer_executable_path_fit(const char *base, const char *iso
         root[used] = '\0';
     }
 
-    snprintf(build_directory, sizeof(build_directory), "%s%cbuild%csynthetic", root, sep, sep);
-    snprintf(fitting_path, sizeof(fitting_path), "%s%csynthetic", build_directory, sep);
+    snprintf(build_directory, sizeof(build_directory), "%s%s", root, build_suffix);
+    snprintf(fitting_path, sizeof(fitting_path), "%s%c%s", build_directory, sep, name);
     snprintf(overlong_path, sizeof(overlong_path), "%s.exe", fitting_path);
     assert(strlen(fitting_path) == sizeof(session.executable_path) - 1u);
     assert(strlen(overlong_path) >= sizeof(session.executable_path));
