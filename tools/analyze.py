@@ -2393,10 +2393,6 @@ def _seed_address_materializations(d):
 
             is_branch = branch_target(addr, word) is not None
             is_jump_or_call = op in (2, 3) or (op == 0 and (word & 0x3F) in (0x08, 0x09))
-            if (is_branch or is_jump_or_call) and clear_at is None:
-                _discard_transfer_link(hireg, word)
-                clear_at = addr + 8
-
             if op == 0x0F:  # lui rt, imm
                 rt_reg = (word >> 16) & 0x1F
                 if rt_reg:
@@ -2488,6 +2484,11 @@ def _seed_address_materializations(d):
                     for register in writes:
                         if register:
                             hireg.pop(register, None)
+            # Consume an indirect target before its link write changes the slot's input.
+            if (is_branch or is_jump_or_call) and clear_at is None:
+                _discard_transfer_link(hireg, word)
+                clear_at = addr + 8
+
 
 
 #: What became of a miss seed (`analyze`'s `report["miss_seeds"]`), decided by comparing the build

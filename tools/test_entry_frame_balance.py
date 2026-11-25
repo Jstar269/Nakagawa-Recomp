@@ -1328,6 +1328,20 @@ class AddressMaterializationTests(unittest.TestCase):
 
         self.assertNotIn(base + 0x50, discovery.materialized)
 
+    def test_jalr_uses_the_table_target_before_replacing_its_link_register(self):
+        base, table, leaf = self.BASE, self.BASE + 0x80, self.BASE + 0x40
+        discovery = self.discovery({
+            base: lui(T9, base >> 16),
+            base + 4: lw(T9, T9, table & 0xFFFF),
+            base + 8: jalr(T9, T9),
+            leaf: jr(RA),
+            table: leaf,
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertIn(leaf, discovery.hc)
+
     def test_gas_switch_table_expansion_seeds_the_table_entries(self):
         # `lw v0, T(idx)` expands to lui at, %hi(T); addu at, at, idx; lw v0, %lo(T)(at):
         # the table address is hi + lo whatever the index holds.
