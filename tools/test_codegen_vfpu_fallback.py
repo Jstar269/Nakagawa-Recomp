@@ -481,7 +481,7 @@ int main(void) {{
         # Issue #326: C leaves the NaN a NaN-producing + - * / returns to the host, and an
         # optimiser may swap the operands of + and *. The generated code and sr_vfpu_interp
         # disagreed on NaN words at -O1/-O2 until every lane operation went through the
-        # sr_vf_* and sr_vfpu_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
+        # sr_vfpu_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
         words = {
             "vadd.q": 0x60048800 | 0x8080, "vsub.t": 0x60848800 | 0x8000, "vdiv.p": 0x63848880,
             "vmul.s": 0x64048800, "vdot.q": 0x64848880 | 0x8000, "vhdp.t": 0x66048800 | 0x8000,
@@ -495,15 +495,25 @@ int main(void) {{
             with self.subTest(form=name, word=f"0x{word:08x}"):
                 effect, _, _ = codegen.vfpu_effect(0x5500, word)
                 self.assertNotIn("sr_vfpu_interp", effect)
-                self.assertRegex(effect, r"sr_vf(pu)?_")
-                if name in ("vadd.q", "vsub.t", "vdiv.p", "vmul.s", "vscl.q", "vmscl.t", "vmscl alias"):
-                    # The PSP-3000 lane rule of the vfpu-basic-arith read (PSP-VFPU-BASICARITH-001, 2026-11-08), not the
-                    # project NaN rule the unmeasured forms still use.
-                    self.assertIn("sr_vfpu_", effect)
-                    self.assertNotIn("sr_vf_", effect)
+                self.assertIn("sr_vfpu_", effect)
+                if name in ("vadd.q", "vsub.t", "vdiv.p", "vmul.s", "vscl.q", "vcrs.t", "vmscl.t", "vmscl alias"):
+                    # The PSP-3000 lane rule of the vfpu-basic-arith read (PSP-VFPU-BASICARITH-001, 2026-11-08);
+                    # a vcrs.t lane is a vmul lane (PSP-VFPU-WIDEROPS-001).
+                    self.assertRegex(effect, r"sr_vfpu_(add|sub|mul|div)\(")
                 if name in ("vdot.q", "vhdp.t", "vcrsp.t", "vqmul.q", "vmmul.t", "vtfm2.t"):
                     self.assertIn("sr_vfpu_sop(", effect)
                 self.assertIsNone(bare.search(effect), effect)
+
+    def test_vocp_and_vfim_emit_the_measured_words(self):
+        # vocp of a NaN lane is 0x7f800001 (PSP-VFPU-WIDEROPS-001) and vfim.s maps its half as vh2f
+        # does (PSP-VFPU-PREFIX-001); viim.s still converts the signed integer at translation time.
+        vocp, _, _ = codegen.vfpu_effect(0x5500, 0xD0448088)
+        self.assertIn("isnan(_s[_i])?sr_vfpu_from_bits(0x7f800001u):", vocp)
+        self.assertNotIn("fabsf", vocp)
+        vfim, _, _ = codegen.vfpu_effect(0x5500, 0xDF807C01)
+        self.assertIn("uint32_t _bits=sr_vfpu_h2f(0x7c01u);", vfim)
+        viim, _, _ = codegen.vfpu_effect(0x5500, 0xDF00FFFF)
+        self.assertIn("uint32_t _bits=0xbf800000u;", viim)
 
 
 class UnverifiedVfpuFormReportTests(unittest.TestCase):

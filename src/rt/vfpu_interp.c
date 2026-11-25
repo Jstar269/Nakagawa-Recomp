@@ -336,21 +336,8 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             int vt = (w >> 16) & 0x7F;
             uint32_t imm = w & 0xFFFF;
             float d[1];
-            if ((w >> 23) & 1) {  /* vfim: IEEE half -> float32 */
-                uint32_t sgn = (imm >> 15) & 1, e = (imm >> 10) & 0x1F, m = imm & 0x3FF;
-                uint32_t bits;
-                if (e == 0) {
-                    if (m == 0) bits = sgn << 31;
-                    else {
-                        uint32_t e2 = 127 - 15 + 1;
-                        while (!(m & 0x400)) { m <<= 1; e2--; }
-                        bits = (sgn << 31) | (e2 << 23) | ((m & 0x3FF) << 13);
-                    }
-                } else if (e == 31) {
-                    bits = (sgn << 31) | (0xFFu << 23) | (m << 13);
-                } else {
-                    bits = (sgn << 31) | ((e - 15 + 127) << 23) | (m << 13);
-                }
+            if ((w >> 23) & 1) {  /* vfim: the half as vh2f maps it (sr_vfpu_h2f) */
+                const uint32_t bits = sr_vfpu_h2f(imm);
                 memcpy(d, &bits, 4);
             } else {
                 d[0] = (float)(int16_t)imm;
@@ -502,14 +489,16 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             }
             if (op9 == 4) {  /* vocp: d = 1 - s, computed as forced prefixes per PPSSPP:
                               * S gains negate-all, T is forced to constant ONE (user T abs
-                              * may swap the constant, negate still applies). NaN stays
-                              * positive. */
+                              * may swap the constant, negate still applies). A NaN lane
+                              * gives 0x7f800001 whatever its sign and payload
+                              * (PSP-VFPU-WIDEROPS-001; pspautotests e37443a6
+                              * tests/cpu/vfpu/specials.expected, recorded on a PSP). */
                 float sv[4], tv[4], d[4];
                 vreg_idx(vs, n, si);
                 sr_vread(sv, s, si, n, s->vfpuCtrl[0] | (0xFu << 16));
                 sr_vread(tv, s, si, n, (s->vfpuCtrl[1] & ~0xFFu) | 0x55u | (0xFu << 12));
                 for (int i = 0; i < n; i++)
-                    d[i] = isnan(sv[i]) ? fabsf(sv[i]) : tv[i] + sv[i];
+                    d[i] = isnan(sv[i]) ? sr_vfpu_from_bits(0x7f800001u) : tv[i] + sv[i];
                 vreg_idx(vd, n, di);
                 VFPU_NAN("vocp.s", d, n, sv, n, tv, n);
                 sr_vwrite(s, di, d, n, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
@@ -910,12 +899,14 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         static const int ss[4] = {1, 2, 0, 3}, ts[4] = {2, 0, 1, 3};
         float a[4], b[4], d[4];
         /* vcrs is the triple-vector form only. Reject reserved widths before
-         * reading sources; the lane permutation below uses all triple lanes. */
+         * reading sources; the lane permutation below uses all triple lanes. Each lane
+         * is a vmul lane (PSP-VFPU-WIDEROPS-001; pspautotests e37443a6
+         * tests/cpu/vfpu/nan_gen.expected, recorded on a PSP). */
         if (n != 3) return SR_VFPU_OTHER;
         vreg_idx(vd, n, di); vreg_idx(vs, n, si); vreg_idx(vt, n, ti);
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
-        for (int i = 0; i < n; i++) d[i] = sr_vf_mul(a[ss[i]], b[ts[i]]);
+        for (int i = 0; i < n; i++) d[i] = sr_vfpu_mul(a[ss[i]], b[ts[i]]);
         VFPU_NAN("vcrs.t", d, n, a, n, b, n);
         sr_vwrite(s, di, d, n, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
     }

@@ -36,6 +36,9 @@
 //   * vh2f.s/.p, vuc2i.s, vsocp.s/.p, vwbn.s and vrndf1.s/vrndf2.s return the
 //     PSP-VFPU-FORMS-001 words in both lanes, and their unmeasured widths and
 //     prefixes fail closed;
+//   * vocp, vcrs.t and vfim.s return the NaN, infinity, denormal and signed-zero
+//     words of PSP-VFPU-WIDEROPS-001, PSP-VFPU-PREFIX-001 and the pspautotests
+//     .expected files in both lanes;
 //   * every census form the generated code emits directly agrees with the
 //     interpreter at every register-overlap signature its encoding allows, on
 //     seeded states with edge-value lanes and drawn S/T/D prefixes (the alias
@@ -2685,6 +2688,136 @@ static int check_vmscl_measured(void) {
     return bad;
 }
 
+/* One cell of check_vocp_vcrs_measured or check_vfim_measured: n source lanes at the word's vs
+ * (and vt, when tv is given) registers, every other register the probe's sentinel 0x7a5a5a5a,
+ * then n result lanes at vd (vfim.s: the vt field) from the generated body and from
+ * sr_vfpu_interp. */
+static int measured_nan_word_cell(const char *name, int n, const uint32_t *sv, const uint32_t *tv,
+                                  const uint32_t *want) {
+    const int c = find_overlap_diff_case(name);
+    CHECK(c >= 0, "vocp/vcrs/vfim probe word is in the overlap-diff header");
+    if (c < 0) return 1;
+    const uint32_t w = overlap_diff_cases[c].w;
+    const int vfim = (w >> 26) == 0x37u;
+    uint8_t si[4], ti[4], di[4];
+    CpuState aot, interp;
+    setup_identity_compute(&aot);
+    for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a5au;
+    vreg_idx((int)(vfim ? (w >> 16) & 0x7fu : w & 0x7fu), n, di);
+    vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+    vreg_idx((int)((w >> 16) & 0x7fu), n, ti);
+    for (int k = 0; k < n && sv; k++) aot.vi[si[k]] = sv[k];
+    for (int k = 0; k < n && tv; k++) aot.vi[ti[k]] = tv[k];
+    interp = aot;
+    overlap_diff_run_codegen(&aot, c);
+    const int kind = sr_vfpu_interp(&interp, w);
+    int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+    for (int k = 0; k < n; k++) ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+    g_checks++;
+    if (!ok) {
+        g_failures++;
+        fprintf(stderr, "FAIL: %s (kind=%d)", name, kind);
+        for (int k = 0; k < n; k++)
+            fprintf(stderr, " | src=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x", sv ? sv[k] : w & 0xffffu,
+                    want[k], aot.vi[di[k]], interp.vi[di[k]]);
+        fputc('\n', stderr);
+    }
+    return !ok;
+}
+
+/* vocp and vcrs.t at identity prefixes against the words a PSP returned, from
+ * PSP-VFPU-WIDEROPS-001 (PSP-3000, 2026-11-10, issue #326; docs/HARDWARE_ORACLE.md) and
+ * pspautotests e37443a6 tests/cpu/vfpu/specials.expected, nan_gen.expected and
+ * signed_zero.expected (recorded on a PSP). pspautotests ran vocp.q C000, C100 and
+ * vcrs.t C000, C100, C200; its cells run here through the probe words, whose lane rule does not
+ * depend on the registers. vocp of any NaN is 0x7f800001; a vcrs.t lane is a vmul lane (0 * inf
+ * and a NaN operand give 0x7f800001, a denormal operand is a zero). */
+static int check_vocp_vcrs_measured(void) {
+    /* WIDEROPS-001: the 20 specials in order and 1 - x of each. */
+    static const uint32_t specials[20] = {
+        0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u, 0x3f800000u, 0xbf800000u, 0x3f000000u,
+        0xbf000000u, 0x40000000u, 0xc0000000u, 0x00800000u, 0x80800000u, 0x7f000000u, 0xff000000u,
+        0x7f800000u, 0xff800000u, 0x7fc00000u, 0xffc00000u, 0x7f800001u, 0xff800001u,
+    };
+    static const uint32_t ocp[20] = {
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x00000000u, 0x40000000u, 0x3f000000u,
+        0x3fc00000u, 0xbf800000u, 0x40400000u, 0x3f800000u, 0x3f800000u, 0xff000000u, 0x7f000000u,
+        0xff800000u, 0x7f800000u, 0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+    };
+    /* specials.expected: vocp.q of two vectors with a NaN lane. */
+    static const uint32_t ocp_q[2][2][4] = {
+        {{0x7fbfffffu, 0x3f800000u, 0xbf800000u, 0xffbfffffu}, {0x7f800001u, 0x00000000u, 0x40000000u, 0x7f800001u}},
+        {{0x40400000u, 0x7fbfffffu, 0x3f800000u, 0x40000000u}, {0xc0000000u, 0x7f800001u, 0x00000000u, 0xbf800000u}},
+    };
+    /* vcrs.t (a1 b2, a2 b0, a0 b1). WIDEROPS-001: (1e8, 1, -1e8) x (0.75, 4, -1.5), then a0
+     * replaced by 0x7fc00011, +inf and 0x00000001; nan_gen.expected: (inf, inf, inf) x 0;
+     * signed_zero.expected: the eight vector inputs with a zero lane. */
+    static const uint32_t crs[13][3][3] = {
+        {{0x4cbebc20u, 0x3f800000u, 0xccbebc20u}, {0x3f400000u, 0x40800000u, 0xbfc00000u},
+         {0xbfc00000u, 0xcc8f0d18u, 0x4dbebc20u}},
+        {{0x7fc00011u, 0x3f800000u, 0xccbebc20u}, {0x3f400000u, 0x40800000u, 0xbfc00000u},
+         {0xbfc00000u, 0xcc8f0d18u, 0x7f800001u}},
+        {{0x7f800000u, 0x3f800000u, 0xccbebc20u}, {0x3f400000u, 0x40800000u, 0xbfc00000u},
+         {0xbfc00000u, 0xcc8f0d18u, 0x7f800000u}},
+        {{0x00000001u, 0x3f800000u, 0xccbebc20u}, {0x3f400000u, 0x40800000u, 0xbfc00000u},
+         {0xbfc00000u, 0xcc8f0d18u, 0x00000000u}},
+        {{0x7f800000u, 0x7f800000u, 0x7f800000u}, {0x00000000u, 0x00000000u, 0x00000000u},
+         {0x7f800001u, 0x7f800001u, 0x7f800001u}},
+        {{0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x80000000u, 0x80000000u, 0x80000000u},
+         {0x80000000u, 0x80000000u, 0x80000000u}},
+        {{0xbf800000u, 0xbf800000u, 0xbf800000u}, {0x00000000u, 0x00000000u, 0x00000000u},
+         {0x80000000u, 0x80000000u, 0x80000000u}},
+        {{0x80000000u, 0x80000000u, 0x80000000u}, {0x80000000u, 0x80000000u, 0x80000000u},
+         {0x00000000u, 0x00000000u, 0x00000000u}},
+        {{0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x00000000u, 0x80000000u, 0x80000000u},
+         {0x80000000u, 0x00000000u, 0x80000000u}},
+        {{0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x80000000u, 0x00000000u, 0x80000000u},
+         {0x80000000u, 0x80000000u, 0x00000000u}},
+        {{0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x80000000u, 0x80000000u, 0x00000000u},
+         {0x00000000u, 0x80000000u, 0x80000000u}},
+        {{0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x80000000u, 0x80000000u, 0x80000000u},
+         {0x80000000u, 0x80000000u, 0x80000000u}},
+        {{0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x3f800000u, 0xbf800000u, 0x3f800000u},
+         {0x3f800000u, 0x3f800000u, 0xbf800000u}},
+    };
+    int bad = 0;
+    for (int i = 0; i < 20; i++) bad |= measured_nan_word_cell("wo-vocp-s", 1, &specials[i], NULL, &ocp[i]);
+    for (int i = 0; i < 20; i += 4) bad |= measured_nan_word_cell("wo-vocp-q", 4, &specials[i], NULL, &ocp[i]);
+    for (int i = 0; i < 2; i++) bad |= measured_nan_word_cell("wo-vocp-q", 4, ocp_q[i][0], NULL, ocp_q[i][1]);
+    for (int i = 0; i < 13; i++) bad |= measured_nan_word_cell("wo-vcrs-t", 3, crs[i][0], crs[i][1], crs[i][2]);
+    return bad;
+}
+
+/* vfim.s with no pending prefix against the words a PSP returned: pspautotests e37443a6
+ * tests/cpu/vfpu/vfim.expected (vfim.s S000, recorded on a PSP) and PSP-VFPU-PREFIX-001
+ * (vfim.s S200, PSP-3000, 2026-11-10, issue #326). The half maps as vh2f maps it: a denormal to
+ * a zero of its sign, and an exponent-31 half to sign | 0x7f800000 | its 10 mantissa bits. */
+static int check_vfim_measured(void) {
+    /* The half and the word. */
+    static const uint32_t fim_s000[14][2] = {
+        {0x0000u, 0x00000000u}, {0x8000u, 0x80000000u}, {0x0001u, 0x00000000u}, {0x0090u, 0x00000000u},
+        {0x03ffu, 0x00000000u}, {0x8090u, 0x80000000u}, {0x0400u, 0x38800000u}, {0x3c00u, 0x3f800000u},
+        {0x7bffu, 0x477fe000u}, {0x7c00u, 0x7f800000u}, {0xfc00u, 0xff800000u}, {0x7c01u, 0x7f800001u},
+        {0x7e00u, 0x7f800200u}, {0xfdffu, 0xff8001ffu},
+    };
+    static const uint32_t fim_s200[8][2] = {
+        {0x0000u, 0x00000000u}, {0x3c00u, 0x3f800000u}, {0xc000u, 0xc0000000u}, {0x7c00u, 0x7f800000u},
+        {0x7c01u, 0x7f800001u}, {0x8000u, 0x80000000u}, {0x0400u, 0x38800000u}, {0x7bffu, 0x477fe000u},
+    };
+    int bad = 0;
+    for (int i = 0; i < 14; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "vfim-s000-%04x", (unsigned)fim_s000[i][0]);
+        bad |= measured_nan_word_cell(name, 1, NULL, NULL, &fim_s000[i][1]);
+    }
+    for (int i = 0; i < 8; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "vfim-s200-%04x", (unsigned)fim_s200[i][0]);
+        bad |= measured_nan_word_cell(name, 1, NULL, NULL, &fim_s200[i][1]);
+    }
+    return bad;
+}
+
 /* PSP-VFPU-VUS2I-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-vus2i):
  * vus2i.s/.p (half << 15) and vs2i.s/.p
  * (half << 16) over twelve source words, identity prefixes. The low half goes to the even
@@ -3307,44 +3440,6 @@ static int sweep_diff(const CpuState *a, const CpuState *b, char *where, size_t 
     return 0;
 }
 
-/* The NaN rule of the sr_vf_* lane helpers (src/rt/recomp.h, issue #326), which the generated
- * code and sr_vfpu_interp share: the first NaN operand quieted, else 0xFFC00000 for an invalid
- * operation. Swapping two NaN operands swaps the result, whatever the host compiler does with
- * a plain + or *. Project semantics, not PSP evidence. */
-static int check_vf_nan_rule(void) {
-    static const struct { uint32_t a, b, add, sub, mul; } cells[] = {
-        {0x7fc12345u, 0xffc00001u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
-        {0xffc00001u, 0x7fc12345u, 0xffc00001u, 0xffc00001u, 0xffc00001u},
-        {0x7f800001u, 0x3f800000u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u}, /* sNaN quieted */
-        {0x3f800000u, 0xff800002u, 0xffc00002u, 0xffc00002u, 0xffc00002u},
-        {0x7f800000u, 0xff800000u, 0xffc00000u, 0x7f800000u, 0xff800000u}, /* Inf, -Inf */
-        {0x00000000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0xffc00000u}, /* 0, Inf */
-        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, /* 0 / 0 */
-        {0x3fc00000u, 0x40000000u, 0x40600000u, 0xbf000000u, 0x40400000u}, /* 1.5, 2 */
-    };
-    int bad = 0;
-    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
-        float a, b, r[3];
-        uint32_t got[3];
-        memcpy(&a, &cells[i].a, 4);
-        memcpy(&b, &cells[i].b, 4);
-        r[0] = sr_vf_add(a, b);
-        r[1] = sr_vf_sub(a, b);
-        r[2] = sr_vf_mul(a, b);
-        memcpy(got, r, sizeof(got));
-        const uint32_t want[3] = {cells[i].add, cells[i].sub, cells[i].mul};
-        for (int k = 0; k < 3; k++) {
-            if (got[k] != want[k]) {
-                fprintf(stderr, "FAIL: sr_vf_%s(0x%08x, 0x%08x) = 0x%08x, want 0x%08x\n",
-                        (const char *[]){"add", "sub", "mul"}[k], cells[i].a, cells[i].b, got[k], want[k]);
-                bad = 1;
-            }
-        }
-    }
-    CHECK(!bad, "sr_vf_* lane helpers return the first NaN operand, quieted, or 0xFFC00000");
-    return bad;
-}
-
 /* PSP-3000 reads of the dot, cross, quaternion and matrix forms (PSP-VFPU-WIDEDOT-001,
  * 2026-11-08, issue #326, probe case vfpu-wide-dot-matrix: vdot.p/.q, vhdp.q, vcrsp.t, vqmul.q,
  * vtfm4.q, vhtfm4.q, vmmul.q at identity prefixes, plus vmmov, vrot and the constant fills).
@@ -3915,6 +4010,8 @@ int main(void) {
     bad |= check_vfpu_unary_arith_measured();
     bad |= check_vfpu_dprefix_saturation_signed_zero();
     bad |= check_vmscl_measured();
+    bad |= check_vocp_vcrs_measured();
+    bad |= check_vfim_measured();
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();
@@ -3938,7 +4035,6 @@ int main(void) {
     bad |= check_vf2i_conversions();
     bad |= check_vf2i_measured_cells();
     bad |= check_vi2f_scales();
-    bad |= check_vf_nan_rule();
     bad |= check_vfpu_wide_dot_measured();
     bad |= check_vfpu_wide_dot_quoted_cells();
     bad |= check_log2_top_knot();
