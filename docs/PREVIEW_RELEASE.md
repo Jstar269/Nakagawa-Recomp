@@ -576,14 +576,20 @@ Wine and Proton: the Windows ZIP is the build used there. The smoke run and its 
 
 From v0.1.0 onward, measure the frozen candidate on the reference PC using the
 [two gameplay windows and reporting convention](COMPATIBILITY.md#release-performance-baselines).
-Build each title's runtime package from the same candidate as the launcher. Use a private
-input replay to verify the route and its start and end points. `SR_REPLAY` uses the unpaced
-deterministic clock. For frame-delivery measurements, repeat the qualified inputs with normal
-real-time pacing from the same starting state, in Authentic and in Ace where the title has a
-timing package. Verify the same landmarks on each timed run. Use the
+Build each title's runtime package from the same candidate as the launcher. Verify both route
+landmarks with a private input replay for that runtime and mode. `SR_REPLAY` requires the
+recording's executable and uses the unpaced deterministic clock. For frame-delivery measurements,
+repeat the qualified inputs from the same starting state with normal real-time pacing. Verify
+both landmarks each time, in Authentic and in Ace where the title has a timing package. Use the
 [guarded benchmark runs from #2574, stage 4](https://github.com/Jstar269/Nakagawa-Recomp/issues/2574).
-If the guard is unavailable or refuses a run, leave its measurements out and record the reason
-in the private run record. Keep results pending until a run qualifies.
+
+For each title and mode, match the flip observations and wall-clock intervals from the same
+paced run to both guarded edges. Preserve the order of events that share a VBlank. The ordered
+`SR_PRESENT_TRACE` log can place observed flips relative to the guard records, and the matching
+`SR_PERF_FRAMES` rows give the wall-clock intervals. Exclude runs if the guard is unavailable or
+refuses the run, if the flip count or interval endpoints cannot be matched to the window, or if
+there are no complete intervals. Record the reason privately and keep results pending until a
+run qualifies.
 
 Add the accepted aggregate results to the compatibility document and link that section from
 the release notes. Compare releases on the same route, PC, mode and presentation settings.

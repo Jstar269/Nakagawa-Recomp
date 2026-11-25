@@ -153,13 +153,15 @@ release and commit, disc revision, route, mode and timing package, CPU, GPU, OS 
 display refresh rate, resolution, VSync and other presentation settings. Include host load,
 cache condition and the number of accepted runs.
 
-For each run, divide the number of new game frames in the window by elapsed seconds. Count a
-frame at the start and exclude one at the end. Use the wall-clock intervals between new frames
-with both endpoints inside the window for frame delivery. Report the range of per-run FPS and
-each run's median and 95th-percentile interval in milliseconds. For the median, average the
+Report game FPS as measured by [framebuffer flips](DEBUGGING.md#sr_perf-subsystem-attribution).
+The counter counts the first guest framebuffer presented and each later present with a changed
+guest framebuffer address. A repeated address adds no flip, so draws that reuse one buffer can
+go uncounted. For each run, divide the number of flips in the window by the wall-clock seconds
+between its guarded start and end. Include the start and exclude the end. Use only intervals
+between successive flips with both endpoints inside the window. Report the range of per-run FPS
+and each run's median and 95th-percentile interval in milliseconds. For the median, average the
 middle pair when the count is even. For p95, sort the intervals and use rank
-`ceil(0.95 × count)`, starting at one. Repeated presentations of the same game frame add no
-new frame. The [frame counters](DEBUGGING.md#sr_perf-subsystem-attribution) distinguish the two.
+`ceil(0.95 × count)`, starting at one.
 
 ## Whole library
 
