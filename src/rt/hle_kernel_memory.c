@@ -832,6 +832,43 @@ static int vpl_request_illegal(const VplPool *p, uint32_t request) {
     return ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER > vpl_pool_size(p);
 }
 
+/* 1 when a free span holds a request of this many bytes now (vpl_try_allocate_internal's cost). */
+static int vpl_request_fits(const VplPool *p, uint32_t request) {
+    if (vpl_request_illegal(p, request)) return 0;
+    uint32_t need = ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER;
+    for (int i = 0; i < p->nfree; ++i)
+        if (p->free[i].size >= need) return 1;
+    return 0;
+}
+
+/* Take the waiter the pool's queue order picks (pool_pick_waiter) off the queue and wake it. */
+static void vpl_wake_next_waiter(VplPool *p, uint32_t uid) {
+    uint32_t uids[VPL_MAX_WAITERS];
+    for (int j = 0; j < p->nwaiters; j++) uids[j] = p->waiters[j].thread_uid;
+    const int pick = pool_pick_waiter(uids, p->nwaiters, p->attr);
+    uint32_t next_thread = p->waiters[pick].thread_uid;
+    for (int j = pick; j + 1 < p->nwaiters; j++) p->waiters[j] = p->waiters[j + 1];
+    p->nwaiters--;
+    sched_wake_one_object_waiter(uid, next_thread);
+}
+
+/* A woken waiter that got its block: FreeVpl woke only it, but the space that free made can
+ * hold the next waiter's request too. Wake that waiter now, in queue order, while its request
+ * fits, so one free serves every waiter it has room for instead of leaving the next one
+ * blocked beside free memory until another free. */
+static uint32_t vpl_wait_served(VplPool *p, uint32_t uid) {
+    if (p->nwaiters > 0) {
+        uint32_t uids[VPL_MAX_WAITERS];
+        for (int j = 0; j < p->nwaiters; j++) uids[j] = p->waiters[j].thread_uid;
+        const int pick = pool_pick_waiter(uids, p->nwaiters, p->attr);
+        if (vpl_request_fits(p, p->waiters[pick].size)) {
+            vpl_wake_next_waiter(p, uid);
+            sched_preempt();
+        }
+    }
+    return 0;
+}
+
 /* pspautotests tests/threads/vpl/create.expected (70e72391, recorded on a PSP): a pool the
  * partition cannot hold (0x10000000 bytes) is SCE_KERNEL_ERROR_NO_MEMORY (0x80020190). */
 static uint32_t h_CreateVpl(CpuState *s) {
@@ -978,7 +1015,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
                 now = sched_vtime_us();
                 uint32_t rem = (now < end_time) ? (uint32_t)(end_time - now) : 0u;
                 MEM_W32(toptr, rem);
-                return 0;
+                return vpl_wait_served(p, uid);
             }
 
             if (timed_out) {
@@ -1001,7 +1038,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
 
             if (vpl_try_allocate_internal(p, request, &addr) == 0) {
                 if (out) MEM_W32(out, addr);
-                return 0;
+                return vpl_wait_served(p, uid);
             }
 
             vpl_requeue_waiter_head(p, cur_thid, request);
@@ -1024,17 +1061,10 @@ static uint32_t h_FreeVpl(CpuState *s) {
     for (int i = 0; i < p->nallocs; ++i) if (p->allocs[i].addr == addr) {
         vpl_insert_free(p, addr - VPL_BLOCK_HEADER, p->allocs[i].size);
         p->allocs[i] = p->allocs[--p->nallocs];
-        /* Wake one waiter, chosen by the pool's queue order (pool_pick_waiter). */
+        /* Wake one waiter, chosen by the pool's queue order (pool_pick_waiter); once served
+         * it wakes the next one the space still holds (vpl_wait_served). */
         if (p->nwaiters > 0) {
-            uint32_t uids[VPL_MAX_WAITERS];
-            for (int j = 0; j < p->nwaiters; j++) uids[j] = p->waiters[j].thread_uid;
-            const int pick = pool_pick_waiter(uids, p->nwaiters, p->attr);
-            uint32_t next_thread = p->waiters[pick].thread_uid;
-            for (int j = pick; j + 1 < p->nwaiters; j++) {
-                p->waiters[j] = p->waiters[j + 1];
-            }
-            p->nwaiters--;
-            sched_wake_one_object_waiter(A0, next_thread);
+            vpl_wake_next_waiter(p, A0);
             sched_preempt();
         }
         return 0;

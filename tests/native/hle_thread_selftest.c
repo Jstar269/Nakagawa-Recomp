@@ -52847,6 +52847,66 @@ static void test_fpl_free_bounds_do_not_wrap(void) {
     (void)selftest_fpl_delete(pool);
 }
 
+/* One FreeVpl that frees room for two queued waiters must serve both. FreeVpl wakes one waiter;
+ * once that waiter has its block, the next one whose request fits the space left must be woken
+ * too, not left blocked beside free memory until some later free. Code-derived (the space is
+ * free and the waiter is next in the queue); PPSSPP's sceKernelFreeVpl likewise serves every
+ * waiter that fits in queue order. */
+static void test_vpl_free_serves_every_waiter_that_fits(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x6a20u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t held_out = 0x00271050u, out1 = 0x00271054u, out2 = 0x00271058u;
+    /* PSP-B1-01 accounting: a 0x200-byte pool hands out 0x1e0 bytes, all of them to one
+     * 0x1d8-byte block, and two 0x40-byte blocks cost 0x48 each. */
+    uint32_t vpool = selftest_vpl_create(0x200u);
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL free serves all: the pool is created");
+    expect(selftest_vpl_try_allocate(vpool, 0x1d8u, held_out) == 0u,
+           "VPL free serves all: one block takes the whole pool");
+    const uint32_t held = MEM_R32(held_out);
+
+    SelftestPoolWaiterCtx w1; memset(&w1, 0, sizeof w1);
+    w1.uid = 0x6a21u; w1.tcb = fixture_thread(w1.uid, TH_READY, 40); w1.tcb->started = 1;
+    w1.pool_uid = vpool; w1.req_size = 0x40u; w1.outptr = out1;
+    w1.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &w1, (size_t)4 << 20);
+    SelftestPoolWaiterCtx w2; memset(&w2, 0, sizeof w2);
+    w2.uid = 0x6a22u; w2.tcb = fixture_thread(w2.uid, TH_READY, 40); w2.tcb->started = 1;
+    w2.pool_uid = vpool; w2.req_size = 0x40u; w2.outptr = out2;
+    w2.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &w2, (size_t)4 << 20);
+    MEM_W32(out1, 0xfeedfaceu);
+    MEM_W32(out2, 0xfeedfaceu);
+    s_cur = (int)(w1.tcb - s_tcb); sr_coro_switch(w1.tcb->coro);
+    s_cur = (int)(w2.tcb - s_tcb); sr_coro_switch(w2.tcb->coro);
+    expect(!w1.returned && !w2.returned && w1.tcb->state == TH_WAIT_OBJ &&
+               w2.tcb->state == TH_WAIT_OBJ,
+           "VPL free serves all: both waiters block on the full pool");
+
+    s_cur = (int)(cur - s_tcb);
+    expect(selftest_vpl_free(vpool, held) == 0u, "VPL free serves all: the owner frees the pool");
+    expect(w1.tcb->state == TH_READY, "VPL free serves all: the first waiter is woken");
+    s_cur = (int)(w1.tcb - s_tcb); sr_coro_switch(w1.tcb->coro);
+    expect(w1.returned && w1.ret == 0u && MEM_R32(out1) != 0xfeedfaceu,
+           "VPL free serves all: the first waiter gets its block");
+    expect(w2.tcb->state == TH_READY,
+           "VPL free serves all: the second waiter, whose request fits what is left, is woken");
+    if (w2.tcb->state == TH_READY) {
+        s_cur = (int)(w2.tcb - s_tcb); sr_coro_switch(w2.tcb->coro);
+    }
+    expect(w2.returned && w2.ret == 0u && MEM_R32(out2) != 0xfeedfaceu &&
+               MEM_R32(out2) != MEM_R32(out1),
+           "VPL free serves all: the second waiter gets its own block from the same free");
+
+    sr_coro_destroy(w1.tcb->coro); w1.tcb->coro = NULL;
+    sr_coro_destroy(w2.tcb->coro); w2.tcb->coro = NULL;
+    s_cur = (int)(cur - s_tcb);
+    (void)selftest_vpl_delete(vpool);
+    s_cur = -1;
+}
+
 /* Audit 2026-11-17 (F-5e96c5e7): an FPL or VPL wait that ends with a latched result
  * (sceKernelReleaseWaitThread's WAIT_RELEASE here) leaves the pool's queue. The entry used to
  * stay, so ReferStatus counted a thread that no longer waits and a zero-timeout allocate on a
@@ -70065,6 +70125,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_pool_cb_waiter_takes_block_freed_by_its_callback();
     test_fpl_create_size_product_does_not_wrap();
     test_pool_released_waiter_leaves_queue();
+    test_vpl_free_serves_every_waiter_that_fits();
     test_pool_uids_come_from_the_shared_pool();
     test_partition_alloc_size_zero_refused();
     test_partition_low_refused_when_block_records_full();
