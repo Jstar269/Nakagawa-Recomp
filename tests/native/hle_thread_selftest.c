@@ -1894,6 +1894,21 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
         } else {
             expect(0, "imports route to the reloaded libfont export");
         }
+
+        /* Retire the reloaded image through the real guest-visible calls, so its
+         * user-partition block at the manifest base is free for the no-stop image below.
+         * sr_hle_test_module_reset() only clears records; it never frees guest memory. */
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = reloaded;
+        cpu.r[7] = status_addr;
+        expect(sr_hle_test_stop_module(&cpu) == 0u &&
+                   s_synth_libfont_stop_calls == 2u,
+               "the reloaded libfont stops through its translated module_stop");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = reloaded;
+        expect(sr_hle_test_unload_module(&cpu) == 0u &&
+                   sr_hle_test_image_count() == 0u && sr_hle_test_module_count() == 0u,
+               "the reloaded libfont unloads and releases its image before the no-stop load");
     }
 
     /* A translated stop body alone is not an export. Load the same image with a real
