@@ -2085,9 +2085,15 @@ static void short_exit_run(PlayerApp *app, const char *exit_code, const char *bo
     assert(app->is_game_running);
     app->launch_time_ms = launch_tick;
     assert(nk_launch_wait(&app->launch_session, 10000) == expected_code);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
     g_player_state_test_after_live_read = hook;
+#else
+    assert(hook == NULL);
+#endif
     assert(player_app_monitor_game_session(app, launch_tick + 82u));
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
     g_player_state_test_after_live_read = NULL;
+#endif
     assert(!app->is_game_running);
     assert_session_released(&app->launch_session);
 }
@@ -2096,6 +2102,7 @@ static void append_boot_event_to_session(PlayerApp *app, const char *line) {
     assert(append_runtime_event(app->boot_event_file_path, line));
 }
 
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
 static void append_first_frame_after_live_read(PlayerApp *app) {
     append_boot_event_to_session(app, "BOOT_EVENT phase=first_frame source=cpu\n");
 }
@@ -2103,6 +2110,7 @@ static void append_first_frame_after_live_read(PlayerApp *app) {
 static void append_window_ready_after_live_read(PlayerApp *app) {
     append_boot_event_to_session(app, "BOOT_EVENT phase=window_ready backend=offscreen\n");
 }
+#endif /* NK_PLAYER_STATE_TEST_SEAMS */
 
 /* Catalog-epoch coherence probe (#670). Built only with the test seam macro,
  * like the SR_CD_TEST_HOOKS selftests. The checkpoint runs inside
@@ -21228,6 +21236,7 @@ int main(int argc, char **argv) {
         short_exit_run(rep, "7", "first_frame", 7, 7600u, NULL);
         assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
         assert(rep->active_view == VIEW_ERROR);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
         /* The child writes nothing; the first frame lands in the session file
            between the tick's live read and its exit check, so only the final
            drain can see it. */
@@ -21237,6 +21246,7 @@ int main(int argc, char **argv) {
         /* The same seam appending only window_ready is still a premature exit. */
         short_exit_run(rep, "0", "", 0, 8000u, append_window_ready_after_live_read);
         assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+#endif /* NK_PLAYER_STATE_TEST_SEAMS */
         set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
         set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", "");
         memset(&rep->last_error, 0, sizeof(rep->last_error));
