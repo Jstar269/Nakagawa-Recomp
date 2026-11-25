@@ -820,35 +820,50 @@ static void mbx_relink(Mbx *m) {
         MEM_W32(m->msgs[i] + 0, m->msgs[(i + 1) % m->nmsgs]);
 }
 
+static void mbx_remove_waiter_at(Mbx *m, int i) {
+    for (int j = i; j + 1 < m->nwaiters; j++) {
+        m->waiters[j] = m->waiters[j + 1];
+        m->waiter_out[j] = m->waiter_out[j + 1];
+    }
+    m->nwaiters--;
+}
+
 void mbx_remove_waiter(Mbx *m, uint32_t thid) {
     for (int i = 0; i < m->nwaiters; i++) {
         if (m->waiters[i] == thid) {
-            for (int j = i; j + 1 < m->nwaiters; j++) m->waiters[j] = m->waiters[j + 1];
-            m->nwaiters--;
+            mbx_remove_waiter_at(m, i);
             break;
         }
     }
 }
 
 /* A receiver joins the wait queue at its tail, or at its head when it goes back to waiting
- * after a wake that left it no message (it keeps its turn). A thread waits on one object at
- * a time, so a full table means the waiter bookkeeping is broken: that stops the run by name. */
-static int mbx_has_waiter(const Mbx *m, uint32_t thid) {
-    for (int i = 0; i < m->nwaiters; i++)
-        if (m->waiters[i] == thid) return 1;
-    return 0;
-}
-static uint32_t mbx_add_waiter(Mbx *m, uint32_t thid, int at_head) {
-    if (mbx_has_waiter(m, thid)) return 0u;
+ * after a wake that left it no message (it keeps its turn). `out` is where its call stores the
+ * packet pointer; a receiver already on the queue keeps its place and takes the new address
+ * (a ReceiveMbx made from a callback of a ReceiveMbxCB on the same mailbox). A thread waits on
+ * one object at a time, so a full table means the waiter bookkeeping is broken: that stops the
+ * run by name. */
+static uint32_t mbx_add_waiter(Mbx *m, uint32_t thid, uint32_t out, int at_head) {
+    for (int i = 0; i < m->nwaiters; i++) {
+        if (m->waiters[i] == thid) {
+            m->waiter_out[i] = out;
+            return 0u;
+        }
+    }
     if (m->nwaiters >= MBX_MAX_WAITERS)
         return hle_unmodelled_stop("sceKernelReceiveMbx",
                                    "on mailbox 0x%x with %d waiters recorded, more than the "
                                    "scheduler has threads", m->uid, m->nwaiters);
     if (at_head) {
-        for (int j = m->nwaiters; j > 0; j--) m->waiters[j] = m->waiters[j - 1];
+        for (int j = m->nwaiters; j > 0; j--) {
+            m->waiters[j] = m->waiters[j - 1];
+            m->waiter_out[j] = m->waiter_out[j - 1];
+        }
         m->waiters[0] = thid;
+        m->waiter_out[0] = out;
     } else {
         m->waiters[m->nwaiters] = thid;
+        m->waiter_out[m->nwaiters] = out;
     }
     m->nwaiters++;
     return 0u;
@@ -938,6 +953,14 @@ static int mbx_next_waiter(const Mbx *m) {
     return best;
 }
 
+/* Whether thid is blocked in ReceiveMbx[CB] on m (waitType 5 with the mailbox as waitId), the
+ * only state in which a send can serve it. A receiver that a timeout or a callback readied, or
+ * that is running its callbacks, is not, even while it is still on the wait queue. */
+static int mbx_waiter_blocked(const Mbx *m, uint32_t thid) {
+    SrThreadRunStatus rs;
+    return sched_thread_run_status(thid, &rs) == 0 && rs.waitType == 5u && rs.waitId == m->uid;
+}
+
 static uint32_t h_SendMbx(CpuState *s) {
     Mbx *m = mbx_find(A0);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MBXID;
@@ -945,20 +968,39 @@ static uint32_t h_SendMbx(CpuState *s) {
     /* Validate the whole accessed packet span: the circular relink writes
      * next@0 and priority mailboxes read msgPriority@4. */
     if (!msg || !sr_guest_span_writable(msg, 8u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    mbx_enqueue(m, msg);
-    /* The first waiter still blocked on the mailbox is woken. One that is not (running its
-     * callbacks in ReceiveMbxCB, or timed out and not yet back) is passed over: it finds the
-     * message itself when it resumes, and the wake goes to the next one. */
-    while (m->nwaiters > 0) {
+    /* The first waiter still blocked on the mailbox is handed the packet here (#3066): its
+     * address is stored where that receiver's call returns it and the receiver is readied with
+     * result 0, as SignalSema hands its count over (sema_hand_over). The packet never joins the
+     * queue, so a PollMbx, ReceiveMbx or ReferMbxStatus made before the receiver runs (by this
+     * sender, when it keeps the CPU) finds no message. A waiter that is not blocked (running its
+     * callbacks in ReceiveMbxCB, or timed out and not yet back) is passed over as before. With
+     * no blocked waiter the packet is queued, and a passed-over receiver finds it there when it
+     * resumes.
+     * The readied receiver's ReceiveMbx returns 0 with this packet whatever happens before it
+     * runs: it is off the wait queue, so CancelReceiveMbx does not count it and DeleteMbx does
+     * not reach it. Project model: the public PSPAutotests priority transcript shows which
+     * receiver a send serves, not these cells. */
+    int readied = 0, handed = 0;
+    while (!handed && m->nwaiters > 0) {
         const int pick = mbx_next_waiter(m);
-        uint32_t thid = m->waiters[pick];
-        for (int j = pick; j + 1 < m->nwaiters; j++) m->waiters[j] = m->waiters[j + 1];
-        m->nwaiters--;
-        if (sched_wake_one_object_waiter(A0, thid)) {
-            sched_preempt();
-            break;
+        const uint32_t thid = m->waiters[pick];
+        const uint32_t out = m->waiter_out[pick];
+        const int blocked = mbx_waiter_blocked(m, thid);
+        mbx_remove_waiter_at(m, pick);
+        if (!blocked) continue;
+        if (!out || !sr_guest_span_writable(out, 4u)) {
+            /* The receiver checked its own pointer before it waited. One that cannot be
+             * written now fails on its own; the packet goes to the next waiter or the queue. */
+            readied |= sched_wake_one_object_waiter_with_result(thid, SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+            continue;
         }
+        if (!sched_wake_one_object_waiter_with_result(thid, 0u)) continue;
+        /* Only queued packets acquire circular links. The receiver owns this packet directly. */
+        MEM_W32(out, msg);
+        readied = handed = 1;
     }
+    if (!handed) mbx_enqueue(m, msg);
+    if (readied) sched_preempt();
     return 0;
 }
 
@@ -1002,7 +1044,7 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
     uint32_t cur_thid = sched_current_uid();
     if (cur_thid == 0) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
     {
-        uint32_t stop = mbx_add_waiter(m, cur_thid, 0);
+        uint32_t stop = mbx_add_waiter(m, cur_thid, pmsg, 0);
         if (stop) return stop;
     }
 
@@ -1025,8 +1067,10 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
                 return 0;
             }
             /* A sender may have taken this receiver off the queue meanwhile: it waits again
-             * at the head, keeping its turn. */
-            uint32_t stop = mbx_add_waiter(m, cur_thid, 1);
+             * at the head, keeping its turn. So may a ReceiveMbx one of the callbacks made on
+             * this mailbox, which waited on this thread's entry with its own packet address:
+             * this call's address goes back on. */
+            uint32_t stop = mbx_add_waiter(m, cur_thid, pmsg, 1);
             if (stop) return stop;
             continue;
         }
@@ -1051,10 +1095,14 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
             if (sched_take_wake_result(&woken)) {
                 m = mbx_find(uid);
                 if (m) mbx_remove_waiter(m, cur_thid);
-                if (woken == SCE_KERNEL_ERROR_WAIT_DELETE) {
+                if (woken == 0u || woken == SCE_KERNEL_ERROR_WAIT_DELETE) {
                     /* PSP-measured 2026-10-15 (PSP-3000, 6.61): a timed waiter woken by DeleteMbx
-                     * rewrites its timeout word to the remaining time (499950 of 500000 us). Other
-                     * wake results are not measured for this word and leave it unchanged. */
+                     * rewrites its timeout word to the remaining time (499950 of 500000 us).
+                     * Result 0 is SendMbx's handoff (h_SendMbx): the sender stored the packet at
+                     * pmsg and took this receiver off the queue, and the time left is written as
+                     * it is below when a receiver takes a queued message itself. The other wake
+                     * results (cancel, release) are not measured for this word and leave it
+                     * unchanged. */
                     sched_vtime_refresh();
                     uint64_t now_us = sched_vtime_us();
                     MEM_W32(toptr, now_us < end_time ? (uint32_t)(end_time - now_us) : 0u);
@@ -1083,7 +1131,7 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
             /* Spurious wake: requeue at head so FIFO order is preserved. */
             mbx_remove_waiter(m, cur_thid);
             {
-                uint32_t stop = mbx_add_waiter(m, cur_thid, 1);
+                uint32_t stop = mbx_add_waiter(m, cur_thid, pmsg, 1);
                 if (stop) return stop;
             }
         } else {
@@ -1091,6 +1139,7 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
             sched_block_on(uid);
             if (is_cb) sched_set_current_cb_wait(0);
 
+            /* Result 0 is SendMbx's handoff: the packet is already at pmsg (h_SendMbx). */
             uint32_t woken = 0;
             if (sched_take_wake_result(&woken)) {
                 m = mbx_find(uid);
@@ -1109,7 +1158,7 @@ static uint32_t receive_mbx_common(CpuState *s, int is_cb) {
 
             mbx_remove_waiter(m, cur_thid);
             {
-                uint32_t stop = mbx_add_waiter(m, cur_thid, 1);
+                uint32_t stop = mbx_add_waiter(m, cur_thid, pmsg, 1);
                 if (stop) return stop;
             }
         }
