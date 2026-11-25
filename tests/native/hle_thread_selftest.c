@@ -231,6 +231,7 @@ extern uint32_t sr_hle_test_io_dclose(CpuState *s);
 extern uint32_t sr_hle_test_vfs_initial_find_error(unsigned long error, int *found);
 extern uint32_t sr_hle_test_io_ioctl(CpuState *s);
 extern void sr_hle_test_register_iofilemgr(void);
+extern void sr_hle_test_io_write_fault(uint32_t fd, uint32_t limit, int refuse_seek);
 extern uint32_t sr_hle_test_io_devctl_callback_count(void);
 extern uint32_t sr_hle_test_io_devctl_callback_at(uint32_t index);
 extern uint32_t sr_hle_test_io_devctl_refusal_log_count(void);
@@ -6359,6 +6360,98 @@ static void test_fd_namespace(void) {
 }
 
 /* sceIoLseek takes its 64-bit offset in a2:a3 and whence in t0 and returns the high word in v1. */
+enum {
+    APPEND_PROGRESS_OPEN = 0x109f50bcu,
+    APPEND_PROGRESS_WRITE = 0x42ec03acu,
+    APPEND_PROGRESS_SEEK = 0x68963324u,
+    APPEND_PROGRESS_CLOSE = 0x810c4bc3u,
+    APPEND_PROGRESS_CREATE_TRUNC = 0x0603u,
+    APPEND_PROGRESS_APPEND = 0x0103u,
+    APPEND_PROGRESS_IO_ERROR = 0x80010005u
+};
+
+static uint32_t fd_append_progress_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+static void test_fd_append_progress(void) {
+    const uint32_t path_addr = 0x09010000u, src = 0x09011000u;
+    static const char guest[] = "ms0:/NAKAGAWA_SYNTHETIC_APPEND_PROGRESS.BIN";
+    static const char root[] = HLE_BUILD_ROOT "/hle_io_append_progress_ms";
+    static const char host[] = HLE_BUILD_ROOT "/hle_io_append_progress_ms/NAKAGAWA_SYNTHETIC_APPEND_PROGRESS.BIN";
+    const char *old = getenv("SR_MEMSTICK");
+    char *previous_root = old ? (char *)malloc(strlen(old) + 1u) : NULL;
+    if (old && !previous_root) { expect(0, "save the original synthetic root setting"); return; }
+    if (old) memcpy(previous_root, old, strlen(old) + 1u);
+    nk_platform_mkdir_p(root);
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", root);
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    expect(sr_hle_test_is_registered(APPEND_PROGRESS_WRITE) && sr_hle_test_is_registered(APPEND_PROGRESS_SEEK),
+           "the production IoFileMgr write and seek NIDs are registered");
+    fd_guest_copy(path_addr, guest, sizeof(guest));
+    fd_guest_copy(src, "XYZ", 3u);
+    fd_guest_copy(src + 8u, "abcde?", 6u);
+    uint32_t fd = fd_append_progress_call(APPEND_PROGRESS_OPEN, path_addr, APPEND_PROGRESS_CREATE_TRUNC, 0u);
+    expect(fd < 64u, "open a real contained file for progress controls");
+    if (fd >= 64u) goto done;
+    expect(fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src + 8u, 5u) == 5u,
+           "ordinary nonappend write stores the initial file");
+    expect(fd_append_progress_call(APPEND_PROGRESS_CLOSE, fd, 0u, 0u) == 0u, "close the initial ordinary control");
+
+    fd = fd_append_progress_call(APPEND_PROGRESS_OPEN, path_addr, APPEND_PROGRESS_APPEND, 0u);
+    expect(fd < 64u && fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 1u, 0u) == 1u,
+           "open append descriptor and move before EOF");
+    if (fd >= 64u) goto done;
+    uint32_t other = fd_append_progress_call(APPEND_PROGRESS_OPEN, path_addr, APPEND_PROGRESS_APPEND, 0u);
+    expect(other < 64u, "open another descriptor to grow the actual host file");
+    if (other < 64u) {
+        expect(fd_append_progress_call(APPEND_PROGRESS_WRITE, other, src + 13u, 1u) == 1u &&
+               fd_host_bytes_equal(host, (const uint8_t *)"abcde?", 6u),
+               "second descriptor grows the real host file beyond the first descriptor's cached size");
+        expect(fd_append_progress_call(APPEND_PROGRESS_CLOSE, other, 0u, 0u) == 0u, "close the second descriptor");
+    }
+    sr_hle_test_io_write_fault(fd, UINT32_MAX, 1);
+    uint32_t refused = fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    uint32_t cursor = fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u);
+    uint32_t size = fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u);
+    expect(refused == APPEND_PROGRESS_IO_ERROR && cursor == 1u && size == 5u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?", 6u),
+           "refused append seek must preserve the earlier guest cursor and cached size");
+    expect(fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 1u, 0u) == 1u, "reset the position before a no-progress append");
+    sr_hle_test_io_write_fault(fd, 0u, 0);
+    uint32_t refused_write = fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    expect(refused_write == APPEND_PROGRESS_IO_ERROR &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u) == 1u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u) == 5u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?", 6u),
+           "zero accepted bytes preserve the earlier append cursor and cached size");
+    expect(fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 1u, 0u) == 1u, "reset the position before short append");
+    sr_hle_test_io_write_fault(fd, 2u, 0);
+    uint32_t short_write = fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    expect(short_write == 2u && fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u) == 8u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u) == 8u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?XY", 8u),
+           "short append publishes actual EOF plus only the accepted prefix");
+    expect(fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src + 2u, 1u) == 1u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u) == 9u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u) == 9u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?XYZ", 9u),
+           "append retry sends only the suffix and leaves no duplicated bytes");
+    expect(fd_append_progress_call(APPEND_PROGRESS_CLOSE, fd, 0u, 0u) == 0u, "close recovered append control");
+done:
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", previous_root);
+    free(previous_root);
+}
+
 static uint32_t umd_test_seek64(uint32_t fd, int64_t offset, uint32_t whence, uint32_t *high) {
     CpuState cpu;
     memset(&cpu, 0, sizeof(cpu));
@@ -69535,6 +69628,13 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--io-append-progress") == 0) {
+        test_fd_append_progress();
+        fprintf(stderr, "io-append-progress: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--kernel-nested-sync") == 0) {
         test_kernel_nested_join();
         test_kernel_nested_mutex();
@@ -69596,6 +69696,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_prx_export_relocation_behavior();
     test_module_identity_is_its_export_table();
     test_variable_import_linker();
+    test_fd_append_progress();
     test_fd_namespace();
     test_main_function_exports_link_from_boot();
     test_umd_io_console_model();

@@ -334,11 +334,68 @@ static uint32_t io_path_error(uint32_t rc, uint32_t fallback) {
     return rc == HLE_KERNEL_ERROR_NO_SUCH_DEVICE ? rc : fallback;
 }
 
+#ifdef SR_HLE_THREAD_SELFTEST
+/* A bounded regular-file write and a refused seek, scoped to one test descriptor. */
+static uint32_t s_test_write_fd = UINT32_MAX;
+static uint32_t s_test_write_limit;
+static int s_test_write_refuse_seek;
+
+void sr_hle_test_io_write_fault(uint32_t fd, uint32_t limit, int refuse_seek) {
+    s_test_write_fd = fd;
+    s_test_write_limit = limit;
+    s_test_write_refuse_seek = refuse_seek;
+}
+#endif
+
+static int io_seek_for_write(uint32_t fd, FILE *host, uint32_t offset) {
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (fd == s_test_write_fd && s_test_write_refuse_seek) return -1;
+#else
+    (void)fd;
+#endif
+    return io_host_seek(host, offset);
+}
+
+static uint32_t io_write_guest_prefix(uint32_t fd, FILE *host,
+                                      uint32_t src, uint32_t count) {
+#ifndef SR_HLE_THREAD_SELFTEST
+    (void)fd;
+#endif
+    uint8_t tmp[4096];
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
+        for (uint32_t k = 0; k < n; k++) tmp[k] = (uint8_t)MEM_R8(src + done + k);
+        uint32_t request = n;
+#ifdef SR_HLE_THREAD_SELFTEST
+        if (fd == s_test_write_fd && request > s_test_write_limit) request = s_test_write_limit;
+#endif
+        uint32_t wrote = (uint32_t)fwrite(tmp, 1, request, host);
+        done += wrote;
+        if (wrote < n) break;
+    }
+    return done;
+}
+
 static uint32_t h_IoOpen(CpuState *s) {
     char path[512];
     uint32_t rc = io_guest_path(A0, path, sizeof(path));
     if (rc != 0u) return rc;
     return h_io_open_path(path, A1, -1);
+}
+
+/* Writable append streams have no deferred output buffer, so a host error
+ * after a prefix leaves a precise count and a suffix the guest can retry. */
+static uint32_t io_write_append(Fd *f, uint32_t fd, uint32_t offset,
+                                uint32_t src, uint32_t count) {
+    if (count == 0u) return 0u;
+    if (io_seek_for_write(fd, f->host, offset) != 0) return 0x80010005u;
+    clearerr(f->host);
+    uint32_t done = io_write_guest_prefix(fd, f->host, src, count);
+    clearerr(f->host);
+    if (done == 0u) return 0x80010005u;
+    f->off = f->size = offset + done;
+    return done;
 }
 
 uint32_t h_IoWrite(CpuState *s) {
@@ -381,7 +438,7 @@ uint32_t h_IoWrite(CpuState *s) {
      * stream is opened to append), so the descriptor's position and size follow it there:
      * after the write the position is the new end and the bytes read back through the
      * descriptor. PPSSPP's sceIoWrite seeks an append descriptor to its end before each write
-     * in the same way (PPSSPP-derived, not PSP-measured). A refused write moves nothing. */
+     * in the same way (PPSSPP-derived, not PSP-measured). Publish that offset only on progress. */
     uint32_t write_at = f->off;
     if (f->append && !sr_stream_size_u32(f->host, &write_at)) return 0x80010005u;
     if (count > UINT32_MAX - write_at) {
@@ -398,17 +455,10 @@ uint32_t h_IoWrite(CpuState *s) {
      * a byte past the arena reads back as zero, so the loop below would store zeros in the
      * file and report the full count. Any view will do, because the loop reads byte by byte. */
     if (count != 0u && !sr_inrange_n(src, count)) return 0x80010016u;
-    if (f->append) f->off = f->size = write_at;
+    if (f->append) return io_write_append(f, fd, write_at, src, count);
     if (f->truncated_bytes && !io_restore_truncated_gap(f)) return 0x80010005u;
-    if (io_host_seek(f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
-    uint8_t tmp[4096]; uint32_t done = 0;
-    while (done < count) {
-        uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
-        for (uint32_t k = 0; k < n; k++) tmp[k] = (uint8_t)MEM_R8(src + done + k);
-        uint32_t wrote = (uint32_t)fwrite(tmp, 1, n, f->host);
-        done += wrote;
-        if (wrote < n) break;
-    }
+    if (io_seek_for_write(fd, f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
+    uint32_t done = io_write_guest_prefix(fd, f->host, src, count);
     fflush(f->host);
     f->off += done; if (f->off > f->size) f->size = f->off;
     return done;

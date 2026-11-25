@@ -2477,6 +2477,14 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             fprintf(stderr, "sceIoOpen: not found: %s\n", path);
             return 0x80010002;
         }
+        /* Count an append's progress at fwrite, before a later flush can hide
+         * an accepted prefix. Ordinary files keep their existing stream policy. */
+        if ((writing || creating) && (flags & 0x0100u) &&
+            setvbuf(fp, NULL, _IONBF, 0u) != 0) {
+            fprintf(stderr, "sceIoOpen: cannot configure counted append: %s\n", path);
+            fclose(fp);
+            return 0x80010005u;
+        }
         uint32_t host_size = 0;
         if (!sr_stream_size_u32(fp, &host_size)) {
             fclose(fp);
