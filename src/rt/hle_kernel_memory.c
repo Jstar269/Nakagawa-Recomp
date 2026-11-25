@@ -963,6 +963,11 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
     SrWaitHandle invocation = sched_wait_begin(uid, end_time, is_cb, vpl_detach_wait);
     if (!invocation) return HLE_KERNEL_ERROR_NO_MEMORY;
     p->waiters[p->nwaiters++] = (VplWaiter){invocation, request};
+    /* A stronger arrival can already be eligible with free bytes beside a
+     * non-fitting lower-priority wait (PSPAutotests PRIORITY / whole).
+     * Keep the callback-first path when there is a callback to dispatch. */
+    if ((!is_cb || !sr_thread_has_pending_callbacks(cur_thid)) &&
+        vpl_grant_waiters(p, invocation)) sched_preempt();
 
     uint32_t result;
     int timed_out = 0;

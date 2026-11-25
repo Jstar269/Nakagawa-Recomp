@@ -53477,6 +53477,7 @@ static void test_pool_priority_attribute_orders_waiters(void) {
             if (vpl) (void)selftest_vpl_delete(pool);
             else (void)selftest_fpl_delete(pool);
             for (int i = 0; i < 2; i++) {
+                if (vpl) sched_release_thread_resources(w[i].tcb);
                 sr_coro_destroy(w[i].tcb->coro);
                 w[i].tcb->coro = NULL;
             }
@@ -54639,6 +54640,78 @@ done:
     s_cur = (int)(owner - s_tcb);
     (void)selftest_vpl_delete(pool);
     s_cur = -1;
+}
+
+/* PSPAutotests e37443a681c6, PRIORITY / whole and FIFO / whole. In the priority
+ * case only the first three arrivals are needed to reproduce the observation
+ * before unblocking. The FIFO control also checks the first resumed receiver. */
+static void test_vpl_whole_pool_priority_arrival(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int priority = 0; priority < 2; ++priority) {
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *owner = fixture_thread(0x6a60u, TH_RUNNING, 8);
+        owner->started = 1;
+        s_cur = (int)(owner - s_tcb);
+        const uint32_t held_out = 0x00271900u;
+        CpuState cpu = {0};
+        cpu.r[5] = 2u; cpu.r[6] = priority ? 0x100u : 0u; cpu.r[7] = 0x1020u;
+        uint32_t pool = sr_syscall(&cpu, NID_VPL_CREATE);
+        expect(selftest_vpl_try_allocate(pool, 0x980u, held_out) == 0u,
+               "VPL whole arrival: the original allocation leaves 0x678 free bytes");
+
+        SelftestPoolWaiterCtx waiters[7] = {0};
+        size_t count = priority ? 3u : 7u;
+        for (size_t i = 0; i < count; ++i) {
+            SelftestPoolWaiterCtx *w = &waiters[i];
+            w->uid = 0x6a61u + (uint32_t)i;
+            w->tcb = fixture_thread(w->uid, TH_READY, 0x18 - (int)i);
+            w->tcb->started = 1;
+            w->pool_uid = pool;
+            w->req_size = 0x800u - (uint32_t)i * 0x100u;
+            w->outptr = held_out + 4u + (uint32_t)i * 4u;
+            w->status_ptr = 0x00271a00u + (uint32_t)i * 0x40u;
+            w->status_result = ~0u;
+            MEM_W32(w->outptr, 0xfeedfaceu);
+            w->tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, w, (size_t)4 << 20);
+            expect(w->tcb->coro != NULL, "VPL whole arrival: creates a real waiter coroutine");
+            if (!w->tcb->coro) goto done;
+            kernel_nested_resume(w->tcb);
+        }
+
+        expect(waiters[0].tcb->state == TH_WAIT_OBJ && waiters[1].tcb->state == TH_WAIT_OBJ,
+               "VPL whole arrival: the two oldest requests do not fit initially");
+        SelftestPoolWaiterCtx *third = &waiters[2];
+        if (priority) {
+            expect(third->returned && third->ret == 0u && MEM_R32(third->outptr) != 0xfeedfaceu,
+                   "VPL priority whole: the stronger fitting arrival returns before the first free");
+            expect(third->status_result == 0u && MEM_R32(third->status_ptr + 44u) == 0x70u &&
+                       MEM_R32(third->status_ptr + 48u) == 2u,
+                   "VPL priority whole: the arrival observes PSP free size 0x70 and two waiters");
+        } else {
+            expect(!third->returned && third->tcb->state == TH_WAIT_OBJ &&
+                       third->tcb->wait_obj == pool && MEM_R32(third->outptr) == 0xfeedfaceu,
+                   "VPL FIFO whole: the same fitting arrival cannot pass the older non-fitting requests");
+            s_cur = (int)(owner - s_tcb);
+            expect(selftest_vpl_free(pool, MEM_R32(held_out)) == 0u &&
+                       waiters[0].tcb->state == TH_READY &&
+                       waiters[1].tcb->state == TH_READY && third->tcb->state == TH_WAIT_OBJ,
+                   "VPL FIFO whole: the explicit free grants the first two requests in queue order");
+            SelftestPoolWaiterCtx *second = &waiters[1];
+            if (second->tcb->state == TH_READY) kernel_nested_resume(second->tcb);
+            expect(second->returned && second->ret == 0u && second->status_result == 0u &&
+                       MEM_R32(second->status_ptr + 44u) == 0xf0u &&
+                       MEM_R32(second->status_ptr + 48u) == 5u,
+                   "VPL FIFO whole: the stronger of those two sees PSP free size 0xf0 and five waiters");
+        }
+
+done:
+        for (size_t i = 0; i < count; ++i) destroy_vpl_fixture_waiter(waiters[i].tcb);
+        s_cur = (int)(owner - s_tcb);
+        (void)selftest_vpl_delete(pool);
+        s_cur = -1;
+    }
 }
 
 /* A reservation belongs to the invocation until it returns to guest code. */
@@ -69890,6 +69963,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_vpl_free_serves_every_waiter_that_fits();
         test_vpl_free_serves_waiter_behind_parked_callback();
         test_vpl_priority_reserves_blocks_before_waiters_run();
+        test_vpl_whole_pool_priority_arrival();
         test_vpl_abandoned_reservation_serves_next_waiter();
         test_pool_delete_tears_down_before_waking();
         test_pool_priority_attribute_orders_waiters();
@@ -70396,6 +70470,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vpl_free_serves_every_waiter_that_fits();
     test_vpl_free_serves_waiter_behind_parked_callback();
     test_vpl_priority_reserves_blocks_before_waiters_run();
+    test_vpl_whole_pool_priority_arrival();
     test_vpl_abandoned_reservation_serves_next_waiter();
     test_pool_uids_come_from_the_shared_pool();
     test_partition_alloc_size_zero_refused();
