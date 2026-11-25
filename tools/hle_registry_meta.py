@@ -99,7 +99,11 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_SysClock2USec": {
         "status": "partial",
-        "limitation": "splits the runtime's 64-bit microsecond system clock into whole seconds (first output) and the remaining microseconds (second output), each cut to 32 bits, as PPSSPP and JPCSP do; hardware conversion and error-precedence cells are not measured",
+        "evidence": [
+            "PPSSPP 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 Core/HLE/sceKernelTime.cpp sceKernelSysClock2USec, unsigned split with 32-bit outputs",
+            "tests/native/hle_thread_selftest.c:test_kernel_import_sweep_sysclock_conversion",
+        ],
+        "limitation": "PPSSPP-derived, not PSP-measured. Splits the unsigned 64-bit clock bit pattern into 32-bit seconds and remaining microseconds. Both output spans are required by the runtime safety policy. Null, alias, signed-input and error behavior on PSP remain unmeasured.",
     },
     "h_USec2SysClock": {
         "status": "partial",
@@ -141,7 +145,12 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_SysClock2USecWide": {
         "status": "partial",
-        "limitation": "takes the 64-bit clock as the $a0/$a1 pair and writes its whole seconds through $a2 and its remaining microseconds through $a3, as h_SysClock2USec does (PPSSPP and JPCSP agree); invalid-output-pointer error code and hardware conversion are not measured",
+        "evidence": [
+            "PSP-KERNEL-MISC-001 sysclock-wide, public confirmation in PR #3078: by-value 1234567890 us returned 0 and wrote 1234 and 567890 to valid outputs",
+            "PPSSPP 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 Core/HLE/sceKernelTime.cpp sceKernelSysClock2USecWide, unsigned arithmetic outside the measured value",
+            "tests/native/hle_thread_selftest.c:test_unregistered_batch_sysclock_wide",
+        ],
+        "limitation": "PSP-KERNEL-MISC-001 measures only by-value 1234567890 us with valid outputs. It returns 0 and writes seconds 1234 and remaining microseconds 567890. Other clock arithmetic is PPSSPP-derived, not PSP-measured. Required output spans and ordered alias writes are runtime policy. Null, alias, signed-input and error behavior on PSP remain unmeasured.",
     },
     "h_ReferProfilerNull": {
         "status": "partial",
@@ -3201,8 +3210,6 @@ PARTIAL_WITHOUT_EVIDENCE = frozenset({
     "h_SendMbx",
     "h_StartVTimer",
     "h_StopVTimer",
-    "h_SysClock2USec",
-    "h_SysClock2USecWide",
     "h_USec2SysClock",
     "h_USec2SysClockWide",
     "h_UmdGetErrorStat",

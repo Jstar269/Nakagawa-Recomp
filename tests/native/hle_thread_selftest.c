@@ -20526,9 +20526,7 @@ static void test_kernel_import_sweep_sysclock_conversion(void) {
     cpu.r[4] = clock;
     cpu.r[5] = low_out;
     cpu.r[6] = high_out;
-    /* The two outputs are the whole seconds and the microseconds left over (PPSSPP
-     * Core/HLE/sceKernelTime.cpp and JPCSP ThreadManForUser agree; not PSP-measured here),
-     * not the clock's raw low/high words. */
+    /* This pointer-input arithmetic cell follows the pinned PPSSPP model. */
     const uint64_t wide_value = ((uint64_t)0x12345678u << 32) | 0x89abcdefu;
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
                MEM_R32(low_out) == (uint32_t)(wide_value / 1000000u) &&
@@ -20554,6 +20552,38 @@ static void test_kernel_import_sweep_sysclock_conversion(void) {
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0x800200d3u &&
                MEM_R32(low_out) == sentinel && MEM_R32(high_out) == sentinel,
            "sceKernelSysClock2USec rejects an incomplete input span before writing outputs");
+
+    /* Existing local all-or-nothing pointer policy. Neither reference
+     * emulator establishes the PSP's null pointer result. */
+    for (int missing = 4; missing <= 6; ++missing) {
+        cpu.r[4] = clock;
+        cpu.r[5] = low_out;
+        cpu.r[6] = high_out;
+        cpu.r[missing] = 0u;
+        expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0x800200d3u &&
+                   MEM_R32(low_out) == sentinel && MEM_R32(high_out) == sentinel,
+               "SysClock2USec null input or output preserves both output words");
+    }
+
+    MEM_W32(clock, 42u);
+    MEM_W32(clock + 4u, 1u);
+    cpu.r[4] = clock;
+    cpu.r[5] = clock + 4u;
+    cpu.r[6] = clock;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
+               MEM_R32(clock + 4u) == 4294u && MEM_R32(clock) == 967338u,
+           "SysClock2USec snapshots both input words before aliased output writes");
+
+    /* PPSSPP unsigned interpretation of the bit pattern. PSP signed-input
+     * semantics are not implied by this fixture. */
+    MEM_W32(clock, 0xffffffffu);
+    MEM_W32(clock + 4u, 0xffffffffu);
+    cpu.r[4] = clock;
+    cpu.r[5] = low_out;
+    cpu.r[6] = high_out;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
+               MEM_R32(low_out) == 4154504685u && MEM_R32(high_out) == 551615u,
+           "SysClock2USec splits a high-bit clock using the pinned unsigned reference");
 }
 
 /* sceKernelSysClock2USecWide takes the 64-bit clock by value ($a0 low word, $a1 high word)
@@ -20601,6 +20631,31 @@ static void test_unregistered_batch_sysclock_wide(void) {
     expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0x800200d3u &&
                MEM_R32(WIDE_LOW_OUT) == sentinel,
            "sceKernelSysClock2USecWide refuses a missing output pointer before writing the low word");
+
+    MEM_W32(WIDE_HIGH_OUT, sentinel);
+    cpu.r[4] = 1234567890u;
+    cpu.r[5] = 0u;
+    cpu.r[6] = 0u;
+    cpu.r[7] = WIDE_HIGH_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0x800200d3u &&
+               MEM_R32(WIDE_HIGH_OUT) == sentinel,
+           "SysClock2USecWide null seconds follows the local whole-call refusal policy");
+
+    cpu.r[4] = 1000007u;
+    cpu.r[5] = 0u;
+    cpu.r[6] = WIDE_LOW_OUT;
+    cpu.r[7] = WIDE_LOW_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
+               MEM_R32(WIDE_LOW_OUT) == 7u && MEM_R32(WIDE_HIGH_OUT) == sentinel,
+           "SysClock2USecWide ordered alias writes leave the remainder last");
+
+    cpu.r[4] = 0xffffffffu;
+    cpu.r[5] = 0xffffffffu;
+    cpu.r[6] = WIDE_LOW_OUT;
+    cpu.r[7] = WIDE_HIGH_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
+               MEM_R32(WIDE_LOW_OUT) == 4154504685u && MEM_R32(WIDE_HIGH_OUT) == 551615u,
+           "SysClock2USecWide splits a high-bit clock using the pinned unsigned reference");
 }
 
 static void test_kernel_usec_sysclock_conversions(void) {
@@ -69552,6 +69607,15 @@ static int hle_selftest_main(int argc, char **argv) {
         test_delay_threadcb_zero_bounds_a_self_renotifying_callback();
         fprintf(stderr, "delay-zero-selftest: %d checks, %d failures\n",
                 s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--sysclock-conversion") == 0) {
+        test_kernel_import_sweep_sysclock_conversion();
+        test_unregistered_batch_sysclock_wide();
+        test_kernel_usec_sysclock_conversions();
+        fprintf(stderr, "sysclock-conversion: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
     }

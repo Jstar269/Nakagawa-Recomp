@@ -24,9 +24,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 181 | 88 |
+| `ppsspp-derived` | 183 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 301 | 183 |
+| `synthetic` | 299 | 183 |
 | `unverified` | 172 | 22 |
 | total | 718 | 367 |
 
@@ -603,7 +603,7 @@ a title that translates none has generated code unchanged.
 | `0xb9685118` | `sceNetAdhocGetPtpStat` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0xb9848a74` | `scePsmfPlayerGetAudioData` | mpeg | `unverified` | no recorded evidence |
 | `0xba4051d6` | `sceKernelCancelCallback` | kernel_thread | `synthetic` | HLE selftest dispatch |
-| `0xba6b92e2` | `sceKernelSysClock2USec` | kernel_time | `synthetic` | HLE selftest dispatch |
+| `0xba6b92e2` | `sceKernelSysClock2USec` | kernel_time | `ppsspp-derived` | registry notes name PPSSPP |
 | `0xbb8e7fe6` | `sceFontOpenUserMemory` | font | `unverified` | no recorded evidence |
 | `0xbc6febc5` | `sceKernelReferSemaStatus` | kernel_sync | `synthetic` | HLE selftest dispatch |
 | `0xbc75d85b` | `sceFontGetFontList` | font | `unverified` | no recorded evidence |
@@ -702,7 +702,7 @@ a title that translates none has generated code unchanged.
 | `0xe0727056` | `sceAudioSRCOutputBlocking` | audio | `hardware-measured` | PSP oracle PSP-HLE-AUDIO-SRC-001 |
 | `0xe08bdac1` | `sceNetAdhocPtpListen` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0xe0d68148` | `sceGeListUpdateStallAddr` | ge | `synthetic` | HLE selftest dispatch |
-| `0xe1619d7c` | `sceKernelSysClock2USecWide` | kernel_time | `synthetic` | HLE selftest dispatch |
+| `0xe1619d7c` | `sceKernelSysClock2USecWide` | kernel_time | `ppsspp-derived` | registry notes name PPSSPP; PSP-measured cells only: `sceKernelSysClock2USecWide(clock, &usec_low, &usec_high)` clock is 1234567890 microseconds with valid outputs. Returns 0 and writes 1234 seconds and 567890 remaining microseconds (public confirmation in PR #3078) (PSP-KERNEL-MISC-001 `sysclock-wide`) |
 | `0xe162cb14` | `sceNetAdhocctlGetPeerList` | network | `synthetic` | HLE selftest dispatch |
 | `0xe175ef66` | `__sceSasGetOutputmode` | audio | `synthetic` | HLE selftest dispatch |
 | `0xe1c93e47` | `sceRtcGetTime64_t` | rtc | `synthetic` | HLE selftest dispatch; unlinked hardware note |
