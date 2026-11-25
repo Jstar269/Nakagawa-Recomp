@@ -1379,6 +1379,43 @@ void sr_ge_vram_write_prepare(uint32_t physical_addr, uint32_t width) {
                                   "the Vulkan depth surface could not be preserved before a CPU store yet.");
 }
 
+/* Once the host shows a GPU-resident scanout, a later CPU store can change
+ * that image without another SetFrameBuf. Keep this signal independent of
+ * the renderer's pending ranges, which it can consume before VBLANK. */
+static struct {
+    uint32_t first, end, pitch, visible_row;
+    int written;
+} s_scanout_cpu_watch;
+
+void ge_watch_cpu_scanout(uint32_t first, uint32_t end, uint32_t pitch, uint32_t visible_row) {
+    s_scanout_cpu_watch.first = first;
+    s_scanout_cpu_watch.end = end;
+    s_scanout_cpu_watch.pitch = pitch;
+    s_scanout_cpu_watch.visible_row = visible_row;
+    s_scanout_cpu_watch.written = 0;
+}
+
+int ge_scanout_cpu_written(void) {
+    return s_scanout_cpu_watch.written;
+}
+
+static void ge_note_scanout_cpu_write(uint32_t addr, uint32_t bytes) {
+    if (!bytes || addr >= s_scanout_cpu_watch.end ||
+        (uint64_t)addr + bytes <= s_scanout_cpu_watch.first)
+        return;
+    /* Narrow strides overlap rows. With a wider stride, only a write that
+     * starts in a visible row or crosses the padding into one can wake it. */
+    if (addr < s_scanout_cpu_watch.first ||
+        s_scanout_cpu_watch.pitch <= s_scanout_cpu_watch.visible_row) {
+        s_scanout_cpu_watch.written = 1;
+        return;
+    }
+    const uint32_t row_offset = (addr - s_scanout_cpu_watch.first) % s_scanout_cpu_watch.pitch;
+    if (row_offset < s_scanout_cpu_watch.visible_row ||
+        bytes > s_scanout_cpu_watch.pitch - row_offset)
+        s_scanout_cpu_watch.written = 1;
+}
+
 void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width) {
     uint32_t canonical = sr_vram_cpu_aperture(physical_addr)
                        ? sr_vram_cpu_address(physical_addr) : SR_PHYS(physical_addr);
@@ -1388,6 +1425,8 @@ void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width) {
     }
     if (g_ge_capture_active && !s_ge_capture_own_store)
         ge_capture_note_cpu_vram_store(physical_addr, width);
+    if (s_scanout_cpu_watch.first && !s_scanout_cpu_watch.written && !s_ge_capture_own_store)
+        ge_note_scanout_cpu_write(canonical, width);
     sr_gpu_vram_dirty(physical_addr, width);
     g_sr_vram_read_pending = s_zbuf_guest_dirty ||
         (s_gpu && s_gpu->vram_pending && s_gpu->vram_pending());

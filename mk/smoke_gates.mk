@@ -68,7 +68,7 @@ showcase-linux:
 display-smoke: DISPLAY_SMOKE_BUILD_FRAMES ?= $(DISPLAY_SMOKE_FRAMES)
 display-smoke:
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) generate --out-dir $(DISPLAY_SMOKE_FIXTURE) \
-		--frames $(DISPLAY_SMOKE_BUILD_FRAMES)
+		--frames $(DISPLAY_SMOKE_BUILD_FRAMES) $(DISPLAY_SMOKE_LAYOUT_FLAGS)
 	$(MAKE) all \
 		GAME_NAME=$(DISPLAY_SMOKE_NAME) \
 		GAME_ELF=$(DISPLAY_SMOKE_PRX) \
@@ -83,9 +83,10 @@ display-smoke:
 # display-smoke-run is the aggregate source-owned gate: it runs the guest-only
 # scheduler route and the --sched --gui route through the explicit no-window
 # presenter, then records and compares GE/present events from the same guest, and records a
-# video of it (videorec, #1273) to prove a recording leaves the guest unchanged. The recording
-# goes through the videorec selftest acting as FFmpeg, which stalls every frame write, and runs
-# on the deterministic clock, which recording requires. cheats-relocated runs the guest at its
+# video (videorec, #1273) to prove a recording leaves the guest unchanged. The
+# alternating-surface control records complete frames. The original guest paints
+# its active surface, so its recorder check compares against submitted pictures.
+# Both use the stalling fake encoder and deterministic clock. cheats-relocated runs the guest at its
 # manifest's 0x08810000 with cheats on: a PSP loads the image at 0x08804000, so every cheat is
 # refused by name and nothing is written.
 display-smoke-run: display-smoke
@@ -96,7 +97,10 @@ display-smoke-run: display-smoke
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) cheats-relocated --build-dir $(DISPLAY_SMOKE_DIR)
 	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt -DSR_VIDEOREC_SELFTEST -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		-o $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe tests/native/videorec_selftest.c src/rt/videorec.c
-	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) videorec --build-dir $(DISPLAY_SMOKE_DIR) \
+	$(MAKE) DISPLAY_SMOKE_DIR="$(DISPLAY_SMOKE_RECORD_DIR)" DISPLAY_SMOKE_LAYOUT_FLAGS=--double-buffer display-smoke
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) videorec --build-dir $(DISPLAY_SMOKE_RECORD_DIR) \
+		--fake-ffmpeg $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) videorec --build-dir $(DISPLAY_SMOKE_DIR) --in-place \
 		--fake-ffmpeg $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe
 	$(MAKE) display-smoke-cheats-base0
 
@@ -168,6 +172,7 @@ display-smoke-player: player display-smoke-run
 
 display-smoke-clean:
 	$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_DIR) clean
+	$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_RECORD_DIR) clean
 	$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) clean
 
 # Public title qualification (issue #699). title-qualification validates the checked-in

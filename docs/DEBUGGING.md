@@ -1353,6 +1353,9 @@ frames are byte-identical to an ungated run.
 | `N` >= 1 | set | presents at least `N` vblanks apart, inside the windows |
 | `0`, negative or non-numeric | either | none: an explicit `0` still disables FBSNAP |
 
+A host refresh of a static framebuffer counts as a present for FBSNAP. The cadence permits at
+most one capture attempt per VBLANK, preserving the filename of the first attempt.
+
 `SR_FBSNAP_AFTER` applies in every row, and `SR_FBDUMP` still takes the capture slot when it
 is set. A window whose text does not parse leaves no window active (reported on stderr as
 `FBSNAP_WINDOWS: could not parse`), so it selects nothing by itself.
