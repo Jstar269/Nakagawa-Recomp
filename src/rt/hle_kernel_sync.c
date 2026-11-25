@@ -1437,7 +1437,12 @@ static uint32_t h_WaitSema(CpuState *s) {
                 return woken;
             }
         }
-        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return 0x80020000;
+        /* Gone without a wake result (a callback or another thread deleted it while this
+         * thread was not blocked on it, so the delete woke nobody): the semaphore existed
+         * when the wait began, so the wait ends as a deleted one, as the event-flag, mailbox
+         * and mutex waits here end (PPSSPP-derived, not PSP-measured), never with the
+         * generic 0x80020000. The same holds for sceKernelWaitSemaCB below. */
+        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_WAIT_DELETE;
     }
     m->count -= need;
     sema_write_timeout_left(toptr, wait_end_set, wait_end);
@@ -1462,7 +1467,7 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
     while (m->count < need) {
         if (sr_thread_has_pending_callbacks(sched_current_uid())) {
             sr_thread_dispatch_callbacks();
-            m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return 0x80020000;
+            m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_WAIT_DELETE;
             sched_vtime_refresh();
             continue;
         }
@@ -1508,7 +1513,7 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
                 return woken;
             }
         }
-        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return 0x80020000;
+        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_WAIT_DELETE;
         sched_vtime_refresh();
     }
     m->count -= need;

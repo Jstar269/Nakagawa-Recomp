@@ -26586,6 +26586,12 @@ static void wsv_cb_coro_body(void *arg) {
     selftest_park_on_scheduler();
 }
 
+/* A callback body for section 7 of the WaitSemaCB probe: it deletes the semaphore its
+ * thread is waiting on. */
+static void wsv_cb_delete_sema(void) {
+    wsv_delete(s_wsv_cb_sema);
+}
+
 /* PSP-B1-01: project-authored synthetic probe run on a PSP-3000, firmware 6.61. */
 static void b1_expect(uint32_t actual, uint32_t expected, const char *scenario) {
     char msg[256];
@@ -27090,6 +27096,79 @@ static void test_wait_sema_count_validation(void) {
 
         if (self->coro) { sr_coro_destroy(self->coro); self->coro = NULL; }
         wsv_delete(sema);
+        s_oracle_mode = 0;
+        s_oracle_callback_calls = 0;
+        s_cur = -1;
+    }
+
+    /* ---- 7. a CB wait whose semaphore is deleted outside a waking delete ---- */
+    /* The semaphore existed when the wait began, so a wait that finds it gone ends as a
+     * deleted one (WAIT_DELETE), as the event-flag, mailbox and mutex CB waits here do,
+     * never with the generic 0x80020000. (a) the pending callback the wait runs before it
+     * blocks deletes the semaphore; (b) a blocked waiter readied by a callback notification
+     * finds its semaphore deleted before it runs, so the delete woke nobody. */
+    {
+        TCB *self = wsv_begin();
+        s_oracle_mode = 1;
+        s_oracle_callback_calls = 0;
+        static const char cbname[] = "wsv-cb-del";
+        for (size_t k = 0; k < sizeof cbname; k++)
+            MEM_W8(WSV_NAMEBUF + (uint32_t)k, (uint8_t)cbname[k]);
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = WSV_NAMEBUF; cpu.r[5] = ORACLE_CALLBACK_ENTRY; cpu.r[6] = 0x55u;
+        uint32_t cb = sr_syscall(&cpu, NID_WSV_CREATE_CALLBACK);
+        expect(cb > 0 && sr_callback_is_valid(cb), "WaitSemaCB delete: callback registered");
+
+        /* (a) */
+        s_wsv_cb_sema = wsv_create(0, 1);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = cb; cpu.r[5] = 1u;
+        (void)sr_syscall(&cpu, NID_WSV_NOTIFY_CALLBACK);
+        s_kernel_nested_callback = wsv_cb_delete_sema;
+        s_wsv_cb_ret = 0xFFFFFFFFu;
+        s_wsv_cb_returned = 0;
+        self->coro = sr_coro_create(wsv_cb_coro_body, NULL, (size_t)4 << 20);
+        if (self->coro) sr_coro_switch(self->coro);
+        s_kernel_nested_callback = NULL;
+        expect(s_oracle_callback_calls == 1, "WaitSemaCB delete (a): the pending callback ran");
+        expect(wsv_count(s_wsv_cb_sema) == -1,
+               "WaitSemaCB delete (a): the callback deleted the semaphore");
+        {
+            char msg[160];
+            snprintf(msg, sizeof msg, "WaitSemaCB delete (a): a semaphore its callback deleted ends "
+                                      "the wait with WAIT_DELETE (got 0x%08x)", s_wsv_cb_ret);
+            expect(s_wsv_cb_returned == 1 && s_wsv_cb_ret == 0x800201b5u, msg);
+        }
+        if (self->coro) { sr_coro_destroy(self->coro); self->coro = NULL; }
+
+        /* (b) */
+        s_cur = (int)(self - s_tcb);
+        self->state = TH_RUNNING;
+        s_oracle_callback_calls = 0;
+        s_wsv_cb_sema = wsv_create(0, 1);
+        s_wsv_cb_ret = 0xFFFFFFFFu;
+        s_wsv_cb_returned = 0;
+        self->coro = sr_coro_create(wsv_cb_coro_body, NULL, (size_t)4 << 20);
+        if (self->coro) sr_coro_switch(self->coro);
+        expect(self->state == TH_WAIT_OBJ && self->wait_obj == s_wsv_cb_sema &&
+               s_wsv_cb_returned == 0, "WaitSemaCB delete (b): the waiter blocked on the semaphore");
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = cb; cpu.r[5] = 2u;
+        (void)sr_syscall(&cpu, NID_WSV_NOTIFY_CALLBACK);
+        expect(self->state == TH_READY, "WaitSemaCB delete (b): the notification readied the waiter");
+        wsv_delete(s_wsv_cb_sema);
+        if (self->state == TH_READY && self->coro) {
+            s_cur = (int)(self - s_tcb);
+            sr_coro_switch(self->coro);
+        }
+        {
+            char msg[160];
+            snprintf(msg, sizeof msg, "WaitSemaCB delete (b): a readied waiter whose semaphore was "
+                                      "deleted ends with WAIT_DELETE (got 0x%08x)", s_wsv_cb_ret);
+            expect(s_wsv_cb_returned == 1 && s_wsv_cb_ret == 0x800201b5u, msg);
+        }
+        if (self->coro) { sr_coro_destroy(self->coro); self->coro = NULL; }
         s_oracle_mode = 0;
         s_oracle_callback_calls = 0;
         s_cur = -1;
@@ -54808,7 +54887,7 @@ static void check_coroutine_lifecycle(void) {
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
         extern int s_rv_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + 2 /* WaitSemaCB delete bodies */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1536];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -54827,6 +54906,7 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 flight thread-snapshot waiters "
                  "+ 6 semaphore service-order waiters + 1 released LwMutex waiter "
                  "+ 4 unwritable-timeout call bodies + 2 released sleepers + 2 released delayers "
+                 "+ 2 WaitSemaCB delete bodies "
                  "+ %d single-call bodies + %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
                  "+ %d Message Pipe waiter/owner legs + %d volatile-memory Lock waiters "
                  "+ %d controller read waiters = %d, observed %lu)",
