@@ -110,7 +110,8 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # vcmp.q C000 against C010, all 16 conditions (PSP-VFPU-CCCMOV-001, probe case vfpu-cc-cmov, PSP-3000,
     # 2026-11-08, issue #326):
     # check_vcmp_denormal_operands() finds them by name and pins both lanes to the CC the
-    # PSP read back for the signed-zero and denormal operand set.
+    # PSP read back for the signed-zero and denormal operand set; check_vcmp_special_operands()
+    # runs the same words on NaN and infinity lanes.
     for cond in range(16):
         cases.append((_bin_word(0x1B, 0, 4, cond, 0x00, 0x01), f"vcmp-q-c{cond:02d}-measured", 4))
 
