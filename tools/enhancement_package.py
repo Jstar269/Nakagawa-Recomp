@@ -821,11 +821,13 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
     unknown_parts = sorted(set(parts) - ACE_PART_NAMES)
     if unknown_parts:
         fail("ace_parts", f"Unknown ace part {unknown_parts}; must be one of {sorted(ACE_PART_NAMES)}")
-    if "load" in parts and "update_boundary" not in data:
-        # The boundary marks the logic update's function, which no skipped wait may pace;
-        # without it nothing would keep a load site out of the update loop.
-        fail("update_boundary", "A package with ace_parts.load must declare update_boundary: no "
-                                "vblank_wait_skip site may be in the function where a logic update begins")
+    if "load" in parts:
+        if not data["sites"]:
+            fail("ace_parts.load", "data-only timing packages cannot declare load instruction sites")
+        if "update_boundary" not in data:
+            # The boundary marks the logic update's function, which no skipped wait may pace.
+            fail("update_boundary", "A package with ace_parts.load must declare update_boundary: no "
+                                    "vblank_wait_skip site may be in the function where a logic update begins")
     for name in sorted(parts):
         part_path = f"ace_parts.{name}"
         part = parts[name]
@@ -1674,15 +1676,35 @@ def _keyed_matcher(key: bytes, want: str) -> Callable[[bytes], bool]:
 ReadFn = Callable[[int, int], Any]
 
 
+def _elf_file_backed_offset(elf: Any, addr: int, size: int) -> int | None:
+    """File offset of a full span with one unambiguous PT_LOAD mapping."""
+    if size <= 0:
+        return None
+    end = addr + size
+    offset = None
+    for seg in elf.segments:
+        lo = seg["vaddr"]
+        if seg["type"] != 1 or not seg["memsz"] or lo >= end or addr >= lo + seg["memsz"]:
+            continue
+        if offset is not None or addr < lo or end > lo + seg["filesz"]:
+            return None
+        offset = seg["off"] + (addr - lo)
+    return offset
+
+
 def elf_readers(elf: Any) -> tuple[ReadFn, ReadFn]:
     """``(read_words, read_data)`` over an ``analyze.Elf`` as codegen reads it.
 
     ``read_words(vaddr, count)`` returns ``count`` little-endian words or ``None``;
     ``read_data(vaddr, size)`` returns initialised bytes of one allocated,
     non-executable PROGBITS section as the loader places them (relocated, for a
-    relocatable image), never code or zero-fill, or ``None``. Segments cannot tell,
-    since a title may load code and data in one RWX segment.
+    relocatable image), or ``None``. The span must have unambiguous file backing
+    and no conflicting allocated section. A load segment may mix code and data.
     """
+    from analyze import exec_ranges
+
+    code_spans = exec_ranges(elf)
+
     def read_words(vaddr: int, count: int) -> list[int] | None:
         out: list[int] = []
         for idx in range(count):
@@ -1693,15 +1715,27 @@ def elf_readers(elf: Any) -> tuple[ReadFn, ReadFn]:
         return out
 
     def read_data(vaddr: int, count: int) -> bytes | None:
+        offset = _elf_file_backed_offset(elf, vaddr, count)
+        if offset is None:
+            return None
+        end = vaddr + count
+        if any(lo < end and vaddr < hi for lo, hi in code_spans):
+            return None
+        initialized = False
         for sec in elf.sections:
-            if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 4:
-                continue
             # analyze.Elf already places section addresses in the same space as its reads.
             lo = sec["addr"]
-            if lo <= vaddr and vaddr + count <= lo + sec["size"]:
-                raw = elf.read_at_vaddr(vaddr, count)
-                return None if raw is None else bytes(raw)
-        return None
+            hi = lo + sec["size"]
+            if not sec["flags"] & 2 or lo == hi or lo >= end or vaddr >= hi:
+                continue
+            if sec["typ"] != 1 or sec["flags"] & 4 or sec["off"] - lo != offset - vaddr:
+                return None
+            if lo <= vaddr and end <= hi:
+                initialized = True
+        if not initialized:
+            return None
+        raw = elf.read_at_vaddr(vaddr, count)
+        return bytes(raw) if raw is not None and len(raw) == count else None
 
     return read_words, read_data
 

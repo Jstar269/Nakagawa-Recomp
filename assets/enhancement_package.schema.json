@@ -783,6 +783,9 @@
           "category": { "const": "timing_frame_presentation" },
           "rng_policy": {
             "properties": { "mode": { "const": "unmodified" } }
+          },
+          "ace_parts": {
+            "properties": { "load": false }
           }
         }
       }

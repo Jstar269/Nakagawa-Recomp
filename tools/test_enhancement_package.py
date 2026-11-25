@@ -5298,6 +5298,7 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                           (".bss", bss_addr, 4, 3)), elf_type=ET_SCE_PRX)
             private, _ = self._make_package_and_symbols(elf_bytes)
             instruction_sites = private["sites"]
+            update_boundary = private.pop("update_boundary")
             private.update(sites=[], capabilities=["timing_data"],
                            rng_policy={"mode": "unmodified",
                                        "reason": "The synthetic fixture uses no RNG."},
@@ -5307,7 +5308,6 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                                "stock_digest": hashlib.sha256(stock).hexdigest(),
                                "transform": "f32_x3",
                            }])
-            del private["update_boundary"]
             symbols = {"synth_interval": f"0x{placed_addr:08x}"}
 
             def generate(label: str, options: list[str]) -> tuple[int, str, dict[str, bytes]]:
@@ -5338,6 +5338,11 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             rc, output, public_generated = generate("public", [f"--enhancement-package={public_path}"])
             self.assertEqual(rc, 0, output)
             self.assertEqual(public_generated, generated)
+
+            load_site = dict(instruction_sites[5], transform="vblank_wait_skip")
+            with self.assertRaisesRegex(EnhancementPackageError, "cannot declare load instruction sites"):
+                validate_package(dict(private, update_boundary=update_boundary,
+                                      ace_parts={"load": {"sites": [load_site]}}))
 
             for label, value, diagnostic in (
                 ("local-mismatch", private, "Stock data digest mismatch"),
@@ -5437,11 +5442,20 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                     delta = base if elf_type == ET_SCE_PRX else 0
                     self.assertEqual(elf.read_at_vaddr(data_addr + delta, 4), stock)
                     self.assertEqual(read_data(data_addr + delta, 4), stock)
+                    segment = elf.segments[0]
+                    self.assertEqual(
+                        enhancement_package._elf_file_backed_offset(elf, data_addr + delta, 4),
+                        segment["off"] + data_addr)
+                    file_end = segment["vaddr"] + segment["filesz"]
+                    self.assertEqual(enhancement_package._elf_file_backed_offset(elf, file_end - 2, 2),
+                                     segment["off"] + segment["filesz"] - 2)
+                    self.assertIsNone(enhancement_package._elf_file_backed_offset(elf, file_end - 2, 4))
                     self.assertEqual(elf.read_at_vaddr(self.entry + delta, 4),
                                      struct.pack("<I", self.words[self.entry]))
                     self.assertIsNone(read_data(self.entry + delta, 4))
                     if elf_type == ET_SCE_PRX:
                         self.assertEqual(elf.read_at_vaddr(bss_addr + delta, 4), b"\0" * 4)
+                    self.assertIsNone(enhancement_package._elf_file_backed_offset(elf, bss_addr + delta, 4))
                     self.assertIsNone(read_data(bss_addr + delta, 4))
 
     def test_publish_keeps_no_values_read_from_the_game_and_refuses_wrong_digests(self) -> None:
