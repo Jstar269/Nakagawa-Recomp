@@ -223,6 +223,7 @@ extern uint32_t sr_hle_test_io_read(CpuState *s);
 extern uint32_t hle_io_umd_read_us(uint64_t bytes);   /* the UMD drive's read time (hle_io.c) */
 extern int sr_hle_test_io_disc_fetches_in_flight(void);
 extern uint32_t sr_hle_test_io_write(CpuState *s);
+extern FILE *sr_hle_test_io_replace_host(uint32_t fd, FILE *host);
 extern uint32_t sr_hle_test_io_lseek(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek32(CpuState *s);
 extern uint32_t sr_hle_test_io_dopen(CpuState *s);
@@ -5258,6 +5259,50 @@ static void test_fd_namespace(void) {
            "write through the first ordinary descriptor reports the full payload");
     expect(fd_host_bytes_equal(result_host, payload, sizeof(payload) - 1u),
            "Phase-5 payload is persisted byte-for-byte through the ordinary fd");
+
+#ifdef __linux__
+    /* A host write that fails must not reach the guest as a full count. /dev/full opens and
+     * buffers writes but refuses every flush (ENOSPC), as a full host volume does; it stands in
+     * for the host stream of an ordinary ms0: descriptor, and the production sceIoWrite runs
+     * against it. The write answers the host I/O error and leaves the position where it was. */
+    {
+        FILE *full_volume = fopen("/dev/full", "r+b");
+        if (!full_volume) {
+            printf("hle_thread_selftest: SKIP full-volume sceIoWrite (no writable /dev/full)\n");
+        } else {
+            fd_set_path(&cpu, path_addr, "ms0:/NAKAGAWA_FULL_VOLUME.BIN");
+            uint32_t full_fd = sr_hle_test_io_open(&cpu);
+            FILE *real_host = full_fd < 64u ? sr_hle_test_io_replace_host(full_fd, full_volume)
+                                            : NULL;
+            expect(real_host != NULL, "the full-volume fixture opens a host-backed ms0: file");
+            if (real_host) {
+                fd_guest_copy(payload_addr, "xyz", 3u);
+                fd_set_write(&cpu, full_fd, payload_addr, 3u);
+                uint32_t full_write = sr_hle_test_io_write(&cpu);
+                expect(full_write == 0x80010005u,
+                       "sceIoWrite answers the host I/O error when the host refuses the bytes");
+                if (full_write != 0x80010005u)
+                    fprintf(stderr, "  full-volume sceIoWrite: 0x%08x (want 0x80010005)\n",
+                            full_write);
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = full_fd; cpu.r[5] = 0u; cpu.r[6] = 1u;   /* SEEK_CUR */
+                uint32_t full_pos = sr_hle_test_io_lseek32(&cpu);
+                expect(full_pos == 0u, "a refused host write leaves the position unchanged");
+                if (full_pos != 0u)
+                    fprintf(stderr, "  full-volume position after the write: %u (want 0)\n",
+                            full_pos);
+                (void)sr_hle_test_io_replace_host(full_fd, real_host);
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = full_fd;
+                (void)sr_hle_test_io_close(&cpu);
+            }
+            fclose(full_volume);
+            char full_host[256];
+            fd_host_path(full_host, sizeof(full_host), "ms0:/NAKAGAWA_FULL_VOLUME.BIN");
+            remove(full_host);
+        }
+    }
+#endif
 
     /* Standard descriptor operations */
     fd_set_write(&cpu, 1u, payload_addr, (uint32_t)(sizeof(payload) - 1u));

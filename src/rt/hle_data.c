@@ -3073,6 +3073,13 @@ void sr_hle_test_io_async_import_boundary(void) { io_async_dispatch_tick(); }
 int sr_hle_test_fd_kind(uint32_t fd) {
     return fd < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) ? (int)s_fds[fd].kind : -1;
 }
+/* Put `host` in place of a file descriptor's host stream; the previous stream, or NULL. */
+FILE *sr_hle_test_io_replace_host(uint32_t fd, FILE *host) {
+    if (!hle_fd_is_file(fd)) return NULL;
+    FILE *previous = s_fds[fd].host;
+    s_fds[fd].host = host;
+    return previous;
+}
 #endif
 #ifdef SR_HLE_THREAD_SELFTEST
 uint32_t sr_hle_test_ms0_legacy_import_count(void) {

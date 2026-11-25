@@ -393,6 +393,7 @@ uint32_t h_IoWrite(CpuState *s) {
     if (count != 0u && !sr_inrange_n(src, count)) return 0x80010016u;
     if (f->truncated_bytes && !io_restore_truncated_gap(f)) return 0x80010005u;
     if (io_host_seek(f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
+    clearerr(f->host);   /* an earlier read's error is not this write's */
     uint8_t tmp[4096]; uint32_t done = 0;
     while (done < count) {
         uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
@@ -401,7 +402,13 @@ uint32_t h_IoWrite(CpuState *s) {
         done += wrote;
         if (wrote < n) break;
     }
-    fflush(f->host);
+    /* The host stream buffers what fwrite takes, so a full or failing host volume refuses the
+     * bytes only at the flush (or in fwrite itself). Such a write answers the host I/O error
+     * and leaves the position and size as they were, rather than the count it never stored. */
+    if (fflush(f->host) != 0 || ferror(f->host)) {
+        clearerr(f->host);
+        return 0x80010005u;
+    }
     f->off += done; if (f->off > f->size) f->size = f->off;
     return done;
 }
