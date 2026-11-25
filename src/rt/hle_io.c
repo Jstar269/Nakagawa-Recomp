@@ -457,8 +457,15 @@ uint32_t h_IoWrite(CpuState *s) {
     if (count != 0u && !sr_inrange_n(src, count)) return 0x80010016u;
     if (f->append) return io_write_append(f, fd, write_at, src, count);
     if (f->truncated_bytes && !io_restore_truncated_gap(f)) return 0x80010005u;
-    if (io_seek_for_write(fd, f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
-    uint32_t done = io_write_guest_prefix(fd, f->host, src, count);
+    if (io_host_seek(f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
+    uint8_t tmp[4096]; uint32_t done = 0;
+    while (done < count) {
+        uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
+        for (uint32_t k = 0; k < n; k++) tmp[k] = (uint8_t)MEM_R8(src + done + k);
+        uint32_t wrote = (uint32_t)fwrite(tmp, 1, n, f->host);
+        done += wrote;
+        if (wrote < n) break;
+    }
     fflush(f->host);
     f->off += done; if (f->off > f->size) f->size = f->off;
     return done;
