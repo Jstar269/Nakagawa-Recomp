@@ -572,6 +572,22 @@ attached to a release. `tools/test_stage_install.py` keeps the rule from driftin
 Wine and Proton: the Windows ZIP is the build used there. The smoke run and its known limits are in
 [`SETUP.md`](SETUP.md#wine-and-proton).
 
+## Record the candidate performance baseline
+
+From v0.1.0 onward, measure the frozen candidate on the reference PC using the
+[two gameplay windows and reporting convention](COMPATIBILITY.md#release-performance-baselines).
+Build each title's runtime package from the same candidate as the launcher. Replay the fixed
+route from the same starting state, in Authentic and in Ace where the title has a timing package.
+Verify that each run reaches the end of its window. Use the
+[guarded benchmark runs from #2574, stage 4](https://github.com/Jstar269/Nakagawa-Recomp/issues/2574).
+If the guard is unavailable or refuses a run, leave its measurements out and record the reason
+in the private run record. Keep results pending until a run qualifies.
+
+Add the accepted aggregate results to the compatibility document and link that section from
+the release notes. Compare releases on the same route, PC, mode and presentation settings.
+When conditions change, identify the change and start a new series. Replays, saves, captures
+and per-frame logs stay private.
+
 ## Clean-VM offline acceptance
 
 This is the acceptance run for the bundled prerequisites ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)) and a release gate: an ordinary user, on a machine that has never seen a development tool and has no network, goes from the release ZIP to playing their own game with no download prompt. Run it on the exact ZIP that will be published, after the package script and the checks above.
