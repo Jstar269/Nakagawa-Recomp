@@ -1976,7 +1976,9 @@ static uint32_t h_lwmutex_lock_common(CpuState *s, int is_cb) {
     /* a0=workarea, a1=lockCount, a2=timeout ptr. */
     uint32_t wa = A0;
     if (!lwmutex_workarea_ok(wa)) return 0x80000103u;
-    int count = (int)A1; if (count <= 0) return 0x800200d2u;  /* ILLEGAL_ARGUMENT */
+    /* pspautotests tests/threads/lwmutex/lock.expected "Lock 0 => 0" and "Lock 0 => -1":
+     * a count <= 0 is ILLEGAL_COUNT, recursive or not, and takes nothing. */
+    int count = (int)A1; if (count <= 0) return 0x800201bdu;  /* ILLEGAL_COUNT */
     /* pspautotests tests/threads/lwmutex/lock.expected "Lock 0 => 2": a count above 1
      * on a non-recursive mutex is ILLEGAL_COUNT and takes nothing, as TryLock_600. */
     if (!(MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) && count > 1)

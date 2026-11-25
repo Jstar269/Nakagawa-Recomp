@@ -26942,6 +26942,19 @@ static void test_trylock600_cells(void) {
               "Lock overflow: the owner unlocks its INT_MAX level");
     expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock overflow: the mutex is free again");
     b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock overflow: delete");
+    /* sceKernelLockLwMutex with count 0 or -1: pspautotests tests/threads/lwmutex/lock.expected
+     * (reference output) "Lock 0 => 0: Failed (800201BD)" and "Lock 0 => -1: Failed (800201BD)",
+     * for a non-recursive and a recursive mutex alike, with the mutex left free. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 0u), 0u, "Lock count: create free");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0u, 0u, 0u), 0x800201bdu, "Lock 0 => 0 returns 800201BD");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0xffffffffu, 0u, 0u), 0x800201bdu, "Lock 0 => -1 returns 800201BD");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock count: rejected counts leave the mutex free");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock count: delete");
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 0u), 0u, "Lock count: create recursive free");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0xffffffffu, 0u, 0u), 0x800201bdu,
+              "Lock 0 => -1 (recursive) returns 800201BD");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock count: the recursive mutex stays free");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock count: recursive delete");
     s_cur = -1;
 }
 
