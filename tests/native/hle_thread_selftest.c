@@ -64846,10 +64846,31 @@ static void test_font_glyph_image_and_handles(uint32_t served_index) {
            "the served font has a glyph whose bitmap fits a 16 x 16 buffer");
     uint32_t stops = sr_hle_test_unmodelled_stops();
     for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 4u, 0xa5u);
     flt_write_glyph_image(FLT_GI, 2u, 0, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
            "sceFontGetCharGlyphImage draws into a complete glyph image and bitmap");
+    /* The first glyph of each synthetic strike in test_flash0_font.py has coverage
+     * 0..15 in row order. Check what the guest actually sees at its 16-byte pitch. */
+    int coverage_ok = 1;
+    for (uint32_t y = 0; y < 4u; ++y) {
+        for (uint32_t x = 0; x < 4u; ++x) {
+            if (MEM_R8(FLT_BITMAP + 16u * y + x) != 17u * (4u * y + x)) coverage_ok = 0;
+        }
+    }
+    expect(coverage_ok && MEM_R8(FLT_BITMAP + 4u) == 0xa5u,
+           "format-2 glyph syscall writes all 16 coverage levels and preserves the next byte");
+
+    for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 5u, 0xa5u);
+    flt_write_glyph_image(FLT_GI, 2u, 32, 16u, 16u, 16u, FLT_BITMAP);
+    expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
+               sr_hle_test_unmodelled_stops() == stops &&
+               MEM_R8(FLT_BITMAP) == 0u && MEM_R8(FLT_BITMAP + 1u) == 9u &&
+               MEM_R8(FLT_BITMAP + 2u) == 25u && MEM_R8(FLT_BITMAP + 3u) == 43u &&
+               MEM_R8(FLT_BITMAP + 4u) == 25u && MEM_R8(FLT_BITMAP + 5u) == 0xa5u,
+           "half-pixel format-2 glyph write preserves the byte beyond its fifth column");
     flt_write_glyph_image(FLT_GI, 2u, 100 * 64, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
