@@ -5006,7 +5006,7 @@ static void test_settings_pages(void) {
                       strstr(dump, "\"ONLINE MODE: ON\"") != NULL &&
                       strstr(dump, "\"ONLINE PLAY: ON (SOCOM.CC)\"") != NULL &&
                       strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL &&
-                      strstr(dump, "\"CHEAT DATABASE\"") != NULL,
+                      strstr(dump, "\"CHEAT DATABASE: OPEN\"") != NULL,
                   "the optional and standard Online and developer rows fit together");
             for (size_t step = 0u; step < sizeof(full_order) / sizeof(full_order[0]); ++step) {
                 CHECK(nk_ui_focused(ui) == full_order[step],

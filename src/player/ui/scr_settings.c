@@ -2538,7 +2538,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                               ? NK_UI_STR(SETTINGS_SIGNED_IN_STATUS)
                                                               : NK_UI_STR(SETTINGS_SIGN_IN_TO_CONNECT))};
             }
-            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_CHEAT_DB), "", ""};
+            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_CHEAT_DB), NK_UI_STR(LIBRARY_OPEN), ""};
             /* The RetroAchievements row's button carries the account name, of any length, which
                widens the button column; while it shows, a sentence the column would cut goes
                under its button at every text size instead of ending in an ellipsis. */
@@ -2623,7 +2623,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                           : PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS);
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_CHEAT_DB, SET_ID_TEXT + 0xF8u,
-                                 NK_UI_STR(SETTINGS_CHEAT_DB), "", "", false, inner - 32.0f, &column)) {
+                                 NK_UI_STR(SETTINGS_CHEAT_DB), NK_UI_STR(LIBRARY_OPEN), "",
+                                 false, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_CHEAT_DB);
             }
             nk_ui_end_container(ui);
