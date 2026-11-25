@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
+import contextlib
+import io
 import json
 from pathlib import Path, PurePath
 import re
 import subprocess
 import sys
 import tempfile
+from typing import Literal
 import hashlib
 import os
 import random
 import unittest
 from unittest import mock
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -26,6 +30,101 @@ NUL = bytes([0])
 BOM = bytes([0xEF, 0xBB, 0xBF])
 UTF16LE = bytes([0xFF, 0xFE])
 UTF16BE = bytes([0xFE, 0xFF])
+
+
+class ReleaseArtifactTests(unittest.TestCase):
+    """The real artifact entry point reads an external pin set and the finished bytes."""
+
+    commit = "a" * 40
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.pins = self.root / "reference.json"
+        self.members = {"toolchain.json": json.dumps({"candidate": {"commit": self.commit}}).encode(),
+                        "source/README.md": b"original source bytes", "docs/SETUP.md": b"documentation"}
+
+    @staticmethod
+    def _digest(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def _reference(self, files: dict[str, bytes]) -> dict[str, bytes]:
+        self.pins.write_text(json.dumps({
+            "format": "nakagawa-release-artifact-reference", "schema_version": 1,
+            "source_commit": self.commit, "empty_folders": ["bin/empty/"],
+            "files": [{"path": name, "role": publish_audit._artifact_role(name),
+                       "size": len(data), "sha256": self._digest(data)} for name, data in files.items()],
+        }), encoding="utf-8")
+        sums = "".join(f"{self._digest(files[name])}  {name}\n" for name in sorted(files))
+        return {**files, "SHA256SUMS.txt": sums.encode()}
+
+    def _zip(self, files: dict[str, bytes]) -> Path:
+        out = self.root / "package.zip"
+        with zipfile.ZipFile(out, "w") as archive:
+            archive.writestr("bin/empty/", b"")
+            for name, data in files.items():
+                archive.writestr(name, data)
+        return out
+
+    def _audit(self, artifact: Path) -> tuple[int, str]:
+        with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = publish_audit.main(["--artifact", str(artifact), "--artifact-reference", str(self.pins), "--json"])
+        return code, stdout.getvalue() if code == 0 else stderr.getvalue()
+
+    def test_directory_and_zip_match_the_same_approved_bytes(self):
+        files = self._reference(self.members)
+        folder = self.root / "package"
+        (folder / "bin/empty").mkdir(parents=True)
+        for name, data in files.items():
+            path = folder / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        zip_report = self._audit(self._zip(files))
+        self.assertEqual(zip_report, self._audit(folder))
+        self.assertEqual(zip_report[0], 0)
+        self.assertEqual(json.loads(zip_report[1]), {"event": "artifact-audit", "source_commit": self.commit,
+                                                    "files": 4, "empty_folders": 1})
+
+    def test_altered_bytes_and_missing_members_fail_closed(self):
+        files = self._reference(self.members)
+        cases = (
+            ({**files, "source/README.md": b"Original source bytes"}, "ARTIFACT_MEMBER_DIGEST: source/README.md"),
+            ({n: b for n, b in files.items() if n != "docs/SETUP.md"}, "ARTIFACT_MEMBER_MISSING: docs/SETUP.md"),
+            ({**files, "docs/surprise.txt": b"extra"}, "ARTIFACT_MEMBER_UNEXPECTED: docs/surprise.txt"),
+            ({**files, "SHA256SUMS.txt": files["SHA256SUMS.txt"].replace(b" ", b"-", 1)}, "ARTIFACT_MEMBER_DIGEST: SHA256SUMS.txt"),
+        )
+        for content, code in cases:
+            with self.subTest(code=code):
+                status, problem = self._audit(self._zip(content))
+                self.assertEqual(status, 1)
+                self.assertIn(code, problem)
+
+    def test_renamed_guest_header_is_refused_even_with_a_size_and_hash_pin(self):
+        def elf(byte_order: Literal["little", "big"], machine: int) -> bytes:
+            return (b"\x7fELF\x01" + bytes([1 if byte_order == "little" else 2]) + bytes(12)
+                    + machine.to_bytes(2, byte_order))
+
+        cases = ((b"\0PSF synthetic", "PSP PSF"), (b"\0PBP synthetic", "PSP PBP"),
+                 (elf("little", 8), "MIPS ELF"), (elf("big", 8), "MIPS ELF"),
+                 (bytes(0x8001) + b"CD001", "ISO9660 image"))
+        for data, kind in cases:
+            with self.subTest(kind=kind):
+                files = self._reference({**self.members, "docs/note.txt": data})
+                status, problem = self._audit(self._zip(files))
+                self.assertEqual(status, 1)
+                self.assertIn(f"ARTIFACT_GUEST_CONTENT: docs/note.txt contains {kind}", problem)
+        byte_orders: tuple[Literal["little", "big"], ...] = ("little", "big")
+        for byte_order in byte_orders:
+            with self.subTest(byte_order=byte_order):
+                files = self._reference({**self.members, "source/test-header.txt": elf(byte_order, 62)})
+                self.assertEqual(self._audit(self._zip(files))[0], 0)
+
+    def test_toolchain_file_must_identify_the_reference_commit(self):
+        files = self._reference({**self.members, "toolchain.json": b'{"candidate":{"commit":"other"}}'})
+        status, problem = self._audit(self._zip(files))
+        self.assertEqual(status, 1)
+        self.assertIn("ARTIFACT_TOOLCHAIN_COMMIT", problem)
 
 
 def _communicate_all(commands: dict[str, list[str]]) -> dict[str, subprocess.CompletedProcess]:

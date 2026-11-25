@@ -739,19 +739,34 @@ def _make_stage(root: Path, *, reverse: bool, mtime: float) -> Path:
 class PortableZipTests(unittest.TestCase):
     """--portable-zip: one commit and one staged folder give one ZIP, byte for byte (#324)."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self._temp = tempfile.TemporaryDirectory()
         self.root = Path(self._temp.name)
 
     def tearDown(self):
         self._temp.cleanup()
 
+    def _pins(self, fixture: Path, name: str = "pins.json") -> Path:
+        files, folders = stage_install._stage_tree(fixture)
+        commit = stage_install.staged_source_commit(fixture)
+        pins = self.root / name
+        pins.write_text(json.dumps({
+            "format": "nakagawa-release-artifact-reference", "schema_version": 1,
+            "source_commit": commit, "empty_folders": folders,
+            "files": [{"path": rel, "size": path.stat().st_size,
+                       "role": stage_install.publish_audit._artifact_role(rel),
+                       "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                      for rel, path in files if rel != "SHA256SUMS.txt"],
+        }), encoding="utf-8")
+        return pins
+
     def _zip(self, stage: Path, name: str = "out.zip", **kwargs) -> Path:
         out = self.root / name
+        pins = kwargs.pop("artifact_reference", None) or self._pins(stage)
         stage_install.write_portable_zip(stage, out, source_date_epoch=kwargs.pop("epoch", _EPOCH),
-                                         verify_runtime=kwargs.pop("verify", _no_runtime_check))
-        returned: Path = out
-        return returned
+                                         verify_runtime=kwargs.pop("verify", _no_runtime_check),
+                                         artifact_reference=pins)
+        return out
 
     def test_two_builds_of_the_same_stage_are_byte_identical(self):
         first = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
@@ -859,6 +874,7 @@ class PortableZipTests(unittest.TestCase):
                                _no_runtime_check), \
                 contextlib.redirect_stdout(io.StringIO()) as stdout:
             status = stage_install.main(["--portable-zip", str(out), "--zip-stage", str(stage),
+                                         "--artifact-reference", str(self._pins(stage)),
                                          "--source-date-epoch", str(_EPOCH)])
         self.assertEqual(status, 0)
         report = json.loads(stdout.getvalue())
@@ -873,7 +889,8 @@ class PortableZipTests(unittest.TestCase):
         stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
         summary = stage_install.write_portable_zip(stage, self.root / "out.zip", source_date_epoch=_EPOCH,
                                                    verify_runtime=_no_runtime_check,
-                                                   expected_commit=_STAGE_COMMIT)
+                                                   expected_commit=_STAGE_COMMIT,
+                                                   artifact_reference=self._pins(stage))
         self.assertEqual(summary["source_commit"], _STAGE_COMMIT)
         with zipfile.ZipFile(self.root / "out.zip") as archive:
             sums = archive.read("SHA256SUMS.txt")
@@ -911,15 +928,244 @@ class PortableZipTests(unittest.TestCase):
                                              verify_runtime=_no_runtime_check, expected_commit="1" * 40)
         self.assertFalse(out.exists())
 
-    def _cli_zip(self, stage: Path, out: Path, record: Path, revision: str) -> tuple[int, str]:
+    def _cli_zip(self, stage: Path, out: Path, record: Path, revision: str,
+                 *reference_options: str, verify_runtime=_no_runtime_check) -> tuple[int, str]:
         stderr = io.StringIO()
         with mock.patch.object(stage_install.stage_runtime_dlls, "verify_runtime_manifest",
-                               _no_runtime_check), \
+                               verify_runtime), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
             status = stage_install.main(["--portable-zip", str(out), "--zip-stage", str(stage),
                                          "--source-date-epoch", str(_EPOCH), "--revision", revision,
-                                         "--record", str(record)])
+                                         "--record", str(record),
+                                         *(reference_options or ("--artifact-reference", str(self._pins(stage))))])
         return status, stderr.getvalue()
+
+    @staticmethod
+    def _write_member(root: Path, name: str, data: bytes) -> None:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def test_cli_packs_reference_bound_bundle_and_prerequisite_members(self):
+        head = stage_install.resolve_commit("HEAD")
+        stage = _make_stage(self.root / "stage", reverse=False, mtime=1_700_000_000)
+        reference = _make_stage(self.root / "reference", reverse=True, mtime=1_800_000_000)
+        bundle = self.root / "attested-bundle"
+        prereqs = self.root / "pinned-prereqs"
+        toolchain = json.dumps({"candidate": {"commit": head}}).encode()
+        pe = b"MZ" + bytes(58) + (64).to_bytes(4, "little") + b"PE\0\0"
+        iso = bytes(0x8001) + b"CD001"
+        runtime_members = {name: data for name, data in _STAGE_FILES.items() if name.startswith("bin/")}
+        runtime_members.update({"bin/nakagawa_player.exe": pe + b"player",
+                                "bin/demos/packages/TEST00008/demo.exe": pe + b"demo",
+                                "bin/demos/images/TEST00008.iso": iso, "toolchain.json": toolchain})
+        prereq_members = {name.removeprefix("prereqs/"): data for name, data in _STAGE_FILES.items()
+                          if name.startswith("prereqs/")}
+        prereq_members.update({"python/python.exe": pe + b"python",
+                               "msys64/ucrt64/bin/make.exe": pe + b"make",
+                               "msys64/ucrt64/lib/support.a": b"archive support"})
+        # Build the approved inputs before assembling either release layout.
+        for name, data in runtime_members.items():
+            self._write_member(bundle, name, data)
+        for name, data in prereq_members.items():
+            self._write_member(prereqs, name, data)
+        for name in _STAGE_EMPTY:
+            if name.startswith("bin/"):
+                (bundle / name).mkdir(parents=True, exist_ok=True)
+            if name.startswith("prereqs/"):
+                (prereqs / name.removeprefix("prereqs/")).mkdir(parents=True, exist_ok=True)
+        for layout in (stage, reference):
+            for name in runtime_members:
+                self._write_member(layout, name, (bundle / name).read_bytes())
+            for name in prereq_members:
+                self._write_member(layout, f"prereqs/{name}", (prereqs / name).read_bytes())
+        options = ("--artifact-reference", str(reference), "--approved-bundle", str(bundle),
+                   "--approved-prereqs", str(prereqs))
+        out, record = self.root / "out.zip", self.root / "out.json"
+        self.assertEqual(self._cli_zip(stage, out, record, head, *options), (0, ""))
+        with zipfile.ZipFile(out) as archive:
+            self.assertEqual(archive.read("prereqs/python/python.exe"), prereq_members["python/python.exe"])
+            self.assertEqual(archive.read("prereqs/msys64/ucrt64/bin/make.exe"), prereq_members["msys64/ucrt64/bin/make.exe"])
+            self.assertEqual(archive.read("bin/demos/images/TEST00008.iso"), iso)
+        # Two mutually matching layouts cannot approve a change to any upstream role.
+        for path in ("bin/nakagawa_player.exe", "bin/demos/images/TEST00008.iso",
+                     "prereqs/python/python.exe", "prereqs/msys64/ucrt64/bin/make.exe"):
+            with self.subTest(path=path):
+                original = (stage / path).read_bytes()
+                altered = (bytes([original[0] ^ 1]) + original[1:] if path.endswith(".iso")
+                           else original[:-1] + bytes([original[-1] ^ 1]))
+                for layout in (stage, reference):
+                    self._write_member(layout, path, altered)
+                rejected = self.root / "rejected.zip"
+                rejected_record = self.root / "rejected.json"
+                status, error = self._cli_zip(stage, rejected, rejected_record, head, *options)
+                self.assertEqual(status, 1)
+                self.assertIn(f"ARTIFACT_REFERENCE_ROLE_MISMATCH: {path}", error)
+                self.assertFalse(rejected.exists() or rejected_record.exists())
+                for layout in (stage, reference):
+                    self._write_member(layout, path, original)
+        for layout in (stage, reference):
+            (layout / "prereqs/python/python.exe").unlink()
+        status, error = self._cli_zip(stage, rejected, rejected_record, head, *options)
+        self.assertEqual(status, 1)
+        self.assertIn("ARTIFACT_REFERENCE_ROLE_MISSING: prereqs/python/python.exe", error)
+        self.assertFalse(rejected.exists() or rejected_record.exists())
+
+    def test_cli_preserves_approved_signing_record_and_binds_its_final_hashes(self):
+        head = stage_install.resolve_commit("HEAD")
+        stage = self.root / "signed-stage"
+        reference = self.root / "signed-reference"
+        bundle = self.root / "approved-signed-bundle"
+        attested = self.root / "attested-pre-sign-bundle"
+        layouts = (stage, reference, bundle)
+        unsigned = {"bin/nakagawa_player.exe": b"unsigned player", "bin/production_smoke.exe": b"unsigned smoke"}
+        signed = {"bin/nakagawa_player.exe": b"synthetic signed player", "bin/production_smoke.exe": b"synthetic signed smoke"}
+        path_to_manifest = "bin/runtime-manifest.json"
+        for layout, files in ((attested, unsigned), (bundle, signed)):
+            for name, data in files.items():
+                self._write_member(layout, name, data)
+            stage_runtime_dlls.write_runtime_manifest(layout / "bin", imports_of=lambda _path: [])
+            files[path_to_manifest] = (layout / path_to_manifest).read_bytes()
+
+        def digest(data):
+            return hashlib.sha256(data).hexdigest()
+
+        signing = {
+            "format": "nakagawa-signing-record", "schema": 1, "test_certificate": False,
+            "signer_subject": "synthetic witness", "signer_thumbprint": "1" * 40,
+            "digest_algorithm": "sha256", "timestamped": True,
+            "files": [{"path": path, "unsigned_sha256": digest(unsigned[path]), "signed_sha256": digest(signed[path])}
+                      for path in unsigned if path != path_to_manifest],
+            "refreshed_files": [{"path": path_to_manifest, "attested_sha256": digest(unsigned[path_to_manifest]),
+                                 "refreshed_sha256": digest(signed[path_to_manifest])}],
+        }
+        record_name = "signing-record.json"
+        toolchain = json.dumps({"candidate": {"commit": head}}).encode()
+        self._write_member(attested, "toolchain.json", toolchain)
+        for name, data in unsigned.items():
+            self._write_member(attested, name, data)
+        for layout in layouts:
+            self._write_member(layout, "toolchain.json", toolchain)
+            for name, data in signed.items():
+                self._write_member(layout, name, data)
+
+        def copy_record():
+            content = (json.dumps(signing, indent=2) + "\n").encode()
+            for layout in layouts:
+                self._write_member(layout, record_name, content)
+            return content
+
+        without_originals = ("--artifact-reference", str(reference), "--approved-bundle", str(bundle))
+        options = (*without_originals, "--attested-bundle", str(attested))
+        verify_runtime = stage_runtime_dlls.verify_runtime_manifest
+
+        def verify_synthetic_runtime(bin_dir):
+            return verify_runtime(bin_dir, imports_of=None, require_licence_records=False)
+
+        def published(label, record_bytes):
+            out, release_record = self.root / f"{label}.zip", self.root / f"{label}.json"
+            self.assertEqual(self._cli_zip(stage, out, release_record, head, *options,
+                                           verify_runtime=verify_synthetic_runtime), (0, ""))
+            self.assertTrue(release_record.is_file())
+            self.assertFalse(out.with_suffix(".zip.part").exists())
+            with zipfile.ZipFile(out) as archive:
+                self.assertEqual(archive.read(record_name), record_bytes)
+                self.assertIn(f"{digest(record_bytes)}  {record_name}\n", archive.read("SHA256SUMS.txt").decode())
+                for name, data in signed.items():
+                    self.assertEqual(archive.read(name), data)
+
+        def refused(message, reference_options=options, *, record_path=None, zip_path=None):
+            rejected = zip_path or self.root / "rejected.zip"
+            rejected_record = record_path or self.root / "rejected.json"
+            status, error = self._cli_zip(stage, rejected, rejected_record, head, *reference_options,
+                                          verify_runtime=verify_synthetic_runtime)
+            self.assertEqual(status, 1)
+            self.assertIn(message, error)
+            self.assertFalse(rejected.exists() or rejected_record.exists() or rejected.with_suffix(".zip.part").exists())
+
+        approved_record = copy_record()
+        published("signed", approved_record)
+        refused("PORTABLE_RECORD_OVERLAPS_REFERENCE", record_path=attested / "audit.json")
+        refused("ARTIFACT_REFERENCE_NOT_SEPARATE", zip_path=attested / "unpublished.zip")
+        refused("ARTIFACT_REFERENCE_NOT_SEPARATE", (*without_originals, "--attested-bundle", str(bundle)))
+        self._write_member(attested, "toolchain.json", toolchain + b" ")
+        refused("ARTIFACT_REFERENCE_ROLE_MISMATCH: toolchain.json")
+        self._write_member(attested, "toolchain.json", toolchain)
+
+        inventory_row = signing["refreshed_files"][0]
+        inventory_row["attested_sha256"] = None
+        copy_record()
+        # Even matching signed layouts cannot use null to hide a real original.
+        refused("ARTIFACT_SIGNING_RECORD_INVALID: invalid attested_sha256")
+        (attested / path_to_manifest).unlink()
+        refused("ARTIFACT_SIGNING_RECORD_INVALID: invalid attested_sha256", without_originals)
+        published("signed-legacy", copy_record())
+        del inventory_row["attested_sha256"]
+        copy_record()
+        refused("ARTIFACT_SIGNING_RECORD_INVALID: invalid attested_sha256")
+        inventory_row["attested_sha256"] = "invalid"
+        copy_record()
+        refused("ARTIFACT_SIGNING_RECORD_INVALID: invalid attested_sha256")
+        self._write_member(attested, path_to_manifest, unsigned[path_to_manifest])
+        inventory_row["attested_sha256"] = digest(unsigned[path_to_manifest])
+        copy_record()
+
+        for layout in (stage, reference):
+            (layout / record_name).unlink()
+        refused("ARTIFACT_REFERENCE_ROLE_MISSING: signing-record.json")
+
+        for layout in (stage, reference):
+            self._write_member(layout, record_name, approved_record.replace(b"synthetic witness", b"synthetic changed"))
+        refused("ARTIFACT_REFERENCE_ROLE_MISMATCH: signing-record.json")
+
+        for row in signing["files"]:
+            for field, code in (("unsigned_sha256", "ARTIFACT_SIGNING_RECORD_ORIGINAL_DIGEST"),
+                                ("signed_sha256", "ARTIFACT_SIGNING_RECORD_DIGEST")):
+                with self.subTest(path=row["path"], field=field):
+                    previous = row[field]
+                    row[field] = "0" * 64
+                    copy_record()
+                    refused(f"{code}: {row['path']}")
+                    row[field] = previous
+        for field, code in (("attested_sha256", "ARTIFACT_SIGNING_RECORD_ORIGINAL_DIGEST"),
+                            ("refreshed_sha256", "ARTIFACT_SIGNING_RECORD_DIGEST")):
+            with self.subTest(path=path_to_manifest, field=field):
+                previous = inventory_row[field]
+                inventory_row[field] = "0" * 64
+                copy_record()
+                refused(f"{code}: {path_to_manifest}")
+                inventory_row[field] = previous
+
+    def test_cli_rejects_closed_zip_with_an_unexpected_member_and_publishes_nothing(self):
+        head = stage_install.resolve_commit("HEAD")
+        reference = _make_stage(self.root / "reference", reverse=True, mtime=1_800_000_000)
+        (reference / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
+        pins = self._pins(reference)
+        stage = self.root / "stage"
+        shutil.copytree(reference, stage)
+        (stage / "docs/unlisted.txt").write_bytes(b"\0PSF synthetic signature marker")
+        out, record = self.root / "out.zip", self.root / "out.json"
+        peek = stage_install.publish_audit.audit_artifact
+
+        def inspect_closed_zip(partial, expectation):
+            self.assertEqual(partial.name, "out.zip.part")
+            with zipfile.ZipFile(partial) as archive:
+                self.assertIn("docs/unlisted.txt", archive.namelist())
+            return peek(partial, expectation)
+
+        with mock.patch.object(stage_install.publish_audit, "audit_artifact", side_effect=inspect_closed_zip) as gate:
+            status, error = self._cli_zip(stage, out, record, head, "--artifact-reference", str(pins))
+        self.assertEqual(status, 1)
+        self.assertIn("ARTIFACT_MEMBER_UNEXPECTED: docs/unlisted.txt", error)
+        gate.assert_called_once()
+        self.assertFalse(out.exists() or record.exists() or out.with_suffix(".zip.part").exists())
+
+    def test_proof_is_required_for_a_portable_zip(self):
+        stage = _make_stage(self.root / "stage", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        with self.assertRaisesRegex(stage_install.InstallError, "PORTABLE_ARTIFACT_REFERENCE_REQUIRED"):
+            stage_install.write_portable_zip(stage, out, source_date_epoch=_EPOCH, verify_runtime=_no_runtime_check)
+        self.assertFalse(out.exists())
 
     def test_a_release_dry_run_gives_two_identical_records(self):
         head = stage_install.resolve_commit("HEAD")
@@ -964,6 +1210,45 @@ class PortableZipTests(unittest.TestCase):
                 self.assertIn(code, stderr)
                 self.assertFalse(zip_path.exists())
                 self.assertFalse((stage / "record.json").exists())
+
+    def _record_reference_inputs(self):
+        stage = self.root / "stage"
+        reference = self.root / "reference"
+        bundle = self.root / "bundle"
+        prereqs = self.root / "prereqs"
+        head = stage_install.resolve_commit("HEAD")
+        data = json.dumps({"candidate": {"commit": head}}).encode()
+        for layout in (stage, reference, bundle):
+            self._write_member(layout, "toolchain.json", data)
+        (bundle / "bin").mkdir()
+        prereqs.mkdir()
+        flags = ("--artifact-reference", str(reference), "--approved-bundle", str(bundle),
+                 "--approved-prereqs", str(prereqs))
+        return stage, reference, bundle, prereqs, flags
+
+    def test_record_cannot_write_inside_any_verification_input(self):
+        stage, reference, bundle, prereqs, flags = self._record_reference_inputs()
+        out = self.root / "out.zip"
+        for root in (reference, bundle, prereqs):
+            with self.subTest(root=root.name):
+                record = root / "new" / "record.json"
+                status, error = self._cli_zip(stage, out, record, "HEAD", *flags)
+                self.assertEqual(status, 1)
+                self.assertIn("PORTABLE_RECORD_OVERLAPS_REFERENCE", error)
+                self.assertFalse(out.exists() or record.parent.exists())
+
+    def test_record_refuses_an_alias_into_the_verification_input(self):
+        stage, reference, _, _, flags = self._record_reference_inputs()
+        alias = self.root / "alias"
+        try:
+            os.symlink(reference, alias, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"this host cannot create a directory alias: {exc}")
+        out = self.root / "out.zip"
+        status, error = self._cli_zip(stage, out, alias / "record.json", "HEAD", *flags)
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_RECORD_OVERLAPS_REFERENCE", error)
+        self.assertFalse(out.exists() or (reference / "record.json").exists())
 
     def test_record_without_a_portable_zip_is_an_error(self):
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
