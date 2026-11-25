@@ -6488,6 +6488,7 @@ const char *player_runtime_stop_feature(const char *boundary) {
     };
     static const char import_prefix[] = "unsupported-import-";
     if (!boundary) return "a system feature";
+    if (strcmp(boundary, "osk-host-unavailable") == 0) return "the on-screen keyboard";
     if (strncmp(boundary, import_prefix, sizeof(import_prefix) - 1u) == 0) {
         const char *name = boundary + sizeof(import_prefix) - 1u;
         for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {

@@ -921,8 +921,9 @@ void osk_abandon_request(void) {
 }
 
 /* Answer the keyboard's fields in order, from the script or from a person. Returns 1 once
- * every field holds its answer, 0 while a person's answer to the current field is pending
- * (that field and the ones after it are left untouched until it arrives). */
+ * every field holds its answer, 0 while a person's answer is pending, or
+ * SR_OSK_TEXT_UNAVAILABLE if no live host can answer. Pending and unavailable fields
+ * are left untouched. */
 static int osk_collect(void) {
     uint32_t p = s_osk_param;
     if (!p) return 1;
@@ -971,6 +972,7 @@ static int osk_collect(void) {
                 return 0;
             }
             s_osk_request_open = 0;
+            if (answer == SR_OSK_TEXT_UNAVAILABLE) return answer;
             ok = answer == 1;
         } else {
             const char *ans = i < s_osk_answer_count ? s_osk_answers[i] : s_osk_repeat;
@@ -1026,6 +1028,26 @@ static uint32_t h_OskInitStart(CpuState *s) {
     dialog_unlock();
     return claim;
 }
+/* No PSP result describes a keyboard the host could not present. Stop
+ * outside the dialog lock without completing the unanswered guest field. */
+static _Noreturn void osk_stop_unavailable(void) {
+    fprintf(stderr, "OSK_HOST_UNAVAILABLE: sceUtilityOskGetStatus could not open a live "
+                    "on-screen keyboard on this host (#306)\n");
+    const char *path = getenv("SR_BOOT_EVENT_FILE");
+    if (path && *path) {
+        FILE *events = fopen(path, "ab");
+        if (events) {
+            fputs("BOOT_EVENT phase=stop reason=semantic-boundary boundary=osk-host-unavailable "
+                  "issue=306\n", events);
+            fclose(events);
+        }
+    }
+    sr_hit_hle = 1;
+    if (sr_sched_on)
+        sr_run_end(7, "osk_host_unavailable", "OSK_HOST_UNAVAILABLE stopped the run");
+    longjmp(g_hle_jmp, 1);
+}
+
 /* GetStatus with no OSK ever started (e.g. polled every boot frame while a savedata dialog
  * is up) is SCE_ERROR_UTILITY_WRONG_TYPE; once one has run NONE(0) is a real status. */
 static uint32_t h_OskGetStatus(CpuState *s) {
@@ -1038,8 +1060,10 @@ static uint32_t h_OskGetStatus(CpuState *s) {
     dialog_lock();
     utility_slot_settle_locked();
     const int ret = s_osk_status;
-    if (ret == OSK_VISIBLE && osk_collect()) s_osk_status = OSK_QUIT;
+    const int collected = ret == OSK_VISIBLE ? osk_collect() : 0;
+    if (collected == 1) s_osk_status = OSK_QUIT;
     dialog_unlock();
+    if (collected == SR_OSK_TEXT_UNAVAILABLE) osk_stop_unavailable();
     return (uint32_t)ret;
 }
 /* PSP-3000 measurements (#363): no keyboard returns WRONG_TYPE (0x80110005);
