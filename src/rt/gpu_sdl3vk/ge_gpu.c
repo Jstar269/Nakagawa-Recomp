@@ -133,6 +133,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "../recomp.h"
 #include "../ge_shared.h"
+#include "../ge_capture.h"
 #include "../perf.h"
 #include "../ace.h"   /* Ace Mode: the 30 Hz detector counts draws per target (Ace on only) */
 #include "tex_scale.h"   /* texture scaling (xBRZ) and the smart 2D filter (Ace on only) */
@@ -319,6 +320,9 @@ typedef struct {
     int pending;                           /* referenced by not-yet-submitted batches */
     uint8_t *shadow;
     uint32_t shadow_bytes;
+    uint64_t shadow_gen;
+    uint32_t shadow_fmt;
+    int shadow_swizzle;
     uint8_t shadow_clut[2048];
     uint32_t shadow_clut_fmt;
     int shadow_clut_valid;
@@ -896,6 +900,7 @@ static uint64_t s_ssaa_test_budget = 0;
 static uint32_t s_ssaa_test_dim = 0;
 /* gegpu_selftest_init_fail: gegpu_init fails at its last step that can fail. */
 static int s_selftest_init_fail = 0;
+static int s_selftest_pipeline_create_fail = 0;   /* fail the next pipeline creation */
 /* tex-make-fail: the next image memory allocation fails, as vkAllocateMemory out of memory. */
 static int s_selftest_alloc_fail = 0;
 #endif
@@ -2227,6 +2232,16 @@ static void pcache_close(int save) {
 
 /* ---- pipelines ------------------------------------------------------------------------ */
 
+static PipeKey pipe_clear_key(uint32_t clear_mode, uint32_t rgb_bits, int write_alpha) {
+    /* Bit 10 enables unconditional depth fill for both clear sprites and triangles. */
+    const uint8_t depth = (clear_mode & 0x400u) != 0;
+    return (PipeKey) {
+        .ztest = depth, .zwrite = depth, .zfunc = VK_COMPARE_OP_ALWAYS,
+        .cmask = ((clear_mode & 0x100u) ? rgb_bits : 0u)
+               | ((clear_mode & 0x200u) && write_alpha ? VK_COLOR_COMPONENT_A_BIT : 0u),
+    };
+}
+
 /* `rmw`: the RMW variant (#2109): psp_frag_rmw with the write mask as its specialization
  * constant, no colour attachment, the depth-only pass and the storage-image set 2. 1 tests depth
  * in the pipeline, early; 2 (a shader-depth run) leaves the pipeline's depth test off and gives
@@ -2349,7 +2364,11 @@ static VkPipeline pipe_create(const PipeKey *k, int rmw) {
 #else
     const VkPipelineCache cache = s_pcache;
 #endif
-    VkResult r = vkCreateGraphicsPipelines(s_dev, cache, 1, &pci, NULL, &p);
+    VkResult r =
+#ifdef SR_GPU_COHERENCE_SELFTEST
+        s_selftest_pipeline_create_fail ? (s_selftest_pipeline_create_fail = 0, VK_ERROR_OUT_OF_HOST_MEMORY) :
+#endif
+        vkCreateGraphicsPipelines(s_dev, cache, 1, &pci, NULL, &p);
     s_pcache_create_ns += SDL_GetTicksNS() - create_started;
     if (r == VK_SUCCESS) {
         s_pcache_creates++;
@@ -2416,6 +2435,14 @@ static void pipe_index_free(PipeIndex *ix) {
 
 static VkPipeline pipe_get(const PipeKey *k) {
     uint64_t profile_started = cpu_profile_now();
+    /* Fixed-function MIN and MAX ignore both RGB factors. Share the Vulkan
+     * object across those draws; alpha still uses the separate ADD state. */
+    PipeKey minmax_key;
+    if (k->blend_on && (k->eq == VK_BLEND_OP_MIN || k->eq == VK_BLEND_OP_MAX)) {
+        minmax_key = *k;
+        minmax_key.srcf = minmax_key.dstf = VK_BLEND_FACTOR_ONE;
+        k = &minmax_key;
+    }
     const int hit = pipe_index_find(&s_pipe_idx, s_pipes, s_pipe_n, k);
     if (hit >= 0) {
         if (s_cpu_profile) {
@@ -4621,8 +4648,11 @@ static uint32_t tex_span_size(uint32_t bufw, int tw, int th) {
         bytes = tile_idx * 4u + (((u % texels_per_tile) * bpp_num) >> 3) +
                 (bpp_num < 8u ? 1u : bpp_num >> 3);
     } else {
-        /* Linear rows are whole 16-byte lines, as ge.c samples them (ge_tex_row_bytes). */
-        bytes = (uint64_t)ge_tex_row_bytes(stride, bpp_num) * h;
+        /* The decoder advances by the aligned pitch and samples the full visible row.
+         * Retain the trailing padding for a wide pitch and the visible tail for a narrow one. */
+        const uint32_t pitch = ge_tex_row_bytes(stride, bpp_num);
+        const uint64_t visible = ((uint64_t)w * bpp_num + 7u) / 8u;
+        bytes = (uint64_t)(h - 1u) * pitch + (visible > pitch ? visible : pitch);
     }
     if (bytes > 4u << 20) bytes = 4u << 20;
     return (uint32_t)bytes;
@@ -4730,6 +4760,9 @@ static void tex_shadow_store(TexEnt *e) {
     uint64_t memcpy_started = cpu_profile_now();
     for (uint32_t l = 0, off = 0; l <= e->mip.max_level; off += tex_level_bytes(e, l++))
         memcpy(e->shadow + off, src[l], tex_level_bytes(e, l));
+    e->shadow_gen = e->gen;
+    e->shadow_fmt = s_ge->tex_fmt;
+    e->shadow_swizzle = s_ge->tex_swizzle;
     if (s_ge->tex_fmt >= 4 && s_ge->tex_fmt <= 7) {
         memcpy(e->shadow_clut, s_ge->clutram, sizeof(e->shadow_clut));
         e->shadow_clut_fmt = s_ge->clut_fmt;
@@ -7148,6 +7181,46 @@ static void tex_slot_unmake(TexEnt *e) {
     e->smp = VK_NULL_HANDLE; e->view = VK_NULL_HANDLE; e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE;
 }
 
+static const char *tex_capture_cached_source(const TexEnt *e) {
+    int sparse = 0, vram = 0;
+    for (uint32_t level = 0; level <= e->mip.max_level; ++level) {
+        switch (ge_capture_texture_storage(level)) {
+        case GE_CAPTURE_TEXTURE_SPARSE: sparse = 1; break;
+        case GE_CAPTURE_TEXTURE_VRAM: vram = 1; break;
+        default: return "texture source footprint is outside captured memory";
+        }
+    }
+    if (!sparse) return NULL; /* Every active byte is covered by the eager VRAM copy. */
+    if (vram) return "mixed sparse memory and VRAM mip chain";
+    if (!e->shadow || e->shadow_gen != e->gen) return "missing current resident source";
+    if (e->addr != s_ge->tex_addr || e->w != s_ge->tex_w || e->h != s_ge->tex_h ||
+        e->bufw != s_ge->tex_bufw || e->shadow_fmt != s_ge->tex_fmt ||
+        e->shadow_swizzle != s_ge->tex_swizzle)
+        return "resident texture layout differs";
+    if (s_ge->tex_fmt >= 4u && s_ge->tex_fmt <= 7u &&
+        (!e->shadow_clut_valid || e->shadow_clut_fmt != s_ge->clut_fmt ||
+         memcmp(e->shadow_clut, s_ge->clutram, sizeof(e->shadow_clut)) != 0))
+        return "resident CLUT differs from GE state";
+    uint32_t offset = 0;
+    for (uint32_t level = 0; level <= e->mip.max_level; level++) {
+        const uint32_t bytes = tex_level_bytes(e, level);
+        if (bytes > e->shadow_bytes - offset ||
+            !ge_capture_note_texture_level(level, e->shadow + offset, bytes))
+            return "resident texture read is unrepresentable";
+        offset += bytes;
+    }
+    return NULL;
+}
+
+static void tex_capture_cached_read(const TexEnt *e) {
+    const char *reason = tex_capture_cached_source(e);
+    if (reason && g_ge_capture_active) {
+        fprintf(stderr, "GE_CAPTURE: cached texture at 0x%08x cannot be captured: %s\n",
+                e->addr, reason);
+        ge_capture_abort();
+    }
+}
+
 static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
     s_tex_bound_hm = 0;
@@ -7198,6 +7271,7 @@ static VkDescriptorSet tex_get(void) {
             if (xs_enabled()) tex_xs_retry(e, levels);
             tex_movie_refresh(e, levels);   /* #2111 */
             tex_dump_note(e, levels);
+            if (g_ge_capture_active) tex_capture_cached_read(e);
             return tex_bind_set(e, levels);
         }
         if (!e->content_valid && e->hash == hash && tex_shadow_matches(e)) {
@@ -7211,6 +7285,7 @@ static VkDescriptorSet tex_get(void) {
             if (sr_perf_enabled) sr_perf_texture_cache(1);
             if (xs_enabled()) tex_xs_retry(e, levels);
             tex_dump_note(e, levels);
+            if (g_ge_capture_active) tex_capture_cached_read(e);
             return tex_bind_set(e, levels);
         }
         /* same texture state, new contents: update in place (cache stays bounded) */
@@ -7640,8 +7715,7 @@ static void build_state(int persp, int sprite, Batch *b) {
     const uint32_t rgb_bits = (mr >= 0x80 ? 0 : VK_COLOR_COMPONENT_R_BIT) | (mg >= 0x80 ? 0 : VK_COLOR_COMPONENT_G_BIT)
                             | (mb >= 0x80 ? 0 : VK_COLOR_COMPONENT_B_BIT);
     if (clear) {
-        k->cmask = ((g->clear_mode & 0x100) ? rgb_bits : 0)
-                 | ((g->clear_mode & 0x200) && ma < 0x80 ? VK_COLOR_COMPONENT_A_BIT : 0);
+        *k = pipe_clear_key(g->clear_mode, rgb_bits, ma < 0x80);
     } else {
         /* Outside clear mode PSP alpha is the stencil plane: a draw without the stencil
          * test preserves destination alpha, and one with it stores the shader's stencil
@@ -7728,11 +7802,7 @@ static void build_state(int persp, int sprite, Batch *b) {
         VK_COMPARE_OP_NEVER, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_NOT_EQUAL,
         VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL,
     };
-    if (clear) {
-        /* clear mode (sprites AND triangles): bit 10 = unconditional depth fill, no test */
-        k->ztest = k->zwrite = (g->clear_mode & 0x400) ? 1 : 0;
-        k->zfunc = VK_COMPARE_OP_ALWAYS;
-    } else {
+    if (!clear) {
         k->ztest = g->ztest_enable ? 1 : 0;
         k->zwrite = (k->ztest && !g->zwrite_disable) ? 1 : 0;
         k->zfunc = k->ztest ? zmap[g->ztest & 7] : VK_COMPARE_OP_ALWAYS;
@@ -10388,9 +10458,14 @@ static int gegpu_init_parts(void) {
 #endif
     /* Last, so a failed init leaves no query pool and the switch off. */
     if (sr_perf_gpu_timestamps_requested()) (void)ts_setup(vi.queue_family);
-    /* After every step that can fail, and before the first pipeline (pipe_get runs only once
-     * the renderer is ready), so the cache is either used for every pipeline or not made. */
+    /* Open the driver cache before creating any pipelines. */
     pcache_open((VkPhysicalDevice)vi.physical);
+    /* The unmasked color, alpha and depth clear uses this regular pipeline (#2361).
+     * Create it before guest lists run so their first clear need not compile it. */
+    const PipeKey clear_key = pipe_clear_key(0x701u,
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT, 1);
+    if (!pipe_get(&clear_key))
+        fprintf(stderr, "gegpu: clear pipeline warmup failed; first use will retry\n");
     s_readback_commit_failures = 0;
     /* Registered only now, after the last step that can fail: a failed init registers nothing
      * (ge_gpu.h), so the Ace report never confirms a part the software rasterizer stood in for. */

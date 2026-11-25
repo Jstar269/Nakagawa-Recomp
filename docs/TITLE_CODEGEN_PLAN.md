@@ -420,11 +420,16 @@ The generator's invariant is that **a guest address must never change what
 `--profile=none` emits**. Generic implementation may be core; the binding of a
 numeric address to a semantic is title-owned. Every HST-specific translation in
 `tools/codegen.py` — the address-specific custom stubs (`tools/codegen_hst_stubs.py`), `HST_SIMPLE_STUBS`,
-`GUEST_PATCHES`, the `HST_MANUAL_CALLABLES`/`HST_RESUME_OWNERS` entry roles, and the `_SV_SPECIAL`
+`GUEST_PATCHES`, the `HST_RESUME_OWNERS` entry roles, and the `_SV_SPECIAL`
 `--static-verify` exclusion — is therefore reachable only when
 `profile == "hst"`. The MEMSET and ARRSHIFT loop fast paths, the `GUEST_ABORT` exit and the
 four stand-alone `_SV_SPECIAL` entries were retired under #363: those guest loops and the
-title's `abort()` translate as written under every profile.
+title's `abort()` translate as written under every profile. The six callable entry roles
+(`HST_MANUAL_CALLABLES`) were retired under #363 as well: a leaf entered only through a
+pointer is an analyzer entry under every profile, so no profile adds a callable entry, and
+an address the profile used to name gets the role the image gives it. The three resume
+entries in `HST_RESUME_OWNERS`, each with the function that owns it, are the entry roles the
+profile still names.
 
 `tools/test_codegen_profile_isolation.py` proves this differentially rather than
 by sampling output strings. Its synthetic ET_EXEC carries two byte-identical

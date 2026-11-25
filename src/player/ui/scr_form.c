@@ -10,6 +10,7 @@
 
 #include "player_ui_nk.h"
 #include "nk_adhoc_relay.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 #include "ui_keyboard.h"
@@ -56,7 +57,7 @@ bool scr_wizard_box_begin(NkUi *ui, uint32_t edge) {
 
 /* Whether nk_ui_text_clamp cut `text` short to give `shown`. */
 static bool text_was_cut(const char *shown, const char *text) {
-    static const char ellipsis[] = "\xE2\x80\xA6";
+    static const char ellipsis[] = NK_UI_STR(FORM_ELLIPSIS);
     size_t n = sizeof(ellipsis) - 1u;
     size_t shown_length = strlen(shown);
     size_t text_length = strlen(text);
@@ -72,7 +73,7 @@ static const char *scr_wizard_label(NkUi *ui, char *out, size_t cap, const char 
                                     const char *value, float width) {
     NkUiTextStyle style;
     float pad;
-    (void)snprintf(out, cap, "%s: %s", name, value);
+    (void)snprintf(out, cap, NK_UI_STR(FORM_NAME_VALUE_FORMAT), name, value);
     if (!(width > 0.0f) || nk_ui_button_width(ui, out, 0u) <= width) return out;
     pad = nk_ui_button_width(ui, "", 0u);
     style = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
@@ -200,7 +201,8 @@ bool scr_wizard_value_state(NkUi *ui, NkUiId id, NkUiId text_id, const char *nam
 bool scr_wizard_switch(NkUi *ui, NkUiId id, NkUiId text_id, const char *name,
                           const char *sentence, bool on, float width,
                           const WizardColumn *column) {
-    return scr_wizard_value(ui, id, text_id, name, on ? "On" : "Off", sentence, on, width, column);
+    return scr_wizard_value(ui, id, text_id, name, on ? NK_UI_STR(FORM_ON) : NK_UI_STR(FORM_OFF),
+                            sentence, on, width, column);
 }
 
 bool player_ui_nickname_accepts(uint32_t codepoint, void *user) {
@@ -227,24 +229,80 @@ bool player_ui_server_accepts(uint32_t codepoint, void *user) {
            codepoint == ':' || codepoint == ',';
 }
 
+bool player_ui_ra_username_accepts(uint32_t codepoint, void *user) {
+    (void)user;
+    return codepoint > 0x20u && codepoint < 0x7Fu;
+}
+
+bool player_ui_ra_password_accepts(uint32_t codepoint, void *user) {
+    (void)user;
+    return codepoint >= 0x20u && codepoint != 0x7Fu && !(codepoint >= 0x80u && codepoint < 0xA0u);
+}
+
+void player_ui_sign_in_wipe(PlayerUiSignInForm *form) {
+    volatile unsigned char *bytes = (volatile unsigned char *)form;
+    if (form == NULL) return;
+    for (size_t i = 0u; i < sizeof(*form); ++i) bytes[i] = 0u;
+}
+
+static void sign_in_wipe_bytes(char *text, size_t cap) {
+    volatile char *bytes = text;
+    for (size_t i = 0u; i < cap; ++i) bytes[i] = '\0';
+}
+
+/* The text's length, never reading past cap bytes (strnlen is POSIX, not C11). */
+static size_t sign_in_length(const char *text, size_t cap) {
+    size_t length = 0u;
+    while (length < cap && text[length] != '\0') length++;
+    return length;
+}
+
+bool player_ui_sign_in_take(PlayerUiSignInForm *form, char *username, size_t username_cap,
+                            char *password, size_t password_cap) {
+    size_t user_len;
+    size_t pass_len;
+    bool ok;
+    if (form == NULL) return false;
+    user_len = sign_in_length(form->username, sizeof(form->username));
+    pass_len = sign_in_length(form->password, sizeof(form->password));
+    ok = username != NULL && password != NULL && user_len > 0u && pass_len > 0u &&
+         user_len < sizeof(form->username) && pass_len < sizeof(form->password) &&
+         user_len < username_cap && pass_len < password_cap;
+    if (ok) {
+        memcpy(username, form->username, user_len + 1u);
+        memcpy(password, form->password, pass_len + 1u);
+    }
+    sign_in_wipe_bytes(form->password, sizeof(form->password));
+    return ok;
+}
+
+size_t player_ui_sign_in_password_chars(const PlayerUiSignInForm *form) {
+    size_t count = 0u;
+    if (form == NULL) return 0u;
+    for (size_t i = 0u; i < sizeof(form->password) && form->password[i] != '\0'; ++i) {
+        if (((unsigned char)form->password[i] & 0xC0u) != 0x80u) count++;
+    }
+    return count;
+}
+
 /* The nickname / server editor (#2197, #1139): the box with what is typed (the value in use,
    dimmed, while nothing is), how many bytes it uses, why the last Done was refused, then the
    on-screen keyboard with Done and Skip (first launch) or Cancel (Settings). A physical keyboard
    also types into the box (player_ui_nk.c); Back is Skip or Cancel. */
 PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *model) {
     static const NkUiPromptItem prompts_first[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Type"},
-        {NK_UI_PROMPT_ACT_OPTIONS, "Delete"}, {NK_UI_PROMPT_ACT_MENU, "Done"},
-        {NK_UI_PROMPT_ACT_BACK, "Skip"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(FORM_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(FORM_TYPE)},
+        {NK_UI_PROMPT_ACT_OPTIONS, NK_UI_STR(FORM_DELETE)}, {NK_UI_PROMPT_ACT_MENU, NK_UI_STR(FORM_DONE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(FORM_SKIP)}
     };
     static const NkUiPromptItem prompts_settings[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Type"},
-        {NK_UI_PROMPT_ACT_OPTIONS, "Delete"}, {NK_UI_PROMPT_ACT_MENU, "Done"},
-        {NK_UI_PROMPT_ACT_BACK, "Cancel"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(FORM_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(FORM_TYPE)},
+        {NK_UI_PROMPT_ACT_OPTIONS, NK_UI_STR(FORM_DELETE)}, {NK_UI_PROMPT_ACT_MENU, NK_UI_STR(FORM_DONE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(FORM_CANCEL)}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
-    char scratch[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    char scratch[PLAYER_UI_RA_PASSWORD_MAX + 1u];
     UiKeyboard empty;
     UiKeyboard *keyboard;
     UiKeyboardView view;
@@ -256,9 +314,13 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
         /* Nothing to type into: the keys show, and what they type is dropped. */
         scratch[0] = '\0';
         ui_keyboard_init(&empty, scratch,
-                         model->port_mode ? 5u
+                         model->ra_password_mode ? PLAYER_UI_RA_PASSWORD_MAX
+                         : model->ra_username_mode ? PLAYER_UI_RA_USERNAME_MAX
+                         : model->port_mode ? 5u
                          : model->server_mode ? NK_ADHOC_SERVER_MAX_LEN : NK_NICKNAME_MAX_BYTES,
-                         model->port_mode ? player_ui_port_accepts
+                         model->ra_password_mode ? player_ui_ra_password_accepts
+                         : model->ra_username_mode ? player_ui_ra_username_accepts
+                         : model->port_mode ? player_ui_port_accepts
                          : model->server_mode ? player_ui_server_accepts
                                               : player_ui_nickname_accepts,
                          NULL);
@@ -271,31 +333,30 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
                            640.0f);
     if (inner <= 0.0f) return result;
     scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND,
-                     model->server_mode || model->port_mode ? "Online play" : "Nickname",
+                     model->ra_username_mode || model->ra_password_mode ? NK_UI_STR(FORM_RETROACHIEVEMENTS)
+                     : model->server_mode || model->port_mode ? NK_UI_STR(FORM_ONLINE_PLAY) : NK_UI_STR(FORM_NICKNAME),
                      theme->info);
     nk_ui_text_role(ui, FLOW_ID_TITLE,
-                    model->port_mode ? "Port offset"
+                    model->ra_username_mode ? NK_UI_STR(FORM_USERNAME)
+                    : model->ra_password_mode ? NK_UI_STR(FORM_PASSWORD)
+                    : model->port_mode ? NK_UI_STR(FORM_PORT_OFFSET)
                     : model->server_mode
-                        ? "Other server"
-                        : model->first_launch ? "Choose a nickname" : "Change your nickname",
+                        ? NK_UI_STR(FORM_OTHER_SERVER)
+                        : model->first_launch ? NK_UI_STR(FORM_CHOOSE_A_NICKNAME)
+                            : NK_UI_STR(FORM_CHANGE_YOUR_NICKNAME),
                     NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,
-                    model->port_mode
-                        ? "A whole number from 0 to 65535, added to the game's ports on the "
-                          "server (10000 unless you change it). Players who want to play "
-                          "together need the same value. It applies from the next game you start."
+                    model->ra_username_mode
+                        ? NK_UI_STR(FORM_USERNAME_HELP)
+                    : model->ra_password_mode
+                        ? NK_UI_STR(FORM_PASSWORD_HELP)
+                    : model->port_mode
+                        ? NK_UI_STR(FORM_PORT_OFFSET_HELP)
                         : model->server_mode
-                        ? "Enter a community ad hoc relay server: host, host:lobby_port, or "
-                          "host:lobby_port,data_port (default ports 27312 and 27313; press Shift "
-                          "for ':'). It is kept only on this PC. Done opens the Online play card "
-                          "for it; nothing connects until you choose TURN ON there."
+                        ? NK_UI_STR(FORM_SERVER_ADDRESS_HELP)
                         : model->first_launch
-                        ? "Games show it as your PSP's nickname. Type up to 32 bytes of text "
-                          "(32 letters, about 10 Japanese characters), or skip to keep \"" NK_NICKNAME_DEFAULT "\". "
-                          "You can change it in Settings."
-                        : "Games show it as your PSP's nickname when they start; a game that "
-                          "saved its own nickname keeps that one. Up to 32 bytes of text "
-                          "(32 letters, about 10 Japanese characters).",
+                        ? NK_UI_STR(FORM_NICKNAME_FIRST_LAUNCH_HELP)
+                        : NK_UI_STR(FORM_NICKNAME_EDIT_HELP),
                     NK_UI_TYPE_BODY_S, theme->muted);
     {
         NkUiLayout field = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(),
@@ -310,16 +371,26 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
         field.padding_left = NK_UI_SPACE_4;
         field.padding_right = NK_UI_SPACE_4;
         if (nk_ui_begin_container(ui, FLOW_ID_NICKNAME_FIELD, &field, &style)) {
-            char shown[NK_ADHOC_SERVER_MAX_LEN + 2u];
+            char shown[PLAYER_UI_RA_PASSWORD_MAX + 2u];
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
                                             typed[0] != '\0' ? theme->paper : theme->muted);
             text.wrap = false;
-            if (typed[0] != '\0') {
-                (void)snprintf(shown, sizeof(shown), "%s|", typed);
+            if (typed[0] != '\0' && model->ra_password_mode) {
+                /* One star for each character; the password itself is never drawn. */
+                size_t stars = 0u;
+                for (size_t i = 0u; typed[i] != '\0' && stars + 2u < sizeof(shown); ++i) {
+                    if (((unsigned char)typed[i] & 0xC0u) != 0x80u) shown[stars++] = '*';
+                }
+                shown[stars++] = '|';
+                shown[stars] = '\0';
+            } else if (typed[0] != '\0') {
+                (void)snprintf(shown, sizeof(shown), NK_UI_STR(FORM_EDITOR_CURSOR_FORMAT), typed);
             } else {
                 (void)snprintf(shown, sizeof(shown), "%s",
                                safe_text(model->current,
-                                         model->port_mode ? "10000"
+                                         model->ra_password_mode ? NK_UI_STR(FORM_TYPE_YOUR_PASSWORD)
+                                         : model->ra_username_mode ? NK_UI_STR(FORM_TYPE_YOUR_USERNAME)
+                                         : model->port_mode ? "10000"
                                          : model->server_mode ? NK_ADHOC_DEFAULT_SERVER
                                                               : NK_NICKNAME_DEFAULT));
             }
@@ -329,8 +400,9 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
             nk_ui_end_container(ui);
         }
     }
-    {
-        /* The count, in the warning colour once the text is full. */
+    if (!model->ra_password_mode) {
+        /* The count, in the warning colour once the text is full. A password has none: its
+           stars already show how long it is. */
         char count[32];
         bool full = strlen(typed) >= keyboard->cap;
         (void)ui_keyboard_count_text(keyboard, count, sizeof(count));
@@ -341,17 +413,15 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
         char server_note[320];
         /* A refused server says why first, by name; the server in use stays. */
         (void)snprintf(server_note, sizeof(server_note),
-                       "Not used: %s. Enter a host name or IPv4 address, with optional "
-                       ":lobby_port or :lobby_port,data_port from 1 to 65535.",
+                       NK_UI_STR(FORM_SERVER_ADDRESS_REFUSED_FORMAT),
                        model->refused_reason ? model->refused_reason
-                                             : "it is not a server address");
+                                             : NK_UI_STR(FORM_IT_IS_NOT_A_SERVER_ADDRESS));
         nk_ui_text_role(ui, FLOW_ID_NICKNAME_NOTE,
                         model->port_mode
-                            ? "Enter a whole number from 0 to 65535."
+                            ? NK_UI_STR(FORM_PORT_OFFSET_REFUSED)
                         : model->server_mode
                             ? nk_ui_frame_text(ui, server_note)
-                            : "A nickname is 1 to 32 bytes of text (32 plain letters; accented or "
-                              "Japanese letters take 2 to 4 bytes each), with no control characters and not only spaces.",
+                            : NK_UI_STR(FORM_NICKNAME_REFUSED),
                         NK_UI_TYPE_BODY_S, theme->warning);
     }
     memset(&view, 0, sizeof(view));
@@ -359,8 +429,8 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
     view.part_base = FLOW_ID_NICKNAME_KEYS;
     view.done_id = PLAYER_UI_ID_NICKNAME_SAVE;
     view.cancel_id = PLAYER_UI_ID_NICKNAME_SKIP;
-    view.done_label = "Done";
-    view.cancel_label = model->first_launch ? "Skip" : "Cancel";
+    view.done_label = NK_UI_STR(FORM_DONE);
+    view.cancel_label = model->first_launch ? NK_UI_STR(FORM_SKIP) : NK_UI_STR(FORM_CANCEL);
     switch (ui_keyboard_draw(ui, keyboard, &view)) {
     case UI_KEYBOARD_DONE:
         result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
@@ -386,8 +456,9 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
 WizardColumn scr_online_developer_column(NkUi *ui, bool online_on, bool developer, float width) {
     /* The Online mode row is there only while the stored setting is On. */
     const WizardRow rows[] = {
-        {"Online mode", "On", SCR_ONLINE_STORED_ON_SENTENCE},
-        {"Developer mode", developer ? "On" : "Off", WIZARD_DEVELOPER_SENTENCE}
+        {NK_UI_STR(FORM_ONLINE_MODE), NK_UI_STR(FORM_ON), SCR_ONLINE_STORED_ON_SENTENCE},
+        {NK_UI_STR(FORM_DEVELOPER_MODE), developer ? NK_UI_STR(FORM_ON) : NK_UI_STR(FORM_OFF),
+            WIZARD_DEVELOPER_SENTENCE}
     };
     return online_on ? scr_wizard_column(ui, rows, 2u, width, false)
                      : scr_wizard_column(ui, rows + 1, 1u, width, false);

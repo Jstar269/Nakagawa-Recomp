@@ -49,20 +49,44 @@ _ISSUE_REFERENCE_RE = re.compile(r"#[0-9]+")
 # Any conversion after "#" formats an issue number into user-facing text.
 _ISSUE_FORMAT_RE = re.compile(r"#%")
 # The known-issue link is the one issue number the player shows. It comes from
-# the code table k_known_causes through player_known_issue_for_boundary
-# (player_state.c), and only these literals format it: the error screen's
-# sentence and link, and the problem report's line. Matched by file and exact
-# literal, so neither another file nor another wording is let through.
+# k_known_causes through player_known_issue_for_boundary (player_state.c).
+# The exception binds each screen format to its English catalog ID and exact
+# literal, and the problem report's format to its original source file.
+_UI_ENGLISH_CATALOG = "src/ui/nk_ui_text.h"
 _KNOWN_ISSUE_LITERALS = frozenset({
-    ("src/player/ui/scr_error.c", '"This is a known issue (#%u)."'),
-    ("src/player/ui/scr_error.c", '"View issue #%u on GitHub"'),
-    ("src/player/player_state.c", '"#%u"'),
+    (_UI_ENGLISH_CATALOG, "ERROR_KNOWN_ISSUE_FORMAT", '"This is a known issue (#%u)."'),
+    (_UI_ENGLISH_CATALOG, "ERROR_VIEW_ISSUE_FORMAT", '"View issue #%u on GitHub"'),
+    ("src/player/player_state.c", None, '"#%u"'),
 })
 # Character literals are tokens too: an unmatched '"' would otherwise open a
 # phantom string that swallows the code after it.
 _C_TOKEN_RE = re.compile(
     r"""//[^\r\n]*|/\*.*?\*/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\])*\"""", re.DOTALL
 )
+
+
+def launcher_c_source(path: Path) -> str:
+    """C source with line continuations joined and comments blanked."""
+    source = path.read_text(encoding="utf-8").replace("\\\n", "")
+    return _C_TOKEN_RE.sub(
+        lambda token: " " if token[0].startswith("/") else token[0], source
+    )
+
+
+def launcher_english_catalog(repo_root: Path) -> dict[str, str]:
+    """English catalog entries, with adjacent C string literals joined."""
+    source = launcher_c_source(repo_root / _UI_ENGLISH_CATALOG)
+    entries: dict[str, str] = {}
+    for key, value in re.findall(r"^#define[ \t]+NK_UI_EN_(\w+)[ \t]+(.+)$", source, re.M):
+        value = value.strip()
+        tokens = _C_TOKEN_RE.findall(value)
+        if tokens and all(token.startswith('"') for token in tokens) \
+                and not _C_TOKEN_RE.sub("", value).strip():
+            value = '"' + "".join(token[1:-1] for token in tokens) + '"'
+        if key in entries:
+            raise AssertionError(f"duplicate launcher string {key}")
+        entries[key] = value
+    return entries
 
 
 def _issue_number_literal_failures(rel_path: str, source: str) -> list[str]:
@@ -73,9 +97,18 @@ def _issue_number_literal_failures(rel_path: str, source: str) -> list[str]:
         failures.append(f"{rel_path}: draw_issue_links")
     for match in _C_TOKEN_RE.finditer(source):
         token = match.group()
-        if not token.startswith('"') or (rel_path, token) in _KNOWN_ISSUE_LITERALS:
+        if not token.startswith('"'):
             continue
-        if _ISSUE_REFERENCE_RE.search(token) or _ISSUE_FORMAT_RE.search(token):
+        if not (_ISSUE_REFERENCE_RE.search(token) or _ISSUE_FORMAT_RE.search(token)):
+            continue
+        key = None
+        if rel_path == _UI_ENGLISH_CATALOG:
+            line_start = source.rfind("\n", 0, match.start()) + 1
+            definition = re.fullmatch(
+                r"\s*#define[ \t]+NK_UI_EN_(\w+)\s*", source[line_start:match.start()]
+            )
+            key = definition[1] if definition else None
+        if (rel_path, key, token) not in _KNOWN_ISSUE_LITERALS:
             line = source.count("\n", 0, match.start()) + 1
             failures.append(f"{rel_path}:{line}: {token}")
     return failures
@@ -218,9 +251,10 @@ class NkCoreTests(unittest.TestCase):
 
     def test_issue_number_guard_allows_only_the_known_issue_literals(self) -> None:
         """The exception is the three known-issue literals, not a conversion letter."""
-        for rel, literal in sorted(_KNOWN_ISSUE_LITERALS):
-            with self.subTest(allowed=(rel, literal)):
-                self.assertEqual(_issue_number_literal_failures(rel, f"x = {literal};"), [])
+        for rel, key, literal in sorted(_KNOWN_ISSUE_LITERALS):
+            with self.subTest(allowed=(rel, key, literal)):
+                source = f"#define NK_UI_EN_{key} {literal}" if key else f"x = {literal};"
+                self.assertEqual(_issue_number_literal_failures(rel, source), [])
         rejected = [
             ("src/player/ui/scr_error.c", '"see #%u"'),
             ("src/player/ui/scr_error.c", '"#%lu"'),
@@ -237,6 +271,12 @@ class NkCoreTests(unittest.TestCase):
                     len(_issue_number_literal_failures(rel, f"x = {literal};")), 1
                 )
         self.assertEqual(
+            len(_issue_number_literal_failures(
+                _UI_ENGLISH_CATALOG,
+                '#define NK_UI_EN_UNRELATED "This is a known issue (#%u)."',
+            )), 1,
+        )
+        self.assertEqual(
             _issue_number_literal_failures("src/player/x.c", "draw_issue_links();"),
             ["src/player/x.c: draw_issue_links"],
         )
@@ -248,6 +288,7 @@ class NkCoreTests(unittest.TestCase):
             *sorted((repo_root / "src" / "player").glob("*.c")),
             # The nk launcher draws every view (#2071): its screens are here.
             *sorted((repo_root / "src" / "player" / "ui").glob("*.c")),
+            repo_root / _UI_ENGLISH_CATALOG,
             repo_root / "src" / "core" / "nk_font.c",
             repo_root / "src" / "core" / "nk_launch.c",
             repo_root / "src" / "core" / "nk_title_manifest.c",
@@ -2484,6 +2525,35 @@ class BoundedLibraryJsonTests(unittest.TestCase):
         self.assertEqual(entry["selected_executable"], "EBOOT.BIN")
         self.assertEqual(entry["boot_executable"], "BOOT.BIN")
         self.assertEqual(entry["title_id"], "synthetic_one")
+
+    def test_v002_and_v003_player_libraries_round_trip(self) -> None:
+        for release in ("v0.0.2", "v0.0.3"):
+            with self.subTest(release=release):
+                fixture = REPO_ROOT / "tests" / "fixtures" / "user_data" / release / "library.json"
+                original = fixture.read_bytes()
+                data = self.temp_dir / release
+                data.mkdir()
+                path = data / "library.json"
+                path.write_bytes(original)
+                before = nk_cli._read_library_json(path)
+                self.assertEqual(before["schema_version"], 1)
+                first = nk_cli._load_library_entry(data, "TEST80003")
+                self.assertEqual(first["source_image_path"], r"<drive>:\SyntheticFixture\Images\preview.cso")
+                self.assertEqual(first["selected_executable"], "EBOOT.BIN")
+                self.assertEqual(first["boot_executable"], "BOOT.BIN")
+                self.assertEqual(first["content_sha1"], "0123456789abcdef0123456789abcdef01234567")
+                library = GameLibrary.load(path)
+                self.assertEqual(library.count(), 2)
+                self.assertEqual(path.read_bytes(), original)
+
+                library.save()
+                after = nk_cli._read_library_json(path)
+                self.assertEqual(after["schema_version"], 1)
+                saved = {row["disc_id"]: row for row in after["games"]}
+                self.assertEqual(set(saved), {"TEST80003", "TEST80004"})
+                for row in before["games"]:
+                    self.assertEqual({key: saved[row["disc_id"]][key] for key in row}, row)
+                self.assertEqual(fixture.read_bytes(), original)
 
     def test_library_target_with_tmp_suffix_is_preserved(self) -> None:
         path = self.temp_dir / "library.tmp"

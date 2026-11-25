@@ -9,9 +9,11 @@
 
 #include "player_ui_nk.h"
 #include "player_state.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,7 +45,7 @@ static PlayerUiAction settings_op(PlayerUiSettingsOp op) {
 }
 
 static const char *settings_on_off(bool on) {
-    return on ? "On" : "Off";
+    return on ? NK_UI_STR(SETTINGS_ON) : NK_UI_STR(SETTINGS_OFF);
 }
 
 /* A named row with its value on the button beside it. Returns true when the
@@ -91,15 +93,15 @@ static void settings_level_row(NkUi *ui, uint32_t k, const char *name, int level
             nk_ui_text_role(ui, base + 2u, name, NK_UI_TYPE_BODY, theme->paper);
             nk_ui_end_container(ui);
         }
-        if (nk_ui_button(ui, down, "-", NK_UI_BUTTON_SMALL)) *result = settings_op(down_op);
-        (void)snprintf(line, sizeof(line), "%d%%", level);
+        if (nk_ui_button(ui, down, NK_UI_STR(SETTINGS_DECREASE), NK_UI_BUTTON_SMALL)) *result = settings_op(down_op);
+        (void)snprintf(line, sizeof(line), NK_UI_STR(SETTINGS_LEVEL_PERCENT_FORMAT), level);
         cell.width = sizing_fixed(52.0f);
         cell.align_x = NK_UI_ALIGN_CENTER;
         if (nk_ui_begin_container(ui, base + 3u, &cell, NULL)) {
             nk_ui_text_role(ui, text_id, line, NK_UI_TYPE_DATA, theme->paper);
             nk_ui_end_container(ui);
         }
-        if (nk_ui_button(ui, up, "+", NK_UI_BUTTON_SMALL)) *result = settings_op(up_op);
+        if (nk_ui_button(ui, up, NK_UI_STR(SETTINGS_INCREASE), NK_UI_BUTTON_SMALL)) *result = settings_op(up_op);
     }
     nk_ui_end_container(ui);
 }
@@ -141,13 +143,11 @@ void player_ui_refresh_advisory_text(double refresh_hz, char *out, size_t out_si
     if (player_ui_refresh_advice(refresh_hz) != PLAYER_UI_REFRESH_ADVISORY) return;
     if (fabs(refresh_hz - floor(refresh_hz + 0.5)) < 0.005) {
         (void)snprintf(out, out_size,
-                       "Your display runs at %.0f Hz, which is not a multiple of the game's 60 Hz. "
-                       "Motion can stutter slightly. For even motion, set it to 60, 120 or 180 Hz.",
+                       NK_UI_STR(SETTINGS_DISPLAY_RATE_WARNING_WHOLE_HZ_FORMAT),
                        refresh_hz);
     } else {
         (void)snprintf(out, out_size,
-                       "Your display runs at %.2f Hz, which is not a multiple of the game's 60 Hz. "
-                       "Motion can stutter slightly. For even motion, set it to 60, 120 or 180 Hz.",
+                       NK_UI_STR(SETTINGS_DISPLAY_RATE_WARNING_FRACTIONAL_HZ_FORMAT),
                        refresh_hz);
     }
 }
@@ -166,9 +166,11 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
         /* The names take what the widest value button leaves, at least its
            design 190 px; at a larger text size the names wrap instead. */
         const char *values[] = {
-            safe_text(model->resolution, "2x"), safe_text(model->scaling, "Sharp"),
-            "Size, contrast, motion",
-            "Controller and keyboard", "Check for updates", "Off", "Off: options"
+            safe_text(model->resolution, NK_UI_STR(SETTINGS_DEFAULT_RESOLUTION)), safe_text(model->scaling,
+                NK_UI_STR(SETTINGS_SHARP)),
+            NK_UI_STR(SETTINGS_SIZE_CONTRAST_MOTION),
+            NK_UI_STR(SETTINGS_CONTROLLER_AND_KEYBOARD), NK_UI_STR(SETTINGS_CHECK_FOR_UPDATES),
+            NK_UI_STR(SETTINGS_OFF), NK_UI_STR(SETTINGS_OFF_OPTIONS)
         };
         float buttons = 190.0f;
         for (size_t i = 0u; i < sizeof(values) / sizeof(values[0]); ++i) {
@@ -184,14 +186,18 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
     {
         NkUiLayout head = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
                                       NK_UI_SPACE_1);
-        char advisory[192];
+        /* A fixed-point double needs at most DBL_MAX_10_EXP + 1 digits, plus the decimal
+           point and two fractional digits. Allow either translated sentence in full. */
+        char advisory[sizeof(NK_UI_STR(SETTINGS_DISPLAY_RATE_WARNING_WHOLE_HZ_FORMAT)) +
+                      sizeof(NK_UI_STR(SETTINGS_DISPLAY_RATE_WARNING_FRACTIONAL_HZ_FORMAT)) +
+                      DBL_MAX_10_EXP + 4u];
         player_ui_refresh_advisory_text(model->display_refresh_hz, advisory, sizeof(advisory));
         if (nk_ui_begin_container(ui, SET_ID_HEAD, &head, NULL)) {
             /* The SETTINGS tab names the page, so a short window drops the
                heading to keep every row on screen; the advisory line needs
                that room sooner. */
             if (height >= (advisory[0] != '\0' ? 780.0f : 680.0f)) {
-                nk_ui_text_role(ui, SET_ID_TEXT + 0u, "SETTINGS", NK_UI_TYPE_DISPLAY,
+                nk_ui_text_role(ui, SET_ID_TEXT + 0u, NK_UI_STR(SETTINGS_TITLE), NK_UI_TYPE_DISPLAY,
                                 theme->paper);
             }
             /* A notice (a failed save) comes first, then the page's own line. The graphics
@@ -199,8 +205,7 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
             bool has_notice = model->notice != NULL && model->notice[0] != '\0';
             nk_ui_text_role(ui, SET_ID_TEXT + 1u,
                             has_notice ? model->notice
-                                       : "Changes are saved as you make them. Game settings "
-                                         "apply the next time a game starts.",
+                                       : NK_UI_STR(SETTINGS_SETTINGS_APPLY_ON_NEXT_GAME),
                             NK_UI_TYPE_BODY_S,
                             has_notice ? theme->warning : theme->muted);
             if (advisory[0] != '\0') {
@@ -213,29 +218,29 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_4);
     if (nk_ui_begin_container(ui, SET_ID_CARDS, &layout, NULL)) {
         if (nk_ui_card_begin(ui, SET_ID_GAME, sizing_fixed(card), sizing_grow(), NK_UI_SPACE_2)) {
-            nk_ui_eyebrow(ui, SET_ID_TEXT + 0x10u, "Game");
-            if (settings_row(ui, 0u, PLAYER_UI_ID_SETTINGS_RESOLUTION, "Resolution",
-                             safe_text(model->resolution, "2x"), false, name_width)) {
+            nk_ui_eyebrow(ui, SET_ID_TEXT + 0x10u, NK_UI_STR(SETTINGS_GAME));
+            if (settings_row(ui, 0u, PLAYER_UI_ID_SETTINGS_RESOLUTION, NK_UI_STR(SETTINGS_RESOLUTION),
+                             safe_text(model->resolution, NK_UI_STR(SETTINGS_DEFAULT_RESOLUTION)), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_RESOLUTION);
             }
-            if (settings_row(ui, 2u, PLAYER_UI_ID_SETTINGS_VSYNC, "VSync",
+            if (settings_row(ui, 2u, PLAYER_UI_ID_SETTINGS_VSYNC, NK_UI_STR(SETTINGS_VSYNC),
                              settings_on_off(model->vsync), model->vsync, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_VSYNC);
             }
-            if (settings_row(ui, 3u, PLAYER_UI_ID_SETTINGS_FULLSCREEN, "Game fullscreen",
+            if (settings_row(ui, 3u, PLAYER_UI_ID_SETTINGS_FULLSCREEN, NK_UI_STR(SETTINGS_GAME_FULLSCREEN),
                              settings_on_off(model->fullscreen), model->fullscreen,
                              name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_FULLSCREEN);
             }
-            if (settings_row(ui, 4u, PLAYER_UI_ID_SETTINGS_SCALING, "Scaling",
-                             safe_text(model->scaling, "Sharp"), false, name_width)) {
+            if (settings_row(ui, 4u, PLAYER_UI_ID_SETTINGS_SCALING, NK_UI_STR(SETTINGS_SCALING),
+                             safe_text(model->scaling, NK_UI_STR(SETTINGS_SHARP)), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_SCALING);
             }
             /* The play mode (#2055): one row that opens Settings > Enhanced, where the
                library's default and each part are (#2007). */
-            if (settings_row(ui, 12u, PLAYER_UI_ID_SETTINGS_ACE_OPEN, "Play mode",
-                             model->enhanced_library_on ? "Enhanced: options"
-                                                        : "Authentic: options",
+            if (settings_row(ui, 12u, PLAYER_UI_ID_SETTINGS_ACE_OPEN, NK_UI_STR(SETTINGS_PLAY_MODE),
+                             model->enhanced_library_on ? NK_UI_STR(SETTINGS_ENHANCED_OPTIONS)
+                                                        : NK_UI_STR(SETTINGS_AUTHENTIC_OPTIONS),
                              model->enhanced_library_on, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ACE);
             }
@@ -243,57 +248,57 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
         }
         if (nk_ui_card_begin(ui, SET_ID_LAUNCHER, sizing_fixed(card), sizing_grow(),
                              NK_UI_SPACE_2)) {
-            nk_ui_eyebrow(ui, SET_ID_TEXT + 0x20u, "Launcher and sound");
-            settings_level_row(ui, 5u, "Game volume", model->volume,
+            nk_ui_eyebrow(ui, SET_ID_TEXT + 0x20u, NK_UI_STR(SETTINGS_LAUNCHER_AND_SOUND));
+            settings_level_row(ui, 5u, NK_UI_STR(SETTINGS_GAME_VOLUME), model->volume,
                                PLAYER_UI_ID_SETTINGS_VOLUME_DOWN, PLAYER_UI_ID_SETTINGS_VOLUME_UP,
                                SET_ID_TEXT + 0x11u, PLAYER_UI_SETTINGS_VOLUME_DOWN,
                                PLAYER_UI_SETTINGS_VOLUME_UP, name_width, result);
             if (settings_row(ui, 6u, PLAYER_UI_ID_SETTINGS_LAUNCHER_FULLSCREEN,
-                             "Launcher fullscreen (F11)", settings_on_off(model->launcher_fullscreen),
+                             NK_UI_STR(SETTINGS_LAUNCHER_FULLSCREEN_F11), settings_on_off(model->launcher_fullscreen),
                              model->launcher_fullscreen, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_FULLSCREEN);
             }
-            if (settings_row(ui, 7u, PLAYER_UI_ID_SETTINGS_ACCESSIBILITY, "Accessibility",
-                             "Size, contrast, motion", false, name_width)) {
+            if (settings_row(ui, 7u, PLAYER_UI_ID_SETTINGS_ACCESSIBILITY, NK_UI_STR(SETTINGS_ACCESSIBILITY),
+                             NK_UI_STR(SETTINGS_SIZE_CONTRAST_MOTION), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ACCESSIBILITY);
             }
-            if (settings_row(ui, 8u, PLAYER_UI_ID_SETTINGS_UI_SOUNDS, "Menu sounds",
+            if (settings_row(ui, 8u, PLAYER_UI_ID_SETTINGS_UI_SOUNDS, NK_UI_STR(SETTINGS_MENU_SOUNDS),
                              settings_on_off(model->ui_sounds), model->ui_sounds, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS);
             }
-            if (settings_row(ui, 9u, PLAYER_UI_ID_SETTINGS_CONTROLLER, "Controls",
-                             "Controller and keyboard", false, name_width)) {
+            if (settings_row(ui, 9u, PLAYER_UI_ID_SETTINGS_CONTROLLER, NK_UI_STR(SETTINGS_CONTROLS),
+                             NK_UI_STR(SETTINGS_CONTROLLER_AND_KEYBOARD), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_CONTROLLER);
             }
-            if (settings_row(ui, 10u, PLAYER_UI_ID_SETTINGS_UPDATES, "Updates",
-                             "Check for updates", false, name_width)) {
+            if (settings_row(ui, 10u, PLAYER_UI_ID_SETTINGS_UPDATES, NK_UI_STR(SETTINGS_UPDATES),
+                             NK_UI_STR(SETTINGS_CHECK_FOR_UPDATES), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CHECK_UPDATES);
             }
             /* Launcher music (#2207), at the card's end so the rows above keep their
                places beside the GAME rows. Its level is its own, as the menu sounds'
                is: Game volume is the game's. */
-            if (settings_row(ui, 14u, PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC, "Launcher music",
+            if (settings_row(ui, 14u, PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC, NK_UI_STR(SETTINGS_LAUNCHER_MUSIC),
                              model->launcher_music_value != NULL
                                  ? model->launcher_music_value
                                  : settings_on_off(model->launcher_music),
                              model->launcher_music, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC);
             }
-            settings_level_row(ui, 15u, "Music volume", model->music_volume,
+            settings_level_row(ui, 15u, NK_UI_STR(SETTINGS_MUSIC_VOLUME), model->music_volume,
                                PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN,
                                PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, SET_ID_TEXT + 0x12u,
                                PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
                                PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP, name_width, result);
             /* A game's own startup clip on its page (SND0.AT3), at the Music volume. */
-            if (settings_row(ui, 16u, PLAYER_UI_ID_SETTINGS_GAME_MUSIC, "Game page music",
+            if (settings_row(ui, 16u, PLAYER_UI_ID_SETTINGS_GAME_MUSIC, NK_UI_STR(SETTINGS_GAME_PAGE_MUSIC),
                              settings_on_off(model->game_music), model->game_music,
                              name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_GAME_MUSIC);
             }
             {
                 NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
-                (void)snprintf(line, sizeof(line), "Controller: %s",
-                               safe_text(model->controller_line, "keyboard and mouse"));
+                (void)snprintf(line, sizeof(line), NK_UI_STR(SETTINGS_CONTROLLER_FORMAT),
+                               safe_text(model->controller_line, NK_UI_STR(SETTINGS_KEYBOARD_AND_MOUSE)));
                 nk_ui_text(ui, SET_ID_TEXT + 0x21u,
                            nk_ui_text_clamp(ui, line, &text, card - 40.0f, 1), &text);
                 if (model->saves_folder != NULL && model->saves_folder[0] != '\0') {
@@ -301,7 +306,7 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                     text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
                     /* A no-break space keeps the folder on the line, so a long
                        one is cut short rather than dropped. */
-                    (void)snprintf(saves, sizeof(saves), "Saves:\xC2\xA0%s",
+                    (void)snprintf(saves, sizeof(saves), NK_UI_STR(SETTINGS_SAVES_FORMAT),
                                    model->saves_folder);
                     nk_ui_text(ui, SET_ID_TEXT + 0x22u,
                                nk_ui_text_clamp(ui, saves, &text, card - 40.0f, 1), &text);
@@ -320,20 +325,20 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
             uint32_t flags;
             PlayerUiSettingsOp op;
         } actions[] = {
-            {PLAYER_UI_ID_SETTINGS_DONE, "Done", NK_UI_BUTTON_PRIMARY, PLAYER_UI_SETTINGS_DONE},
-            {PLAYER_UI_ID_SETTINGS_ONLINE, "Online and developer", 0u,
+            {PLAYER_UI_ID_SETTINGS_DONE, NK_UI_STR(SETTINGS_DONE), NK_UI_BUTTON_PRIMARY, PLAYER_UI_SETTINGS_DONE},
+            {PLAYER_UI_ID_SETTINGS_ONLINE, NK_UI_STR(SETTINGS_ONLINE_AND_DEVELOPER), 0u,
              PLAYER_UI_SETTINGS_OPEN_ONLINE},
-            {PLAYER_UI_ID_SETTINGS_NOTICES, "Third-party notices", 0u,
+            {PLAYER_UI_ID_SETTINGS_NOTICES, NK_UI_STR(SETTINGS_THIRD_PARTY_NOTICES), 0u,
              PLAYER_UI_SETTINGS_OPEN_NOTICES},
-            {PLAYER_UI_ID_SETTINGS_BUILD_CACHE, "Build tools and cache", 0u,
+            {PLAYER_UI_ID_SETTINGS_BUILD_CACHE, NK_UI_STR(SETTINGS_BUILD_TOOLS_AND_CACHE), 0u,
              PLAYER_UI_SETTINGS_OPEN_BUILD_CACHE},
-            {PLAYER_UI_ID_SETTINGS_FONTS, "PSP fonts", 0u, PLAYER_UI_SETTINGS_OPEN_FONTS},
-            {PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT, "Problem report", 0u,
+            {PLAYER_UI_ID_SETTINGS_FONTS, NK_UI_STR(SETTINGS_PSP_FONTS), 0u, PLAYER_UI_SETTINGS_OPEN_FONTS},
+            {PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT, NK_UI_STR(SETTINGS_PROBLEM_REPORT), 0u,
              PLAYER_UI_SETTINGS_OPEN_PROBLEM_REPORT},
-            {PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER, "Open data folder", 0u,
+            {PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER, NK_UI_STR(SETTINGS_OPEN_DATA_FOLDER), 0u,
              PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER},
-            {PLAYER_UI_ID_SETTINGS_OPEN_LOGS, "Open logs", 0u, PLAYER_UI_SETTINGS_OPEN_LOGS},
-            {PLAYER_UI_ID_SETTINGS_FACTORY_RESET, "Factory reset", NK_UI_BUTTON_DANGER,
+            {PLAYER_UI_ID_SETTINGS_OPEN_LOGS, NK_UI_STR(SETTINGS_OPEN_LOGS), 0u, PLAYER_UI_SETTINGS_OPEN_LOGS},
+            {PLAYER_UI_ID_SETTINGS_FACTORY_RESET, NK_UI_STR(SETTINGS_FACTORY_RESET), NK_UI_BUTTON_DANGER,
              PLAYER_UI_SETTINGS_OPEN_FACTORY_RESET}
         };
         NkUiFlowRow flow;
@@ -362,35 +367,31 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
     bool busy = step == PLAYER_UI_REPORT_PREVIEWING || step == PLAYER_UI_REPORT_CREATING;
     const char *lead;
     uint32_t lead_rgba = theme->muted;
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, "Problem report", NK_UI_TYPE_TITLE, theme->paper);
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_SECTION), theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_PROBLEM_REPORT), NK_UI_TYPE_TITLE, theme->paper);
     switch (step) {
         case PLAYER_UI_REPORT_PREVIEWING:
-            lead = "Listing what the report would hold…";
+            lead = NK_UI_STR(SETTINGS_REPORT_LISTING);
             break;
         case PLAYER_UI_REPORT_CREATING:
-            lead = "Writing the report. Checking the build tools can take a minute…";
+            lead = NK_UI_STR(SETTINGS_REPORT_WRITING);
             break;
         case PLAYER_UI_REPORT_DONE:
-            lead = "The report is written. Open the ZIP and look through it before you attach "
-                   "it to an issue: issues on GitHub are public.";
+            lead = NK_UI_STR(SETTINGS_REPORT_WRITTEN);
             lead_rgba = theme->ready;
             break;
         case PLAYER_UI_REPORT_FAILED:
-            lead = "The report could not be written.";
+            lead = NK_UI_STR(SETTINGS_REPORT_WRITE_FAILED);
             lead_rgba = theme->warning;
             break;
         case PLAYER_UI_REPORT_NO_PYTHON:
-            lead = "Python isn't available here, so the report can't be made from this window. "
-                   "Run this command in a terminal from the Nakagawa folder instead.";
+            lead = NK_UI_STR(SETTINGS_REPORT_NO_PYTHON);
             lead_rgba = theme->warning;
             break;
         case PLAYER_UI_REPORT_PREVIEWED:
         case PLAYER_UI_REPORT_IDLE:
         default:
-            lead = "Writes a ZIP on this PC with the logs and settings that help someone fix a "
-                   "problem. Your user name and folders are replaced, and game files, saves and "
-                   "keys are left out. Nothing is uploaded.";
+            lead = NK_UI_STR(SETTINGS_REPORT_LEAD);
             break;
     }
     nk_ui_text_role(ui, FLOW_ID_LEAD, lead, NK_UI_TYPE_BODY_S, lead_rgba);
@@ -415,7 +416,8 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
             NkUiLayout cols = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
                                           NK_UI_SPACE_4);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x301u,
-                            step == PLAYER_UI_REPORT_DONE ? "The ZIP holds:" : "The ZIP would hold:",
+                            step == PLAYER_UI_REPORT_DONE ? NK_UI_STR(SETTINGS_THE_ZIP_HOLDS)
+                                : NK_UI_STR(SETTINGS_THE_ZIP_WOULD_HOLD),
                             NK_UI_TYPE_BODY_S, theme->muted);
             if (nk_ui_begin_container(ui, SET_ID_TEXT + 0x310u, &cols, NULL)) {
                 for (size_t c = 0u; c < 2u; ++c) {
@@ -438,7 +440,7 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
             }
             if (more > 0u) {
                 char more_text[48];
-                (void)snprintf(more_text, sizeof(more_text), "and %zu more", more);
+                (void)snprintf(more_text, sizeof(more_text), NK_UI_STR(SETTINGS_REPORT_MORE_FORMAT), more);
                 nk_ui_text_role(ui, SET_ID_TEXT + 0x302u, more_text, NK_UI_TYPE_CAPTION,
                                 theme->muted);
             }
@@ -452,17 +454,17 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
             if (step == PLAYER_UI_REPORT_PREVIEWED || step == PLAYER_UI_REPORT_FAILED ||
                 step == PLAYER_UI_REPORT_DONE) {
                 if (nk_ui_button(ui, PLAYER_UI_ID_REPORT_CREATE,
-                                 step == PLAYER_UI_REPORT_DONE ? "Create again"
-                                                               : "Create the report",
+                                 step == PLAYER_UI_REPORT_DONE ? NK_UI_STR(SETTINGS_CREATE_AGAIN)
+                                                               : NK_UI_STR(SETTINGS_CREATE_THE_REPORT),
                                  step == PLAYER_UI_REPORT_PREVIEWED ? NK_UI_BUTTON_PRIMARY : 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_CREATE_REPORT);
                 }
             }
             if (step == PLAYER_UI_REPORT_DONE &&
-                nk_ui_button(ui, PLAYER_UI_ID_REPORT_FOLDER, "Open folder", NK_UI_BUTTON_PRIMARY)) {
+                nk_ui_button(ui, PLAYER_UI_ID_REPORT_FOLDER, NK_UI_STR(SETTINGS_OPEN_FOLDER), NK_UI_BUTTON_PRIMARY)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER);
             }
-            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back",
+            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK),
                              busy || step == PLAYER_UI_REPORT_NO_PYTHON ? NK_UI_BUTTON_PRIMARY : 0u)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_BACK);
             }
@@ -490,7 +492,7 @@ static void settings_shorten_words(NkUi *ui, const char *in, char *out, size_t c
             size_t tail = max_word - head - 3u;
             while (head > 0u && ((unsigned char)in[head] & 0xC0u) == 0x80u) --head;
             while (tail > 0u && ((unsigned char)in[word - tail] & 0xC0u) == 0x80u) --tail;
-            (void)snprintf(out + used, cap - used, "%.*s…%.*s", (int)head, in, (int)tail,
+            (void)snprintf(out + used, cap - used, NK_UI_STR(SETTINGS_PATH_ELLIPSIS_FORMAT), (int)head, in, (int)tail,
                            in + word - tail);
         } else {
             (void)snprintf(out + used, cap - used, "%.*s", (int)word, in);
@@ -503,6 +505,22 @@ static void settings_shorten_words(NkUi *ui, const char *in, char *out, size_t c
     out[used < cap ? used : cap - 1u] = '\0';
 }
 
+/* Preserve the shipped English layout. Longer translations can wrap inside the
+   card and extend its vertical scroll range. */
+static void settings_update_text(NkUi *ui, NkUiId id, const char *content, NkUiTextStyle style,
+                                  float width) {
+    if (!NK_UI_ALTERNATE_CATALOG || nk_ui_text_width(ui, content, &style) <= width) {
+        nk_ui_text(ui, id, content, &style);
+        return;
+    }
+    NkUiLayout box = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(width), sizing_fit(), 0.0f);
+    if (nk_ui_begin_container(ui, nk_ui_child_id(id, 0u), &box, NULL)) {
+        style.wrap = true;
+        nk_ui_text(ui, id, nk_ui_text_break(ui, content, &style, width), &style);
+        nk_ui_end_container(ui);
+    }
+}
+
 /* Settings > Updates: one card that says where the check is, with the next step
    first. Nothing here reaches the network on its own: every button is a click. */
 static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float inner,
@@ -513,70 +531,71 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
     bool busy = step == PLAYER_UI_UPDATE_CHECKING || step == PLAYER_UI_UPDATE_DOWNLOADING ||
                 step == PLAYER_UI_UPDATE_INSTALLING;
     char lead[192];
-    char line[800]; /* a sentence around a whole folder (folder[] below) */
+    char line[800];
     char a[32];
     char b[32];
     uint32_t lead_rgba = theme->muted;
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, "Updates", NK_UI_TYPE_TITLE, theme->paper);
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_SECTION), theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_UPDATES), NK_UI_TYPE_TITLE, theme->paper);
     switch (step) {
         case PLAYER_UI_UPDATE_CHECKING:
-            (void)snprintf(lead, sizeof(lead), "Asking GitHub for the newest version…");
+            (void)snprintf(lead, sizeof(lead), NK_UI_STR(SETTINGS_UPDATE_CHECKING));
             break;
         case PLAYER_UI_UPDATE_CURRENT:
-            (void)snprintf(lead, sizeof(lead), "You have the newest version.");
+            (void)snprintf(lead, sizeof(lead), NK_UI_STR(SETTINGS_UPDATE_ALREADY_LATEST));
             lead_rgba = theme->ready;
             break;
         case PLAYER_UI_UPDATE_AVAILABLE:
-            (void)snprintf(lead, sizeof(lead), "Version %s is out.", version);
+            (void)snprintf(lead, sizeof(lead), NK_UI_STR(SETTINGS_UPDATE_AVAILABLE_FORMAT), version);
             lead_rgba = theme->ready;
             break;
         case PLAYER_UI_UPDATE_DOWNLOADING:
-            (void)snprintf(lead, sizeof(lead), "Downloading version %s…", version);
+            (void)snprintf(lead, sizeof(lead), NK_UI_STR(SETTINGS_UPDATE_DOWNLOADING_FORMAT), version);
             break;
         case PLAYER_UI_UPDATE_DOWNLOADED:
-            (void)snprintf(lead, sizeof(lead), "Version %s is downloaded and checked.", version);
+            (void)snprintf(lead, sizeof(lead), NK_UI_STR(SETTINGS_UPDATE_VERIFIED_FORMAT), version);
             lead_rgba = theme->ready;
             break;
         case PLAYER_UI_UPDATE_INSTALLING:
-            (void)snprintf(lead, sizeof(lead), "Unpacking version %s…", version);
+            (void)snprintf(lead, sizeof(lead), NK_UI_STR(SETTINGS_UPDATE_INSTALLING_FORMAT), version);
             break;
         case PLAYER_UI_UPDATE_INSTALLED:
-            (void)snprintf(lead, sizeof(lead), "Version %s is ready to start.", version);
+            (void)snprintf(lead, sizeof(lead), NK_UI_STR(SETTINGS_UPDATE_INSTALLED_FORMAT), version);
             lead_rgba = theme->ready;
             break;
         case PLAYER_UI_UPDATE_FAILED:
             (void)snprintf(lead, sizeof(lead), "%s",
-                           safe_text(model->update_error_title, "Something went wrong"));
+                           safe_text(model->update_error_title, NK_UI_STR(SETTINGS_SOMETHING_WENT_WRONG)));
             lead_rgba = theme->warning;
             break;
         case PLAYER_UI_UPDATE_IDLE:
         default:
             (void)snprintf(lead, sizeof(lead),
-                           "Nakagawa can ask GitHub whether a newer version is out. The request "
-                           "carries nothing about you, this PC or your games.");
+                           NK_UI_STR(SETTINGS_UPDATE_LEAD));
             break;
     }
     nk_ui_text_role(ui, FLOW_ID_LEAD, lead, NK_UI_TYPE_BODY_S, lead_rgba);
     if (scr_wizard_box_begin(ui, 0u)) {
         NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
+        const float text_width = inner - 32.0f; /* the box's two 16 px side pads */
         if (version[0] != '\0') {
             const char *published = safe_text(model->update_published, "");
             char about[48] = "";
             if (model->update_prerelease && published[0] != '\0') {
-                (void)snprintf(about, sizeof(about), " (pre-release, %s)", published);
+                (void)snprintf(about, sizeof(about), NK_UI_STR(SETTINGS_UPDATE_PRERELEASE_DATE_FORMAT), published);
             } else if (model->update_prerelease) {
-                (void)snprintf(about, sizeof(about), " (pre-release)");
+                (void)snprintf(about, sizeof(about), NK_UI_STR(SETTINGS_UPDATE_PRERELEASE));
             } else if (published[0] != '\0') {
-                (void)snprintf(about, sizeof(about), " (%s)", published);
+                (void)snprintf(about, sizeof(about), NK_UI_STR(SETTINGS_UPDATE_DATE_FORMAT), published);
             }
-            (void)snprintf(line, sizeof(line), "This version: %s    Newest: %s%s",
-                           safe_text(model->current_version, "unknown"), version, about);
+            (void)snprintf(line, sizeof(line), NK_UI_STR(SETTINGS_UPDATE_CURRENT_AND_LATEST_FORMAT),
+                           safe_text(model->current_version, NK_UI_STR(SETTINGS_UNKNOWN)), version, about);
         } else {
-            (void)snprintf(line, sizeof(line), "This version: %s",
-                           safe_text(model->current_version, "unknown"));
+            (void)snprintf(line, sizeof(line), NK_UI_STR(SETTINGS_UPDATE_CURRENT_VERSION_FORMAT),
+                           safe_text(model->current_version, NK_UI_STR(SETTINGS_UNKNOWN)));
         }
-        nk_ui_text_role(ui, SET_ID_TEXT + 0xD0u, line, NK_UI_TYPE_DATA, theme->paper);
+        settings_update_text(ui, SET_ID_TEXT + 0xD0u, line, nk_ui_type(NK_UI_TYPE_DATA, theme->paper),
+                             text_width);
         switch (step) {
             case PLAYER_UI_UPDATE_AVAILABLE:
                 if (model->update_notes && model->update_notes[0]) {
@@ -590,34 +609,26 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                 }
                 if (!model->update_has_zip) {
                     (void)snprintf(line, sizeof(line),
-                                   "This release has no Windows download. Its page on GitHub "
-                                   "lists what it offers.");
+                                   NK_UI_STR(SETTINGS_UPDATE_NO_WINDOWS_DOWNLOAD));
                 } else if (model->update_installed_by_setup) {
                     (void)snprintf(line, sizeof(line),
-                                   "This copy was installed with Setup. Download the new "
-                                   "Setup from the release page on GitHub and run it: it "
-                                   "updates this copy and keeps your games and saves.");
+                                   NK_UI_STR(SETTINGS_UPDATE_INSTALLER_INSTRUCTIONS));
                 } else if (model->update_unverifiable) {
                     (void)snprintf(line, sizeof(line),
-                                   "This build can't check update signatures, so it doesn't "
-                                   "download updates itself. Download the new version from the "
-                                   "release page on GitHub.");
+                                   NK_UI_STR(SETTINGS_UPDATE_NO_SIGNATURE_SUPPORT));
                 } else if (model->update_unsigned) {
                     (void)snprintf(line, sizeof(line),
-                                   "This release isn't signed, so Nakagawa won't download it. "
-                                   "Its page on GitHub has the download.");
+                                   NK_UI_STR(SETTINGS_UPDATE_UNSIGNED));
                 } else if (!model->update_can_download) {
                     (void)snprintf(line, sizeof(line),
-                                   "Download it from the release page on GitHub.");
+                                   NK_UI_STR(SETTINGS_UPDATE_RELEASE_PAGE_INSTRUCTIONS));
                 } else {
                     scr_flow_bytes(a, sizeof(a), model->update_zip_bytes);
                     (void)snprintf(line, sizeof(line),
-                                   "Download fetches %s (%s) and checks it against the "
-                                   "release's signed SHA-256. Nothing is installed until you "
-                                   "choose Install.",
-                                   safe_text(model->update_zip_name, "the Windows ZIP"), a);
+                                   NK_UI_STR(SETTINGS_UPDATE_DOWNLOAD_INSTRUCTIONS_FORMAT),
+                                   safe_text(model->update_zip_name, NK_UI_STR(SETTINGS_THE_WINDOWS_ZIP)), a);
                 }
-                nk_ui_text(ui, SET_ID_TEXT + 0xD2u, line, &text);
+                settings_update_text(ui, SET_ID_TEXT + 0xD2u, line, text, text_width);
                 break;
             case PLAYER_UI_UPDATE_DOWNLOADING:
                 nk_ui_progress_bar(ui, SET_ID_TEXT + 0xD3u, inner - 32.0f,
@@ -628,33 +639,31 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                                    0.0);
                 scr_flow_bytes(a, sizeof(a), model->update_received_bytes);
                 scr_flow_bytes(b, sizeof(b), model->update_zip_bytes);
-                (void)snprintf(line, sizeof(line), "%s of %s", a, b);
+                (void)snprintf(line, sizeof(line), NK_UI_STR(SETTINGS_UPDATE_PROGRESS_FORMAT), a, b);
                 nk_ui_text_role(ui, SET_ID_TEXT + 0xD4u, line, NK_UI_TYPE_DATA, theme->muted);
                 break;
             case PLAYER_UI_UPDATE_DOWNLOADED: {
                 /* Holds any folder whole (NK_MAX_PATH): a shorter buffer cut the
                    folder's own name off its end with no mark. */
                 char folder[600];
-                settings_shorten_words(ui, safe_text(model->update_folder, "the downloads folder"),
+                char summary[sizeof(folder) + sizeof(NK_UI_STR(SETTINGS_UPDATE_DOWNLOAD_COMPLETE_FORMAT))];
+                settings_shorten_words(ui, safe_text(model->update_folder, NK_UI_STR(SETTINGS_THE_DOWNLOADS_FOLDER)),
                                        folder, sizeof(folder), 72u);
-                (void)snprintf(line, sizeof(line),
-                               "Its SHA-256 matches the release's signed checksum. Saved in "
-                               "%s. Install unpacks it into a new folder of its own; this "
-                               "version stays as it is.", folder);
+                (void)snprintf(summary, sizeof(summary),
+                               NK_UI_STR(SETTINGS_UPDATE_DOWNLOAD_COMPLETE_FORMAT), folder);
                 nk_ui_text(ui, SET_ID_TEXT + 0xD2u,
-                           nk_ui_text_clamp(ui, line, &text, inner - 32.0f, 4), &text);
+                           nk_ui_text_clamp(ui, summary, &text, inner - 32.0f, 4), &text);
                 break;
             }
             case PLAYER_UI_UPDATE_INSTALLED: {
                 char folder[600];
-                settings_shorten_words(ui, safe_text(model->update_folder, "a new folder"), folder,
+                char summary[sizeof(folder) + sizeof(NK_UI_STR(SETTINGS_UPDATE_INSTALL_COMPLETE_FORMAT))];
+                settings_shorten_words(ui, safe_text(model->update_folder, NK_UI_STR(SETTINGS_A_NEW_FOLDER)), folder,
                                        sizeof(folder), 72u);
-                (void)snprintf(line, sizeof(line),
-                               "It is in %s. Close Nakagawa, then start bin\\nakagawa_player.exe "
-                               "from that folder. Your library, saves and settings stay where "
-                               "they are and carry over.", folder);
+                (void)snprintf(summary, sizeof(summary),
+                               NK_UI_STR(SETTINGS_UPDATE_INSTALL_COMPLETE_FORMAT), folder);
                 nk_ui_text(ui, SET_ID_TEXT + 0xD2u,
-                           nk_ui_text_clamp(ui, line, &text, inner - 32.0f, 5), &text);
+                           nk_ui_text_clamp(ui, summary, &text, inner - 32.0f, 5), &text);
                 break;
             }
             case PLAYER_UI_UPDATE_FAILED:
@@ -669,9 +678,8 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
         }
         if (!busy &&
             scr_wizard_switch(ui, PLAYER_UI_ID_UPDATE_AT_START, SET_ID_TEXT + 0xE0u,
-                          "Check at start",
-                          "Asks GitHub once each time Nakagawa starts. Off unless you turn it "
-                          "on.",
+                          NK_UI_STR(SETTINGS_CHECK_AT_START),
+                          NK_UI_STR(SETTINGS_UPDATE_CHECK_AT_START_EXPLANATION),
                           model->check_updates_at_start, inner - 32.0f, NULL)) {
             *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_UPDATE_AT_START);
         }
@@ -684,31 +692,31 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
             switch (step) {
                 case PLAYER_UI_UPDATE_AVAILABLE:
                     if (model->update_can_download &&
-                        nk_ui_button(ui, PLAYER_UI_ID_UPDATE_DOWNLOAD, "Download",
+                        nk_ui_button(ui, PLAYER_UI_ID_UPDATE_DOWNLOAD, NK_UI_STR(SETTINGS_DOWNLOAD),
                                      NK_UI_BUTTON_PRIMARY)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_DOWNLOAD_UPDATE);
                     }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_PAGE, "Open release page",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_PAGE, NK_UI_STR(SETTINGS_OPEN_RELEASE_PAGE),
                                      model->update_can_download ? 0u : NK_UI_BUTTON_PRIMARY)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_OPEN_RELEASE_PAGE);
                     }
                     break;
                 case PLAYER_UI_UPDATE_DOWNLOADING:
-                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_CANCEL, "Cancel", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_CANCEL, NK_UI_STR(SETTINGS_CANCEL), 0u)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_CANCEL_UPDATE);
                     }
                     break;
                 case PLAYER_UI_UPDATE_DOWNLOADED:
-                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_INSTALL, "Install",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_INSTALL, NK_UI_STR(SETTINGS_INSTALL),
                                      NK_UI_BUTTON_PRIMARY)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_INSTALL_UPDATE);
                     }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_FOLDER, "Open folder", 0u)) {
+                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_FOLDER, NK_UI_STR(SETTINGS_OPEN_FOLDER), 0u)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_OPEN_UPDATE_FOLDER);
                     }
                     break;
                 case PLAYER_UI_UPDATE_INSTALLED:
-                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_FOLDER, "Open folder",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_FOLDER, NK_UI_STR(SETTINGS_OPEN_FOLDER),
                                      NK_UI_BUTTON_PRIMARY)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_OPEN_UPDATE_FOLDER);
                     }
@@ -717,8 +725,8 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                 case PLAYER_UI_UPDATE_CURRENT:
                 case PLAYER_UI_UPDATE_FAILED:
                     if (nk_ui_button(ui, PLAYER_UI_ID_UPDATE_CHECK,
-                                     step == PLAYER_UI_UPDATE_IDLE ? "Check for updates"
-                                                                   : "Check again",
+                                     step == PLAYER_UI_UPDATE_IDLE ? NK_UI_STR(SETTINGS_CHECK_FOR_UPDATES)
+                                                                   : NK_UI_STR(SETTINGS_CHECK_AGAIN),
                                      NK_UI_BUTTON_PRIMARY)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_CHECK_UPDATES);
                     }
@@ -727,14 +735,14 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                     if (step == PLAYER_UI_UPDATE_FAILED &&
                         model->update_failed_step == PLAYER_UI_UPDATE_DOWNLOADING &&
                         model->update_page_url && model->update_page_url[0] &&
-                        nk_ui_button(ui, PLAYER_UI_ID_UPDATE_PAGE, "Open release page", 0u)) {
+                        nk_ui_button(ui, PLAYER_UI_ID_UPDATE_PAGE, NK_UI_STR(SETTINGS_OPEN_RELEASE_PAGE), 0u)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_OPEN_RELEASE_PAGE);
                     }
                     /* A failed install leaves the checked ZIP to unpack by hand. */
                     if (step == PLAYER_UI_UPDATE_FAILED &&
                         model->update_failed_step == PLAYER_UI_UPDATE_INSTALLING &&
                         model->update_folder && model->update_folder[0] &&
-                        nk_ui_button(ui, PLAYER_UI_ID_UPDATE_FOLDER, "Open folder", 0u)) {
+                        nk_ui_button(ui, PLAYER_UI_ID_UPDATE_FOLDER, NK_UI_STR(SETTINGS_OPEN_FOLDER), 0u)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_OPEN_UPDATE_FOLDER);
                     }
                     break;
@@ -742,7 +750,7 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                     break;
             }
             if (step != PLAYER_UI_UPDATE_DOWNLOADING &&
-                nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back",
+                nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK),
                              busy ? NK_UI_BUTTON_PRIMARY : 0u)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_BACK);
             }
@@ -758,37 +766,38 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
 static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model, float inner,
                                    PlayerUiAction *result) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    const char *system = safe_text(model->system_name, "your system");
+    const char *system = safe_text(model->system_name, NK_UI_STR(SETTINGS_YOUR_SYSTEM));
     char interface_line[256];
     char contrast_line[256];
     char motion_line[256];
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, "Accessibility", NK_UI_TYPE_TITLE, theme->paper);
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_SECTION), theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_ACCESSIBILITY), NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,
-                    "These change the launcher, not a running game. Automatic follows the "
-                    "matching setting of your system, and changes when it does.",
+                    NK_UI_STR(SETTINGS_ACCESSIBILITY_LEAD),
                     NK_UI_TYPE_BODY_S, theme->muted);
     (void)snprintf(interface_line, sizeof(interface_line),
-                   "Grows text and controls in a large enough window. Display scale in "
-                   "%s: %d%%.",
+                   NK_UI_STR(SETTINGS_ACCESSIBILITY_SCALE_FORMAT),
                    system, model->system_scale_pct);
     (void)snprintf(contrast_line, sizeof(contrast_line),
-                   "A white ring between black lines marks the selection. High contrast "
-                   "in %s: %s.",
-                   system, model->system_high_contrast ? "on" : "off");
+                   NK_UI_STR(SETTINGS_ACCESSIBILITY_CONTRAST_FORMAT),
+                   system, model->system_high_contrast ? NK_UI_STR(SETTINGS_ON_LOWERCASE)
+                                                       : NK_UI_STR(SETTINGS_OFF_LOWERCASE));
     (void)snprintf(motion_line, sizeof(motion_line),
-                   "Holds the background still; pulses and sweeps become cuts. "
-                   "Animations in %s: %s.",
-                   system, model->system_reduced_motion ? "off" : "on");
+                   NK_UI_STR(SETTINGS_ACCESSIBILITY_MOTION_FORMAT),
+                   system, model->system_reduced_motion ? NK_UI_STR(SETTINGS_OFF_LOWERCASE)
+                                                        : NK_UI_STR(SETTINGS_ON_LOWERCASE));
     if (scr_wizard_box_begin(ui, 0u)) {
         const WizardRow rows[] = {
-            {"Interface", safe_text(model->interface_size, "Automatic"), interface_line},
-            {"Text size", safe_text(model->text_size, "Standard"),
-             "Makes the launcher's text larger. Controls keep their size."},
-            {"Contrast", safe_text(model->high_contrast_choice, "Automatic"), contrast_line},
-            {"Motion", safe_text(model->reduce_motion_choice, "Automatic"), motion_line},
-            {"Theme", safe_text(model->launcher_theme, "Standard"),
-             "The launcher's colours. A game never shows them."}
+            {NK_UI_STR(SETTINGS_INTERFACE), safe_text(model->interface_size, NK_UI_STR(SETTINGS_AUTOMATIC)),
+                interface_line},
+            {NK_UI_STR(SETTINGS_TEXT_SIZE), safe_text(model->text_size, NK_UI_STR(SETTINGS_STANDARD)),
+             NK_UI_STR(SETTINGS_ACCESSIBILITY_TEXT_SIZE_EXPLANATION)},
+            {NK_UI_STR(SETTINGS_CONTRAST), safe_text(model->high_contrast_choice, NK_UI_STR(SETTINGS_AUTOMATIC)),
+                contrast_line},
+            {NK_UI_STR(SETTINGS_MOTION), safe_text(model->reduce_motion_choice, NK_UI_STR(SETTINGS_AUTOMATIC)),
+                motion_line},
+            {NK_UI_STR(SETTINGS_THEME), safe_text(model->launcher_theme, NK_UI_STR(SETTINGS_STANDARD)),
+             NK_UI_STR(SETTINGS_ACCESSIBILITY_THEME_EXPLANATION)}
         };
         /* The theme row is there once a second theme is offered (launcher_themes.h). */
         const size_t row_count = model->launcher_theme != NULL ? 5u : 4u;
@@ -826,7 +835,7 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
         NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
         row.padding_top = NK_UI_SPACE_1;
         if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK), NK_UI_BUTTON_PRIMARY)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_BACK);
             }
             nk_ui_end_container(ui);
@@ -1006,7 +1015,7 @@ static int settings_enhanced_stepper(NkUi *ui, NkUiId row_id, const char *value,
     style.border_width = NK_UI_BORDER_HAIRLINE;
     style.corner_radius = NK_UI_RADIUS_CONTROL;
     if (!nk_ui_begin_container(ui, nk_ui_child_id(row_id, 4u), &box, &style)) return 0;
-    if (settings_enhanced_arrow(ui, prev, "<", !dimmed)) step = -1;
+    if (settings_enhanced_arrow(ui, prev, NK_UI_STR(SETTINGS_PREVIOUS_VALUE), !dimmed)) step = -1;
     if (nk_ui_begin_container(ui, nk_ui_child_id(row_id, 7u), &cell, NULL)) {
         nk_ui_text(ui, nk_ui_child_id(row_id, 8u),
                    nk_ui_text_clamp(ui, safe_text(value, ""), &text,
@@ -1014,7 +1023,7 @@ static int settings_enhanced_stepper(NkUi *ui, NkUiId row_id, const char *value,
                    &text);
         nk_ui_end_container(ui);
     }
-    if (settings_enhanced_arrow(ui, next, ">", !dimmed)) step = 1;
+    if (settings_enhanced_arrow(ui, next, NK_UI_STR(SETTINGS_NEXT_VALUE), !dimmed)) step = 1;
     nk_ui_end_container(ui);
     /* The keys stay with the row: a clicked arrow hands focus back to it. */
     if (nk_ui_button_focused(ui, prev) || nk_ui_button_focused(ui, next)) nk_ui_focus(ui, row_id);
@@ -1096,12 +1105,15 @@ static bool settings_enhanced_chip(NkUi *ui, NkUiId id, const char *label, bool 
     style.border_width = NK_UI_BORDER_HAIRLINE;
     if (selected && dimmed) text.rgba = theme->muted;
     if (selected && inherited && !dimmed) text.rgba = theme->muted;
-    if (live) nk_ui_register_button(ui, id, NK_UI_BUTTON_POINTER_ONLY);
+    /* A dimmed choice stays inert, but its hit box keeps a click from stepping
+       the row behind it. It is not part of the keyboard focus order. */
+    nk_ui_register_button(ui, id, NK_UI_BUTTON_POINTER_ONLY);
     if (nk_ui_begin_container(ui, id, &chip, &style)) {
         nk_ui_text(ui, nk_ui_child_id(id, 1u), label, &text);
         nk_ui_end_container(ui);
     }
-    return live && nk_ui_take_activation(ui, id);
+    const bool activated = nk_ui_take_activation(ui, id);
+    return live && activated;
 }
 
 static void settings_enhanced_choice_action(PlayerUiAction *result, int part, bool title,
@@ -1114,8 +1126,8 @@ static void settings_enhanced_choice_action(PlayerUiAction *result, int part, bo
 /* A part's value `choice` in words: on a game's page the library's choice comes first. */
 static const char *settings_enhanced_part_label(const PlayerUiEnhancedRow *row, bool title,
                                                 int choice) {
-    return title && choice == 0 ? safe_text(row->library_value, "Library")
-                                : safe_text(row->labels[choice - (title ? 1 : 0)], "Off");
+    return title && choice == 0 ? safe_text(row->library_value, NK_UI_STR(SETTINGS_LIBRARY))
+                                : safe_text(row->labels[choice - (title ? 1 : 0)], NK_UI_STR(SETTINGS_OFF));
 }
 
 /* A part's row: its name, its tag, and every value it can take, the current one marked. When
@@ -1128,6 +1140,8 @@ static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *mo
     const NkUiTheme *theme = nk_ui_theme(ui);
     const bool title = model->enhanced_title != NULL;
     const int choice_count = row->label_count + (title ? 1 : 0);
+    const int unavailable = row->unavailable_label > 0
+        ? row->unavailable_label - 1 + (title ? 1 : 0) : -1;
     const bool boxed = choice_count <= PLAYER_ENHANCED_PART_MAX_CHOICES;
     const NkUiId id = PLAYER_UI_ID_ENHANCED_PART(row->part);
     const char *labels[PLAYER_ENHANCED_PART_MAX_CHOICES];
@@ -1186,7 +1200,8 @@ static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *mo
             for (int choice = 0; choice < choice_count; ++choice) {
                 NkUiId chip = SET_ID_ENHANCED_CHOICES(row->part, choice);
                 if (settings_enhanced_chip(ui, chip, labels[choice], choice == selected,
-                                           title && choice == 0, row->disabled, row->on)) {
+                                           title && choice == 0,
+                                           row->disabled || choice == unavailable, row->on)) {
                     picked = choice;
                 }
                 /* The keys stay with the row: a clicked value hands focus back to it. */
@@ -1205,8 +1220,9 @@ static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *mo
     if (picked >= 0) {
         settings_enhanced_choice_action(result, row->part, title, picked);
     } else if (step != 0) {
-        settings_enhanced_choice_action(result, row->part, title,
-                                        (selected + step + choice_count) % choice_count);
+        int choice = (selected + step + choice_count) % choice_count;
+        if (choice == unavailable) choice = (choice + step + choice_count) % choice_count;
+        settings_enhanced_choice_action(result, row->part, title, choice);
     } else if (activated) {
         *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
         result->title_index = (size_t)row->part;
@@ -1395,9 +1411,9 @@ static void settings_enhanced_details(NkUi *ui, const SettingsEnhancedDetail *de
     settings_enhanced_detail_scroll(ui, detail, nk_ui_line_height(ui, &sentence));
     if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_DETAIL, &panel, &style)) return;
     if (nk_ui_begin_container(ui, SET_ID_ENHANCED_DETAIL_BODY, &body, NULL)) {
-        if (detail->focused) nk_ui_eyebrow(ui, SET_ID_TEXT + 0x701u, "Focused option");
+        if (detail->focused) nk_ui_eyebrow(ui, SET_ID_TEXT + 0x701u, NK_UI_STR(SETTINGS_FOCUSED_OPTION));
         nk_ui_text(ui, SET_ID_TEXT + 0x702u,
-                   nk_ui_text_break(ui, safe_text(detail->name, "Enhanced"), &name, column),
+                   nk_ui_text_break(ui, safe_text(detail->name, NK_UI_STR(SETTINGS_ENHANCED)), &name, column),
                    &name);
         if (detail->value != NULL && detail->value[0] != '\0') {
             nk_ui_text(ui, SET_ID_TEXT + 0x703u,
@@ -1448,8 +1464,8 @@ static void settings_enhanced_row_detail(SettingsEnhancedDetail *detail,
     detail->tag = row->tag;
     /* Whose value it is; a value the page forces (a dimmed row's Off) is nobody's choice. */
     detail->scope = !title ? NULL
-                    : row->inherited ? "Library default"
-                    : row->disabled ? NULL : "This game";
+                    : row->inherited ? NK_UI_STR(SETTINGS_LIBRARY_DEFAULT)
+                    : row->disabled ? NULL : NK_UI_STR(SETTINGS_THIS_GAME);
     detail->value_muted = row->inherited || row->disabled;
 }
 
@@ -1552,12 +1568,12 @@ static bool settings_enhanced_row_blank(NkUi *ui, const SettingsEnhancedWindow *
 
 const char *player_ui_enhanced_group_label(PlayerUiEnhancedGroup group) {
     switch (group) {
-    case PLAYER_UI_ENHANCED_GROUP_PICTURE: return "Picture";
-    case PLAYER_UI_ENHANCED_GROUP_MOTION: return "Motion";
-    case PLAYER_UI_ENHANCED_GROUP_SOUND: return "Sound";
-    case PLAYER_UI_ENHANCED_GROUP_CONTROLS: return "Controls";
-    case PLAYER_UI_ENHANCED_GROUP_ON_SCREEN: return "On-screen";
-    case PLAYER_UI_ENHANCED_GROUP_ADVANCED: return "Advanced";
+    case PLAYER_UI_ENHANCED_GROUP_PICTURE: return NK_UI_STR(SETTINGS_PICTURE);
+    case PLAYER_UI_ENHANCED_GROUP_MOTION: return NK_UI_STR(SETTINGS_MOTION);
+    case PLAYER_UI_ENHANCED_GROUP_SOUND: return NK_UI_STR(SETTINGS_SOUND);
+    case PLAYER_UI_ENHANCED_GROUP_CONTROLS: return NK_UI_STR(SETTINGS_CONTROLS);
+    case PLAYER_UI_ENHANCED_GROUP_ON_SCREEN: return NK_UI_STR(SETTINGS_ON_SCREEN);
+    case PLAYER_UI_ENHANCED_GROUP_ADVANCED: return NK_UI_STR(SETTINGS_ADVANCED);
     default: return "";
     }
 }
@@ -1567,15 +1583,17 @@ const char *player_ui_enhanced_group_label(PlayerUiEnhancedGroup group) {
    the longer Frame pacing word. The rows themselves show the model's words (model->preset,
    model->pacing). */
 static const char *const k_enhanced_preset_widths[] = {
-    [PLAYER_PRESET_CUSTOM] = "Custom", [PLAYER_PRESET_LOW] = "Low",
-    [PLAYER_PRESET_MEDIUM] = "Medium", [PLAYER_PRESET_HIGH] = "High",
-    [PLAYER_PRESET_ULTRA] = "Ultra",   [PLAYER_PRESET_HANDHELD] = "Handheld"
+    [PLAYER_PRESET_CUSTOM] = NK_UI_STR(SETTINGS_PRESET_CUSTOM),
+    [PLAYER_PRESET_LOW] = NK_UI_STR(SETTINGS_PRESET_LOW),
+    [PLAYER_PRESET_MEDIUM] = NK_UI_STR(SETTINGS_PRESET_MEDIUM),
+    [PLAYER_PRESET_HIGH] = NK_UI_STR(SETTINGS_PRESET_HIGH),
+    [PLAYER_PRESET_ULTRA] = NK_UI_STR(SETTINGS_PRESET_ULTRA),
+    [PLAYER_PRESET_HANDHELD] = NK_UI_STR(SETTINGS_PRESET_HANDHELD)
 };
 /* A preset added after Handheld fails to compile here until it has its word above. */
 typedef char settings_enhanced_preset_widths_name_every_preset[
     sizeof(k_enhanced_preset_widths) / sizeof(k_enhanced_preset_widths[0]) == PLAYER_PRESET_COUNT
         ? 1 : -1];
-#define ENHANCED_PACING_WIDEST "No extra cap"
 
 static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inner, float height,
                          PlayerUiAction *result) {
@@ -1583,8 +1601,9 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
         SET_ID(0x000500u), SET_ID(0x000504u), SET_ID(0x000508u), SET_ID(0x00050Cu),
         SET_ID(0x000510u), SET_ID(0x000514u)
     };
-    const char *const preset = safe_text(model->preset, "Custom");
-    const char *const pacing = safe_text(model->pacing, "PSP timing");
+    const char *const mode = safe_text(model->enhanced_mode, NK_UI_STR(ADAPTER_MODE_AUTHENTIC));
+    const char *const preset = safe_text(model->preset, NK_UI_STR(SETTINGS_PRESET_CUSTOM));
+    const char *const pacing = safe_text(model->pacing, NK_UI_STR(SETTINGS_PACING_PSP_TIMING));
     const NkUiTheme *theme = nk_ui_theme(ui);
     const bool title = model->enhanced_title != NULL;
     const bool has_notice = model->notice != NULL && model->notice[0] != '\0';
@@ -1600,7 +1619,6 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     const char *lead;
     char lead_text[256];
     int active_group = model->enhanced_tab;
-    int mode_index;
     int tab_rows[PLAYER_UI_ENHANCED_GROUP_COUNT] = {0};
     int most_rows = 0;
     int visible_rows;
@@ -1643,21 +1661,16 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     memset(&first_detail, 0, sizeof(first_detail));
     if (title) {
         (void)snprintf(lead_text, sizeof(lead_text),
-                       "For %s alone. Library follows Settings > Enhanced.",
+                       NK_UI_STR(SETTINGS_ENHANCED_TITLE_LEAD_FORMAT),
                        model->enhanced_title);
         lead = nk_ui_frame_text(ui, lead_text);
     } else {
-        lead = "Enhanced adds modern touches that work for every game, such as sharper "
-               "textures and crisp system text. The games themselves run as released.";
+        lead = NK_UI_STR(SETTINGS_ENHANCED_LIBRARY_LEAD);
     }
     /* -1: the mode is none of the list's, a saved Ace whose package has gone. It sits where
        Ace would, after the last mode: Right goes round to the first, Left to the last, as the
        select button steps it (player_app_cycle_title_play_mode). */
-    mode_index = -1;
-    for (int i = 0; i < model->enhanced_mode_count; ++i) {
-        if (strcmp(safe_text(model->enhanced_mode, ""),
-                   safe_text(model->enhanced_modes[i], "")) == 0) mode_index = i;
-    }
+    const int mode_index = model->enhanced_mode_index;
     for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
         int group = (int)model->enhanced_rows[i].group;
         if (group >= 0 && group < PLAYER_UI_ENHANCED_GROUP_COUNT) ++tab_rows[group];
@@ -1685,7 +1698,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     box_width = settings_enhanced_stepper_width(
         ui, k_enhanced_preset_widths,
         (int)(sizeof(k_enhanced_preset_widths) / sizeof(k_enhanced_preset_widths[0])),
-        ENHANCED_PACING_WIDEST);
+        NK_UI_STR(SETTINGS_PACING_NO_EXTRA_CAP));
     {
         float modes = settings_enhanced_stepper_width(ui, model->enhanced_modes,
                                                       model->enhanced_mode_count, NULL);
@@ -1724,8 +1737,9 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     }
     page = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), ENHANCED_PAGE_GAP);
     if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_PAGE, &page, NULL)) return;
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, title ? "Game" : "Settings", theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, "Enhanced", NK_UI_TYPE_TITLE, theme->paper);
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, title ? NK_UI_STR(SETTINGS_GAME) : NK_UI_STR(SETTINGS_SECTION),
+        theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_ENHANCED), NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD, lead, NK_UI_TYPE_BODY_S, theme->muted);
     {
         NkUiLayout main = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
@@ -1749,12 +1763,11 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                 int step = 0;
                 bool activated = false;
                 if (settings_enhanced_step_row(ui, PLAYER_UI_ID_SETTINGS_PRESET,
-                                               "Graphics preset", preset, row_width, box_width,
+                                               NK_UI_STR(SETTINGS_GRAPHICS_PRESET), preset, row_width, box_width,
                                                0u, 0u, false, &step, &activated)) {
                     settings_enhanced_control_detail(
-                        &detail, "Graphics preset", preset,
-                        "Library-wide for Enhanced and Ace; Authentic ignores it, and each "
-                        "game's part choices win.",
+                        &detail, NK_UI_STR(SETTINGS_GRAPHICS_PRESET), preset,
+                        NK_UI_STR(SETTINGS_ENHANCED_PRESET_EXPLANATION),
                         model->preset_notice, NULL);
                     have_detail = true;
                 }
@@ -1764,12 +1777,12 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                 }
                 /* Up and Down between the play mode and the list go by the active tab, which
                    may sit far to one side of these full-width rows. */
-                if (settings_enhanced_step_row(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, "Play mode",
-                                               safe_text(model->enhanced_mode, "Authentic"),
+                if (settings_enhanced_step_row(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, NK_UI_STR(SETTINGS_PLAY_MODE),
+                                               mode,
                                                row_width, box_width, 0u, active_tab_id, false,
                                                &step, &activated)) {
                     settings_enhanced_control_detail(
-                        &detail, "Play mode", safe_text(model->enhanced_mode, "Authentic"),
+                        &detail, NK_UI_STR(SETTINGS_PLAY_MODE), mode,
                         model->enhanced_mode_sentence, NULL, NULL);
                     have_detail = true;
                 }
@@ -1856,15 +1869,15 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                             /* The library's frame pacing (fps_cap): one value for every game. */
                             settings_enhanced_list_divider(ui, &placed);
                             focused = settings_enhanced_step_row(
-                                ui, id, "Frame pacing", pacing, row_width, box_width,
+                                ui, id, NK_UI_STR(SETTINGS_FRAME_PACING), pacing, row_width, box_width,
                                 placed.listed == 0 ? active_tab_id : 0u, 0u,
                                 settings_enhanced_row_blank(ui, &window, placed.listed, id),
                                 &step, &activated);
                             if (focused) {
                                 /* fps_cap is the library's: a game's page says so. */
-                                settings_enhanced_control_detail(&detail, "Frame pacing", pacing,
+                                settings_enhanced_control_detail(&detail, NK_UI_STR(SETTINGS_FRAME_PACING), pacing,
                                                                  model->pacing_sentence, NULL,
-                                                                 title ? "All games" : NULL);
+                                                                 title ? NK_UI_STR(SETTINGS_ALL_GAMES) : NULL);
                                 have_detail = true;
                             }
                             if (step != 0 || activated) {
@@ -1874,19 +1887,20 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                         }
                         if (active_group == PLAYER_UI_ENHANCED_GROUP_PICTURE &&
                             model->texpack_row) {
-                            const char *pack = safe_text(model->texpack_value, "None");
+                            const char *pack = safe_text(model->texpack_value, NK_UI_STR(SETTINGS_NONE));
                             NkUiId id = PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE;
                             bool focused;
                             settings_enhanced_list_divider(ui, &placed);
                             focused = settings_enhanced_action_row(
-                                ui, id, "Texture pack folder", model->texpack_value, "Choose",
+                                ui, id, NK_UI_STR(SETTINGS_TEXTURE_PACK_FOLDER), model->texpack_value,
+                                    NK_UI_STR(SETTINGS_CHOOSE),
                                 row_width, placed.listed == 0 ? active_tab_id : 0u,
                                 settings_enhanced_row_blank(ui, &window, placed.listed, id),
                                 result, PLAYER_UI_SETTINGS_CHOOSE_TEXPACK);
                             if (focused) {
-                                settings_enhanced_control_detail(&detail, "Texture pack folder",
+                                settings_enhanced_control_detail(&detail, NK_UI_STR(SETTINGS_TEXTURE_PACK_FOLDER),
                                                                  pack, model->texpack_sentence,
-                                                                 NULL, "This game");
+                                                                 NULL, NK_UI_STR(SETTINGS_THIS_GAME));
                                 have_detail = true;
                             }
                             settings_enhanced_list_added(&placed, id, focused);
@@ -1894,15 +1908,15 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                                 id = PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE;
                                 settings_enhanced_list_divider(ui, &placed);
                                 focused = settings_enhanced_action_row(
-                                    ui, id, "Remove texture pack", NULL, "Remove", row_width, 0u,
+                                    ui, id, NK_UI_STR(SETTINGS_REMOVE_TEXTURE_PACK), NULL,
+                                        NK_UI_STR(SETTINGS_REMOVE), row_width, 0u,
                                     settings_enhanced_row_blank(ui, &window, placed.listed, id),
                                     result, PLAYER_UI_SETTINGS_REMOVE_TEXPACK);
                                 if (focused) {
                                     settings_enhanced_control_detail(
-                                        &detail, "Remove texture pack", pack,
-                                        "Forgets the folder for this game. The folder is not "
-                                        "deleted.",
-                                        NULL, "This game");
+                                        &detail, NK_UI_STR(SETTINGS_REMOVE_TEXTURE_PACK), pack,
+                                        NK_UI_STR(SETTINGS_TEXTURE_PACK_REMOVAL_EXPLANATION),
+                                        NULL, NK_UI_STR(SETTINGS_THIS_GAME));
                                     have_detail = true;
                                 }
                                 settings_enhanced_list_added(&placed, id, focused);
@@ -1969,7 +1983,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
         NkUiLayout actions = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
         if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &actions, NULL)) {
             /* Up from Back enters the list at its end, whatever tab sits above the button. */
-            if (nk_ui_button_between(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back",
+            if (nk_ui_button_between(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK),
                                      NK_UI_BUTTON_PRIMARY, placed.last_row, 0u)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_BACK);
             }
@@ -1989,7 +2003,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
    gap under it (docs/PLAYER_UI_DESIGN.md spacing scale). */
 #define ONLINE_PLAY_SECTION_GAP NK_UI_SPACE_4
 #define ONLINE_PLAY_HEADING_GAP NK_UI_SPACE_2
-#define ONLINE_PLAY_CHECK "\xE2\x9C\x93"
+#define ONLINE_PLAY_CHECK NK_UI_STR(SETTINGS_CHECK_MARK)
 #define SET_ID_ONLINE_PLAY_LIST_ROW (SET_ID_TEXT + 0x7E0u)
 #define SET_ID_ONLINE_PLAY_LIST (SET_ID_TEXT + 0x7E1u)
 #define SET_ID_ONLINE_PLAY_TRACK (SET_ID_TEXT + 0x7E2u)
@@ -2022,7 +2036,7 @@ static float settings_online_play_chips_width(NkUi *ui, const char *chip, bool c
     if (current) {
         if (width > 0.0f) width += ONLINE_PLAY_CHIP_GAP;
         width += ceilf(nk_ui_text_width(ui, ONLINE_PLAY_CHECK, &label)) + 6.0f +
-                 ceilf(nk_ui_text_width(ui, nk_ui_caps(ui, "Current"), &label)) + 2.0f * 10.0f;
+                 ceilf(nk_ui_text_width(ui, nk_ui_caps(ui, NK_UI_STR(SETTINGS_CURRENT)), &label)) + 2.0f * 10.0f;
     }
     return width;
 }
@@ -2033,7 +2047,7 @@ static const char *settings_online_play_host_line(NkUi *ui, const PlayerUiOnline
     const char *host = safe_text(row->host, "");
     const char *where = safe_text(row->line, "");
     if (!row->listed || where[0] == '\0') return host;
-    (void)snprintf(line, sizeof(line), "%s \xC2\xB7 %s", host, where);
+    (void)snprintf(line, sizeof(line), NK_UI_STR(SETTINGS_SERVER_HOST_LOCATION_FORMAT), host, where);
     return nk_ui_frame_text(ui, line);
 }
 
@@ -2158,7 +2172,7 @@ static bool settings_online_play_row(NkUi *ui, NkUiId id, const char *name, cons
             if (nk_ui_begin_container(ui, nk_ui_child_id(id, 4u), &tags, NULL)) {
                 if (chip != NULL && chip[0] != '\0') nk_ui_tag(ui, nk_ui_child_id(id, 5u), chip);
                 if (current) {
-                    nk_ui_status_pill(ui, nk_ui_child_id(id, 6u), ONLINE_PLAY_CHECK, "Current",
+                    nk_ui_status_pill(ui, nk_ui_child_id(id, 6u), ONLINE_PLAY_CHECK, NK_UI_STR(SETTINGS_CURRENT),
                                       theme->ready);
                 }
                 nk_ui_end_container(ui);
@@ -2370,12 +2384,12 @@ static void settings_online_play_keep_focus_in_view(NkUi *ui, const char *const 
    it a view less one line, so its first lines and the server's name can be read by keyboard or
    controller before choosing; the wheel, a drag and touch scroll it as any card does. Returns
    whether the card scrolls, so it can say how. */
-static bool settings_online_play_card_scroll(NkUi *ui) {
+static bool settings_card_scroll(NkUi *ui, NkUiId scroller) {
     NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
     float line = nk_ui_line_height(ui, &body);
     NkUiScrollState state;
     NkUiNavDir page;
-    const bool known = nk_ui_scroll_state(ui, FLOW_ID_CARD, &state);
+    const bool known = nk_ui_scroll_state(ui, scroller, &state);
     float offset = known ? state.offset : 0.0f;
     const float start = offset;
     while (nk_ui_take_event(ui, NK_UI_EV_PAGE, &page)) {
@@ -2384,20 +2398,43 @@ static bool settings_online_play_card_scroll(NkUi *ui) {
     }
     if (known && offset > state.max_offset) offset = state.max_offset;
     if (offset < 0.0f) offset = 0.0f;
-    if (fabsf(offset - start) >= 0.5f) nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
+    if (fabsf(offset - start) >= 0.5f) nk_ui_scroll_to(ui, scroller, offset);
     return known && state.max_offset > 0.5f;
+}
+
+static bool settings_online_play_card_scroll(NkUi *ui) {
+    return settings_card_scroll(ui, FLOW_ID_CARD);
+}
+
+/* The most a consent card's scrolling text may take: what the card, at most the room between
+   the bars (scr_flow_begin), leaves after its fixed lines and buttons, as the last layout
+   measured them (the card's content less the text's own height). Before a first layout, half
+   the card; never under three lines, so a window too small for that scrolls the card too. */
+static float settings_consent_text_max(NkUi *ui, NkUiId text, float height) {
+    const NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    const float least = 3.0f * nk_ui_line_height(ui, &body);
+    const float card = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
+                       2.0f * NK_UI_SPACE_4;
+    NkUiScrollState card_state;
+    NkUiScrollState text_state;
+    float room = card * 0.5f;
+    if (nk_ui_scroll_state(ui, FLOW_ID_CARD, &card_state) &&
+        nk_ui_scroll_state(ui, text, &text_state)) {
+        room = card - (card_state.viewport + card_state.max_offset - text_state.viewport);
+    }
+    return room > least ? floorf(room) : least;
 }
 
 static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float width,
                             float height, PlayerUiAction *result) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Back to settings"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(SETTINGS_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(SETTINGS_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(SETTINGS_BACK_TO_SETTINGS)}
     };
     static const NkUiPromptItem enhanced_prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_TAB_PREV, "Prev tab"},
-        {NK_UI_PROMPT_ACT_TAB_NEXT, "Next tab"},
-        {NK_UI_PROMPT_ACT_CONFIRM, "Change value"}, {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(SETTINGS_MOVE)}, {NK_UI_PROMPT_ACT_TAB_PREV, NK_UI_STR(SETTINGS_PREV_TAB)},
+        {NK_UI_PROMPT_ACT_TAB_NEXT, NK_UI_STR(SETTINGS_NEXT_TAB)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(SETTINGS_CHANGE_VALUE)}, {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(SETTINGS_BACK)}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
     float inner = scr_flow_begin(ui, width, height,
@@ -2409,15 +2446,15 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
     if (inner <= 0.0f) return;
     switch (model->page) {
     case PLAYER_UI_SETTINGS_PAGE_ONLINE:
-        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Online and developer options", NK_UI_TYPE_TITLE,
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_SECTION), theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_ONLINE_AND_DEVELOPER_OPTIONS), NK_UI_TYPE_TITLE,
                         theme->paper);
         /* RetroAchievements is its own opt-in; the news/reports online mode remains unbuilt.
            The warning says the feature stays off only while it is off: once the player has
            turned it on and agreed, the line would be wrong, so it goes. */
         const char *online_line = model->achievements_enabled ? NULL
             : model->achievements_available
-            ? "RetroAchievements stays off until you turn it on and agree to what is sent."
+            ? NK_UI_STR(SETTINGS_ACHIEVEMENTS_OFF_PENDING_CONSENT)
             : SCR_ONLINE_NOT_BUILT_LINE;
         if (online_line != NULL) {
             nk_ui_text_role(ui, FLOW_ID_LEAD, online_line, NK_UI_TYPE_BODY_S, theme->warning);
@@ -2425,18 +2462,19 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         /* Online play's button reads "On (host)" while the whole host fits on it in half the
            row; a host wider than that moves, whole, to the start of the row's sentence and
            the button reads "On", so no host is cut to an ellipsis (#1139). */
-        const char *online_play_value = safe_text(model->online_play_row_value, "Off");
+        const char *online_play_value = safe_text(model->online_play_row_value, NK_UI_STR(SETTINGS_OFF));
         const char *online_play_sentence = SCR_ONLINE_PLAY_ROW_SENTENCE;
         bool online_play_host_in_sentence = false;
         if (model->online_play && model->online_play_server && model->online_play_server[0]) {
             char label[320];
-            (void)snprintf(label, sizeof label, "Online play: %s", online_play_value);
+            (void)snprintf(label, sizeof label, NK_UI_STR(FORM_NAME_VALUE_FORMAT),
+                NK_UI_STR(SETTINGS_ONLINE_PLAY), online_play_value);
             if (nk_ui_button_width(ui, label, 0u) > (inner - 32.0f) * 0.5f) {
                 char sentence[512];
-                (void)snprintf(sentence, sizeof sentence, "On with %s. %s",
+                (void)snprintf(sentence, sizeof sentence, NK_UI_STR(SETTINGS_ONLINE_PLAY_ON_WITH_HOST_FORMAT),
                                model->online_play_server, SCR_ONLINE_PLAY_ROW_SENTENCE);
                 const NkUiTextStyle sentence_style = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
-                online_play_value = "On";
+                online_play_value = NK_UI_STR(SETTINGS_ON);
                 /* Broken inside the host where it is wider than the row, as the Online play
                    page's server sentence is (nk_ui_text_break); the rows stack below. */
                 online_play_sentence = nk_ui_text_break(ui, sentence, &sentence_style,
@@ -2454,51 +2492,51 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                that would be cut makes them all stack. The Nickname button's value is clamped
                to half the column, so only its name counts for the column's width. */
             static const char k_cover_art_sentence[] =
-                "Fetch Redump-matched box art from thumbnails.libretro.com to cache; "
-                "unmatched discs keep disc art.";
+                NK_UI_STR(SETTINGS_COVER_ART_EXPLANATION);
             /* Cheats (#2639): the user's own CWCheat file; the game marks a run that applies one. */
             static const char k_cheats_sentence[] =
-                "Apply your CWCheat file, cheats/<disc ID>.ini in the data folder. "
-                "The game shows a marker while any cheat is on.";
+                NK_UI_STR(SETTINGS_CHEATS_EXPLANATION);
             WizardRow rows[9];
             size_t row_count = 0u;
             if (model->online_mode) {
-                rows[row_count++] = (WizardRow){"Online mode", "On",
+                rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_ONLINE_MODE), NK_UI_STR(SETTINGS_ON),
                                                 SCR_ONLINE_STORED_ON_SENTENCE};
             }
-            rows[row_count++] = (WizardRow){"Developer mode",
-                                            model->developer_mode ? "On" : "Off",
+            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_DEVELOPER_MODE),
+                                            settings_on_off(model->developer_mode),
                                             WIZARD_DEVELOPER_SENTENCE};
             if (discord_row) {
-                rows[row_count++] = (WizardRow){"Discord status",
-                                                model->discord_presence ? "On" : "Off",
+                rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_DISCORD_STATUS),
+                                                settings_on_off(model->discord_presence),
                                                 discord_sentence};
             }
-            rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
-            rows[row_count++] = (WizardRow){"Online play", online_play_value,
+            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_NICKNAME), "", SCR_NICKNAME_SENTENCE};
+            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_ONLINE_PLAY), online_play_value,
                                             online_play_sentence};
-            rows[row_count++] = (WizardRow){"Download cover art",
+            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_DOWNLOAD_COVER_ART),
                                             settings_on_off(model->download_cover_art),
                                             k_cover_art_sentence};
-            rows[row_count++] = (WizardRow){"Cheats", settings_on_off(model->cheats),
+            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_CHEATS), settings_on_off(model->cheats),
                                             k_cheats_sentence};
             /* RetroAchievements (#1316) comes last: where it can run it adds a switch, and the
                rows above keep their keyboard order on every platform. */
             rows[row_count++] = (WizardRow){
-                "Achievements",
-                model->achievements_enabled ? "On" : model->achievements_available ? "Off" : "Unavailable",
+                NK_UI_STR(SETTINGS_ACHIEVEMENTS),
+                model->achievements_available || model->achievements_enabled
+                    ? settings_on_off(model->achievements_enabled) : NK_UI_STR(SETTINGS_UNAVAILABLE),
                 model->achievements_available
                     ? SCR_ACHIEVEMENTS_SENTENCE
                     : SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE};
             if (model->achievements_enabled) {
                 rows[row_count++] = (WizardRow){SCR_ACHIEVEMENTS_ACCOUNT_NAME,
                                                 model->achievements_signed_in
-                                                    ? safe_text(model->achievements_account, "Signed in")
-                                                    : "Sign in",
+                                                    ? safe_text(model->achievements_account,
+                                                        NK_UI_STR(SETTINGS_SIGNED_IN))
+                                                    : NK_UI_STR(SETTINGS_SIGN_IN),
                                                 safe_text(model->achievements_status,
                                                           model->achievements_signed_in
-                                                              ? "Signed in."
-                                                              : "Sign in to connect.")};
+                                                              ? NK_UI_STR(SETTINGS_SIGNED_IN_STATUS)
+                                                              : NK_UI_STR(SETTINGS_SIGN_IN_TO_CONNECT))};
             }
             /* The RetroAchievements row's button carries the account name, of any length, which
                widens the button column; while it shows, a sentence the column would cut goes
@@ -2509,18 +2547,18 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             if (online_play_host_in_sentence) column.stacked = true;
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
-                                  "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
+                                  NK_UI_STR(SETTINGS_ONLINE_MODE), SCR_ONLINE_STORED_ON_SENTENCE, true,
                                   inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ONLINE);
             }
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_DEVELOPER, SET_ID_TEXT + 0x90u,
-                              "Developer mode", WIZARD_DEVELOPER_SENTENCE,
+                              NK_UI_STR(SETTINGS_DEVELOPER_MODE), WIZARD_DEVELOPER_SENTENCE,
                               model->developer_mode, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DEVELOPER);
             }
             if (discord_row &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_DISCORD, SET_ID_TEXT + 0xB0u,
-                                  "Discord status", discord_sentence, model->discord_presence,
+                                  NK_UI_STR(SETTINGS_DISCORD_STATUS), discord_sentence, model->discord_presence,
                                   inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
             }
@@ -2529,7 +2567,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                    editor. A long one is shortened here. */
                 NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
                 if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_NICKNAME, SET_ID_TEXT + 0xB4u,
-                                     "Nickname",
+                                     NK_UI_STR(SETTINGS_NICKNAME),
                                      nk_ui_text_clamp(ui, safe_text(model->nickname,
                                                                     NK_NICKNAME_DEFAULT),
                                                       &value, column.cell * 0.5f, 1),
@@ -2539,24 +2577,24 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 }
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY, SET_ID_TEXT + 0xA8u,
-                                 "Online play", online_play_value, online_play_sentence,
+                                 NK_UI_STR(SETTINGS_ONLINE_PLAY), online_play_value, online_play_sentence,
                                  model->online_play, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY);
             }
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_COVER_ART, SET_ID_TEXT + 0xB8u,
-                                  "Download cover art", k_cover_art_sentence,
+                                  NK_UI_STR(SETTINGS_DOWNLOAD_COVER_ART), k_cover_art_sentence,
                                   model->download_cover_art, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_COVER_ART);
             }
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_CHEATS, SET_ID_TEXT + 0xBCu,
-                                  "Cheats", k_cheats_sentence, model->cheats, inner - 32.0f,
+                                  NK_UI_STR(SETTINGS_CHEATS), k_cheats_sentence, model->cheats, inner - 32.0f,
                                   &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_CHEATS);
             }
             /* One row: the switch where the feature can run, the reason where it cannot. */
             if (model->achievements_available || model->achievements_enabled) {
                 if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
-                                      "Achievements",
+                                      NK_UI_STR(SETTINGS_ACHIEVEMENTS),
                                       SCR_ACHIEVEMENTS_SENTENCE,
                                       model->achievements_enabled, inner - 32.0f, &column)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
@@ -2564,7 +2602,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             } else {
                 (void)scr_wizard_value_state(
                     ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
-                    "Achievements", "Unavailable",
+                    NK_UI_STR(SETTINGS_ACHIEVEMENTS), NK_UI_STR(SETTINGS_UNAVAILABLE),
                     SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE,
                     false, true, inner - 32.0f, &column);
             }
@@ -2572,12 +2610,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT,
                                  SET_ID_TEXT + 0xF4u, SCR_ACHIEVEMENTS_ACCOUNT_NAME,
                                  model->achievements_signed_in
-                                     ? safe_text(model->achievements_account, "Signed in")
-                                     : "Sign in",
+                                     ? safe_text(model->achievements_account, NK_UI_STR(SETTINGS_SIGNED_IN))
+                                     : NK_UI_STR(SETTINGS_SIGN_IN),
                                  safe_text(model->achievements_status,
                                            model->achievements_signed_in
-                                               ? "Signed in."
-                                               : "Sign in to connect."),
+                                               ? NK_UI_STR(SETTINGS_SIGNED_IN_STATUS)
+                                               : NK_UI_STR(SETTINGS_SIGN_IN_TO_CONNECT)),
                                  model->achievements_signed_in, inner - 32.0f, &column)) {
                 *result = settings_op(model->achievements_signed_in
                                           ? PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS
@@ -2590,12 +2628,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK), NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 if (model->developer_mode &&
                     nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG,
-                                 "Open developer log (F12)", 0u)) {
+                                 NK_UI_STR(SETTINGS_OPEN_DEVELOPER_LOG_F12), 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_OPEN_DEVELOPER_LOG);
                 }
                 nk_ui_end_container(ui);
@@ -2605,40 +2643,38 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
     case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY: {
         /* Online play (#1139): the switch, the server, the console ID and the port offset. The
            switch never turns it on by itself: Off opens the consent card for the server shown. */
-        char console_line[160];
+        const char *console_line = NK_UI_STR(SETTINGS_ONLINE_PLAY_NO_CONSOLE_ID);
+        char console_id_line[160 + sizeof(NK_UI_STR(SETTINGS_ONLINE_PLAY_CONSOLE_ID_FORMAT))];
         const char *switch_sentence = model->online_play ? SCR_ONLINE_PLAY_ON_SENTENCE
                                                          : SCR_ONLINE_PLAY_OFF_SENTENCE;
         const char *server = safe_text(model->online_play_server, NK_ADHOC_DEFAULT_SERVER);
         /* No list names the server (typed in, or from PPSSPP's list while it is not loaded). */
-        const char *server_name = safe_text(model->online_play_server_label, "Other server");
-        char server_label[NK_ADHOC_SERVER_MAX_LEN + 16u];
+        const char *server_name = safe_text(model->online_play_server_label, NK_UI_STR(SETTINGS_OTHER_SERVER));
+        char server_label[SCR_WIZARD_LABEL_MAX];
         char server_sentence[NK_ADHOC_SERVER_MAX_LEN + 192u];
         bool server_fits;
         if (model->online_play_console_id_shown) {
-            snprintf(console_line, sizeof(console_line),
-                     "Console ID: %s. Nakagawa made it at random for this PC's games. It is not "
-                     "your PC's hardware address.",
+            snprintf(console_id_line, sizeof(console_id_line),
+                     NK_UI_STR(SETTINGS_ONLINE_PLAY_CONSOLE_ID_FORMAT),
                      safe_text(model->online_play_console_id, ""));
-        } else {
-            snprintf(console_line, sizeof(console_line), "%s",
-                     "Console ID: none yet. Nakagawa makes a random one the first time a game "
-                     "asks for it. It is not your PC's hardware address.");
+            console_line = console_id_line;
         }
         /* The host is never cut: on the button while "Server: host" fits the row, else the
            button reads "Server: Choose" and the host leads its sentence, which wraps whole. */
-        snprintf(server_label, sizeof(server_label), "Server: %s", server);
+        snprintf(server_label, sizeof(server_label), NK_UI_STR(FORM_NAME_VALUE_FORMAT),
+            NK_UI_STR(SETTINGS_SERVER), server);
         server_fits = nk_ui_button_width(ui, server_label, 0u) <= inner - 32.0f;
         if (server_fits) {
             snprintf(server_sentence, sizeof(server_sentence),
-                     "%s. Choose to pick another.",
+                     NK_UI_STR(SETTINGS_ONLINE_PLAY_SERVER_PICK_FORMAT),
                      server_name);
         } else {
             snprintf(server_sentence, sizeof(server_sentence),
-                     "%s: %s. Choose to pick another.",
+                     NK_UI_STR(SETTINGS_ONLINE_PLAY_SERVER_HOST_PICK_FORMAT),
                      server, server_name);
         }
-        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_SECTION), theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_ONLINE_PLAY), NK_UI_TYPE_TITLE, theme->paper);
         {
             const char *lines[] = {console_line, model->online_play_console_note,
                                    model->online_play_status, server_sentence};
@@ -2647,9 +2683,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_LEAD, NK_UI_TYPE_BODY_S, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             WizardRow rows[3] = {
-                {"Online play", model->online_play ? "On" : "Off", switch_sentence},
-                {"Server", server_fits ? server : "Choose", server_sentence},
-                {"Port offset", safe_text(model->online_play_port_offset, "10000"),
+                {NK_UI_STR(SETTINGS_ONLINE_PLAY), settings_on_off(model->online_play), switch_sentence},
+                {NK_UI_STR(SETTINGS_SERVER), server_fits ? server : NK_UI_STR(SETTINGS_CHOOSE), server_sentence},
+                {NK_UI_STR(SETTINGS_PORT_OFFSET), safe_text(model->online_play_port_offset, "10000"),
                  SCR_ONLINE_PLAY_PORT_SENTENCE}
             };
             /* A sentence two lines cannot hold moves every sentence under its button, at any
@@ -2663,17 +2699,17 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                     inner - 32.0f);
             }
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE,
-                                  SET_ID_TEXT + 0x600u, "Online play", switch_sentence,
+                                  SET_ID_TEXT + 0x600u, NK_UI_STR(SETTINGS_ONLINE_PLAY), switch_sentence,
                                   model->online_play, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY);
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET,
-                                 SET_ID_TEXT + 0x604u, "Server", rows[1].value,
+                                 SET_ID_TEXT + 0x604u, NK_UI_STR(SETTINGS_SERVER), rows[1].value,
                                  rows[1].sentence, false, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY_SERVERS);
             }
             if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PORT,
-                                 SET_ID_TEXT + 0x610u, "Port offset",
+                                 SET_ID_TEXT + 0x610u, NK_UI_STR(SETTINGS_PORT_OFFSET),
                                  safe_text(model->online_play_port_offset, "10000"),
                                  SCR_ONLINE_PLAY_PORT_SENTENCE, false, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_PORT);
@@ -2686,7 +2722,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
             nk_ui_text_role(ui, SET_ID_TEXT + 0x60Cu,
                             safe_text(model->online_play_status,
-                                      "Online play is off. Nothing connects."),
+                                      NK_UI_STR(SETTINGS_ONLINE_PLAY_OFF_STATUS)),
                             NK_UI_TYPE_BODY_S,
                             model->online_play ? theme->ready : theme->muted);
             nk_ui_end_container(ui);
@@ -2696,12 +2732,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK), NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 /* A game keeps the console ID it started with, so the button waits for it to
                    close; with none yet there is nothing to replace. */
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONSOLE_ID, "New console ID",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONSOLE_ID, NK_UI_STR(SETTINGS_NEW_CONSOLE_ID),
                                  model->online_play_console_id_shown &&
                                          !model->online_play_console_id_locked
                                      ? 0u : NK_UI_BUTTON_DISABLED)) {
@@ -2715,7 +2751,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
     case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD: {
         /* The consent card (owner's wording of 2026-11-19 and 2026-11-20): it names the exact
            server each time, and it is the only way Online play turns on. */
-        char server_line[NK_ADHOC_SERVER_MAX_LEN + 96u];
+        char server_line[NK_ADHOC_SERVER_MAX_LEN +
+                         sizeof(NK_UI_STR(SETTINGS_ONLINE_CONSENT_EXACT_HOST_AND_PORTS_FORMAT)) + 10u];
         char nickname_line[160];
         const char *server = safe_text(model->online_play_card_server, NK_ADHOC_DEFAULT_SERVER);
         const bool scrolls = settings_online_play_card_scroll(ui);
@@ -2728,20 +2765,18 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             if (host[0] != '\0' && model->online_play_card_lobby_port != 0u &&
                 model->online_play_card_data_port != 0u) {
                 snprintf(server_line, sizeof(server_line),
-                         "To do this, Nakagawa connects to %s on ports %u and %u. This is a "
-                         "community server. Nakagawa does not run it.",
+                         NK_UI_STR(SETTINGS_ONLINE_CONSENT_EXACT_HOST_AND_PORTS_FORMAT),
                          host, model->online_play_card_lobby_port,
                          model->online_play_card_data_port);
             } else {
                 snprintf(server_line, sizeof(server_line),
-                         "To do this, Nakagawa connects to %s. This is a community server. "
-                         "Nakagawa does not run it.", server);
+                         NK_UI_STR(SETTINGS_ONLINE_CONSENT_HOST_FORMAT), server);
             }
         }
         /* The login sends the console nickname, the registry's owner_name: this setting unless
            a game saved its own there (hle_network.c adhoc_fill_nickname). */
         snprintf(nickname_line, sizeof(nickname_line),
-                 "- Your Nickname: %s, or the one a game saved instead.",
+                 NK_UI_STR(SETTINGS_ONLINE_CONSENT_NICKNAME_FORMAT),
                  safe_text(model->nickname, NK_NICKNAME_DEFAULT));
         /* The eyebrow names the server where it fits on its one line; a host too long for it
            (a player's own) is named whole in the card's first line, broken inside the host
@@ -2749,68 +2784,60 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND,
                          nk_ui_text_width(ui, nk_ui_caps(ui, server), &eyebrow_style) +
                                  2.0f * NK_UI_SPACE_5 <= inner
-                             ? server : "Online play",
+                             ? server : NK_UI_STR(SETTINGS_ONLINE_PLAY),
                          theme->info);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_ONLINE_PLAY), NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "Online play lets this game find other players over the internet, the "
-                        "same way it finds players nearby over local wireless.",
+                        NK_UI_STR(SETTINGS_ONLINE_CONSENT_LEAD),
                         NK_UI_TYPE_BODY_S, theme->paper);
         if (scr_wizard_box_begin(ui, 0u)) {
             nk_ui_text_role(ui, SET_ID_TEXT + 0x780u,
                             nk_ui_text_break(ui, server_line, &line_style, inner - 32.0f),
                             NK_UI_TYPE_BODY_S, theme->paper);
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x781u, "What Nakagawa sends to that server",
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x781u, NK_UI_STR(SETTINGS_ONLINE_CONSENT_DATA_HEADING),
                             NK_UI_TYPE_BODY, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x782u, nickname_line, NK_UI_TYPE_BODY_S,
                             theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x783u,
-                            "- This game's ID: the ID of the game you start, for example ULUS12345",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_GAME_ID),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Eu,
-                            "- The name of the room the game makes or joins.", NK_UI_TYPE_BODY_S,
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_ROOM_NAME), NK_UI_TYPE_BODY_S,
                             theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x784u,
-                            "- A random console ID that Nakagawa made for you. It is not your "
-                            "PC's hardware address.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_CONSOLE_ID),
                             NK_UI_TYPE_BODY_S, theme->paper);
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x785u, "- The game's own multiplayer messages.",
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x785u, NK_UI_STR(SETTINGS_ONLINE_CONSENT_MULTIPLAYER_MESSAGES),
                             NK_UI_TYPE_BODY_S, theme->paper);
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x786u, "Who can see what", NK_UI_TYPE_BODY,
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x786u, NK_UI_STR(SETTINGS_ONLINE_CONSENT_VISIBILITY_HEADING),
+                NK_UI_TYPE_BODY,
                             theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x787u,
-                            "- The people who run the server can see your IP address.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_SERVER_IP_VISIBILITY),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x788u,
-                            "- Other players in your game may also see your IP address. This "
-                            "depends on the server.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_PEER_IP_VISIBILITY),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x789u,
-                            "- Your Nickname, the game and your room name may appear on the "
-                            "server's public status page.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_PUBLIC_STATUS),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Au,
-                            "- The connection is not encrypted. Others on the network path could "
-                            "read it.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_PLAINTEXT),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Fu,
-                            "While Online play is on, opening the server list also downloads the "
-                            "current list from metadata.ppsspp.org.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_SERVER_LIST_FETCH),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Bu,
-                            "Nakagawa never sends your saves, your game files, your PC's user "
-                            "name or anything else from your PC.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_UNSHARED_DATA),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Cu,
-                            "Online play is off until you choose TURN ON. You can turn it off "
-                            "again at any time in Settings > Online and developer > Online play. "
-                            "Turning it off ends the connection.",
+                            NK_UI_STR(SETTINGS_ONLINE_CONSENT_OPT_IN),
                             NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_end_container(ui);
         }
         if (scrolls) {
             nk_ui_text_role(ui, SET_ID_TEXT + 0x78Du,
-                            "Page Up and Page Down, or the triggers, scroll this card.",
+                            NK_UI_STR(SETTINGS_CONSENT_SCROLL_HINT),
                             NK_UI_TYPE_CAPTION, theme->muted);
         }
         {
@@ -2818,14 +2845,14 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_TURN_ON, "Turn on",
+                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_TURN_ON, NK_UI_STR(SETTINGS_TURN_ON),
                                  NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_ONLINE_PLAY_TURN_ON);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW, "Not now", 0u)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW, NK_UI_STR(SETTINGS_NOT_NOW), 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER, "Change server",
+                if (nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER, NK_UI_STR(SETTINGS_CHANGE_SERVER),
                                  0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER);
                 }
@@ -2834,14 +2861,155 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         }
         break;
     }
+    case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD: {
+        /* RetroAchievements' consent card (#1316): the only way the Achievements switch turns
+           on. It names both hosts and everything sent (docs/SETUP.md "Network use"); nothing
+           is created or sent while it is open. Its text wraps at any window and text size and
+           scrolls in its own box, with Page Up and Page Down too, between the title and the
+           buttons: AGREE AND TURN ON and NOT NOW always show whole, so neither is chosen
+           unseen (the message box it replaced ran its buttons off the screen, and Enter
+           agreed). */
+        const NkUiId consent_text = PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT;
+        const bool scrolls = settings_card_scroll(ui, consent_text);
+        NkUiLayout text_box = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
+                                          NK_UI_DIALOG_GAP);
+        text_box.height.max = settings_consent_text_max(ui, consent_text, height);
+        text_box.scroll = true;
+        static const char *const sends[] = {
+            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_USERNAME_TOKEN),
+            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_PASSWORD),
+            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_GAME_HASH),
+            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_UNLOCKS),
+            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_RICH_PRESENCE),
+            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_USER_AGENT)
+        };
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, SCR_ACHIEVEMENTS_HOST, theme->info);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_RETROACHIEVEMENTS), NK_UI_TYPE_TITLE, theme->paper);
+        if (!nk_ui_begin_container(ui, consent_text, &text_box, NULL)) break;
+        if (scrolls) {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7AEu,
+                            NK_UI_STR(SETTINGS_CONSENT_SCROLL_HINT),
+                            NK_UI_TYPE_CAPTION, theme->muted);
+        }
+        nk_ui_text_role(ui, FLOW_ID_LEAD,
+                        NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_LEAD),
+                        NK_UI_TYPE_BODY_S, theme->paper);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7A0u,
+                            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_DATA_HEADING), NK_UI_TYPE_BODY,
+                            theme->paper);
+            for (size_t i = 0u; i < sizeof(sends) / sizeof(sends[0]); ++i) {
+                nk_ui_text_role(ui, (NkUiId)(SET_ID_TEXT + 0x7A1u + (NkUiId)i), sends[i],
+                                NK_UI_TYPE_BODY_S, theme->paper);
+            }
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7A8u, NK_UI_STR(SETTINGS_BADGE_PICTURES), NK_UI_TYPE_BODY,
+                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7A9u,
+                            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_BADGE_HOST),
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7AAu, NK_UI_STR(SETTINGS_CASUAL_MODE_ONLY), NK_UI_TYPE_BODY,
+                            theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7ABu,
+                            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_CHEAT_AND_60FPS_LIMITS),
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7ACu,
+                            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_UNSHARED_DATA),
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7ADu,
+                            NK_UI_STR(SETTINGS_ACHIEVEMENTS_CONSENT_OPT_IN),
+                            NK_UI_TYPE_BODY_S, theme->paper);
+            nk_ui_end_container(ui);
+        }
+        nk_ui_end_container(ui); /* consent_text */
+        {
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_3);
+            row.padding_top = NK_UI_SPACE_1;
+            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_AGREE, NK_UI_STR(SETTINGS_AGREE_AND_TURN_ON),
+                                 NK_UI_BUTTON_PRIMARY)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_AGREE);
+                }
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW, NK_UI_STR(SETTINGS_NOT_NOW), 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_NOT_NOW);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+        break;
+    }
+    case PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN: {
+        /* RetroAchievements' sign-in form (#1316). Username and Password each open the
+           on-screen keyboard editor (a physical keyboard types there too); SIGN IN sends them
+           once. The model carries the password's length only, never the password. */
+        char stars[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        const char *username = safe_text(model->achievements_username, "");
+        const size_t star_count = model->achievements_password_chars < sizeof(stars) - 1u
+                                      ? model->achievements_password_chars
+                                      : sizeof(stars) - 1u;
+        const bool ready = username[0] != '\0' && star_count > 0u &&
+                           !model->achievements_sign_in_pending;
+        memset(stars, '*', star_count);
+        stars[star_count] = '\0';
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_RETROACHIEVEMENTS), theme->info);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_SIGN_IN), NK_UI_TYPE_TITLE, theme->paper);
+        nk_ui_text_role(ui, FLOW_ID_LEAD,
+                        NK_UI_STR(SETTINGS_ACHIEVEMENTS_SIGN_IN_LEAD),
+                        NK_UI_TYPE_BODY_S, theme->paper);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            const WizardRow rows[2] = {
+                {NK_UI_STR(SETTINGS_USERNAME), username[0] ? username : NK_UI_STR(SETTINGS_ENTER),
+                 NK_UI_STR(SETTINGS_ACHIEVEMENTS_SIGN_IN_USERNAME_HINT)},
+                {NK_UI_STR(SETTINGS_PASSWORD), star_count ? stars : NK_UI_STR(SETTINGS_ENTER),
+                 NK_UI_STR(SETTINGS_ACHIEVEMENTS_SIGN_IN_PASSWORD_HINT)}
+            };
+            WizardColumn column = scr_wizard_column(ui, rows, 2u, inner - 32.0f, true);
+            if (scr_wizard_value(ui, PLAYER_UI_ID_ACHIEVEMENTS_USERNAME, SET_ID_TEXT + 0x7C0u,
+                                 rows[0].name, rows[0].value, rows[0].sentence, false,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_USERNAME);
+            }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_ACHIEVEMENTS_PASSWORD, SET_ID_TEXT + 0x7C4u,
+                                 rows[1].name, rows[1].value, rows[1].sentence, false,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_PASSWORD);
+            }
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7C8u,
+                            safe_text(model->achievements_status, NK_UI_STR(SETTINGS_SIGN_IN_TO_CONNECT)),
+                            NK_UI_TYPE_BODY_S,
+                            model->achievements_sign_in_pending ? theme->info : theme->muted);
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x7C9u,
+                            NK_UI_STR(SETTINGS_ACHIEVEMENTS_SIGN_IN_ACCOUNT_CREATION),
+                            NK_UI_TYPE_BODY_S, theme->muted);
+            nk_ui_end_container(ui);
+        }
+        {
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_3);
+            row.padding_top = NK_UI_SPACE_1;
+            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN, NK_UI_STR(SETTINGS_SIGN_IN),
+                                 ready ? NK_UI_BUTTON_PRIMARY
+                                       : NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_DISABLED)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT);
+                }
+                if (nk_ui_button(ui, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN_CANCEL, NK_UI_STR(SETTINGS_CANCEL), 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_ACHIEVEMENTS_SIGN_IN_CANCEL);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+        memset(stars, 0, sizeof(stars));
+        break;
+    }
     case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS: {
         /* The server picker: the shipped servers, the player's own, and with Online play on
            PPSSPP's list. Choosing one opens the consent card for it; nothing here connects. */
         size_t count = model->online_play_servers ? model->online_play_server_count : 0u;
         const char *server = safe_text(model->online_play_server, "");
         /* Where PPSSPP's list came from is said once, in its heading, not on each row. */
-        const char *list_heading = model->online_play_list_live ? "PPSSPP's list"
-                                                                : "PPSSPP's list (shipped copy)";
+        const char *list_heading = model->online_play_list_live ? NK_UI_STR(SETTINGS_PPSSPPS_LIST)
+                                                                : NK_UI_STR(SETTINGS_PPSSPPS_LIST_SHIPPED_COPY);
         /* The list's panel keeps little padding of its own: the list's, there for the focus
            ring, is the rest. */
         const float row_width = inner - 16.0f - ENHANCED_SCROLLBAR_ROOM -
@@ -2916,14 +3084,14 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         }
         shipped = settings_online_play_layout(ui, shipped_beside, NULL, row_width);
         from_list = settings_online_play_layout(ui, listed_beside, NULL, row_width);
-        (void)snprintf(port_label, sizeof(port_label), "Port offset: %s",
+        (void)snprintf(port_label, sizeof(port_label), NK_UI_STR(SETTINGS_PORT_OFFSET_FORMAT),
                        safe_text(model->online_play_port_offset, "10000"));
         port_width = nk_ui_button_width(ui, port_label, 0u);
         own_width = row_width - NK_UI_SPACE_3 - port_width;
         /* The own row is "Other server" whether it is empty, holds a server typed in, or holds a
            consented server no shown list names (a list entry while the list is not loaded: it
            lasts one session); Current alone says it is the one in use (owner, 2026-11-20). */
-        own_name = "Other server";
+        own_name = NK_UI_STR(SETTINGS_OTHER_SERVER);
         /* The port offset beside the own server's row while that leaves the row half the
            width and its host whole on one line, else under it: a long typed host (up to 127
            characters) takes the whole width, so the row stays short enough for the list. */
@@ -2961,8 +3129,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
             settings_online_play_snap(ui, items, item_count);
         }
-        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Online play", theme->accent_dark);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Choose a server", NK_UI_TYPE_TITLE, theme->paper);
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_ONLINE_PLAY), theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_CHOOSE_A_SERVER), NK_UI_TYPE_TITLE, theme->paper);
         /* The intro, and its hint on a line of its own under it, in one block. */
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         SCR_ONLINE_PLAY_SERVERS_LEAD "\n" SCR_ONLINE_PLAY_SERVERS_HINT,
@@ -3078,14 +3246,14 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
                 /* Up from Back enters the list at its end, scrolled out of view or not. */
-                if (nk_ui_button_between(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back",
+                if (nk_ui_button_between(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK),
                                          NK_UI_BUTTON_PRIMARY,
                                          order_count > 0u ? order[order_count - 1u] : 0u, 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 /* The list downloads only with Online play on. */
                 if (model->online_play &&
-                    nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_REFRESH, "Refresh list",
+                    nk_ui_button(ui, PLAYER_UI_ID_ONLINE_PLAY_REFRESH, NK_UI_STR(SETTINGS_REFRESH_LIST),
                                  model->online_play_list_busy ? NK_UI_BUTTON_DISABLED : 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_REFRESH_ONLINE_PLAY_SERVERS);
                 }
@@ -3101,8 +3269,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         settings_ace(ui, model, inner, height, result);
         break;
     case PLAYER_UI_SETTINGS_PAGE_NOTICES:
-        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Third-party notices", theme->accent_dark);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Build tools and their licences", NK_UI_TYPE_TITLE,
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_THIRD_PARTY_NOTICES), theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_BUILD_TOOLS_AND_THEIR_LICENCES), NK_UI_TYPE_TITLE,
                         theme->paper);
         if (scr_wizard_box_begin(ui, 0u)) {
             NkUiTextStyle data = nk_ui_type(NK_UI_TYPE_DATA, theme->paper);
@@ -3113,27 +3281,24 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
             if (model->tool_count == 0u) {
                 nk_ui_text_role(ui, SET_ID_TEXT + 0x9Fu,
-                                "No build tools have been downloaded on this PC yet.",
+                                NK_UI_STR(SETTINGS_NOTICES_NO_DOWNLOADED_TOOLS),
                                 NK_UI_TYPE_BODY_S, theme->muted);
             }
             nk_ui_end_container(ui);
         }
         nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "Nakagawa Recomp is free software under the GNU GPL version 3. Its own "
-                        "code also allows later versions; see LICENSE and NOTICE.md. Not "
-                        "affiliated with or endorsed by Sony Interactive Entertainment; "
-                        "PlayStation and PSP are its trademarks.",
+                        NK_UI_STR(SETTINGS_NOTICES_LICENCE_SUMMARY),
                         NK_UI_TYPE_CAPTION, theme->muted);
         {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK), NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 if (model->tool_count > 0u &&
-                    nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_LICENSE_TEXTS, "Open licence texts",
+                    nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_LICENSE_TEXTS, NK_UI_STR(SETTINGS_OPEN_LICENCE_TEXTS),
                                  0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_OPEN_LICENSE_TEXTS);
                 }
@@ -3143,22 +3308,19 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         break;
     case PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE:
         /* #1306: the shared library switch, its clear button and tool removal. */
-        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Build tools and cache", NK_UI_TYPE_TITLE,
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_SECTION), theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_BUILD_TOOLS_AND_CACHE), NK_UI_TYPE_TITLE,
                         theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "A game disc carries system libraries that other games often share. "
-                        "The compiled copies stay in the app-data folder on this PC and are "
-                        "never uploaded or shared.",
+                        NK_UI_STR(SETTINGS_BUILD_CACHE_LEAD),
                         NK_UI_TYPE_BODY_S, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_3);
             const WizardRow rows[] = {
-                {"Share libraries", settings_on_off(model->share_system_libraries),
-                 "Builds keep each compiled library and reuse it for another game "
-                 "with the same one, so those builds finish sooner."},
-                {"Build speed", safe_text(model->build_speed, "Balanced"),
+                {NK_UI_STR(SETTINGS_SHARE_LIBRARIES), settings_on_off(model->share_system_libraries),
+                 NK_UI_STR(SETTINGS_BUILD_CACHE_SHARE_LIBRARIES_EXPLANATION)},
+                {NK_UI_STR(SETTINGS_BUILD_SPEED), safe_text(model->build_speed, NK_UI_STR(SETTINGS_BALANCED)),
                  safe_text(model->build_speed_sentence, "")}
             };
             /* The two buttons line up on one column at every text size. */
@@ -3177,10 +3339,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
             if (nk_ui_begin_container(ui, SET_ID_TEXT + 0xC8u, &row, NULL)) {
                 if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CLEAR_LIBRARIES,
-                                 "Clear shared library cache", NK_UI_BUTTON_SMALL)) {
+                                 NK_UI_STR(SETTINGS_CLEAR_SHARED_LIBRARY_CACHE), NK_UI_BUTTON_SMALL)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_REMOVE_TOOLS, "Remove build tools",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_REMOVE_TOOLS, NK_UI_STR(SETTINGS_REMOVE_BUILD_TOOLS),
                                  NK_UI_BUTTON_SMALL)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_OPEN_REMOVE_TOOLS);
                 }
@@ -3191,15 +3353,15 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 NkUiLayout cache_row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
                                                    NK_UI_SPACE_3);
                 cache_row.align_y = NK_UI_ALIGN_CENTER;
-                (void)snprintf(cache_line, sizeof(cache_line), "Cover art cache: %s",
-                               safe_text(model->cover_art_cache_size, "0 KB"));
+                (void)snprintf(cache_line, sizeof(cache_line), NK_UI_STR(SETTINGS_COVER_ART_CACHE_SIZE_FORMAT),
+                               safe_text(model->cover_art_cache_size, NK_UI_STR(SETTINGS_EMPTY_CACHE_SIZE)));
                 if (nk_ui_begin_container(ui, SET_ID_TEXT + 0xCDu, &cache_row, NULL)) {
                     NkUiTextStyle label_style = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
                     nk_ui_text(ui, SET_ID_TEXT + 0xCEu, nk_ui_frame_text(ui, cache_line),
                                &label_style);
                     nk_ui_spacer(ui, SET_ID_TEXT + 0xCFu, sizing_grow(), sizing_fixed(1.0f));
                     if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART,
-                                     "Refresh cover art", NK_UI_BUTTON_SMALL)) {
+                                     NK_UI_STR(SETTINGS_REFRESH_COVER_ART), NK_UI_BUTTON_SMALL)) {
                         *result = settings_op(PLAYER_UI_SETTINGS_REFRESH_COVER_ART);
                     }
                     nk_ui_end_container(ui);
@@ -3217,7 +3379,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK), NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 nk_ui_end_container(ui);
@@ -3233,8 +3395,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
     case PLAYER_UI_SETTINGS_PAGE_FONTS:
         /* Walkthrough blocker: the wizard's Fonts step is not on the Add to
            library path, so the import lives here, with each slot's status. */
-        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "PSP fonts", NK_UI_TYPE_TITLE, theme->paper);
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, NK_UI_STR(SETTINGS_SECTION), theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_PSP_FONTS), NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         /* #2005: what the stand-in fonts change, as font/README.md
                            describes them: letter shapes, Latin line widths within 3 %, and the
@@ -3243,16 +3405,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                            in mk/housekeeping.mk); the Japanese one lacks about 2,200 of the
                            PSP font's characters, all outside code page 932, and the Korean
                            one 512, none of them Hangul. */
-                        "Optional. Without your PSP's own fonts, every game still runs and "
-                        "shows its text in open stand-in fonts. They look different: the "
-                        "letters are shaped differently, English lines come out a little wider "
-                        "or narrower, and some rarely used characters of the PSP's Japanese "
-                        "and Korean fonts are missing. For the PSP's own look, "
-                        "connect your PSP by USB and choose Get fonts from my PSP, or copy the "
-                        ".pgf files from flash0:/font on your PSP to a folder on this PC "
-                        "(docs/SETUP.md, \"Copying the fonts from your PSP\") and choose them "
-                        "here. The import reads ltn0.pgf to ltn15.pgf, jpn0.pgf and kr0.pgf "
-                        "from that folder.",
+                        NK_UI_STR(SETTINGS_PSP_FONTS_LEAD),
                         NK_UI_TYPE_BODY_S, theme->muted);
         if (model->font_summary != NULL && model->font_summary[0] != '\0') {
             nk_ui_text_role(ui, SET_ID_TEXT + 0xDDu, model->font_summary, NK_UI_TYPE_BODY_S,
@@ -3296,19 +3449,19 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_PSP_FONTS, "Get fonts from my PSP",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_PSP_FONTS, NK_UI_STR(SETTINGS_GET_FONTS_FROM_MY_PSP),
                                  NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_PSP_FONTS);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_IMPORT_FONTS, "Choose font files",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_IMPORT_FONTS, NK_UI_STR(SETTINGS_CHOOSE_FONT_FILES),
                                  0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_IMPORT_FONTS);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_REMOVE_FONTS, "Remove imported fonts",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_REMOVE_FONTS, NK_UI_STR(SETTINGS_REMOVE_IMPORTED_FONTS),
                                  0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_FONTS);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", 0u)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_BACK), 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 nk_ui_end_container(ui);
@@ -3318,22 +3471,18 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
     case PLAYER_UI_SETTINGS_PAGE_FACTORY_RESET:
         /* Factory reset: back to a first run, with the user data moved
            aside (player_app_factory_reset), never deleted. */
-        scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, "Factory reset", theme->warning);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Reset Nakagawa Recomp to a first run?",
+        scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, NK_UI_STR(SETTINGS_FACTORY_RESET), theme->warning);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_FACTORY_RESET_TITLE),
                         NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "Your library, saves, imported PSP fonts, keys, settings, built games "
-                        "and downloaded build tools move into backup folders. Nakagawa Recomp "
-                        "then starts again with the setup it shows the first time. Nothing is "
-                        "deleted, and your disc images and logs stay where they are.",
+                        NK_UI_STR(SETTINGS_FACTORY_RESET_LEAD),
                         NK_UI_TYPE_BODY, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             NkUiTextStyle data = nk_ui_type(NK_UI_TYPE_DATA, theme->paper);
             nk_ui_text_role(ui, SET_ID_TEXT + 0x200u,
                             model->reset_folder_count > 0u
-                                ? "These folders get \"-backup-\" and today's date and time "
-                                  "added to their names:"
-                                : "Nakagawa Recomp has no user data on this PC yet.",
+                                ? NK_UI_STR(SETTINGS_FACTORY_RESET_BACKUP_FOLDERS)
+                                : NK_UI_STR(SETTINGS_FACTORY_RESET_NO_USER_DATA),
                             NK_UI_TYPE_BODY_S, theme->muted);
             for (size_t i = 0u; i < model->reset_folder_count && i < PLAYER_UI_RESET_FOLDERS;
                  ++i) {
@@ -3347,8 +3496,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
             if (model->reset_folder_count > 0u) {
                 nk_ui_text_role(ui, SET_ID_TEXT + 0x20Fu,
-                                "To undo it, close Nakagawa Recomp and give each folder its "
-                                "old name back.",
+                                NK_UI_STR(SETTINGS_FACTORY_RESET_UNDO),
                                 NK_UI_TYPE_CAPTION, theme->muted);
             }
             nk_ui_end_container(ui);
@@ -3358,12 +3506,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Keep everything",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_KEEP_EVERYTHING),
                                  NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 if (model->reset_folder_count > 0u &&
-                    nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONFIRM_RESET, "Reset",
+                    nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONFIRM_RESET, NK_UI_STR(SETTINGS_RESET),
                                  NK_UI_BUTTON_DANGER)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_FACTORY_RESET);
                 }
@@ -3373,24 +3521,22 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         break;
     case PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS:
     default:
-        scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, "Remove build tools", theme->warning);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Remove the downloaded build tools?",
+        scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, NK_UI_STR(SETTINGS_REMOVE_BUILD_TOOLS), theme->warning);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_REMOVE_TOOLS_TITLE),
                         NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "This removes the build tools Nakagawa downloaded. Your library, disc "
-                        "images, saves and built games are kept. Nakagawa asks before it "
-                        "downloads them again, the next time you build a game.",
+                        NK_UI_STR(SETTINGS_REMOVE_TOOLS_LEAD),
                         NK_UI_TYPE_BODY, theme->muted);
         {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_3);
             row.padding_top = NK_UI_SPACE_1;
             if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Keep them",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, NK_UI_STR(SETTINGS_KEEP_THEM),
                                  NK_UI_BUTTON_PRIMARY)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_KEEP_TOOLS);
                 }
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONFIRM_REMOVE, "Remove tools",
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONFIRM_REMOVE, NK_UI_STR(SETTINGS_REMOVE_TOOLS),
                                  NK_UI_BUTTON_DANGER)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_TOOLS);
                 }
@@ -3409,8 +3555,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
 
 PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Change"},
-        {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(SETTINGS_MOVE)}, {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(SETTINGS_CHANGE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(SETTINGS_BACK)}
     };
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     NkUiLayout layout;

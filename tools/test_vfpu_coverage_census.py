@@ -341,6 +341,7 @@ class VfpuCoverageCensusTests(unittest.TestCase):
             "PSP-VFPU-BASICARITH-001": ((0x60000000, 0x60008080, 0x63880400, 0xD0000400, 0xD0070480),
                                         (0x60000080, 0x63888480)),
             "PSP-VFPU-VUS2I-001": ((0xD03A0008, 0xD03B0088), (0xD03A8008, 0xD03A8088)),
+            "PSP-VFPU-RESERVED-001": ((0xD03A8008,), (0xD03A8108, 0xD03A8009, 0xD03A8088)),
             "PSP-VFPU-WIDEDOT-001": ((0x64810088, 0x66018088, 0xF2818008, 0xF3A48088), (0x66010088, 0xF3B48090)),
             "PSP-VFPU-CONVERT-001": ((0xD2000001, 0xD2200001), (0xD2000081, 0xD2008001)),
         }
@@ -363,6 +364,14 @@ class VfpuCoverageCensusTests(unittest.TestCase):
                 record = census.classify_words([word])[0]
                 self.assertFalse(tests & set(census._differential_tests(record, set())),
                                  f"0x{word:08x} is credited to {oracle_id}")
+
+    def test_measured_vus2i_t_neighbors_remain_refused(self):
+        measured = 0xD03A8008
+        self.assertIn(measured, census.systematic_words())
+        controls = (0xD03A8108, 0xD03A8009, 0xD03A8088)
+        for row in census.classify_words(controls):
+            with self.subTest(word=f"0x{row['word']:08x}"):
+                self.assertEqual(census.agreement_status(row), "agree-unsupported")
 
     def test_wide_dot_measured_forms_are_the_words_the_selftest_replays(self):
         import vfpu_overlap_diff_gen as gen

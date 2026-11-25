@@ -831,6 +831,49 @@ static int check_vf2i_measured_cells(void) {
     return bad;
 }
 
+/* PSP-VFPU-CONVERT-001 (#326): vi2f rounds INT32_MAX to 0x4f000000,
+ * divides by 2^scale, and agrees lane for lane at all four widths.
+ * The remaining fixed words are derived from that published rule. */
+static int check_vi2f_scales(void) {
+    static const uint32_t inputs[] = {0x7fffffffu, 0x80000000u, 0x00000100u, 0xffffffffu};
+    static const uint32_t width_bits[] = {0u, 0x80u, 0x8000u, 0x8080u};
+    static const struct {
+        unsigned scale;
+        uint32_t expected[4];
+    } cases[] = {
+        {0u,  {0x4f000000u, 0xcf000000u, 0x43800000u, 0xbf800000u}},
+        {8u,  {0x4b000000u, 0xcb000000u, 0x3f800000u, 0xbb800000u}},
+        {31u, {0x3f800000u, 0xbf800000u, 0x34000000u, 0xb0000000u}},
+    };
+    int bad = 0;
+    const int saved_mode = fegetround();
+    CHECKB(bad, fesetround(FE_TONEAREST) == 0, "vi2f test sets round-to-nearest");
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        for (int n = 1; n <= 4; n++) {
+            CpuState s;
+            uint8_t si[4], di[4];
+            setup_identity_compute(&s);
+            vreg_idx(0, n, si);
+            vreg_idx(8, n, di);
+            for (int lane = 0; lane < n; lane++) {
+                s.vi[si[lane]] = inputs[lane];
+                s.vi[di[lane]] = 0xa5a5a5a5u;
+            }
+            const uint32_t word = 0xd2800008u | (cases[c].scale << 16) | width_bits[n - 1];
+            CHECKB(bad, sr_vfpu_interp(&s, word) == SR_VFPU_COMPUTE, "vi2f executes");
+            for (int lane = 0; lane < n; lane++) {
+                const uint32_t actual = s.vi[di[lane]], expected = cases[c].expected[lane];
+                if (actual != expected)
+                    fprintf(stderr, "vi2f scale %u width %d lane %d: got %08x, expected %08x\n",
+                            cases[c].scale, n, lane, actual, expected);
+                CHECKB(bad, actual == expected, "vi2f scaled result word");
+            }
+        }
+    }
+    if (saved_mode != -1) (void)fesetround(saved_mode);
+    return bad;
+}
+
 static int check_vf2i_conversions(void) {
     static const struct {
         const char *name;
@@ -2701,6 +2744,64 @@ static int check_vus2i_vs2i_measured_words(void) {
     return bad;
 }
 
+/* PSP-VFPU-RESERVED-001, vus2i-t-p0: exact word, registers and identity prefixes. */
+static int check_vus2i_t_measured(void) {
+    const uint32_t word = 0xd03a8008u;
+    static const uint32_t source[8] = {
+        0x80017fffu, 0x0000ffffu, 0x12345678u, 0xfedcba98u,
+        0x11112222u, 0x33334444u, 0x55556666u, 0x77778888u,
+    };
+    static const uint32_t destination[4] = {0x3fff8000u, 0x40008000u, 0x7fff8000u, 0u};
+    int generated_case = -1;
+    for (int i = 0; i < SWEEP_NCASES; i++) {
+        if (sweep_cases[i].w == word) {
+            generated_case = i;
+            break;
+        }
+    }
+    CHECK(generated_case >= 0, "measured vus2i.t word is in the generated sweep");
+    if (generated_case < 0) return 1;
+
+    CpuState before;
+    setup_identity_compute(&before);
+    before.vfpuCtrl[3] = 0x15u;
+    for (int i = 0; i < 128; i++) before.vi[i] = 0x7a5a5a5au;
+    memcpy(before.vi, source, sizeof source);
+    CpuState want = before, aot = before, interp = before;
+    memcpy(&want.vi[32], destination, sizeof destination);
+
+    int bad = 0;
+    sweep_run_codegen(&aot, generated_case);
+    CHECKB(bad, !sweep_stopped && memcmp(aot.vi, want.vi, sizeof want.vi) == 0,
+           "vus2i.t AOT writes the published C200 quartet only");
+    CHECKB(bad, sr_vfpu_interp(&interp, word) == SR_VFPU_COMPUTE &&
+                 memcmp(interp.vi, want.vi, sizeof want.vi) == 0,
+           "vus2i.t interpreter writes the published C200 quartet only");
+
+    static const uint32_t nonidentity[3] = {0xf00e4u, 0x1bu, 0x100u};
+    for (unsigned i = 0u; i < 3u; i++) {
+        CpuState prefixed = before;
+        prefixed.vfpuCtrl[i] = nonidentity[i];
+        aot = interp = prefixed;
+        sweep_run_codegen(&aot, generated_case);
+        CHECKB(bad, sweep_stopped && memcmp(aot.vi, prefixed.vi, sizeof prefixed.vi) == 0 &&
+                     memcmp(aot.vfpuCtrl, prefixed.vfpuCtrl, sizeof prefixed.vfpuCtrl) == 0,
+               "vus2i.t AOT stops before modifying registers or prefixes");
+        CHECKB(bad, sr_vfpu_interp(&interp, word) == SR_VFPU_OTHER &&
+                     memcmp(&interp, &prefixed, sizeof prefixed) == 0,
+               "vus2i.t interpreter refuses each nonidentity prefix without changing state");
+    }
+
+    static const uint32_t refused[] = {0xd03a8108u, 0xd03a8009u, 0xd03a8088u};
+    for (size_t i = 0u; i < sizeof refused / sizeof refused[0]; i++) {
+        interp = before;
+        CHECKB(bad, sr_vfpu_interp(&interp, refused[i]) == SR_VFPU_OTHER &&
+                     memcmp(&interp, &before, sizeof before) == 0,
+               "other vus2i.t operands and vus2i.q still refuse without changing state");
+    }
+    return bad;
+}
+
 /* RCX0-7 image of a random-unit state as probe_hle_issues.c writes it: Ck split into
  * the low halves of RCXk and RCX(k+4), carry nibble k in bits 16-19 of RCXk, 0x3f8 above. */
 static void vrndi_probe_image(uint32_t *rcx, const uint32_t c[4], uint32_t carry) {
@@ -3809,6 +3910,7 @@ int main(void) {
     bad |= check_psp_measured_sort();
     bad |= check_psp_measured_forms2();
     bad |= check_vus2i_vs2i_measured_words();
+    bad |= check_vus2i_t_measured();
     bad |= check_vfpu_basic_arith_measured();
     bad |= check_vfpu_unary_arith_measured();
     bad |= check_vfpu_dprefix_saturation_signed_zero();
@@ -3835,6 +3937,7 @@ int main(void) {
     bad |= check_vhdp_signed_zero_corpus();
     bad |= check_vf2i_conversions();
     bad |= check_vf2i_measured_cells();
+    bad |= check_vi2f_scales();
     bad |= check_vf_nan_rule();
     bad |= check_vfpu_wide_dot_measured();
     bad |= check_vfpu_wide_dot_quoted_cells();

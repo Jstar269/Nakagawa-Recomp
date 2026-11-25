@@ -44,6 +44,7 @@ from test_iso_parity import (  # noqa: E402
     create_test_iso_with_executables,
 )
 from test_import_name_safety import build_synthetic_import_prx  # noqa: E402
+from test_nk_core import launcher_c_source, launcher_english_catalog  # noqa: E402
 from import_fixtures import SYSLIB_EXPORT, build_module_elf  # noqa: E402
 from nk_core import package_cache  # noqa: E402
 from nk_core.iso_inspect import PBP_BOUNDARY_CODES, runtime_registered_nids  # noqa: E402
@@ -4569,35 +4570,55 @@ class TestProductStatusCopy(unittest.TestCase):
     def _source(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
 
-    def _c_text(self, relative: str) -> str:
-        """A C source with adjacent string literals joined, as the compiler joins them."""
-        return re.sub(r'"\s*\n\s*"', "", self._source(relative))
+    def _assert_ui_copy(self, screen: str, draw: str, key: str, expected: str,
+                        english: dict[str, str]) -> None:
+        self.assertRegex(screen, draw + rf"\s*NK_UI_STR\({key}\)\s*,")
+        self.assertEqual(english[key], f'"{expected}"')
 
     def test_about_screen_carries_the_licence_and_no_endorsement_notice(self):
         # The launcher's notices page (Settings > Third-party notices) and its About page. The
         # licence words are the maintainer's (2026-11-19): the program is GNU GPL version 3,
         # since two included parts are version 3 only; its own code also allows later versions.
-        notices = self._c_text("src/player/ui/scr_settings.c")
-        self.assertIn("Nakagawa Recomp is free software under the GNU GPL version 3. Its own "
-                      "code also allows later versions; see LICENSE and NOTICE.md. Not "
-                      "affiliated with or endorsed by Sony Interactive Entertainment; "
-                      "PlayStation and PSP are its trademarks.", notices)
-        about = self._c_text("src/player/ui/scr_about.c")
-        self.assertIn('"GNU GPL version 3"', about)
-        self.assertIn("Free software. Nakagawa's own code also allows later GPL versions; two "
-                      "included parts are version 3 only. Third-party parts keep their own "
-                      "licences.", about)
-        self.assertIn("Not affiliated with or endorsed by Sony Interactive Entertainment. "
-                      "PSP is a trademark of its owner. No game data is included.", about)
+        english = launcher_english_catalog(ROOT)
+        settings = launcher_c_source(ROOT / "src/player/ui/scr_settings.c")
+        notices = settings.split("case PLAYER_UI_SETTINGS_PAGE_NOTICES:", 1)[1].split("\n    case ", 1)[0]
+        self._assert_ui_copy(
+            notices, r"\bnk_ui_text_role\(ui,\s*FLOW_ID_LEAD,", "SETTINGS_NOTICES_LICENCE_SUMMARY",
+            "Nakagawa Recomp is free software under the GNU GPL version 3. Its own "
+            "code also allows later versions; see LICENSE and NOTICE.md. Not "
+            "affiliated with or endorsed by Sony Interactive Entertainment; "
+            "PlayStation and PSP are its trademarks.", english,
+        )
+        about = launcher_c_source(ROOT / "src/player/ui/scr_about.c")
+        self._assert_ui_copy(
+            about, r"\bnk_ui_text_role\(ui,\s*0x50000201u,", "ABOUT_LICENCE_VERSION",
+            "GNU GPL version 3", english,
+        )
+        self._assert_ui_copy(
+            about, r"\bnk_ui_text_role\(ui,\s*0x50000202u,", "ABOUT_LICENCE_SUMMARY",
+            "Free software. Nakagawa's own code also allows later GPL versions; two "
+            "included parts are version 3 only. Third-party parts keep their own licences.",
+            english,
+        )
+        self._assert_ui_copy(
+            about, r"\bnk_ui_text_role\(ui,\s*ABOUT_ID_NOTICE,", "ABOUT_TRADEMARK_NOTICE",
+            "Not affiliated with or endorsed by Sony Interactive Entertainment. "
+            "PSP is a trademark of its owner. No game data is included.", english,
+        )
 
     def test_wizard_states_the_open_boundaries(self):
-        wizard = self._c_text("src/player/ui/scr_wizard.c")
-        self.assertIn("Your games stay on this PC. Nakagawa never uploads anything, and "
-                      "downloads only the build tools you approve. It decrypts your own disc "
-                      "here and never touches firmware.", wizard)
-        self.assertNotIn("key file", wizard)
-        self.assertNotIn("or create runtime packages", wizard)
-        self.assertNotIn("draw_issue_links", wizard)
+        wizard = launcher_c_source(ROOT / "src/player/ui/scr_wizard.c")
+        english = launcher_english_catalog(ROOT)
+        self._assert_ui_copy(
+            wizard, r"\bwizard_text\(ui,\s*6u,", "WIZARD_PRIVACY_NOTE",
+            "Your games stay on this PC. Nakagawa never uploads anything, and "
+            "downloads only the build tools you approve. It decrypts your own disc "
+            "here and never touches firmware.", english,
+        )
+        wizard_copy = re.sub(r"\bNK_UI_STR\((\w+)\)", lambda match: english[match[1]], wizard)
+        self.assertNotIn("key file", wizard_copy)
+        self.assertNotIn("or create runtime packages", wizard_copy)
+        self.assertNotIn("draw_issue_links", wizard_copy)
 
     def test_library_checklist_points_at_the_library_package_builder(self):
         inspect = self._source("tools/nk_core/iso_inspect.py")
@@ -4723,6 +4744,61 @@ class DisplaySmokeFirstFrameSidecarTests(unittest.TestCase):
         self._write(2, stride=256)
         with self.assertRaisesRegex(RuntimeError, "metadata mismatch"):
             self.check(2, 1)
+
+
+class DisplaySmokeRecordingTests(unittest.TestCase):
+    @staticmethod
+    def _bgrx(rgb: bytes) -> bytes:
+        bgrx = bytearray(len(rgb) // 3 * 4)
+        bgrx[0::4], bgrx[1::4], bgrx[2::4] = rgb[2::3], rgb[1::3], rgb[0::3]
+        return bytes(bgrx)
+
+    def test_alternating_buffer_has_a_distinct_guest_and_keeps_legacy_bytes(self):
+        original = display_generator.build_prx(60)
+        self.assertEqual(display_generator.sha256(original),
+                         "135f06eae8b91fa7ff2075c55009ea306d26c1adbfac90bc93b11f32e8a1de4f")
+        alternating = display_generator.build_prx(60, double_buffer=True)
+        self.assertNotEqual(alternating, original)
+        manifest = json.loads(display_generator.manifest_bytes(
+            alternating, display_generator.build_psp_header(), 60, double_buffer=True))
+        self.assertEqual(manifest["back_buffer"], "0x04100000")
+        self.assertEqual(manifest["prx_sha256"], display_generator.sha256(alternating))
+
+    def test_in_place_recording_checks_actual_presents_and_rejects_stale_or_wrong_images(self):
+        g = display_generator
+        previous = g._expected_present_pixels(0)
+        upcoming = g._expected_present_pixels(1)
+        split = 25335 * 3
+        partial = upcoming[:split] + previous[split:]
+        near_partial = upcoming[:split+3] + previous[split+3:]
+        hdr = b"P6\n480 272\n255\n"
+        bundle = {"events": [
+            {"class": "present", "kind": g.FLIGHT_KIND_PRESENT_FRAME, "arg3": 2},
+            {"class": "present", "kind": g.FLIGHT_KIND_PRESENT_FRAME, "arg3": 3},
+            {"class": "present", "kind": g.FLIGHT_KIND_PRESENT_SET_FRAMEBUF, "arg3": 3},
+        ]}
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            video = folder / "video.bgr0"
+            (folder / "frame_v2.ppm").write_bytes(hdr + previous)
+            captured = folder / "frame_v3.ppm"
+            captured.write_bytes(hdr + partial)
+            sound_video = self._bgrx(previous) + 2 * self._bgrx(partial)
+            video.write_bytes(sound_video)
+            self.assertEqual(g._recorded_present_images(video, [2, 3, 4], folder, bundle), [2, 3, 3])
+            video.write_bytes(3 * self._bgrx(previous))
+            with self.assertRaisesRegex(RuntimeError, "VBLANK 3 does not match"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
+            video.write_bytes(sound_video)
+            captured.write_bytes(hdr + near_partial)
+            with self.assertRaisesRegex(RuntimeError, "VBLANK 3 does not match"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
+            captured.write_bytes(hdr + previous)
+            with self.assertRaisesRegex(RuntimeError, "not an exact partial draw"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
+            captured.unlink()
+            with self.assertRaisesRegex(RuntimeError, "do not match the accepted VBLANKs"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
 
 
 class DisplaySmokeVramdumpCaptureTests(unittest.TestCase):

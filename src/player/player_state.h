@@ -155,7 +155,10 @@ typedef enum {
     VIEW_ACE_SETTINGS,          /* Settings > Enhanced, the library's or one title's (#2055) */
     VIEW_PROBLEM_REPORT,        /* Settings > Problem report (#1849) */
     VIEW_ONLINE_PLAY_CARD,      /* Settings > Online play: the consent card (#1139) */
-    VIEW_ONLINE_PLAY_SERVERS    /* Settings > Online play: the server picker; the last value */
+    VIEW_ONLINE_PLAY_SERVERS,   /* Settings > Online play: the server picker */
+    VIEW_ACHIEVEMENTS_CARD,     /* Settings > Online and developer: RetroAchievements' consent
+                                   card (#1316) */
+    VIEW_ACHIEVEMENTS_SIGN_IN   /* RetroAchievements' sign-in form (#1316); the last value */
 } PlayerView;
 
 typedef enum {
@@ -329,9 +332,8 @@ typedef enum {
                                   title whose catalog entry declares a stick dead zone. Appended: the
                                   enum fixes the Settings > Enhanced rows and the saved order; the Ace
                                   line still writes stick before cull */
-    PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
-                                  a title's package declares return at once; guest timing changes. Ace
-                                  only; a title without a load part ignores it */
+    PLAYER_PART_LOAD,          /* loading speed: 0 off, 1 fast (Ace package waits), 2 auto
+                                  (silent disc loads in Enhanced or Ace) */
     PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
                                   Appended; the Ace line writes twin after tess */
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
@@ -987,10 +989,18 @@ typedef struct {
  * writes schema 2. A file with another format or an unknown member is not
  * resumed. A file with a newer schema_version is not resumed and never
  * replaced or removed: this player's queue then lasts until it closes. The
- * file goes once nothing is pending. */
+ * file goes once nothing is pending.
+ *
+ * The queue screen's Pause lives beside it in rebuild-queue-paused, a marker
+ * whose presence alone means "paused" (its bytes are never read). Keeping it
+ * out of rebuild-queue.json leaves that file in the shape every released
+ * player reads, so an older player resumes the queue and ignores the pause.
+ * The marker exists only while a queue is paused; a marker with no queue file
+ * beside it is stale (an older player finished the queue) and goes at start. */
 #define PLAYER_REBUILD_QUEUE_FORMAT "nakagawa-rebuild-queue"
 #define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 2
 #define PLAYER_REBUILD_QUEUE_FILE "rebuild-queue.json"
+#define PLAYER_REBUILD_QUEUE_PAUSED_FILE "rebuild-queue-paused"
 
 typedef struct {
     int count;
@@ -1001,6 +1011,11 @@ typedef struct {
        or the build tool download was cancelled); Resume, Rebuild all or Add to
        queue starts it again. */
     bool paused;
+    /* The person paused it (the queue screen's Pause): the build that runs
+       finishes, and no next one starts until Resume. Saved as the
+       rebuild-queue-paused marker, so it stays paused after a restart; Add to
+       queue does not resume it. */
+    bool held;
     /* The build session the queue started, once the builder runs; 0 before. */
     uint64_t build_generation;
     /* rebuild-queue.json was written by a newer Nakagawa: it stays as it is. */
@@ -1080,6 +1095,14 @@ struct PlayerApp {
        settings.json or PlayerApp's persisted state. */
     bool achievements_store_available;
     bool achievements_signed_in;
+    /* A sign-in is on its way (main.c copies it each frame): the sign-in form's SIGN IN waits. */
+    bool achievements_sign_in_pending;
+    /* Leaving the sign-in form while its sign-in is on its way abandons it: main.c ends the
+       request and drops its answer, so nothing is stored and nobody is signed in. */
+    bool achievements_sign_in_abandoned;
+    /* --view=achievements-sign-in shows the form as AGREE leaves it without turning the switch
+       on: never saved, and SIGN IN is refused while it is set. A real AGREE clears it. */
+    bool achievements_preview;
     char achievements_account[64];
     char achievements_status[192];
     /* A bounded, memory-only preview for the currently identified game's page: the unlocked
@@ -2121,12 +2144,13 @@ const char *player_ssaa_sentence(int value, int render_scale);
  * that adds interpolation above 30 Hz removes this limit. The other parts are untouched, and an
  * Authentic resolution stays off. */
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
-/* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
+/* The resolved Ace line for a session: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
  * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
- * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
+ * ";load=fast" follows only for Ace and ";load=auto" for Enhanced or Ace. A missing load is off.
+ * nk_launch exports Automatic separately as SR_ACE_LOAD_AUTO and the rest of the line as SR_ACE.
  * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier: the resolved
  * factor, so plain 4x at a render scale of 3x or 4x writes ";ssaa=2" (player_ssaa_factor).
  * ";peak=limit" follows ssaa, before texpack, with the Unclipped sound part on, in either tier;
@@ -2204,6 +2228,9 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part);
 void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index);
 /* The title's own value for a part: -1 follows the library. */
 int player_app_title_part(const PlayerApp *app, int game_index, int part);
+/* The package-wait choice is offered when this title is in Ace with a usable package.
+   Only waits declared by the built package can be shortened. */
+bool player_app_title_can_choose_short_waits(const PlayerApp *app, int game_index);
 /* The title's "Last session" line from the report under the user data folder; false, with
  * out empty, when there is none. */
 bool player_app_ace_last_session(const PlayerApp *app, int game_index, char *out, size_t cap);
@@ -2665,8 +2692,16 @@ bool player_app_build_queue_remove(PlayerApp *app, const char *disc_id);
 /* Moves a waiting game one place earlier (direction < 0) or later (> 0), past
    the next game that waits. False at either end or for the one building. */
 bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direction);
-/* A paused queue goes on. */
+/* The queue screen's Pause: the build that runs (if any) finishes, then the
+   queue waits, even after a restart. False when no queue runs or it is already
+   paused. A build cannot be suspended halfway; Cancel build stops one. */
+bool player_app_build_queue_pause(PlayerApp *app);
+/* A paused queue goes on: the person's Pause, or a build that could not start. */
 bool player_app_build_queue_resume(PlayerApp *app);
+/* The person paused the queue (player_app_build_queue_pause). */
+bool player_app_build_queue_held(const PlayerApp *app);
+/* The rebuild-queue-paused marker beside rebuild-queue.json. */
+bool player_app_rebuild_queue_paused_path(const PlayerApp *app, char *out, size_t out_size);
 /* The game's place in the queue, from 1 (the one building, or the next), and
    the number of games waiting or building in *out_total; 0 when it is not
    waiting or building. */
@@ -2813,6 +2848,20 @@ void player_app_toggle_update_check_at_start(PlayerApp *app);
 void player_app_toggle_discord_presence(PlayerApp *app);
 /* RetroAchievements is a separate opt-in, not the reserved network_mode setting. */
 void player_app_set_achievements_enabled(PlayerApp *app, bool enabled);
+/* RetroAchievements' consent card (#1316) is the only way to turn it on: the Achievements switch
+   opens it, and nothing is enabled, created or sent while it is open. False (and a status that
+   says why) when the platform has no credential store or it is already on. */
+bool player_app_open_achievements_card(PlayerApp *app);
+/* The card's AGREE AND TURN ON: the switch turns on and the card closes. False when no card is
+   open. The caller (main.c) then starts the client. */
+bool player_app_achievements_card_agree(PlayerApp *app);
+/* The card's NOT NOW (and Back): nothing changes. */
+void player_app_achievements_card_not_now(PlayerApp *app);
+/* The sign-in form: opens only while RetroAchievements is on (or previewed) with a credential
+   store; closes back to Online and developer options, abandoning a sign-in still on its way.
+   The form's text stays in the UI (player_ui_nk.c), never in PlayerApp. */
+bool player_app_open_achievements_sign_in(PlayerApp *app);
+void player_app_close_achievements_sign_in(PlayerApp *app);
 /* Why RetroAchievements is off for a game, or NULL when nothing stops it (#1316, maintainer
  * decision 2026-11-20): an unlock is earned only in the game as released. Cheats on (the stored
  * switch or this session's --cheats) or a launch with the title's 60 FPS game-logic package,

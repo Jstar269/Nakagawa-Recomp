@@ -766,6 +766,10 @@ static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
         player_app_online_play_not_now(app);
     } else if (app->active_view == VIEW_ONLINE_PLAY_SERVERS) {
         player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
+    } else if (app->active_view == VIEW_ACHIEVEMENTS_CARD) {
+        player_app_achievements_card_not_now(app);
+    } else if (app->active_view == VIEW_ACHIEVEMENTS_SIGN_IN) {
+        player_app_close_achievements_sign_in(app);
     } else if (app->active_view == VIEW_PREREQ_ABOUT ||
                app->active_view == VIEW_BUILD_CACHE ||
                app->active_view == VIEW_UPDATES ||
@@ -2129,6 +2133,10 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
                 player_app_online_play_not_now(app);
             } else if (app->active_view == VIEW_ONLINE_PLAY_SERVERS) {
                 player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
+            } else if (app->active_view == VIEW_ACHIEVEMENTS_CARD) {
+                player_app_achievements_card_not_now(app);
+            } else if (app->active_view == VIEW_ACHIEVEMENTS_SIGN_IN) {
+                player_app_close_achievements_sign_in(app);
             } else player_app_set_view(app, VIEW_SETTINGS);
             break;
         case PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY: player_online_play_open_page(app); break;
@@ -2341,7 +2349,11 @@ static void player_ui_nk_apply_action(PlayerRun *run, PlayerApp *app,
         const PlayerUiSettingsOp op = (PlayerUiSettingsOp)action->primary;
         if (op == PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS ||
             op == PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS ||
-            op == PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS) {
+            op == PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS ||
+            op == PLAYER_UI_SETTINGS_ACHIEVEMENTS_AGREE ||
+            op == PLAYER_UI_SETTINGS_ACHIEVEMENTS_NOT_NOW ||
+            op == PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT ||
+            op == PLAYER_UI_SETTINGS_ACHIEVEMENTS_SIGN_IN_CANCEL) {
             player_achievements_settings_action(run, op);
         } else {
             player_ui_settings_apply(app, op, action->title_index, action->choice_index);
@@ -2368,10 +2380,12 @@ static void player_ui_nk_apply_action(PlayerRun *run, PlayerApp *app,
     }
     if (action->kind == PLAYER_UI_ACTION_QUEUE) {
         /* The build queue: the title page's Add to queue and Remove from
-           queue, and the queue screen's Up, Down, Remove and Resume. */
+           queue, and the queue screen's Up, Down, Remove, and Pause or Resume. */
         PlayerUiQueueOp op = (PlayerUiQueueOp)action->primary;
         if (op == PLAYER_UI_QUEUE_RESUME) {
             (void)player_app_build_queue_resume(app);
+        } else if (op == PLAYER_UI_QUEUE_PAUSE) {
+            (void)player_app_build_queue_pause(app);
         } else if (action->title_index < (size_t)app->game_count) {
             int index = (int)action->title_index;
             const char *disc_id = app->games[index].disc_id;
@@ -2583,9 +2597,13 @@ static void player_ui_nk_apply_action(PlayerRun *run, PlayerApp *app,
 }
 
 /* nk_ui draws the frame at the window's real size, from the output's pixels. */
+static bool player_run_sign_in_pending(const PlayerRun *run);
+
 static void player_render_active_ui(PlayerRun *run, PlayerUiNk *next_ui, PlayerApp *app,
                                     SDL_Renderer *renderer, SDL_Window *window) {
     PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+    /* The sign-in form's SIGN IN waits while a sign-in is on its way (#1316). */
+    app->achievements_sign_in_pending = player_run_sign_in_pending(run);
     bool drawn = player_ui_nk_view_active(next_ui, app) &&
                  player_ui_nk_render(next_ui, app, renderer, window, &action);
     /* An action the frame committed (its dialog already closed) runs even when
@@ -4855,6 +4873,9 @@ struct PlayerRun {
     bool guest_memory_channel_checked;
     bool achievements_shutting_down;
     bool achievements_login_pending;
+    /* The sign-in form was left while this sign-in was on its way: it was ended
+       (nk_ach_logout), and its answer, whatever it is, stores nothing and signs nobody in. */
+    bool achievements_login_abandoned;
     bool achievements_signout_pending;
     bool achievements_queue_load_checked;
     /* What the saved queue's load had to say, shown again once the sign-in has settled. */
@@ -5577,9 +5598,24 @@ static void player_achievements_report_dropped_events(PlayerRun *run) {
              player_utf8_fit(status, room), status, status[0] ? " " : "", note);
 }
 
+static bool player_run_sign_in_pending(const PlayerRun *run) {
+    return run != NULL && run->achievements_login_pending;
+}
+
 static void player_achievements_collect_events(PlayerRun *run) {
     if (!run || !run->achievements) return;
     PlayerApp *app = &run->app;
+    if (app->achievements_sign_in_abandoned) {
+        /* Cancel or Back on the sign-in form while its SIGN IN was on its way. */
+        app->achievements_sign_in_abandoned = false;
+        if (run->achievements_login_pending && !run->achievements_signout_pending &&
+            !run->achievements_login_abandoned) {
+            run->achievements_login_abandoned = true;
+            nk_ach_logout(run->achievements);
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "Sign-in cancelled.");
+        }
+    }
     NkAchEvent events[NK_ACH_EVENT_QUEUE];
     size_t count;
     while ((count = nk_ach_take_events(run->achievements, events,
@@ -5589,6 +5625,16 @@ static void player_achievements_collect_events(PlayerRun *run) {
             switch (event->kind) {
             case NK_ACH_EVENT_LOGIN_OK: {
                 run->achievements_login_pending = false;
+                if (run->achievements_login_abandoned) {
+                    /* Cancelled: the token it brought is neither stored nor used. */
+                    run->achievements_login_abandoned = false;
+                    nk_ach_logout(run->achievements);
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Sign-in cancelled.");
+                    break;
+                }
                 if (run->achievements_signout_pending) {
                     /* Tried again: an account whose token is still stored keeps its records. */
                     player_achievements_end_account(
@@ -5624,6 +5670,8 @@ static void player_achievements_collect_events(PlayerRun *run) {
                              "RetroAchievements token.");
                 } else {
                     app->achievements_signed_in = true;
+                    /* The sign-in form, if it asked, has done its work. */
+                    player_app_close_achievements_sign_in(app);
                     nk_ach_display_name(username, app->achievements_account,
                                         sizeof app->achievements_account);
                     player_achievements_rest_status(
@@ -5638,7 +5686,10 @@ static void player_achievements_collect_events(PlayerRun *run) {
             case NK_ACH_EVENT_LOGIN_FAILED:
             case NK_ACH_EVENT_LOGIN_UNREACHABLE:
                 run->achievements_login_pending = false;
-                if (run->achievements_signout_pending) {
+                if (run->achievements_login_abandoned) {
+                    /* Its own nk_ach_logout ended it: "Sign-in cancelled." stays. */
+                    run->achievements_login_abandoned = false;
+                } else if (run->achievements_signout_pending) {
                     run->achievements_signout_pending = false;
                     player_achievements_end_account(
                         run, nk_platform_credential_delete(k_ach_credential_target));
@@ -5818,77 +5869,49 @@ static void player_achievements_start(PlayerRun *run) {
     player_achievements_sign_in_stored(run);
 }
 
-static bool player_achievements_consent(PlayerRun *run) {
-    static const SDL_MessageBoxButtonData buttons[] = {
-        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel"},
-        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Agree and continue"},
-    };
-    static const char message[] =
-        "RetroAchievements is hosted at https://retroachievements.org.\n\n"
-        "If you agree, Nakagawa Recomp sends only to retroachievements.org: your "
-        "RetroAchievements username and API token, the game's RetroAchievements hash, the "
-        "achievements you unlock, and every two minutes while a game runs its Rich Presence "
-        "text (what the game's achievement set says you are doing). Each request names this "
-        "player, its version, your operating system and the rcheevos version. During sign-in "
-        "your password is sent once to obtain a token and is never saved; the token is kept in "
-        "Windows Credential Manager. Game files, saves and guest memory stay on this PC.\n\n"
-        "While you are signed in, the achievements' badge pictures are downloaded from "
-        "media.retroachievements.org, the only other host. Those requests send no username, "
-        "token or console ID, only the same player, version and system names. The pictures "
-        "are kept on this PC until you sign out.\n\n"
-        "Casual Mode only: Hardcore is not available. Achievements are off while cheats are on "
-        "or with 60 FPS game logic.";
-    SDL_MessageBoxData data;
-    int selected = 0;
-    if (!run || !run->window) return false;
-    memset(&data, 0, sizeof data);
-    data.flags = SDL_MESSAGEBOX_INFORMATION;
-    data.window = run->window;
-    data.title = "RetroAchievements consent";
-    data.message = message;
-    data.numbuttons = (int)(sizeof buttons / sizeof buttons[0]);
-    data.buttons = buttons;
-    return SDL_ShowMessageBox(&data, &selected) && selected == 1;
-}
-
-static bool player_achievements_prompt_sign_in(PlayerRun *run) {
-    if (!run || !run->app.settings.achievements_enabled ||
-        !run->app.achievements_store_available) {
-        if (run) snprintf(run->app.achievements_status,
-                          sizeof run->app.achievements_status,
-                          "Enable RetroAchievements first; this platform needs Windows Credential Manager.");
-        return false;
-    }
-    if (run->achievements_login_pending) {
+/* The sign-in form's SIGN IN (#1316). RetroAchievements has no browser or OAuth sign-in for other
+   clients, so the launcher's own form (scr_settings.c, player_ui_nk.c) takes the username and the
+   password. The password passes through here once: taken out of the form (which wipes its copy),
+   handed to the one sign-in request, and wiped. Only the token the server answers with is kept,
+   in Windows Credential Manager (NK_ACH_EVENT_LOGIN_SUCCEEDED below). */
+static bool player_achievements_submit_sign_in(PlayerRun *run) {
+    if (!run) return false;
+    char username[PLAYER_UI_RA_USERNAME_MAX + 1u];
+    char password[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+    /* Taken first, so the form's password is gone whatever happens next. */
+    const bool taken = player_ui_nk_take_sign_in(run->next_ui, username, sizeof username,
+                                                 password, sizeof password);
+    bool started = false;
+    if (!taken) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Enter your username and password.");
+    } else if (run->app.achievements_preview) {
+        /* --view=achievements-sign-in: a picture of the form, with the switch off. */
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "This sign-in page is a preview; turn RetroAchievements on to sign in.");
+    } else if (!run->app.settings.achievements_enabled ||
+               !run->app.achievements_store_available) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Enable RetroAchievements first; this platform needs Windows Credential Manager.");
+    } else if (run->achievements_login_pending) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
                  "Sign-in is already in progress.");
-        return false;
-    }
-    if (!player_achievements_create(run)) return false;
-    /* The operating system's own credential dialog takes the password (nk_platform.h); the
-       player sees it only long enough to hand it to the sign-in request. */
-    char username[256] = "";
-    char password[1024] = "";
-    const int prompt = nk_platform_credential_prompt(
-        "Sign in to RetroAchievements",
-        "Enter your RetroAchievements.org username and password. "
-        "The password is used once to obtain a token and is not stored.",
-        NK_ACH_HOST, username, sizeof username, password, sizeof password);
-    if (prompt != 1) {
-        nk_secure_zero(password, sizeof password);
+    } else if (!player_achievements_create(run)) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-                 prompt == 0 ? "Sign-in cancelled." : "Credential prompt failed.");
-        return false;
-    }
-    if (!nk_ach_begin_login_with_password(run->achievements, username, password)) {
-        nk_secure_zero(password, sizeof password);
+                 "RetroAchievements could not initialize.");
+    } else if (!nk_ach_begin_login_with_password(run->achievements, username, password)) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
                  "Sign-in could not start.");
-        return false;
+    } else {
+        started = true;
     }
     nk_secure_zero(password, sizeof password);
+    nk_secure_zero(username, sizeof username);
+    if (!started) return false;
     run->achievements_login_pending = true;
+    run->achievements_login_abandoned = false;
     run->achievements_signout_pending = false;
+    run->app.achievements_sign_in_abandoned = false;
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "Signing in.");
     return true;
 }
@@ -6083,9 +6106,37 @@ static void player_achievements_sign_out(PlayerRun *run) {
 static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op) {
     if (!run) return;
     PlayerApp *app = &run->app;
+    /* The consent card and the sign-in form connect nothing and read no credential: they open
+       and close as in any run. */
+    if (op == PLAYER_UI_SETTINGS_ACHIEVEMENTS_NOT_NOW) {
+        player_app_achievements_card_not_now(app);
+        return;
+    }
+    if (op == PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS) {
+        (void)player_app_open_achievements_sign_in(app);
+        return;
+    }
+    if (op == PLAYER_UI_SETTINGS_ACHIEVEMENTS_SIGN_IN_CANCEL) {
+        player_app_close_achievements_sign_in(app);
+        return;
+    }
+    if (op == PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS && !app->settings.achievements_enabled) {
+        /* Off: the consent card, the only way it turns on. Nothing is created or sent. */
+        (void)player_app_open_achievements_card(app);
+        return;
+    }
     if (player_ui_test_active(&run->ui_test)) {
-        /* A native UI regression run stays offline, opens no modal box and reads no
-           credential: the switch, Sign in and Sign out are refused, and say so. */
+        /* A native UI regression run stays offline and reads no credential: the card's AGREE,
+           SIGN IN, the switch's Off and Sign out are refused, and say so. The form's password
+           is wiped all the same. */
+        if (op == PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT) {
+            char username[PLAYER_UI_RA_USERNAME_MAX + 1u];
+            char password[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+            (void)player_ui_nk_take_sign_in(run->next_ui, username, sizeof username, password,
+                                            sizeof password);
+            nk_secure_zero(password, sizeof password);
+            nk_secure_zero(username, sizeof username);
+        }
         snprintf(app->achievements_status, sizeof app->achievements_status,
                  "RetroAchievements is not available in a UI regression run.");
         return;
@@ -6122,21 +6173,17 @@ static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettings
                      "RetroAchievements is off.");
             return;
         }
-        if (!app->achievements_store_available) {
-            snprintf(app->achievements_status, sizeof app->achievements_status,
-                     "Sign-in requires Windows Credential Manager; this platform is unsupported.");
-            return;
-        }
-        if (!player_achievements_consent(run)) {
-            snprintf(app->achievements_status, sizeof app->achievements_status,
-                     "RetroAchievements was not enabled.");
-            return;
-        }
-        player_app_set_achievements_enabled(app, true);
-        player_achievements_start(run);
         break;
-    case PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS:
-        (void)player_achievements_prompt_sign_in(run);
+    case PLAYER_UI_SETTINGS_ACHIEVEMENTS_AGREE:
+        /* The card's AGREE AND TURN ON: the switch turns on, then the client starts. With a
+           stored token it signs in by itself; without one the sign-in form opens. */
+        if (!player_app_achievements_card_agree(app)) return;
+        player_achievements_start(run);
+        if (!run->achievements_login_pending && !app->achievements_signed_in)
+            (void)player_app_open_achievements_sign_in(app);
+        break;
+    case PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT:
+        (void)player_achievements_submit_sign_in(run);
         break;
     case PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS:
         player_achievements_sign_out(run);
@@ -6891,6 +6938,16 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
         } else if (strcmp(test_view, "online-play-card") == 0) {
             player_online_play_open_page(app);
             (void)player_app_open_online_play_card(app, app->settings.online_play_server);
+        } else if (strcmp(test_view, "achievements-card") == 0) {
+            player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+            (void)player_app_open_achievements_card(app);
+        } else if (strcmp(test_view, "achievements-sign-in") == 0) {
+            /* The form as AGREE leaves it, as a preview: the switch stays off and nothing is
+               saved, the client never starts, and SIGN IN is refused (an interactive run
+               included); a real AGREE ends the preview. */
+            player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+            app->achievements_preview = app->achievements_store_available;
+            (void)player_app_open_achievements_sign_in(app);
         } else if (strcmp(test_view, "online-play-servers") == 0) {
             player_online_play_open_page(app);
             player_online_play_open_servers(app);
@@ -7017,6 +7074,10 @@ static int player_command_line_launch(PlayerRun *run) {
             } else {
                 fprintf(stderr, "[PLAYER] Launch index %d has no prepared runtime; PLAY NOW is unavailable.\n",
                         run->launch_index);
+            }
+            if (app->headless_accept_presented_frames > 0u) {
+                fprintf(stderr,
+                        "[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable\n");
             }
             if (run->launch_title) {
                 char message[320];

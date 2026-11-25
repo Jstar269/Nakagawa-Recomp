@@ -224,8 +224,8 @@ static void write_text_file(const char *path, const char *text) {
     assert(fclose(file) == 0);
 }
 
-/* The whole file as a NUL-terminated string; the caller frees it. */
-static char *read_text_file(const char *path) {
+/* Read the whole file and append a NUL outside its reported length. */
+static char *read_file_contents(const char *path, size_t *size) {
     FILE *file = fopen(path, "rb");
     char *text;
     long length;
@@ -237,9 +237,14 @@ static char *read_text_file(const char *path) {
     text = (char *)malloc((size_t)length + 1u);
     assert(text != NULL);
     assert(fread(text, 1, (size_t)length, file) == (size_t)length);
+    if (size) *size = (size_t)length;
     text[length] = '\0';
     fclose(file);
     return text;
+}
+
+static char *read_text_file(const char *path) {
+    return read_file_contents(path, NULL);
 }
 
 #define TEST_ISO_SECTOR_BYTES 2048u
@@ -1848,6 +1853,18 @@ static int repeat_launch_child_mode(void) {
     fflush(stdout);
     fprintf(stderr, "synthetic runtime stderr line\n");
     fflush(stderr);
+    /* The runtime's last-resort crash report (src/rt/driver.c) writes this header
+       before its fault and register lines. "embedded" writes the same words inside a
+       longer line, the negative control. */
+    const char *crash_marker = getenv("NK_REPEAT_LAUNCH_CRASH_MARKER");
+    if (crash_marker && strcmp(crash_marker, "1") == 0) {
+        fprintf(stderr, "\n=== PSP RECOMPILER CRASH REPORT ===\n");
+        fprintf(stderr, "Exception: 0xc0000005 at host 0x0000000000000000\n");
+        fflush(stderr);
+    } else if (crash_marker && strcmp(crash_marker, "embedded") == 0) {
+        fprintf(stderr, "note === PSP RECOMPILER CRASH REPORT === quoted\n");
+        fflush(stderr);
+    }
     const char *stop_reason = getenv("NK_REPEAT_LAUNCH_STOP_REASON");
     const char *boot_event_path = getenv("SR_BOOT_EVENT_FILE");
     /* A run's own boot event, after as many lines of output as a real runtime
@@ -4369,6 +4386,7 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     char sep = nk_platform_path_separator();
     char path[NATIVE_TEST_PATH_MAX + 192];
     char queue_path[MAX_PATH_LEN];
+    char paused_path[MAX_PATH_LEN];
     char text[256];
     char reason[2048];
     bool offers = true;
@@ -4460,6 +4478,8 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     /* The file keeps the order and each title's kind, as schema 2, and a
        restart resumes the queue from it. */
     assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(player_app_rebuild_queue_paused_path(app, paused_path, sizeof(paused_path)));
+    assert(!nk_platform_file_exists(paused_path));
     assert(queue_file_has(queue_path,
         "{\"disc_id\": \"ULUS99998\", \"kind\": \"build\", \"state\": \"pending\"},\n"
         "    {\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
@@ -4480,6 +4500,47 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     }
     printf("[PLAYER_STATE_TEST] the build queue persists and resumes after a restart PASS\n");
 
+    /* Pause with nothing building: no game starts, the file says paused, a
+       restart keeps it paused, and Add to queue does not resume it. */
+    assert(player_app_build_queue_pause(app));
+    assert(!player_app_build_queue_pause(app));                    /* already paused */
+    assert(player_app_build_queue_held(app) && queue->active && !queue->paused);
+    /* The pause is a marker beside the queue file, which keeps the schema 2
+       shape every released player reads. */
+    assert(nk_platform_file_exists(paused_path));
+    assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(!queue_file_has(queue_path, "paused"));
+    player_app_rebuild_queue_step(app);
+    assert(!app->build_session.is_building);
+    assert(queue->entries[0].state == PLAYER_REBUILD_PENDING &&
+           queue->entries[1].state == PLAYER_REBUILD_PENDING);
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "The build queue is paused. 2 games wait.") == 0);
+    {
+        PlayerApp *resumed = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(resumed != NULL);
+        snprintf(resumed->settings_path, sizeof(resumed->settings_path), "%s",
+                 app->settings_path);
+        memcpy(resumed->games, app->games, sizeof(GameRecord) * 4u);
+        resumed->game_count = 4;
+        assert(player_app_rebuild_queue_load(resumed));
+        assert(resumed->rebuild_queue.active && resumed->rebuild_queue.held &&
+               resumed->rebuild_queue.count == 2);
+        player_app_rebuild_queue_step(resumed);
+        assert(!resumed->build_session.is_building &&
+               resumed->rebuild_queue.entries[0].state == PLAYER_REBUILD_PENDING);
+        free(resumed);
+    }
+    assert(player_app_build_queue_add(app, 3));
+    assert(player_app_build_queue_held(app) && queue->count == 3);
+    assert(player_app_build_queue_remove(app, "ULUS99995"));
+    assert(player_app_build_queue_held(app));
+    assert(player_app_build_queue_resume(app));
+    assert(!player_app_build_queue_resume(app));                   /* not paused now */
+    assert(!player_app_build_queue_held(app) && !nk_platform_file_exists(paused_path));
+    printf("[PLAYER_STATE_TEST] a paused build queue starts nothing and stays paused after a "
+           "restart PASS\n");
+
     /* A first build that fails says so on its card, and the queue goes on:
        ULUS99997's disc is missing, so it is skipped, and the queue ends. */
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "failure");
@@ -4495,9 +4556,40 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(!player_app_build_queue_move(app, "ULUS99997", -1));    /* not past it */
     player_app_rebuild_queue_step(app);                            /* one build at a time */
     assert(queue->entries[1].state == PLAYER_REBUILD_PENDING);
+    /* Pause while it builds: that build goes on to its end, then nothing
+       starts until Resume. */
+    assert(player_app_build_queue_pause(app));
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "Building 1 of 2") == 0);                  /* it still builds */
+    {
+        /* Closed while it builds under Pause: the build is saved as waiting,
+           and after a restart it waits for Resume instead of starting again. */
+        PlayerApp *resumed = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(resumed != NULL);
+        assert(queue_file_has(queue_path,
+            "{\"disc_id\": \"ULUS99998\", \"kind\": \"build\", \"state\": \"pending\"}"));
+        snprintf(resumed->settings_path, sizeof(resumed->settings_path), "%s",
+                 app->settings_path);
+        memcpy(resumed->games, app->games, sizeof(GameRecord) * 4u);
+        resumed->game_count = 4;
+        assert(player_app_rebuild_queue_load(resumed));
+        assert(resumed->rebuild_queue.active && resumed->rebuild_queue.held);
+        player_app_rebuild_queue_step(resumed);
+        assert(!resumed->build_session.is_building);
+        assert(resumed->rebuild_queue.entries[0].state == PLAYER_REBUILD_PENDING &&
+               resumed->rebuild_queue.entries[1].state == PLAYER_REBUILD_PENDING);
+        free(resumed);
+    }
+    player_app_rebuild_queue_step(app);
+    assert(app->build_session.is_building && player_app_rebuild_queue_owns_build(app));
     poll_player_package_build_to_terminal(app);
     assert(app->build_session.is_failed);
     assert(!player_app_apply_build_outcome(app));
+    assert(queue->entries[0].state == PLAYER_REBUILD_FAILED);
+    player_app_rebuild_queue_step(app);
+    assert(queue->active && player_app_build_queue_held(app) && !app->build_session.is_building);
+    assert(queue->entries[1].state == PLAYER_REBUILD_PENDING);     /* not started */
+    assert(player_app_build_queue_resume(app));
     assert(app->active_view == VIEW_LIBRARY && app->last_error.error_code[0] == '\0');
     assert(queue->entries[0].state == PLAYER_REBUILD_FAILED);
     assert(player_app_rebuild_card(app, &app->games[0], &card));
@@ -4509,7 +4601,9 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(!queue->active && !nk_platform_file_exists(queue_path));
     assert(player_app_rebuild_card(app, &app->games[0], &card) &&
            strcmp(card.word, "Build failed") == 0);
+    assert(!queue->held && !nk_platform_file_exists(paused_path)); /* a finished queue */
     printf("[PLAYER_STATE_TEST] a failed queued build goes to its card and the queue goes on PASS\n");
+    printf("[PLAYER_STATE_TEST] Pause lets the running build finish and starts no next one PASS\n");
 
     /* Added again, a finished game waits again; this time its build passes. */
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "success");
@@ -4547,6 +4641,14 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(queue_file_has(queue_path, "\"schema_version\": 2"));
     assert(queue_file_has(queue_path,
         "{\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
+    /* The pause marker: a queue file beside it loads paused; with no queue
+       file it is stale (an older player finished the queue) and goes. */
+    write_text_file(paused_path, "paused\n");
+    memset(queue, 0, sizeof(*queue));
+    assert(player_app_rebuild_queue_load(app) && queue->active && queue->held);
+    assert(nk_remove_utf8(queue_path) == 0);
+    memset(queue, 0, sizeof(*queue));
+    assert(!player_app_rebuild_queue_load(app) && !nk_platform_file_exists(paused_path));
     /* A schema 2 title must say its kind; a repeated title is refused too. */
     write_text_file(queue_path,
         "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,"
@@ -4560,6 +4662,7 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
     assert(!player_app_rebuild_queue_load(app) && !queue->active);
     assert(nk_remove_utf8(queue_path) == 0);
     printf("[PLAYER_STATE_TEST] a schema 1 rebuild queue migrates to schema 2 PASS\n");
+    printf("[PLAYER_STATE_TEST] the pause marker loads with its queue and goes without one PASS\n");
 
     /* A newer Nakagawa's queue is not resumed, and stays as it is while this
        player's own queue comes and goes. */
@@ -7326,23 +7429,89 @@ static void versioned_path(char *out, size_t out_size, const char *name) {
 }
 
 static void versioned_copy_fixture(const char *fixture, const char *destination) {
-    char *bytes = read_text_file(fixture);
-    write_text_file(destination, bytes);
+    size_t size;
+    char *bytes = read_file_contents(fixture, &size);
+    write_binary_file(destination, (const unsigned char *)bytes, size);
     free(bytes);
+}
+
+static bool versioned_bytes_equal(const char *path, const char *original, size_t original_size) {
+    if (!nk_platform_file_exists(path)) return false;
+    size_t size;
+    char *bytes = read_file_contents(path, &size);
+    bool same = size == original_size && memcmp(bytes, original, size) == 0;
+    free(bytes);
+    return same;
 }
 
 static bool versioned_file_equals(const char *path, const char *fixture) {
     if (!nk_platform_file_exists(path)) return false;
-    char *left = read_text_file(path);
-    char *right = read_text_file(fixture);
-    bool same = strcmp(left, right) == 0;
-    free(left);
-    free(right);
+    size_t size;
+    char *bytes = read_file_contents(fixture, &size);
+    bool same = versioned_bytes_equal(path, bytes, size);
+    free(bytes);
     return same;
 }
 
 static void versioned_remove(const char *path) {
     if (nk_platform_file_exists(path)) assert(remove(path) == 0);
+}
+
+static void versioned_release_fixture(char *out, size_t size, const char *release, const char *name) {
+    int written = snprintf(out, size, "tests/fixtures/user_data/%s/%s", release, name);
+    assert(written > 0 && (size_t)written < size);
+}
+
+static void test_preview_settings(PlayerApp *app, const char *release, bool v003) {
+    char fixture[96];
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_release_fixture(fixture, sizeof(fixture), release, "settings.json");
+    versioned_path(path, sizeof(path), "settings.json");
+    versioned_path(backup, sizeof(backup), "settings.json.v2.bak");
+    size_t original_size;
+    char *original = read_file_contents(fixture, &original_size);
+    write_binary_file(path, (const unsigned char *)original, original_size);
+    for (unsigned pass = 0; pass < 2u; ++pass) {
+        assert(player_app_load_settings(app, path) == NK_OK);
+        assert(!app->settings_newer_schema && !app->settings_unreadable);
+        const PlayerSettings *settings = &app->settings;
+        assert(settings->resolution_scale == 2 && settings->fps_cap == 0 && !settings->vsync);
+        assert(settings->present_scaling == NK_PRESENT_SCALING_INTEGER);
+        assert(settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON);
+        assert(settings->high_contrast_choice == PLAYER_SYSTEM_CHOICE_OFF);
+        assert(settings->interface_size_pct == 125 && settings->text_size_pct == 150);
+        assert(settings->master_volume == (v003 ? 57 : 42));
+        assert(settings->library_sort == PLAYER_LIBRARY_SORT_NAME);
+        assert(!settings->share_system_libraries);
+        assert(strcmp(settings->rebuild_prompt_version, v003 ? "0.0.3" : "0.0.2") == 0);
+        assert(settings->launcher_window_position_valid && !settings->launcher_window_maximized);
+        assert(settings->launcher_window_x == 24 && settings->launcher_window_y == 36);
+        assert(settings->launcher_window_width == 1440 && settings->launcher_window_height == 810);
+        assert(strcmp(settings->picker_folder, "<drive>:\\SyntheticFixture\\Images") == 0);
+        assert(settings->title_play_count == 1);
+        assert(strcmp(settings->title_play[0].key, "TEST80003") == 0);
+        assert(settings->title_play[0].mode == PLAYER_PLAY_ENHANCED);
+        assert(settings->launcher_music == v003);
+        assert(settings->launcher_music_volume == (v003 ? 37 : 80));
+        assert(settings->build_speed == (v003 ? PACKAGE_BUILD_SPEED_BACKGROUND : PACKAGE_BUILD_SPEED_BALANCED));
+        assert(settings->nickname_asked == v003);
+        assert(strcmp(settings->nickname, v003 ? "Fixture Three" : NK_NICKNAME_DEFAULT) == 0);
+        assert(settings->title_pack_count == (v003 ? 1 : 0));
+        if (v003) {
+            assert(strcmp(settings->title_packs[0].key, "TEST80003") == 0);
+            assert(strcmp(settings->title_packs[0].path, "//fixtures.invalid/synthetic-fixtures/texture-pack") == 0);
+        }
+        if (pass == 0u) {
+            assert(versioned_bytes_equal(path, original, original_size));
+            assert(player_app_save_settings(app, path) == NK_OK);
+        }
+    }
+    assert(!nk_platform_file_exists(backup));
+    assert(versioned_bytes_equal(fixture, original, original_size));
+    free(original);
+    versioned_remove(path);
+    printf("[PLAYER_STATE_TEST] %s settings.json: schema 2 round-trip PASS\n", release);
 }
 
 static void test_versioned_settings(PlayerApp *app) {
@@ -7431,6 +7600,45 @@ static void test_versioned_settings(PlayerApp *app) {
            "a newer file is kept PASS\n");
 }
 
+static void test_preview_library(NkLibrary *library, NkLibrary *reloaded, const char *release,
+                                 uint64_t iso_size) {
+    char fixture[96];
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_release_fixture(fixture, sizeof(fixture), release, "library.json");
+    versioned_path(path, sizeof(path), "library.json");
+    versioned_path(backup, sizeof(backup), "library.json.bak");
+    size_t original_size;
+    char *original = read_file_contents(fixture, &original_size);
+    write_binary_file(path, (const unsigned char *)original, original_size);
+    assert(nk_library_load(library, path) == NK_OK);
+    assert(library->count == 2 && library->newer_schema_version == 0);
+    const NkGameEntry *one = nk_library_find_by_disc_id(library, "TEST80003");
+    const NkGameEntry *two = nk_library_find_by_disc_id(library, "TEST80004");
+    assert(one && two);
+    assert(strcmp(one->title_name, "Synthetic Preview \"One\"") == 0);
+    assert(strcmp(one->iso_path, "<drive>:\\SyntheticFixture\\Expanded\\preview.iso") == 0);
+    assert(strcmp(one->source_image_path, "<drive>:\\SyntheticFixture\\Images\\preview.cso") == 0);
+    assert(strcmp(one->content_sha1, "0123456789abcdef0123456789abcdef01234567") == 0);
+    assert(strcmp(one->content_crc32, "10203040") == 0);
+    assert(one->disc_verification == NK_DISC_TIER_MODIFIED && one->iso_size_bytes == iso_size);
+    assert(one->is_prepared && one->assets_staged && one->status == NK_STATUS_PREPARED);
+    assert(strcmp(two->title_name, "Synthetic Preview Two \xE6\x97\xA5\xE6\x9C\xAC") == 0);
+    assert(two->is_experimental && two->source_image_path[0] == '\0');
+    assert(versioned_bytes_equal(path, original, original_size));
+    assert(nk_library_save(library, path) == NK_OK);
+    assert(versioned_bytes_equal(backup, original, original_size));
+    assert(nk_library_load(reloaded, path) == NK_OK);
+    assert(reloaded->count == library->count);
+    assert(memcmp(reloaded->entries, library->entries,
+                  sizeof(library->entries[0]) * (size_t)library->count) == 0);
+    assert(versioned_bytes_equal(fixture, original, original_size));
+    free(original);
+    versioned_remove(backup);
+    versioned_remove(path);
+    printf("[PLAYER_STATE_TEST] %s library.json: schema 1 round-trip PASS\n", release);
+}
+
 static void test_versioned_library(PlayerApp *app) {
     static NkLibrary library;
     static NkLibrary reloaded;
@@ -7507,6 +7715,8 @@ static void test_versioned_library(PlayerApp *app) {
     versioned_remove(bak);
     printf("[PLAYER_STATE_TEST] library.json: v0.0.1 loads and round-trips, a newer file "
            "and its .bak are kept PASS\n");
+    test_preview_library(&library, &reloaded, "v0.0.2", 124000000u);
+    test_preview_library(&library, &reloaded, "v0.0.3", 125000000u);
 }
 
 static void test_versioned_user_data(void) {
@@ -7516,9 +7726,18 @@ static void test_versioned_user_data(void) {
                            native_test_get_root(), nk_platform_path_separator());
     assert(written > 0 && (size_t)written < sizeof(s_versioned_root));
     assert(nk_platform_mkdir_p(s_versioned_root));
+    const unsigned char bytes[] = "{}\n";
+    char probe[NATIVE_TEST_PATH_MAX + 64];
+    versioned_path(probe, sizeof(probe), "trailing-nul.json");
+    write_binary_file(probe, bytes, sizeof(bytes));
+    assert(!versioned_bytes_equal(probe, (const char *)bytes, sizeof(bytes) - 1u));
+    assert(versioned_bytes_equal(probe, (const char *)bytes, sizeof(bytes)));
+    versioned_remove(probe);
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
     test_versioned_settings(app);
+    test_preview_settings(app, "v0.0.2", false);
+    test_preview_settings(app, "v0.0.3", true);
     test_versioned_library(app);
     free(app);
 }
@@ -11447,8 +11666,8 @@ static void test_play_mode_load_settings(void) {
     assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 0);
     assert(player_enhanced_part(PLAYER_PART_LOAD)->fresh == 0);
     assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->key, "load") == 0);
-    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->name, "Short loads") == 0);
-    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "Ace only") != NULL);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->name, "Loading speed") == 0);
+    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "Ace package") != NULL);
     assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "changes the game's timing") != NULL);
     app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
     for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
@@ -11515,6 +11734,86 @@ static void test_play_mode_load_settings(void) {
     free(app);
     printf("PASS: short loads are off by default, read and saved at both levels, and only Ace "
            "launches them\n");
+}
+
+static void test_auto_load_player_path(void) {
+    const char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    NkRuntimeConfig config = {0};
+    PlayerPlayResolved play;
+    AceConfig ace;
+    PlayerApp *app = calloc(1, sizeof(*app));
+    PlayerApp *back = calloc(1, sizeof(*back));
+    const PlayerEnhancedPartInfo *load = player_enhanced_part(PLAYER_PART_LOAD);
+    assert(app && back && load->value_count == 3 && !load->ace_only);
+    const int automatic = 0;
+    const int ace_waits = 1;
+    const int off = 2;
+    assert(load->values[automatic] == ACE_LOAD_AUTO && load->values[ace_waits] == ACE_LOAD_FAST &&
+           load->values[off] == ACE_LOAD_OFF);
+    assert(strcmp(load->labels[automatic], "Automatic") == 0);
+    assert(strstr(load->sentence, "Rebuild older game packages") != NULL);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cauto_load_player_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+
+    /* A regular Enhanced title needs neither a timing package nor an Ace package. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"load\": \"auto\"},"
+        " \"title_play\": {\"TEST95002\": {\"mode\": \"ace\", \"load\": \"fast\"},"
+        " \"TEST95003\": {\"mode\": \"authentic\", \"load\": \"auto\"},"
+        " \"TEST95004\": {\"mode\": \"ace\", \"load\": \"auto\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+    player_play_config_session(&app->settings, "TEST95001", false, false, &config, &play);
+    assert(play.mode == PLAYER_PLAY_ENHANCED && play.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+    assert(ace_parse(config.ace_spec, &ace, NULL, 0) == 1 && ace.load == ACE_LOAD_AUTO);
+    assert(strstr(config.ace_spec, ";load=auto") && !strstr(config.ace_spec, ";load=fast"));
+    player_play_config_session(&app->settings, "TEST95004", false, false, &config, &play);
+    assert(play.mode == PLAYER_PLAY_ACE && strstr(config.ace_spec, ";load=auto"));
+    player_play_config_session(&app->settings, "TEST95002", false, false, &config, &play);
+    assert(play.mode == PLAYER_PLAY_ACE && strstr(config.ace_spec, ";load=fast") &&
+           !strstr(config.ace_spec, ";load=auto"));
+    player_play_config_session(&app->settings, "TEST95003", false, false, &config, &play);
+    assert(strcmp(config.ace_spec, "off") == 0);
+    player_play_config_session(&app->settings, "TEST95001", false, true, &config, &play);
+    assert(strcmp(config.ace_spec, "off") == 0);
+
+    /* Use the same app actions as the screen. Both click and cycle skip legacy
+       Ace waits on a game following the Enhanced library. */
+    app->game_count = 1;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "TEST95001");
+    player_app_open_title_enhanced(app, 0);
+    assert(player_app_enhanced_page_title(app) == 0);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_LOAD, ace_waits);
+    assert(player_app_title_part(app, 0, PLAYER_PART_LOAD) == -1);
+    player_app_enhanced_page_cycle_part(app, PLAYER_PART_LOAD);
+    assert(player_app_title_part(app, 0, PLAYER_PART_LOAD) == ACE_LOAD_AUTO);
+    player_app_enhanced_page_cycle_part(app, PLAYER_PART_LOAD);
+    assert(player_app_title_part(app, 0, PLAYER_PART_LOAD) == ACE_LOAD_OFF);
+    player_play_config_session(&app->settings, "TEST95001", false, false, &config, &play);
+    assert(play.on && !strstr(config.ace_spec, ";load="));
+    player_app_close_enhanced_page(app);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_LOAD, off);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == ACE_LOAD_OFF);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_LOAD, automatic);
+
+    assert(player_app_save_settings(app, path) == NK_OK);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+    player_play_resolve(&back->settings, "TEST95001", &play);
+    assert(play.part[PLAYER_PART_LOAD] == ACE_LOAD_OFF);
+    player_play_resolve(&back->settings, "TEST95002", &play);
+    assert(play.part[PLAYER_PART_LOAD] == ACE_LOAD_FAST);
+    player_play_resolve(&back->settings, "TEST95004", &play);
+    assert(play.part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    puts("PASS: Automatic loading round-trips and launches in Enhanced or Ace without a package");
 }
 
 /* Supersampling (contract 10.21, #2073): off in a fresh file and in every graphics preset, its row
@@ -12943,7 +13242,9 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.mips == (r->part[PLAYER_PART_MIPS] == 1 ? 1 : 0));
     /* Wider culling, short loads and soft shadows are Ace items: on only in an Ace launch. */
     assert(c.cull == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_CULL] == 1 ? 1 : 0));
-    assert(c.load == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_LOAD] == 1 ? 1 : 0));
+    assert(c.load == (r->part[PLAYER_PART_LOAD] == ACE_LOAD_AUTO ? ACE_LOAD_AUTO
+                      : r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_LOAD] == ACE_LOAD_FAST
+                        ? ACE_LOAD_FAST : ACE_LOAD_OFF));
     assert(c.shadow == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_SHADOW] == 1
                             ? ACE_SHADOW_SOFT : ACE_SHADOW_OFF));
     /* The stick remap is an Ace item that carries the title's declared dead zone, not the part's
@@ -15381,6 +15682,7 @@ int main(int argc, char **argv) {
     test_play_mode_peak_settings();
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
+    test_auto_load_player_path();
     test_play_mode_ssaa_settings();
     test_ssaa_guard();
     test_play_mode_mips_settings();
@@ -18936,6 +19238,68 @@ int main(int argc, char **argv) {
             assert(strstr(s_app2->achievements_status, "Credential Manager") != NULL);
         }
 
+        /* #1316: the switch opens the consent card, a launcher page; nothing turns on while it
+           is open, NOT NOW (and Back) changes nothing, and only AGREE AND TURN ON, from the card,
+           turns the switch on. The sign-in form opens only once it is on. */
+        {
+            const bool store = s_app2->achievements_store_available;
+            player_app_settings_init_default(&s_app2->settings);
+            s_app2->achievements_store_available = false;
+            player_app_set_view(s_app2, VIEW_ONLINE_SETTINGS);
+            assert(!player_app_open_achievements_card(s_app2));
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(strstr(s_app2->achievements_status, "Credential Manager") != NULL);
+
+            s_app2->achievements_store_available = true;
+            assert(!player_app_achievements_card_agree(s_app2)); /* no card is open */
+            assert(!s_app2->settings.achievements_enabled);
+            assert(!player_app_open_achievements_sign_in(s_app2)); /* not on yet */
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            /* --view=achievements-sign-in's preview opens the form with the switch off, and
+               AGREE ends the preview. */
+            s_app2->achievements_preview = true;
+            assert(player_app_open_achievements_sign_in(s_app2));
+            assert(s_app2->active_view == VIEW_ACHIEVEMENTS_SIGN_IN);
+            assert(!s_app2->settings.achievements_enabled);
+            player_app_close_achievements_sign_in(s_app2);
+            assert(!s_app2->achievements_sign_in_abandoned); /* nothing was on its way */
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(player_app_open_achievements_card(s_app2));
+            assert(s_app2->active_view == VIEW_ACHIEVEMENTS_CARD);
+            assert(!s_app2->settings.achievements_enabled);
+            player_app_achievements_card_not_now(s_app2);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(!s_app2->settings.achievements_enabled);
+            assert(strcmp(s_app2->achievements_status, "RetroAchievements was not enabled.") == 0);
+
+            assert(player_app_open_achievements_card(s_app2));
+            assert(player_app_achievements_card_agree(s_app2));
+            assert(s_app2->settings.achievements_enabled);
+            assert(!s_app2->achievements_preview);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(!player_app_open_achievements_card(s_app2)); /* already on: no card */
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            assert(player_app_open_achievements_sign_in(s_app2));
+            assert(s_app2->active_view == VIEW_ACHIEVEMENTS_SIGN_IN);
+            player_app_close_achievements_sign_in(s_app2);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            /* Leaving the form while its sign-in is on its way abandons that sign-in. */
+            assert(player_app_open_achievements_sign_in(s_app2));
+            s_app2->achievements_sign_in_pending = true;
+            player_app_close_achievements_sign_in(s_app2);
+            assert(s_app2->achievements_sign_in_abandoned);
+            assert(s_app2->active_view == VIEW_ONLINE_SETTINGS);
+            s_app2->achievements_sign_in_pending = false;
+            s_app2->achievements_sign_in_abandoned = false;
+            /* Closing the form from another page leaves that page alone. */
+            player_app_set_view(s_app2, VIEW_SETTINGS);
+            player_app_close_achievements_sign_in(s_app2);
+            assert(s_app2->active_view == VIEW_SETTINGS);
+            player_app_set_achievements_enabled(s_app2, false);
+            s_app2->achievements_store_available = store;
+            player_app_settings_init_default(&s_app2->settings);
+        }
+
         /* RetroAchievements is off for a launch with cheats on or with the 60 FPS game-logic
            package (#1316, maintainer decision 2026-11-20); the presentation parts do not stop
            it, nor does a title's culling package alone. */
@@ -20305,6 +20669,7 @@ int main(int argc, char **argv) {
         bool had_code_env;
         bool had_stop_env;
         bool had_hold_env;
+        bool had_crash_env;
         char *old_report_env =
             capture_environment_value("NK_REPEAT_LAUNCH_REPORT_FILE", &had_report_env);
         char *old_code_env =
@@ -20313,9 +20678,12 @@ int main(int argc, char **argv) {
             capture_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", &had_stop_env);
         char *old_hold_env =
             capture_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", &had_hold_env);
+        char *old_crash_env =
+            capture_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", &had_crash_env);
         set_environment_value("NK_REPEAT_LAUNCH_REPORT_FILE", report_path);
         set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "");
         set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "");
 
         bool git_available = git_status_snapshot(git_before);
         if (!git_available) {
@@ -20603,6 +20971,82 @@ int main(int argc, char **argv) {
         assert(strstr(rep->last_error.message, "9") == NULL);
         assert(strstr(rep->last_error.details, "Exit code 9") != NULL);
         assert(strcmp(player_error_retry_label(&rep->last_error), "Restart game") == 0);
+
+        /* A child that wrote the runtime's own crash report and then exited
+           nonzero keeps that indication in Copy details, below and above 500 ms,
+           without changing the exit classification or the restart action. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "1");
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 11000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 7);
+        assert(player_app_monitor_game_session(rep, 11100));
+        assert(!rep->is_game_running);
+        assert_session_released(&rep->launch_session);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(strcmp(player_error_retry_label(&rep->last_error), "Restart game") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash\n") != NULL);
+        }
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "9");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 12000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 12600));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_ERROR_EXIT") == 0);
+        assert(strcmp(player_error_retry_label(&rep->last_error), "Restart game") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash\n") != NULL);
+        }
+
+        /* The same words inside a longer line are not the runtime's record. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "embedded");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 13000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 13600));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_ERROR_EXIT") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash") == NULL);
+        }
+
+        /* A plain nonzero exit is not a crash report, and a fresh launch keeps
+           no earlier run's indication. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 14000;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 14600));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_ERROR_EXIT") == 0);
+        {
+            char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Runtime: reported a native crash") == NULL);
+        }
+
+        /* A structured runtime stop still wins over the marker and the exit status. */
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "1");
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "9");
+        set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "semantic-boundary");
+        assert(player_app_launch_game(rep, 0));
+        rep->launch_time_ms = 14500;
+        assert(nk_launch_wait(&rep->launch_session, 10000) == 9);
+        assert(player_app_monitor_game_session(rep, 15100));
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_SEMANTIC_BOUNDARY") == 0);
+        assert(strstr(rep->last_error.boundary_text, "unsupported-interpreter-form") != NULL);
+        set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "");
+        set_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", "");
+
         /* A structured runtime stop must reach the player error view with a
            plain sentence first and machine detail kept below it. */
         set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "semantic-boundary");
@@ -21348,10 +21792,13 @@ int main(int argc, char **argv) {
                                   had_stop_env);
         restore_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", old_hold_env,
                                   had_hold_env);
+        restore_environment_value("NK_REPEAT_LAUNCH_CRASH_MARKER", old_crash_env,
+                                  had_crash_env);
         free(old_report_env);
         free(old_code_env);
         free(old_stop_env);
         free(old_hold_env);
+        free(old_crash_env);
         free(rep);
 
         char marker_path[1200];

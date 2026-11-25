@@ -97,9 +97,9 @@ LauncherSecretVerdict launcher_secret_feed(LauncherSecretDetector *detector, Lau
 
 const char *launcher_secret_greeting(int hour, int minute) {
     (void)minute; /* every boundary falls on the hour */
-    if (hour >= 5 && hour < 12) return "Good morning.";
-    if (hour >= 12 && hour < 18) return "Good afternoon.";
-    return "Good evening.";
+    if (hour >= 5 && hour < 12) return NK_UI_STR(ADAPTER_GREETING_MORNING);
+    if (hour >= 12 && hour < 18) return NK_UI_STR(ADAPTER_GREETING_AFTERNOON);
+    return NK_UI_STR(ADAPTER_GREETING_EVENING);
 }
 
 /* ---- The moment ----------------------------------------------------------------------------- */

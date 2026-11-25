@@ -140,13 +140,15 @@ static int value_stick_counts(const char *v, int *out) {
     return 1;
 }
 
-int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
+static int ace_parse_line(const char *spec, AceConfig *out, char *why, size_t why_cap,
+                          int *explicit_load) {
     enum { KEYS = (int)(sizeof(k_ace_keys) / sizeof(k_ace_keys[0])) };
     AceConfig c;
     char buf[ACE_SPEC_MAX];
     int seen[KEYS] = {0};
     memset(&c, 0, sizeof(c));
     if (out) memset(out, 0, sizeof(*out));
+    if (explicit_load) *explicit_load = 0;
     if (!spec) { why_set(why, why_cap, "unset"); return 0; }
     if (strcmp(spec, "off") == 0) { why_set(why, why_cap, ""); return 1; }
     if (strlen(spec) >= sizeof(buf)) { why_set(why, why_cap, "line too long"); return 0; }
@@ -231,8 +233,10 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 }
                 break;
             case ACE_KEY_LOAD:
-                if (strcmp(v, "off") == 0) { c.load = 0; ok = 1; }
-                else if (strcmp(v, "fast") == 0) { c.load = 1; ok = 1; }
+                if (explicit_load) *explicit_load = 1;
+                if (strcmp(v, "off") == 0) { c.load = ACE_LOAD_OFF; ok = 1; }
+                else if (strcmp(v, "fast") == 0) { c.load = ACE_LOAD_FAST; ok = 1; }
+                else if (strcmp(v, "auto") == 0) { c.load = ACE_LOAD_AUTO; ok = 1; }
                 if (ok && c.load && !ACE_HAS_LOAD) {
                     why_set(why, why_cap, "load is not part of this build"); return 0;
                 }
@@ -320,7 +324,7 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     if (c.cull && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "cull needs tier=ace"); return 0; }
     if (c.stick && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "stick needs tier=ace"); return 0; }
     /* An Ace item (contract 11.3.10): it changes guest timing, for one title's declared waits. */
-    if (c.load && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
+    if (c.load == ACE_LOAD_FAST && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
     /* Late pad sampling acts at a title package's update boundary (contract 11.3.9): Ace only. */
     if (c.pad && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "pad needs tier=ace"); return 0; }
     /* An Ace item (contract 11.3.13): it needs the title's own package to declare its shadows. */
@@ -329,6 +333,10 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     if (out) *out = c;
     why_set(why, why_cap, "");
     return 1;
+}
+
+int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
+    return ace_parse_line(spec, out, why, why_cap, NULL);
 }
 
 static const char *on_off(int v) { return v ? "on" : "off"; }
@@ -365,7 +373,8 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
     }
     /* Likewise load, after stick: a missing load is off. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->load) {
-        const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
+        const int m = snprintf(out + n, cap - (size_t)n, ";load=%s",
+                               c->load == ACE_LOAD_AUTO ? "auto" : "fast");
         n = m < 0 ? -1 : n + m;
     }
     /* Likewise depth, after load: a missing depth is the PSP's 16 bits. */
@@ -465,21 +474,23 @@ typedef char ace_feature_keys_complete[sizeof(k_feature_key) / sizeof(k_feature_
 
 /* The run's observation state. */
 static AceDetector s_det;
-static AceReadoutState s_readout;
 static AceReadoutView s_view;
 static int s_have_view;
 static AceCounters s_counters;
 static uint64_t s_win_start_ns;
 static int s_win_started;
-static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown, s_win_motion_milli;
+static uint32_t s_win_frames, s_win_betweens, s_win_shown, s_win_motion_milli;
+static uint32_t s_win_display_vblanks;
+static int s_display_host_paced, s_win_display_unqualified;
 static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
-static uint64_t s_win_idle_ns;
 static uint64_t s_win_gpu_wait_ns;   /* ace_note_gpu_wait in the window */
 
 /* A readout window starts at now_ns with nothing counted: every per-window counter is here. */
 static void win_reset(uint64_t now_ns) {
     s_win_start_ns = now_ns;
-    s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
+    s_win_frames = 0; s_win_betweens = 0; s_win_shown = 0;
+    s_win_display_vblanks = 0;
+    s_win_display_unqualified = 0;
     s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
 }
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
@@ -502,7 +513,7 @@ static uint32_t s_target_clock;
 
 static void observation_reset(void) {
     ace_det_reset(&s_det);
-    ace_readout_reset(&s_readout);
+    s_display_host_paced = 0;
     memset(&s_view, 0, sizeof(s_view));
     s_have_view = 0;
     memset(&s_counters, 0, sizeof(s_counters));
@@ -523,8 +534,9 @@ static void observation_reset(void) {
     s_target_clock = 0;
 }
 
-int ace_init_spec(const char *spec, const char *report_path) {
+static int ace_init_line(const char *spec, const char *report_path, int automatic_load) {
     char why[64];
+    int explicit_load;
     g_ace_on = 0;
     memset(&s_req, 0, sizeof(s_req));
     memset(&s_eff, 0, sizeof(s_eff));
@@ -551,11 +563,12 @@ int ace_init_spec(const char *spec, const char *report_path) {
     snprintf(s_spec, sizeof(s_spec), "off");
     observation_reset();
     if (!spec) return 0;                       /* unset: off, silently */
-    if (!ace_parse(spec, &s_req, why, sizeof(why))) {
+    if (!ace_parse_line(spec, &s_req, why, sizeof(why), &explicit_load)) {
         fprintf(stderr, "ACE_MODE: refused (%s)\n", why);
         return 0;
     }
     if (!s_req.on) return 0;                   /* "off": authentic, silently */
+    if (ACE_HAS_LOAD && automatic_load && !explicit_load) s_req.load = ACE_LOAD_AUTO;
     s_eff = s_req;
     (void)ace_format(&s_req, s_spec, sizeof(s_spec));
     if (report_path && report_path[0]) {
@@ -577,9 +590,11 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: stick remap %d (the host stick starts past the game's square dead "
                         "zone of %d counts; the game reads changed stick values)\n",
                 s_req.stick, s_req.stick);
-    if (s_req.load)
+    if (s_req.load == ACE_LOAD_FAST)
         fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
                         "guest timing changes)\n");
+    if (s_req.load == ACE_LOAD_AUTO)
+        fprintf(stderr, "ACE_MODE: load auto (automatic fast-forward during detected disc loads)\n");
     if (s_req.depth)
         fprintf(stderr, "ACE_MODE: depth %d (the host depth buffer keeps unrounded depth, so surfaces "
                         "within one 16-bit step of each other can draw in a different order; guest "
@@ -612,6 +627,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: smart2d on (2D draws that map one texel to one pixel sample nearest "
                         "above 1x; the frames the game keeps in VRAM change where they do)\n");
     return 1;
+}
+
+int ace_init_spec(const char *spec, const char *report_path) {
+    return ace_init_line(spec, report_path, 0);
 }
 
 /* The variables a launch-line key replaced: what each switched, the key that does it now, an
@@ -664,6 +683,10 @@ int ace_init_from_env(void) {
             exit(1);
         }
     }
+    /* The launcher sends Automatic separately for runtimes that know only
+       load=off and load=fast. The explicit load key on a direct line wins. */
+    const char *load_auto = getenv("SR_ACE_LOAD_AUTO");
+    const int automatic_load = load_auto && strcmp(load_auto, "1") == 0;
 #if defined(_WIN32)
     /* The report's path is UTF-8 and may name a folder outside the ANSI code page (the player's
        user-data root under the user's profile): the wide environment carries it whole, where the
@@ -684,11 +707,11 @@ int ace_init_from_env(void) {
         if (!report && got > 0)
             fprintf(stderr, "ACE_MODE: SR_ACE_REPORT is not valid UTF-16: no report is written\n");
     }
-    int on = ace_init_spec(getenv("SR_ACE"), report);
+    int on = ace_init_line(getenv("SR_ACE"), report, automatic_load);
     free(report);
     return on;
 #else
-    return ace_init_spec(getenv("SR_ACE"), getenv("SR_ACE_REPORT"));
+    return ace_init_line(getenv("SR_ACE"), getenv("SR_ACE_REPORT"), automatic_load);
 #endif
 }
 
@@ -828,7 +851,7 @@ void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts) {
 }
 
 int nk_ace_load_fast(const char *site, uint32_t pc) {
-    if (!g_ace_on || !s_eff.load) return 0;
+    if (!g_ace_on || s_eff.load != ACE_LOAD_FAST) return 0;
     s_confirmed[ACE_FEATURE_LOAD] = 1;   /* a declared wait was reached with the part on */
     if (s_load_paced) return 0;          /* the guard fired: the stock call runs */
     if (!s_load_update_skipped) {
@@ -846,7 +869,7 @@ int nk_ace_load_fast(const char *site, uint32_t pc) {
 }
 
 void nk_ace_load_update(void) {
-    if (!g_ace_on || !s_eff.load || s_load_paced) return;
+    if (!g_ace_on || s_eff.load != ACE_LOAD_FAST || s_load_paced) return;
     if (!s_load_update_skipped) s_load_run = 0;   /* the update that ended skipped nothing */
     s_load_update_skipped = 0;
 }
@@ -919,7 +942,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
-    if (s_eff.load) used = words_add(out, cap, used, "short loads");
+    if (s_eff.load == ACE_LOAD_FAST) used = words_add(out, cap, used, "short loads");
+    if (s_eff.load == ACE_LOAD_AUTO) used = words_add(out, cap, used, "automatic load fast-forward");
     if (s_eff.mips) used = words_add(out, cap, used, "smooth far textures");
     if (s_eff.pad) used = words_add(out, cap, used, "late pad sampling");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
@@ -1058,69 +1082,39 @@ int ace_det_flip(AceDetector *d, uint32_t vcount, int new_frame) {
 
 #define ACE_VBLANK_HZ (60000.0 / 1001.0)
 
-void ace_readout_reset(AceReadoutState *s) {
-    if (s) memset(s, 0, sizeof(*s));
+/* 60000/1001 Hz, or 1001000000 nanoseconds per 60 source periods. */
+#define ACE_DISPLAY_60_NS 1001000000ull
+
+uint64_t ace_readout_behind_ns(const AceWindow *w) {
+    if (!w || !w->display_clock_valid) return 0;
+    uint64_t covered = (uint64_t)w->display_vblanks * ACE_DISPLAY_60_NS / 60u;
+    return w->wall_ns > covered ? w->wall_ns - covered : 0u;
 }
 
-static int rate_k(AceRate r) {
-    return r >= ACE_RATE_K1 && r <= ACE_RATE_K4 ? (int)r : 0;
-}
-
-uint64_t ace_readout_behind_ns(const AceWindow *w, int k) {
-    if (!w) return 0;
-    const double vblank_ns = 1e9 / ACE_VBLANK_HZ;
-    double behind = (double)w->skipped_slots * vblank_ns;
-    if (k > 0) {
-        double due = (double)w->new_frames * (double)k * vblank_ns;
-        double short_ns = (double)w->wall_ns - due;
-        if (short_ns > behind) behind = short_ns;
-    }
-    return behind > 0.0 ? (uint64_t)behind : 0u;
-}
-
-void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out) {
+void ace_readout_judge(const AceWindow *w, AceReadoutView *out) {
     AceReadoutView v;
     memset(&v, 0, sizeof(v));
-    if (!s || !w || !out) return;
+    if (!w || !out) return;
     double secs = w->wall_ns ? (double)w->wall_ns / 1e9 : 1.0;
     v.fps = (double)w->new_frames / secs;
-    v.idle_share = w->wall_ns ? (double)w->idle_ns / (double)w->wall_ns : 0.0;
-    if (v.idle_share > 1.0) v.idle_share = 1.0;
-    /* The class frames are judged against: the stretch's while inside one, else the one now
-     * stable, else the last stable one. */
-    int k_now = rate_k(w->stable) ? rate_k(w->stable) : rate_k(w->last_rate);
-    int k_ref = s->in_stretch && s->stretch_k ? s->stretch_k : k_now;
-    int slow = k_ref && v.fps < (ACE_VBLANK_HZ / (double)k_ref) * 0.97;
-    v.pc_limited = w->skipped_slots > 0 || (v.idle_share < 0.02 && slow);
-    /* Which part of the host: the GPU when the scheduler's thread waited on it for at least as
-     * long as the window fell behind, so without those waits the game would have kept up. */
-    v.gpu_limited = v.pc_limited && w->gpu_wait_ns > 0 &&
-                    w->gpu_wait_ns >= ace_readout_behind_ns(w, k_ref);
-    const char *limit = v.gpu_limited ? "GPU LIMITED" : "PC LIMITED";
-    if (v.pc_limited && !s->in_stretch) {
-        s->in_stretch = 1;
-        s->stretch_k = w->ever_stable ? k_now : 0;
-    } else if (!v.pc_limited) {
-        s->in_stretch = 0;
-        s->stretch_k = 0;
-    }
     int fps_shown = (int)(v.fps + 0.5);
-    if (!w->ever_stable || (v.pc_limited && !s->stretch_k)) {
-        v.have_target = 0;
-        v.speed_pct = 100;
-        if (v.pc_limited) snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 \xE2\x80\x94  %d FPS  %s", fps_shown, limit);
-        else snprintf(v.text, sizeof(v.text), "\xE2\x80\x94 %d FPS", fps_shown);
-    } else if (v.pc_limited) {
-        v.have_target = 1;
-        v.target_fps = ACE_VBLANK_HZ / (double)s->stretch_k;
-        double pct = 100.0 * v.fps / v.target_fps;
-        v.speed_pct = pct >= 100.0 ? 100 : (int)pct;
-        snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 %d%%  %d FPS  %s", v.speed_pct, fps_shown, limit);
+    if (!w->display_clock_valid || !w->wall_ns) {
+        snprintf(v.text, sizeof(v.text), "\xE2\x80\x94 %d FPS", fps_shown);
     } else {
-        v.have_target = 1;
-        v.target_fps = k_now ? ACE_VBLANK_HZ / (double)k_now : 0.0;
-        v.speed_pct = 100;
-        snprintf(v.text, sizeof(v.text), "100%%  %d FPS", fps_shown);
+        uint64_t behind = ace_readout_behind_ns(w);
+        /* The flips at the two ends need not fall exactly on source edges. */
+        v.pc_limited = behind > (ACE_DISPLAY_60_NS + 59u) / 60u &&
+                       (double)behind > 0.03 * (double)w->wall_ns;
+        v.gpu_limited = v.pc_limited && w->gpu_wait_ns >= behind;
+        if (v.pc_limited) {
+            v.speed_pct = (int)(100.0 * (double)(w->wall_ns - behind) / (double)w->wall_ns);
+            const char *limit = v.gpu_limited ? "GPU LIMITED" : "PC LIMITED";
+            snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 %d%%  %d FPS  %s",
+                     v.speed_pct, fps_shown, limit);
+        } else {
+            v.speed_pct = 100;
+            snprintf(v.text, sizeof(v.text), "100%%  %d FPS", fps_shown);
+        }
     }
     if (w->smooth) {
         v.smooth_on = 1;
@@ -1186,10 +1180,24 @@ void ace_note_vram_write(uint32_t off, uint32_t bytes) {
     }
 }
 
-void ace_note_host_wait(uint64_t ns) {
+void ace_pause_readout(void) {
     if (!g_ace_on) return;
-    s_win_idle_ns += ns;
-    s_counters.host_wait_ns += ns;
+    s_have_view = 0;
+    s_win_started = 0;
+}
+
+void ace_note_display_vblank(int host_paced, int normal_epoch) {
+    if (!g_ace_on || s_ff_running) return;
+    if (s_display_host_paced != host_paced) {
+        s_display_host_paced = host_paced;
+        ace_pause_readout();
+    }
+    if (!normal_epoch) s_win_display_unqualified = 1;
+    else if (host_paced && s_win_display_vblanks < UINT32_MAX) s_win_display_vblanks++;
+}
+
+void ace_note_display_masked(void) {
+    if (g_ace_on) s_win_display_unqualified = 1;
 }
 
 void ace_note_gpu_wait(uint64_t ns) {
@@ -1201,14 +1209,7 @@ void ace_note_gpu_wait(uint64_t ns) {
 void ace_note_fast_forward(int on) {
     if (!g_ace_on) return;
     s_ff_running = on != 0;
-    s_have_view = 0;
-    s_win_started = 0;   /* the first flip at normal speed starts a new window */
-}
-
-void ace_note_skipped_slots(uint32_t slots) {
-    if (!g_ace_on || !slots || s_ff_running) return;
-    s_win_skipped += slots;
-    s_counters.skipped_slots += slots;
+    ace_pause_readout();   /* the first flip at normal speed starts a new window */
 }
 
 int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
@@ -1249,17 +1250,14 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         AceWindow w;
         w.wall_ns = now_ns - s_win_start_ns;
         w.new_frames = s_win_frames;
-        w.idle_ns = s_win_idle_ns;
+        w.display_vblanks = s_win_display_vblanks;
+        w.display_clock_valid = s_display_host_paced && !s_win_display_unqualified;
         w.gpu_wait_ns = s_win_gpu_wait_ns;
-        w.skipped_slots = s_win_skipped;
-        w.stable = s_det.stable;
-        w.ever_stable = s_det.ever_stable;
-        w.last_rate = s_det.last_rate;
         w.smooth = s_req.smooth != 0;  /* asked for: off for the run (no GPU) still says so */
         w.betweens = s_win_betweens;
         w.shown = s_win_shown;
         w.motion_milli = s_win_motion_milli;
-        ace_readout_judge(&s_readout, &w, &s_view);
+        ace_readout_judge(&w, &s_view);
         s_have_view = 1;
         s_counters.windows++;
         if (s_view.pc_limited) s_limited_windows++;
@@ -1705,10 +1703,12 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.stick) ACE_PUT("  \"stick\": {\"counts\": %d, \"host_dead_zone\": %d, "
                              "\"samples_remapped\": %llu},\n",
                              s_req.stick, s_stick_host, s_stick_samples);
-    if (s_req.load) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n  \"load_skip_max_run\": %u,\n"
+    if (s_req.load == ACE_LOAD_FAST) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n  \"load_skip_max_run\": %u,\n"
                             "  \"load_paced\": %s,\n",
                             s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
                             s_load_paced ? "true" : "false");
+    if (s_req.load == ACE_LOAD_AUTO)
+        ACE_PUT("  \"load_auto\": %s,\n", s_eff.load == ACE_LOAD_AUTO ? "true" : "false");
     if (s_req.depth) ACE_PUT("  \"depth\": %d,\n", s_eff.depth ? s_eff.depth : 16);
     if (s_req.ssaa) ACE_PUT("  \"ssaa\": %d,\n", s_eff.ssaa ? s_eff.ssaa : 1);
     if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
@@ -1873,7 +1873,8 @@ void ace_finish(void) {
                 : f == ACE_FEATURE_STICK
                 ? "did not run: no live stick sample left its rest position in analog mode"
                 : f == ACE_FEATURE_LOAD
-                ? "did not run: this title's build declares no load part, or none of its waits was reached"
+                ? (s_req.load == ACE_LOAD_AUTO ? "did not run: no eligible silent disc load was detected"
+                    : "did not run: this title's build declares no load part, or none of its waits was reached")
                 : f == ACE_FEATURE_PEAK
                 ? "did not run: this build has no SAS mixer or no host audio backend"
                 : f == ACE_FEATURE_TEXPACK ? "did not run: only the Vulkan renderer draws texture packs"
@@ -1888,7 +1889,8 @@ void ace_finish(void) {
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
-    if (s_req.load) fprintf(stderr, "ACE_MODE: load waits skipped %llu (longest run %u logic updates; %s)\n",
+    if (s_req.load == ACE_LOAD_FAST)
+        fprintf(stderr, "ACE_MODE: load waits skipped %llu (longest run %u logic updates; %s)\n",
                             s_load_skipped, s_load_run_max,
                             s_load_paced ? "paced updates, skipping stopped" : "no pacing seen");
     if (s_req.pad && (s_latency.count || s_latency.without_read))

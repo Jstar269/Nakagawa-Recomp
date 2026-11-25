@@ -77,10 +77,15 @@ static uint32_t h_Memcpy(CpuState *s) {
     }
     return dst;
 }
-/* PSP's three std-fd imports intentionally alias the stdout handle (1).  The
- * descriptor table still reserves 0/1/2 with distinct standard identities so
- * ordinary file allocation and I/O dispatch never infer identity from a number. */
-static uint32_t h_StdFd(CpuState *s) { (void)s; return 1; }
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, PSP-3000): the three imports return three
+ * distinct kernel UIDs, none of them 1, the same three in both measured launch contexts (the
+ * XMB and the game context, each launched through PSPLink). hle_internal.h holds the values and
+ * what is unmeasured about them. Each names its reserved standard entry of the descriptor
+ * table, which the sceIo* handlers reach through hle_io_guest_fd(). Returning a handle claims
+ * nothing about a call made with it: a read from Stdin is unmeasured. */
+static uint32_t h_KernelStdin(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDIN; }
+static uint32_t h_KernelStdout(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDOUT; }
+static uint32_t h_KernelStderr(CpuState *s) { (void)s; return HLE_STD_HANDLE_STDERR; }
 
 static uint32_t h_KernelPrintf(CpuState *s) {
     char fmt_check[1024];   /* the whole format must be readable, NUL-terminated guest text */
@@ -92,6 +97,41 @@ static uint32_t h_KernelPrintf(CpuState *s) {
     char line[1024];
     int written = sr_guest_format_host(s, A0, 5u, line, (int)sizeof(line));
     fprintf(stderr, "GAMELOG: %s\n", line);
+    return (uint32_t)written;
+}
+
+/* Positive-capacity termination and the full rendered count follow uOFW
+ * f7b0623168842f02cddbdbf9437ac0c2380c51c8, src/kd/sysmem/sysclib.c
+ * (prnt/snprintf_char), and PPSSPP cdf563b85c42c275ec2835a0883f48d63a9c9406,
+ * Core/HLE/sceKernelInterrupt.cpp (sysclib_snprintf). Reference-derived, not
+ * PSP-measured. Zero capacity is outside this model: uOFW's callback can
+ * still write a terminator, so do not assume C99 zero-capacity behavior. */
+static uint32_t h_SysclibSnprintf(CpuState *s) {
+    uint32_t capacity = A1;
+    if (!capacity)
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "zero capacity");
+    if (!A0 || !sr_guest_span_writable_any_view(A0, capacity))
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "unwritable destination span");
+    char fmt_check[1024];
+    if (!guest_cstr(A2, fmt_check, sizeof(fmt_check)))
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "unreadable or oversized format");
+
+    /* Stage the result so rejected formats or arguments never write guest memory. */
+    char result[SR_SYSCLIB_SNPRINTF_LIMIT + 1];
+    int cap = (capacity < sizeof(result)) ? (int)capacity : (int)sizeof(result);
+    int written = sr_guest_format_sysclib_snprintf(s, A2, result, cap);
+    if (written < 0)
+        return hle_unmodelled_stop("SysclibForKernel_snprintf",
+                                   "unsupported format, argument or output length");
+    uint32_t size = (written < cap) ? (uint32_t)written + 1u : (uint32_t)cap;
+    if (!sr_guest_copy_out(A0, result, size))
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "unwritable output span");
+    if (g_sr_heap_watch) sr_heap_note_bulk_write(A0, size, 0u);
+    static int noted;
+    if (!noted) {
+        noted = 1;
+        fprintf(stderr, "HLE: reference-derived, not PSP-measured: SysclibForKernel_snprintf\n");
+    }
     return (uint32_t)written;
 }
 
@@ -129,6 +169,7 @@ void hle_register_bulk_memory_kernel_utils(void) {
     sr_hle_register(0x10f3bb61, "memset", h_Memset);
     sr_hle_register(0x52df196c, "strlen", h_Strlen);
     sr_hle_register(0x1839852a, "sceKernelMemcpy", h_Memcpy);
+    sr_hle_register(0xc2145e80u, "snprintf", h_SysclibSnprintf);
 }
 
 #ifndef SR_MPEG_MEDIA_SELFTEST
@@ -155,8 +196,8 @@ void hle_register_init_kernel_utils_2(void) {
 /* The std handles, shared by sr_hle_init() and the ThreadMan harness so the
  * PSP-HLE-STDIO-001 cells dispatch the production mapping. */
 void hle_register_std_handle_handlers(void) {
-    sr_hle_register(0x172d316e, "sceKernelStdin", h_StdFd);
-    sr_hle_register(0xa6bab2e9, "sceKernelStdout", h_StdFd);
-    sr_hle_register(0xf78ba90a, "sceKernelStderr", h_StdFd);
+    sr_hle_register(0x172d316e, "sceKernelStdin", h_KernelStdin);
+    sr_hle_register(0xa6bab2e9, "sceKernelStdout", h_KernelStdout);
+    sr_hle_register(0xf78ba90a, "sceKernelStderr", h_KernelStderr);
 }
 #endif

@@ -56,8 +56,9 @@ selftest-repeat:
 
 # heap-selftest — white-box unit tests for the guest heap allocator's boundary-tag
 # coalescing (tests/native/heap_selftest.c). No game inputs needed; #includes recomp.c for
-# direct access to the allocator statics and sr_heap_stats(), and drives the same
-# sr_newlib_malloc/free entry points the generated code calls. Asserts forward and
+# direct access to the allocator statics and sr_heap_stats(), and drives the
+# sr_newlib_malloc/free entry points (no generated code calls them since the Hot Shots
+# Tennis allocator bridges were retired, #363). Asserts forward and
 # backward merges, the #122 regression (a large allocation must succeed after the
 # arena is fragmented and released), refusal to merge across a live block even with
 # a forged boundary tag, clean payload across merge seams, bounded free-list growth
@@ -1128,6 +1129,17 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@: > "$(GPU_COHERENCE_SKIPS)"
 	$(GPU_COHERENCE_RUN)
+	@d=$$(mktemp -d "$(BUILD_DIR)/ngef-ram.XXXXXX") || exit $$?; \
+	unset SR_GE_CAPTURE_EXIT SR_GE_CAPTURE_MIN_PRIMS SR_GPU_TEX_SHADOW_DISABLE; \
+	for cell in ngef-cold ngef-warm ngef-resident ngef-no-capture ngef-clut8 ngef-clut8-masked \
+		  ngef-palette ngef-mip ngef-conflict ngef-scratch-cold ngef-scratch-warm \
+		  ngef-scratch-dxt1 ngef-scratch-ram ngef-scratch-vram ngef-vram-eager ngef-no-shadow; do \
+		export SR_GE_CAPTURE_PATH="$$d/$$cell.ngef"; \
+		if [ "$$cell" = ngef-no-capture ]; then unset SR_GE_CAPTURE_FRAME; \
+		else export SR_GE_CAPTURE_FRAME=2; fi; \
+		if [ "$$cell" = ngef-no-shadow ]; then export SR_GPU_TEX_SHADOW_DISABLE=1; fi; \
+		$(GPU_COHERENCE_LEG) --authentic --scale 1 --case "$$cell" || exit $$?; \
+	done
 	$(GPU_COHERENCE_RUN) --scale 2 --case scaled-upload
 	$(GPU_COHERENCE_RUN) --scale 4 --case scaled-upload
 	$(GPU_COHERENCE_RUN) --scale 2 --case mip-lod
@@ -1263,10 +1275,14 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --scale 4 --case dst-read
 	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_RUN) --case pipeline-minmax
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
+	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test/prewarm --case pipeline-clear-prewarm-cold
+	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test/prewarm --case pipeline-clear-prewarm-warm
+	$(GPU_COHERENCE_RUN) --case pipeline-clear-prewarm-retry
 	$(GPU_COHERENCE_RUN) --case tex-evict-fail
 	$(GPU_COHERENCE_RUN) --case submit-fail
 	$(GPU_COHERENCE_RUN) --depth 32 --init-fail

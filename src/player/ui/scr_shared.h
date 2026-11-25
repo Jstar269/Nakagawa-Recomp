@@ -12,7 +12,9 @@
 #define NK_PLAYER_UI_SCR_SHARED_H
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
+#include "nk_achievements.h" /* NK_ACH_HOST, NK_ACH_BADGE_HOST: the consent card's hosts */
 
 #include <string.h>
 
@@ -146,63 +148,42 @@ typedef struct {
 /* The online options are not built yet, so the wizard and Settings say so in one
    line where the Online mode switch and its News and Reports buttons were (#2007).
    The stored online_mode setting is unchanged; docs/ONLINE_FEATURES.md has the plan. */
-#define SCR_ONLINE_NOT_BUILT_LINE \
-    "Online features aren't built yet, so Nakagawa makes no connection and has " \
-    "nothing to switch on."
+#define SCR_ONLINE_NOT_BUILT_LINE NK_UI_STR(SHARED_ONLINE_NOT_BUILT)
 /* The Nickname row in Settings (#2197): its button opens the nickname editor. */
-#define SCR_NICKNAME_SENTENCE \
-    "What games show as this PSP's nickname. It is never taken from this PC's user name."
+#define SCR_NICKNAME_SENTENCE NK_UI_STR(SHARED_NICKNAME_DESCRIPTION)
 /* A user whose stored online_mode is On still gets the switch, with what it does now, so
    they can turn it off. Nobody else sees it (#2007). */
-#define SCR_ONLINE_STORED_ON_SENTENCE \
-    "Online mode is on in your settings, but it does nothing yet because online " \
-    "features aren't built. Switch it off to keep it off."
+#define SCR_ONLINE_STORED_ON_SENTENCE NK_UI_STR(SHARED_ONLINE_STORED_ON)
 /* Discord status (#2259) on Settings > Online and developer. */
-#define SCR_DISCORD_SENTENCE \
-    "Show the game you play and for how long in Discord, through the Discord app on this " \
-    "PC. Nakagawa itself connects to nothing."
+#define SCR_DISCORD_SENTENCE NK_UI_STR(SHARED_DISCORD_DESCRIPTION)
 /* RetroAchievements (#1316) on Settings > Online and developer: the switch, the reason it is
    missing where sign-in cannot be stored, and the account row's name, spelled out in full. */
-#define SCR_ACHIEVEMENTS_SENTENCE \
-    "Casual Mode only. Before you sign in, you see what is sent and where."
-#define SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE \
-    "Sign-in needs Windows Credential Manager, which this platform does not provide."
-#define SCR_ACHIEVEMENTS_ACCOUNT_NAME "RetroAchievements"
+#define SCR_ACHIEVEMENTS_SENTENCE NK_UI_STR(SHARED_ACHIEVEMENTS_DESCRIPTION)
+#define SCR_ACHIEVEMENTS_UNAVAILABLE_SENTENCE NK_UI_STR(SHARED_ACHIEVEMENTS_CREDENTIALS_UNAVAILABLE)
+#define SCR_ACHIEVEMENTS_ACCOUNT_NAME NK_UI_STR(SHARED_ACHIEVEMENTS_ACCOUNT_NAME)
+/* The two hosts its consent card names: the bridge's own (src/core/nk_achievements.h), so the
+   card can never name a host the client does not use, or miss one it does. */
+#define SCR_ACHIEVEMENTS_HOST NK_ACH_HOST
+#define SCR_ACHIEVEMENTS_BADGE_HOST NK_ACH_BADGE_HOST
 /* A build that cannot show Discord status (no application ID, or no local pipes) hides the
    row, except for a stored On, which it shows with this sentence so it can be turned off. */
-#define SCR_DISCORD_STORED_ON_SENTENCE \
-    "Discord status is on in your settings, but this build can't show it. Switch it off " \
-    "to keep it off."
+#define SCR_DISCORD_STORED_ON_SENTENCE NK_UI_STR(SHARED_DISCORD_STORED_ON)
 /* The developer switch, in the wizard and in Settings. */
-#define WIZARD_DEVELOPER_SENTENCE \
-    "Show a developer log on screen to help track down problems. Stays on this PC."
+#define WIZARD_DEVELOPER_SENTENCE NK_UI_STR(SHARED_DEVELOPER_DESCRIPTION)
 /* Opt-in ad hoc online play (#1139) on Settings > Online and its own subpage. */
-#define SCR_ONLINE_PLAY_ROW_SENTENCE \
-    "Connect PSP ad hoc multiplayer games through a community relay server over plain TCP. Off by default."
-#define SCR_ONLINE_PLAY_LEAD \
-    "Lets games that play over local wireless find other players over the internet, through a " \
-    "community server. Nakagawa does not run these servers. The connection is not encrypted."
-#define SCR_ONLINE_PLAY_OFF_SENTENCE \
-    "Off: nothing connects. Choose it to see what is sent and to whom, then TURN ON."
-#define SCR_ONLINE_PLAY_ON_SENTENCE \
-    "On from the next game you start. Choose it to turn it off: that ends the connection."
-#define SCR_ONLINE_PLAY_PORT_SENTENCE \
-    "Advanced. Added to the game's ports on the server (default 10000). Players who play " \
-    "together need the same value."
-#define SCR_ONLINE_PLAY_SERVERS_LEAD \
-    "Each server is run by its own community, not by Nakagawa. Choosing one opens the Online " \
-    "play card for it: nothing connects until you choose TURN ON there."
+#define SCR_ONLINE_PLAY_ROW_SENTENCE NK_UI_STR(SHARED_ONLINE_PLAY_DESCRIPTION)
+#define SCR_ONLINE_PLAY_LEAD NK_UI_STR(SHARED_ONLINE_PLAY_INTRO)
+#define SCR_ONLINE_PLAY_OFF_SENTENCE NK_UI_STR(SHARED_ONLINE_PLAY_OFF)
+#define SCR_ONLINE_PLAY_ON_SENTENCE NK_UI_STR(SHARED_ONLINE_PLAY_ON)
+#define SCR_ONLINE_PLAY_PORT_SENTENCE NK_UI_STR(SHARED_ONLINE_PLAY_PORT)
+#define SCR_ONLINE_PLAY_SERVERS_LEAD NK_UI_STR(SHARED_ONLINE_PLAY_SERVERS_INTRO)
 /* The picker's hint under its intro (owner, 2026-11-20). */
-#define SCR_ONLINE_PLAY_SERVERS_HINT \
-    "Everyone you play with must choose the same server. A closer server responds faster."
-#define SCR_ONLINE_PLAY_OWN_SENTENCE "A server you run or trust. It is kept only on this PC."
+#define SCR_ONLINE_PLAY_SERVERS_HINT NK_UI_STR(SHARED_ONLINE_PLAY_SERVERS_HINT)
+#define SCR_ONLINE_PLAY_OWN_SENTENCE NK_UI_STR(SHARED_ONLINE_PLAY_CUSTOM_SERVER)
 /* What to type for one's own server, on its row until one is in use. */
 #define SCR_ONLINE_PLAY_OWN_FORMAT "host[:lobby_port[,data_port]]"
-#define SCR_ONLINE_PLAY_LIST_OFF_LINE \
-    "With Online play on, the servers on PPSSPP's list show here as well."
-#define SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION \
-    "Listed: the servers that relay game data the way this version does (PPSSPP's data_mode " \
-    "AemuPostoffice; PPSSPP-derived, not PSP-measured)."
+#define SCR_ONLINE_PLAY_LIST_OFF_LINE NK_UI_STR(SHARED_ONLINE_PLAY_LIST_OFF)
+#define SCR_ONLINE_PLAY_RELAY_ONLY_CAPTION NK_UI_STR(SHARED_ONLINE_PLAY_RELAY_ONLY)
 
 /* Frame and box helpers (scr_flow.c). */
 float scr_flow_begin(NkUi *ui, float width, float height, float card_width);

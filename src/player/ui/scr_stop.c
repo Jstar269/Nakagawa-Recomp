@@ -5,6 +5,7 @@
    card. KEEP PLAYING holds focus first; STOP GAME is the danger button. */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -12,8 +13,9 @@
 
 PlayerUiAction player_ui_screen_stop(NkUi *ui, const PlayerUiStopModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Keep playing"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(STOP_PROMPT_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(STOP_PROMPT_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(STOP_KEEP_PLAYING)}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
@@ -24,23 +26,24 @@ PlayerUiAction player_ui_screen_stop(NkUi *ui, const PlayerUiStopModel *model) {
     inner = scr_flow_begin(ui, model->logical_width > 80.0f ? model->logical_width : 1280.0f,
                        model->logical_height > 80.0f ? model->logical_height : 800.0f, 640.0f);
     if (inner <= 0.0f) return result;
-    scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, "Stop game", theme->warning);
-    (void)snprintf(text, sizeof(text), "Stop %s?", safe_text(model->title, "the game"));
+    scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, NK_UI_STR(STOP_ACTION), theme->warning);
+    (void)snprintf(text, sizeof(text), NK_UI_STR(STOP_QUESTION_FORMAT),
+                   safe_text(model->title, NK_UI_STR(STOP_UNTITLED_GAME)));
     nk_ui_text_role(ui, FLOW_ID_TITLE, nk_ui_frame_text(ui, text), NK_UI_TYPE_TITLE,
                     theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,
-                    "The game closes now, and anything since its last save is lost.",
+                    NK_UI_STR(STOP_CONSEQUENCE),
                     NK_UI_TYPE_BODY_S, theme->muted);
     {
         NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                      NK_UI_SPACE_3);
         row.padding_top = NK_UI_SPACE_1;
         if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-            if (nk_ui_button(ui, PLAYER_UI_ID_STOP_KEEP, "Keep playing", 0u)) {
+            if (nk_ui_button(ui, PLAYER_UI_ID_STOP_KEEP, NK_UI_STR(STOP_KEEP_PLAYING), 0u)) {
                 result = action(PLAYER_UI_ACTION_BACK, model->title_index,
                                 PLAYER_UI_PRIMARY_NONE);
             }
-            if (nk_ui_button(ui, PLAYER_UI_ID_STOP_CONFIRM, "Stop game", NK_UI_BUTTON_DANGER)) {
+            if (nk_ui_button(ui, PLAYER_UI_ID_STOP_CONFIRM, NK_UI_STR(STOP_ACTION), NK_UI_BUTTON_DANGER)) {
                 result = action(PLAYER_UI_ACTION_PRIMARY, model->title_index,
                                 PLAYER_UI_PRIMARY_STOP_GAME);
             }

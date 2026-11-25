@@ -607,26 +607,30 @@ class LleCodegenTests(unittest.TestCase):
         self.assertIn("s->in_delay_slot = _prev_ids; s->next_pc = _prev_npc; }", text)
 
     def test_direct_jal_caller_propagates_lle_flow(self):
-        jal_target = 0x00001008
+        jal_target = 0x1018
         jal_insn = 0x0C000000 | ((jal_target >> 2) & 0x03FFFFFF)
+        elf = FakeElf({
+            0x1000: 0x03E04021,  # move $t0,$ra
+            0x1004: jal_insn,
+            0x1008: NOP,
+            0x100C: 0x01000008,  # jr $t0
+            0x1010: NOP,
+            jal_target: JR_RA,
+            jal_target + 4: NOP,
+        })
+        spans = [(0x1000, 0x1014)]
+        entries = {0x1000, jal_target}
         text_lle = "\n".join(
-            codegen.emit_function(
-                FakeElf({0x1000: jal_insn, 0x1004: NOP, 0x1008: JR_RA, 0x100C: NOP}),
-                0x1000, [(0x1000, 0x1008)], {0x1000, 0x1008},
-                lle_cpu=True,
-            )
+            codegen.emit_function(elf, 0x1000, spans, entries, lle_cpu=True)
         )
-        self.assertIn("f_00001008(s);", text_lle)
-        self.assertIn("if (s->flow_kind != 0u) { return; }", text_lle)
+        self.assertRegex(
+            text_lle, r"f_00001018\(s\);[^\n]*\n    if \(s->flow_kind != 0u\) \{ return; \}"
+        )
 
         text_default = "\n".join(
-            codegen.emit_function(
-                FakeElf({0x1000: jal_insn, 0x1004: NOP, 0x1008: JR_RA, 0x100C: NOP}),
-                0x1000, [(0x1000, 0x1008)], {0x1000, 0x1008},
-                lle_cpu=False,
-            )
+            codegen.emit_function(elf, 0x1000, spans, entries, lle_cpu=False)
         )
-        self.assertIn("f_00001008(s);", text_default)
+        self.assertIn("f_00001018(s);", text_default)
         self.assertNotIn("flow_kind", text_default)
 
     def test_sr_register_all_enables_lle_runtime_when_lle_cpu(self):

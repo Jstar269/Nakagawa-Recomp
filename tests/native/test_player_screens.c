@@ -10,9 +10,15 @@
 #include "scr_shared.h"
 #include "player_enhanced_fixture.h"
 #include "nk_ui_image.h"
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+#include "launcher_secret.h"
+#endif
 
 #include <ctype.h>
 #include <math.h>
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+#include <stdarg.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,6 +89,11 @@ typedef struct {
 } EnhancedWords;
 static const char *const k_enhanced_ssaa_labels[] = {"2x", "4x", "4x anyway", "Off"};
 static const char *const k_enhanced_texscale_labels[] = {"2x", "3x", "4x", "5x", "6x", "Off"};
+enum { AUTO_LOAD_CHOICE, ACE_WAITS_CHOICE, LOAD_OFF_CHOICE };
+static const char *const k_enhanced_load_labels[] = {
+    NK_UI_STR(ADAPTER_LOADING_AUTOMATIC), NK_UI_STR(ADAPTER_LOADING_SHORT_WAITS),
+    NK_UI_STR(SETTINGS_OFF)
+};
 #define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
 static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_FILTERING] = ENHANCED_WORDS(k_enhanced_af_labels),
@@ -96,7 +107,7 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels),
     [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_load_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
     [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
@@ -109,14 +120,14 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 6 };
-static const char *const k_enhanced_library_modes[] = {"Authentic", "Enhanced"};
-static const char k_enhanced_smooth_at_60[] = "Off (this game runs at 60 FPS)";
-static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Authentic",
-                                                     "Enhanced", "Ace"};
+static const char *const k_enhanced_library_modes[] = {
+    NK_UI_STR(ADAPTER_MODE_AUTHENTIC), NK_UI_STR(ADAPTER_MODE_ENHANCED)
+};
+static const char k_enhanced_smooth_at_60[] = NK_UI_STR(ADAPTER_SMOOTH_AT_60);
 /* What the Settings > Enhanced case shows instead of the fixture: a part's value (NULL
-   keeps the fixture's) and the play mode (NULL keeps the case's). */
+   keeps the fixture's) and the play mode's position in the stepper (-1 keeps the case's). */
 static const char *g_enhanced_value[PLAYER_PART_COUNT];
-static const char *g_enhanced_mode;
+static int g_enhanced_mode_index = -1;
 /* A game's page: its name and how many play modes its row steps (NULL and 0 keep the case's
    "Test Game" and four; three is a game with no package of its own). */
 static const char *g_enhanced_title_name;
@@ -367,6 +378,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_DISC_GUIDED, FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_ONLINE_ON,
                FLOW_SETTINGS_ONLINE_PLAY, FLOW_SETTINGS_ONLINE_PLAY_CARD,
                FLOW_SETTINGS_ONLINE_PLAY_SERVERS,
+               /* RetroAchievements (#1316): its consent card and its sign-in form. */
+               FLOW_SETTINGS_ACHIEVEMENTS_CARD, FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN,
                FLOW_SETTINGS_ONLINE_DISCORD_ON, FLOW_SETTINGS_ONLINE_NO_DISCORD,
                FLOW_SETTINGS_NOTICES,
                FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE, FLOW_SETTINGS_FONTS,
@@ -389,14 +402,19 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
-               FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
+               FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED, FLOW_PAGE_QUEUE_HELD,
                FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, FLOW_PAGE_TITLE_LONGEST_ENHANCED,
                FLOW_PAGE_TITLE_LONGEST_ACE,
                FLOW_CONSENT_FULL, FLOW_NICKNAME_FIRST, FLOW_NICKNAME_FULL,
                FLOW_NICKNAME_REFUSED,
+               /* RetroAchievements' password editor with a password typed (#1316). */
+               FLOW_RA_PASSWORD,
                /* Mouse aiming (#1791): its settings off and at their defaults, on with the
                   widest value every row can show, and the keyboard keys with aiming on. */
                FLOW_CONTROLLER_AIM, FLOW_CONTROLLER_AIM_ON, FLOW_CONTROLLER_KEYS_AIM_ON,
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+               FLOW_PAGE_LOVE_ALL,
+#endif
                FLOW_COUNT,
                /* Not a screen: the build card with a container left open, so its frame
                   fails (nk_ui_end returns NULL) after drawing most of the card. Kept past
@@ -411,6 +429,11 @@ static float g_flow_width = 1280.0f;
 static float g_flow_height = 800.0f;
 /* The text size flow_case_layout lays a case out at (NkUiViewport.text_size_pct). */
 static int g_flow_text_size_pct = 100;
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+/* Count formatting events from the second frame, after layout and focus settle. */
+static bool g_pseudo_report_frame;
+static bool g_pseudo_report_text;
+#endif
 /* A player's own server for the Online play page and card (#1139), or NULL for socom.cc. */
 static const char *g_online_play_host = NULL;
 /* The picker's PPSSPP list is its shipped copy (the download unavailable). */
@@ -418,6 +441,9 @@ static bool g_online_play_list_shipped = false;
 /* What the card's server reads as, where a case names its own (the player's model reads it
    with nk_adhoc_relay_parse_server, unit-tested in test_nk_adhoc_relay.c). */
 static const char *g_online_play_card_host = NULL;
+/* RetroAchievements' sign-in form (#1316): empty instead of filled in. */
+static bool g_ra_form_empty = false;
+static void test_achievements_card_and_sign_in(void);
 static unsigned g_online_play_card_ports[2] = {0u, 0u};
 /* The server editor with a refused Done, and why (FLOW_NICKNAME_REFUSED). */
 static const char *g_server_refused_reason = NULL;
@@ -538,6 +564,11 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     /* The game page's "Library (...)" values: player_ui_screen_settings reads them at the
        end of this function, so they live as long as `settings` does. */
     char followed[PLAYER_PART_COUNT][48];
+    char library_mode[48]; /* same buffer size as the adapter */
+    const char *title_modes[] = {
+        library_mode, NK_UI_STR(ADAPTER_MODE_AUTHENTIC),
+        NK_UI_STR(ADAPTER_MODE_ENHANCED), NK_UI_STR(ADAPTER_MODE_ACE)
+    };
     memset(&settings, 0, sizeof(settings));
     settings.page = which == FLOW_SETTINGS_ONLINE || which == FLOW_SETTINGS_ONLINE_ON ||
                     which == FLOW_SETTINGS_ONLINE_DISCORD_ON ||
@@ -546,6 +577,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         : which == FLOW_SETTINGS_ONLINE_PLAY ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY
         : which == FLOW_SETTINGS_ONLINE_PLAY_CARD ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD
         : which == FLOW_SETTINGS_ONLINE_PLAY_SERVERS ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS
+        : which == FLOW_SETTINGS_ACHIEVEMENTS_CARD ? PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD
+        : which == FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN
+            ? PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN
         : which == FLOW_SETTINGS_NOTICES ? PLAYER_UI_SETTINGS_PAGE_NOTICES
         : which == FLOW_SETTINGS_REMOVE ? PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS
         : which == FLOW_SETTINGS_BUILD_CACHE ? PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE
@@ -569,15 +603,22 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.enhanced_on = settings.enhanced_library_on;
         settings.enhanced_title =
             !title ? NULL : g_enhanced_title_name != NULL ? g_enhanced_title_name : "Test Game";
-        settings.enhanced_mode = title ? "Library (Enhanced)"
-                               : settings.enhanced_on ? "Enhanced" : "Authentic";
-        if (g_enhanced_mode != NULL) settings.enhanced_mode = g_enhanced_mode;
-        settings.enhanced_modes = title ? k_enhanced_title_modes : k_enhanced_library_modes;
+        int library_mode_index = settings.enhanced_library_on ? 1 : 0;
+        if (title) {
+            snprintf(library_mode, sizeof(library_mode), NK_UI_STR(ADAPTER_MODE_LIBRARY_VALUE),
+                     k_enhanced_library_modes[library_mode_index]);
+        }
+        int selected_mode = g_enhanced_mode_index >= 0 ? g_enhanced_mode_index
+                          : title ? PLAYER_PLAY_LIBRARY : library_mode_index;
+        settings.enhanced_modes = title ? title_modes : k_enhanced_library_modes;
         settings.enhanced_mode_count =
             !title ? 2 : g_enhanced_mode_count > 0 ? g_enhanced_mode_count : 4;
+        settings.enhanced_mode = settings.enhanced_modes[selected_mode];
+        settings.enhanced_mode_index =
+            selected_mode < settings.enhanced_mode_count ? selected_mode : -1;
         settings.enhanced_mode_sentence =
-            title ? "Enhanced adds the parts below. Ace needs a package made for this game."
-                  : "The default for every game; each game's page can choose its own.";
+            title ? NK_UI_STR(ADAPTER_MODE_ENHANCED_DESCRIPTION)
+                  : NK_UI_STR(ADAPTER_MODE_LIBRARY_DESCRIPTION);
         settings.enhanced_row_count = PLAYER_PART_COUNT;
         settings.enhanced_tab = g_enhanced_tab;
         settings.enhanced_tab_chosen = &g_enhanced_tab_chosen;
@@ -590,8 +631,10 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
             const int part = k_enhanced_layout_fixture[i].part;
             const char *value = g_enhanced_value[part] != NULL ? g_enhanced_value[part]
                                                                : k_enhanced_parts[part].value;
-            snprintf(followed[i], sizeof(followed[i]), "Library (%s)",
-                     k_enhanced_parts[part].value);
+            if (title) {
+                snprintf(followed[i], sizeof(followed[i]), NK_UI_STR(ADAPTER_MODE_LIBRARY_VALUE),
+                         k_enhanced_parts[part].value);
+            }
             settings.enhanced_rows[i].part = part;
             settings.enhanced_rows[i].group = k_enhanced_layout_fixture[i].group;
             settings.enhanced_rows[i].selected_index = 0;
@@ -610,13 +653,21 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                 !settings.enhanced_on ? "Play mode is Authentic." : NULL;
             settings.enhanced_rows[i].tag =
                 part == PLAYER_PART_CULL || part == PLAYER_PART_STICK ||
-                part == PLAYER_PART_LOAD || part == PLAYER_PART_PAD ||
+                part == PLAYER_PART_PAD ||
                 part == PLAYER_PART_SHADOW ? "Ace only" : NULL;
             CHECK(k_enhanced_words[part].count > 0,
                   "every Settings > Enhanced part has its words in this test");
             settings.enhanced_rows[i].labels = k_enhanced_words[part].labels;
             settings.enhanced_rows[i].label_count = k_enhanced_words[part].count;
             settings.enhanced_rows[i].library_value = title ? followed[i] : NULL;
+            if (part == PLAYER_PART_LOAD && title &&
+                settings.enhanced_mode_index != PLAYER_PLAY_ACE) {
+                settings.enhanced_rows[i].unavailable_label = ACE_WAITS_CHOICE + 1;
+                if (strcmp(value, k_enhanced_load_labels[ACE_WAITS_CHOICE]) == 0) {
+                    settings.enhanced_rows[i].on = false;
+                    settings.enhanced_rows[i].sentence = NK_UI_STR(ADAPTER_LOADING_ACE_REQUIRED);
+                }
+            }
             /* As player_ui_nk.c marks a row: the value among the part's words, after the
                library's choice on a game's page; a row following the library marks that
                choice, and Smooth motion off for a game's 60 FPS game logic marks Off. */
@@ -633,11 +684,12 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                 settings.enhanced_rows[i].labels = g_enhanced_labels[part];
                 settings.enhanced_rows[i].label_count = g_enhanced_label_count[part];
             }
-            /* An Ace-only part is dimmed on a game's page until that game's mode is Ace. */
+            /* An Ace-only part needs both the selected mode and an available package. */
             if (settings.enhanced_rows[i].tag != NULL && title &&
-                strcmp(settings.enhanced_mode, "Ace") != 0) {
+                settings.enhanced_mode_index != PLAYER_PLAY_ACE) {
                 settings.enhanced_rows[i].disabled = true;
-                settings.enhanced_rows[i].disabled_reason = "Available only in Ace.";
+                settings.enhanced_rows[i].disabled_reason = settings.enhanced_mode_count == 4
+                    ? NK_UI_STR(ADAPTER_PART_ACE_REQUIRED) : NK_UI_STR(ADAPTER_ACE_PACKAGE_REQUIRED);
             }
         }
     }
@@ -693,6 +745,15 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.online_play_card_host = "relay-usa.arenaanywhere.site";
     settings.online_play_card_lobby_port = 27312u;
     settings.online_play_card_data_port = 27313u;
+    if (which == FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN) {
+        /* The form as Done leaves it: a username, a password of nine characters (the model
+           has its length only), or empty (g_ra_form_empty), and no sign-in on its way. */
+        settings.achievements_enabled = true;
+        settings.achievements_available = true;
+        settings.achievements_username = g_ra_form_empty ? "" : "player_one";
+        settings.achievements_password_chars = g_ra_form_empty ? 0u : 9u;
+        settings.achievements_status = "Sign in to connect.";
+    }
     if (g_online_play_host != NULL) {
         settings.online_play_server = g_online_play_host;
         settings.online_play_server_label = NULL; /* no list names it, as the player's model */
@@ -1093,6 +1154,12 @@ static PlayerUiPrereqItem g_full_prereqs[35];
    a title page, About, and the remove dialog. */
 static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
     PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+    if (which == FLOW_PAGE_LOVE_ALL) {
+        PlayerUiLoveAllModel credits = {g_flow_width, g_flow_height, false, 0.0f};
+        return player_ui_screen_love_all(ui, &credits);
+    }
+#endif
     if (which == FLOW_PAGE_LIBRARY || which == FLOW_PAGE_LIBRARY_FIND) {
         PlayerUiLibraryModel library;
         memset(&library, 0, sizeof(library));
@@ -1473,9 +1540,11 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         steam.logical_height = g_flow_height;
         return player_ui_screen_steam(ui, &steam);
     }
-    if (which == FLOW_PAGE_QUEUE || which == FLOW_PAGE_QUEUE_PAUSED) {
+    if (which == FLOW_PAGE_QUEUE || which == FLOW_PAGE_QUEUE_PAUSED ||
+        which == FLOW_PAGE_QUEUE_HELD) {
         /* The build queue: the one building, a full page of games that wait,
-           the page line and its buttons, and (paused) Resume. */
+           the page line and its buttons, and Pause, or Resume when paused (a
+           build that could not start, or the person's Pause while one builds). */
         static const PlayerUiQueueRow rows[PLAYER_UI_QUEUE_ROW_CAP] = {
             {"Synthetic Showcase Scene with a Long Name That Has to Be Cut Short",
              "Building 40%", 0u, true, false, false},
@@ -1483,13 +1552,19 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
             {"Synthetic Experimental Fixture", "Waiting", 2u, false, true, true},
             {"Synthetic Untested Fixture", "Waiting", 3u, false, true, true}
         };
+        PlayerUiQueueRow page[PLAYER_UI_QUEUE_ROW_CAP];
         PlayerUiQueueModel queue;
+        memcpy(page, rows, sizeof(page));
+        /* As the launcher labels it: a paused queue's next game reads Paused. */
+        if (which != FLOW_PAGE_QUEUE) page[1].status = "Paused";
         memset(&queue, 0, sizeof(queue));
-        queue.rows = rows;
+        queue.rows = page;
         queue.row_count = PLAYER_UI_QUEUE_ROW_CAP;
         queue.first_row = 0u;
         queue.total = 9u;
         queue.paused = which == FLOW_PAGE_QUEUE_PAUSED;
+        queue.held = which == FLOW_PAGE_QUEUE_HELD;
+        queue.building = true;
         queue.logical_width = g_flow_width;
         queue.logical_height = g_flow_height;
         return player_ui_screen_queue(ui, &queue);
@@ -1558,6 +1633,21 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
         nickname.logical_width = g_flow_width;
         nickname.logical_height = g_flow_height;
         return player_ui_screen_nickname(ui, &nickname);
+    }
+    if (which == FLOW_RA_PASSWORD) {
+        /* #1316: RetroAchievements' password editor with a password typed. */
+        static char typed[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        static UiKeyboard keyboard;
+        PlayerUiNicknameModel editor;
+        (void)snprintf(typed, sizeof(typed), "%s", "hunter2 s\xc3\xa9" "cret");
+        ui_keyboard_init(&keyboard, typed, PLAYER_UI_RA_PASSWORD_MAX,
+                         player_ui_ra_password_accepts, NULL);
+        memset(&editor, 0, sizeof(editor));
+        editor.ra_password_mode = true;
+        editor.keyboard = &keyboard;
+        editor.logical_width = g_flow_width;
+        editor.logical_height = g_flow_height;
+        return player_ui_screen_nickname(ui, &editor);
     }
     if (which == FLOW_ERROR_STOP || which == FLOW_ERROR_CRASH) {
         /* #1282: a game that stopped early, with Restart game and Copy details,
@@ -2544,7 +2634,8 @@ static bool build_title_golden(char *out, size_t cap, size_t *used) {
             {FLOW_WIZ_FONTS, "wizard-fonts"}, {FLOW_WIZ_READY, "wizard-ready"},
             {FLOW_WIZ_STAGED, "wizard-staged"}, {FLOW_WIZ_OPTIONS, "wizard-options"},
             {FLOW_PAGE_QUEUE, "flow-build-queue"},
-            {FLOW_PAGE_QUEUE_PAUSED, "flow-build-queue-paused"}
+            {FLOW_PAGE_QUEUE_PAUSED, "flow-build-queue-paused"},
+            {FLOW_PAGE_QUEUE_HELD, "flow-build-queue-held"}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
@@ -3019,6 +3110,9 @@ static const NkUiDrawList *flow_case_layout(FlowCase which, int width, int heigh
     g_flow_width = scale.logical_w;
     g_flow_height = scale.logical_h;
     for (int frame = 0; frame < 2; ++frame) {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+        g_pseudo_report_text = g_pseudo_report_frame && frame == 1;
+#endif
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
         draw = end_frame(ui);
@@ -3027,6 +3121,9 @@ static const NkUiDrawList *flow_case_layout(FlowCase which, int width, int heigh
             nk_ui_focus(ui, g_enhanced_focus_id);
         }
     }
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+    g_pseudo_report_text = false;
+#endif
     g_flow_width = 1280.0f;
     g_flow_height = 800.0f;
     return draw;
@@ -3139,6 +3236,245 @@ static bool flow_case_fits(FlowCase which, int width, int height, char *dump, si
     nk_ui_destroy(ui);
     return inside;
 }
+
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+typedef struct {
+    unsigned frames;
+    unsigned runs;
+    unsigned accented;
+    unsigned scroll_clips;
+    unsigned clamps;
+    unsigned findings;
+} PseudoLayoutResult;
+
+static PseudoLayoutResult g_pseudo_result;
+static int g_pseudo_case;
+static int g_pseudo_width;
+static int g_pseudo_height;
+
+static void pseudo_report_run(const char *kind, const NkUiDrawCmd *cmd,
+                              const NkUiTextRun *run, int lost_pixels) {
+    fprintf(stderr, "PSEUDO %s case=%d window=%dx%d text=%d%% id=%08X "
+                    "lost=%d bounds=[%d,%d,%d,%d] clip=[%d,%d,%d,%d] run=\"%.*s\"\n",
+            kind, g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, (unsigned)cmd->element_id, lost_pixels,
+            cmd->bounds[0], cmd->bounds[1], cmd->bounds[2], cmd->bounds[3],
+            cmd->clip[0], cmd->clip[1], cmd->clip[2], cmd->clip[3],
+            (int)(run->length > 120u ? 120u : run->length), run->text);
+}
+
+/* These probes are linked only by the pseudo-layout build. A deliberate
+   ellipsis and a buffer that loses bytes before layout are separate events. */
+void nk_ui_pseudo_clamped(const char *source, size_t retained_bytes) {
+    if (!g_pseudo_report_text) return;
+    ++g_pseudo_result.clamps;
+    fprintf(stderr, "PSEUDO CLAMP case=%d window=%dx%d text=%d%% kept=%zu source=\"%.120s\"\n",
+            g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, retained_bytes, source);
+}
+
+void nk_ui_pseudo_buffer_truncated(const char *source) {
+    if (!g_pseudo_report_text) return;
+    ++g_pseudo_result.findings;
+    fprintf(stderr, "PSEUDO BUFFER_TRUNCATED case=%d window=%dx%d text=%d%% "
+                    "id=widget-caps lost=0 source=\"%.120s\"\n",
+            g_pseudo_case, g_pseudo_width, g_pseudo_height,
+            g_flow_text_size_pct, source);
+}
+
+/* Preserve snprintf semantics and check its output before layout loses the
+   original length. The generated test header keeps the compiler format check. */
+int nk_ui_pseudo_snprintf(const char *file, int line, char *dest, size_t cap,
+                          const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(dest, cap, format, args);
+    va_end(args);
+    if (g_pseudo_report_text && cap != 0u && written >= 0 && (size_t)written >= cap) {
+        ++g_pseudo_result.findings;
+        fprintf(stderr, "PSEUDO BUFFER_TRUNCATED case=%d window=%dx%d text=%d%% "
+                        "id=%s:%d lost=%zu output=\"%.120s\"\n",
+                g_pseudo_case, g_pseudo_width, g_pseudo_height, g_flow_text_size_pct,
+                file, line, (size_t)written - (cap - 1u), dest);
+    }
+    return written;
+}
+
+static bool pseudo_has_accent(const NkUiTextRun *run) {
+    /* The generated catalog substitutes Latin-1 letters. Count them as
+       rendered UTF-8 rather than counting the bytes of an unrelated symbol. */
+    for (size_t i = 1; i < run->length; ++i) {
+        unsigned char byte = (unsigned char)run->text[i];
+        if ((unsigned char)run->text[i - 1u] == 0xC3u &&
+            byte >= 0x80u && byte <= 0xBFu && byte != 0x97u && byte != 0xB7u) return true;
+    }
+    return false;
+}
+
+static int pseudo_worst_edge(int left, int top, int right, int bottom) {
+    int worst = left > right ? left : right;
+    int vertical = top > bottom ? top : bottom;
+    return worst > vertical ? worst : vertical;
+}
+
+static void pseudo_check_draw(const NkUi *ui, const NkUiDrawList *draw) {
+    /* Track scissors belonging to an actual vertical scroller. A clipped
+       first or last line can scroll into view. Report geometry outside that
+       scroller's edge and horizontal clipping as layout findings. */
+    const NkUiDrawCmd *scrolls[NK_UI_DRAW_CLIP_DEPTH];
+    size_t depth = 0u;
+    ++g_pseudo_result.frames;
+    for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        if (cmd->kind == NK_UI_DRAW_SCISSOR_START) {
+            NkUiScrollState state;
+            scrolls[depth++] = nk_ui_scroll_state(ui, cmd->element_id, &state) &&
+                                state.max_offset > 0.0f ? cmd : NULL;
+        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_END) {
+            --depth;
+        }
+        if (cmd->kind != NK_UI_DRAW_TEXT || cmd->custom == NULL) continue;
+        const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
+        if (run->length == 0u) continue;
+        ++g_pseudo_result.runs;
+        if (pseudo_has_accent(run)) ++g_pseudo_result.accented;
+
+        const int *bounds = cmd->bounds;
+        const int *clip = cmd->clip;
+        const bool top_cut = clip[1] > bounds[1] + 1;
+        const bool bottom_cut = clip[3] < bounds[3] - 1;
+        bool scroll_top = !top_cut;
+        bool scroll_bottom = !bottom_cut;
+        for (size_t j = 0u; j < depth; ++j) {
+            const NkUiDrawCmd *scroll = scrolls[j];
+            if (scroll == NULL) continue;
+            if (clip[1] <= scroll->clip[1] + 1) scroll_top = true;
+            if (clip[3] >= scroll->clip[3] - 1) scroll_bottom = true;
+        }
+        int crop = pseudo_worst_edge(clip[0] - bounds[0], scroll_top ? 0 : clip[1] - bounds[1],
+                                     bounds[2] - clip[2], scroll_bottom ? 0 : bounds[3] - clip[3]);
+        if (crop > 1) {
+            pseudo_report_run("CLIPPED", cmd, run, crop);
+            ++g_pseudo_result.findings;
+        } else if (top_cut || bottom_cut) {
+            ++g_pseudo_result.scroll_clips;
+        }
+
+        int off_window = pseudo_worst_edge(-clip[0], -clip[1], clip[2] - g_pseudo_width,
+                                           clip[3] - g_pseudo_height);
+        if (command_shows(cmd) && off_window > 1) {
+            pseudo_report_run("OFF_WINDOW", cmd, run, off_window);
+            ++g_pseudo_result.findings;
+        }
+
+        /* Clay keeps a line's declared rectangle even when the measured
+           run is wider, including centred keycaps drawn by the widgets. */
+        NkUiTextSize size = screen_test_wide_measure(NULL, run->font, run->size_px,
+                                                     run->text, run->length);
+        if (run->letter_spacing > 0.0f && run->size_px > 0) {
+            const float glyphs = size.width / ((float)run->size_px * 0.62f);
+            size.width += run->letter_spacing * (glyphs - 1.0f);
+        }
+        const float excess = size.width - (float)(bounds[2] - bounds[0]);
+        if (excess > 2.0f) {
+            pseudo_report_run("RUN_OVERFLOW", cmd, run, (int)ceilf(excess));
+            ++g_pseudo_result.findings;
+        }
+    }
+}
+
+static bool pseudo_checker_detects_clipping(void) {
+    static const char translated[] = "P\303\240\303\240ck\303\240ge";
+    NkUiDrawBuffer buffer = {0};
+    char small[4];
+    bool ok = nk_ui_draw_add_scissor(&buffer, true, (NkUiPixelRect){0, 0, 35, 40}, 1u) &&
+              nk_ui_draw_add_text(&buffer, (NkUiPixelRect){2, 10, 85, 28}, translated,
+                                  sizeof(translated) - 1u, 0, 16, 0xFFFFFFFFu, 2u) &&
+              nk_ui_draw_add_scissor(&buffer, false, (NkUiPixelRect){0, 0, 35, 40}, 1u) &&
+              nk_ui_draw_list_valid(&buffer.list);
+    fprintf(stderr, "PSEUDO SELF_CHECK expecting CLIPPED and BUFFER_TRUNCATED diagnostics\n");
+    if (ok) pseudo_check_draw(NULL, &buffer.list);
+    g_pseudo_report_text = true;
+    int written = nk_ui_pseudo_snprintf(__FILE__, __LINE__, small, sizeof(small), "%s", translated);
+    g_pseudo_report_text = false;
+    ok = ok && g_pseudo_result.findings == 2u && g_pseudo_result.accented == 1u &&
+         written == (int)sizeof(translated) - 1 && small[sizeof(small) - 1u] == '\0';
+    nk_ui_draw_buffer_destroy(&buffer);
+    memset(&g_pseudo_result, 0, sizeof(g_pseudo_result));
+    return ok;
+}
+
+static void pseudo_check_flow(FlowCase which, int report_case) {
+    NkUi *ui = NULL;
+    g_pseudo_case = report_case;
+    const NkUiDrawList *draw = flow_case_layout(which, g_pseudo_width, g_pseudo_height, &ui);
+    if (draw != NULL && nk_ui_draw_list_valid(draw)) {
+        pseudo_check_draw(ui, draw);
+    } else {
+        fprintf(stderr, "PSEUDO FRAME_FAILED case=%d window=%dx%d text=%d%% "
+                        "id=00000000 lost=0\n",
+                report_case, g_pseudo_width, g_pseudo_height, g_flow_text_size_pct);
+        ++g_pseudo_result.findings;
+    }
+    nk_ui_destroy(ui);
+}
+
+static int pseudo_layout_report(bool pseudo) {
+    static const struct { int width; int height; } windows[] = {
+        {960, 540}, {1280, 720}, {1366, 705}, {853, 480}
+    };
+    static const int text_sizes[] = {100, 125, 150};
+    g_pseudo_width = 96;
+    g_pseudo_height = 60;
+    if (!pseudo_checker_detects_clipping()) {
+        fprintf(stderr, "PSEUDO SELF_CHECK_FAILED\n");
+        return 2;
+    }
+    g_pseudo_report_frame = true;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t w = 0u; w < sizeof(windows) / sizeof(windows[0]); ++w) {
+            g_pseudo_width = windows[w].width;
+            g_pseudo_height = windows[w].height;
+            for (int which = FLOW_BUILD; which < FLOW_COUNT; ++which) {
+                pseudo_check_flow((FlowCase)which, which);
+            }
+            /* The ordinary flows cover both library modes and a title following the
+               library. Give each explicit title choice its own diagnostics, including
+               a saved Ace when its package is unavailable. */
+            g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_ACE_MODE;
+            int report_case = FLOW_COUNT;
+            for (int mode = PLAYER_PLAY_AUTHENTIC; mode <= PLAYER_PLAY_ACE; ++mode) {
+                g_enhanced_mode_index = mode;
+                pseudo_check_flow(FLOW_SETTINGS_ACE_TITLE, report_case++);
+            }
+            g_enhanced_mode_index = PLAYER_PLAY_ACE;
+            g_enhanced_mode_count = 3;
+            pseudo_check_flow(FLOW_SETTINGS_ACE_TITLE, report_case);
+            g_enhanced_focus_id = 0u;
+            g_enhanced_mode_index = -1;
+            g_enhanced_mode_count = 0;
+        }
+    }
+    printf("PSEUDO SUMMARY locale=%s frames=%u text_runs=%u accented_runs=%u "
+           "scroll_clips=%u clamps=%u findings=%u\n", pseudo ? "pseudo" : "english",
+           g_pseudo_result.frames, g_pseudo_result.runs, g_pseudo_result.accented,
+           g_pseudo_result.scroll_clips, g_pseudo_result.clamps, g_pseudo_result.findings);
+#ifndef NK_UI_PSEUDO_CATALOG_COUNT
+    if (pseudo) {
+        fprintf(stderr, "PSEUDO CATALOG_MISSING\n");
+        return 2;
+    }
+#else
+    if (!pseudo || NK_UI_PSEUDO_CATALOG_COUNT == 0 || g_pseudo_result.accented == 0u) {
+        fprintf(stderr, "PSEUDO CATALOG_UNUSED\n");
+        return 2;
+    }
+#endif
+    if (failures != 0) return 2;
+    return g_pseudo_result.findings != 0u ? 1 : 0;
+}
+#endif /* NK_UI_PSEUDO_LAYOUT_TEST */
 
 /* A dump the flow helpers hand to "X is absent" checks is a whole frame: a frame that
    failed, or a dump cut at the buffer's end, is no dump, since the text it dropped would
@@ -4043,6 +4379,19 @@ static void test_settings_pages(void) {
          PLAYER_UI_SETTINGS_ONLINE_PLAY_NOT_NOW, "the card's NOT NOW changes nothing"},
         {FLOW_SETTINGS_ONLINE_PLAY_CARD, PLAYER_UI_ID_ONLINE_PLAY_CHANGE_SERVER,
          PLAYER_UI_SETTINGS_ONLINE_PLAY_CHANGE_SERVER, "the card's CHANGE SERVER opens the picker"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_CARD, PLAYER_UI_ID_ACHIEVEMENTS_AGREE,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_AGREE,
+         "RetroAchievements' card's AGREE AND TURN ON turns it on"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_CARD, PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_NOT_NOW, "RetroAchievements' card's NOT NOW changes nothing"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_USERNAME,
+         PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_USERNAME, "the sign-in form's Username opens its editor"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_PASSWORD,
+         PLAYER_UI_SETTINGS_EDIT_ACHIEVEMENTS_PASSWORD, "the sign-in form's Password opens its editor"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT, "the filled sign-in form's SIGN IN signs in"},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN_CANCEL,
+         PLAYER_UI_SETTINGS_ACHIEVEMENTS_SIGN_IN_CANCEL, "the sign-in form's CANCEL leaves it"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE + 2u,
          PLAYER_UI_SETTINGS_PICK_ONLINE_PLAY_SERVER, "a picker row picks its server"},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
@@ -4341,9 +4690,9 @@ static void test_settings_pages(void) {
                   message);
             part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, ENHANCED_TEST_CHOICE_ID(i, word + 1),
                                  NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
-            if (enhanced_part_is_ace_only(i)) {
+            if (enhanced_part_is_ace_only(i) || (i == PLAYER_PART_LOAD && word == ACE_WAITS_CHOICE)) {
                 CHECK(part.kind == PLAYER_UI_ACTION_NONE,
-                      "outside Ace a click on an Ace-only part's value changes nothing");
+                      "outside Ace a click on an Ace-only value changes nothing");
             } else {
                 CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
                           part.title_index == (size_t)i && part.choice_index == word,
@@ -4381,7 +4730,7 @@ static void test_settings_pages(void) {
                       part.title_index == (size_t)i && part.choice_index == 0,
                   "Right on a row that follows the library sets the part's first own value");
         }
-        g_enhanced_mode = "Ace";
+        g_enhanced_mode_index = PLAYER_PLAY_ACE;
         part = activate_flow_button(row, FLOW_SETTINGS_ACE_TITLE);
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
                   part.title_index == (size_t)i,
@@ -4408,7 +4757,7 @@ static void test_settings_pages(void) {
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
                   part.title_index == (size_t)i && part.choice_index == 0,
               "in Ace, Right on a row that follows the library sets the part's first own value");
-        g_enhanced_mode = NULL;
+        g_enhanced_mode_index = -1;
         CHECK(activate_flow_button(row, FLOW_SETTINGS_ACE_OFF).kind == PLAYER_UI_ACTION_NONE &&
                   enhanced_send(FLOW_SETTINGS_ACE_OFF, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT).kind ==
                       PLAYER_UI_ACTION_NONE &&
@@ -4556,6 +4905,7 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY_CARD, 1280, 800, NULL, 0u) &&
               online_play_card_reads(1280, 800, 100, false),
           "the Online play card offers TURN ON, NOT NOW and CHANGE SERVER");
+    test_achievements_card_and_sign_in();
     {
         /* The picker scrolls once it lists more than a few servers: each of these shows
            somewhere as it is scrolled through. */
@@ -5673,7 +6023,7 @@ static void test_enhanced_target_sizes(void) {
     const NkUiId saved_focus = g_enhanced_focus_id;
     const int saved_text = g_flow_text_size_pct;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
             for (int row = 0; row < ENHANCED_PLACE_ROWS; ++row) {
@@ -5822,7 +6172,7 @@ static void test_enhanced_title_with_an_ellipsis(void) {
     float plain;
     float ellipsis;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     plain = enhanced_list_viewport(FLOW_SETTINGS_ACE_TITLE, 1280, 720);
     g_enhanced_title_name = "Test Game\xE2\x80\xA6 Two";
     ellipsis = enhanced_list_viewport(FLOW_SETTINGS_ACE_TITLE, 1280, 720);
@@ -5840,7 +6190,7 @@ static void test_enhanced_title_with_an_ellipsis(void) {
    select button does: Right is Library, Left is Enhanced. Right stepped from Library. */
 static void test_enhanced_stale_ace_steps_from_ace(void) {
     PlayerUiAction step;
-    g_enhanced_mode = "Ace";
+    g_enhanced_mode_index = PLAYER_PLAY_ACE;
     g_enhanced_mode_count = 3;
     step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_ACE_MODE, NK_UI_EV_NAV,
                          NK_UI_DIR_RIGHT);
@@ -5851,7 +6201,45 @@ static void test_enhanced_stale_ace_steps_from_ace(void) {
     CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_PLAY_MODE) && step.choice_index == 2,
           "Left on a saved Ace with no package sets Enhanced, the mode before Ace");
     g_enhanced_mode_count = 0;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
+}
+
+static void test_enhanced_load_choices_without_ace(void) {
+    const NkUiId row = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_LOAD);
+    const int saved_tab = g_enhanced_tab;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_ADVANCED;
+    g_enhanced_mode_index = PLAYER_PLAY_ENHANCED;
+    g_enhanced_mode_count = 3;
+
+    PlayerUiAction step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV,
+                                        NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == AUTO_LOAD_CHOICE,
+          "a title in Enhanced can choose Automatic without a package");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = k_enhanced_load_labels[AUTO_LOAD_CHOICE];
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == LOAD_OFF_CHOICE,
+          "Right skips the Ace waits choice on a title in Enhanced");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = k_enhanced_load_labels[LOAD_OFF_CHOICE];
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == AUTO_LOAD_CHOICE,
+          "Left skips the Ace waits choice on a title in Enhanced");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = k_enhanced_load_labels[ACE_WAITS_CHOICE];
+    g_enhanced_mode_index = PLAYER_PLAY_ACE;
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+              step.choice_index == LOAD_OFF_CHOICE,
+          "a saved Ace waits choice remains editable after its package is unavailable");
+
+    g_enhanced_value[PLAYER_PART_LOAD] = NULL;
+    g_enhanced_mode_count = 0;
+    g_enhanced_mode_index = -1;
+    g_enhanced_tab = saved_tab;
 }
 
 /* Main's #2686 gave an activation to the control focused when it was pressed
@@ -5875,7 +6263,7 @@ static void test_enhanced_row_takes_the_press_made_on_it(void) {
          "Enter then Down in one frame on Texture filtering takes its next value"},
     };
     const int saved_tab = g_enhanced_tab;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     for (size_t i = 0u; i < sizeof(rows) / sizeof(rows[0]); ++i) {
         NkUiConfig config;
@@ -5941,7 +6329,7 @@ static void test_enhanced_pacing_says_all_games(void) {
     static char dump[CASE_DUMP_CAP];
     const int saved_tab = g_enhanced_tab;
     const NkUiId saved_focus = g_enhanced_focus_id;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_MOTION;
     g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_PACING;
     CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1280, 720, dump, sizeof(dump)) &&
@@ -5972,7 +6360,7 @@ static void test_enhanced_wheel_scrolls_past_the_focused_row(void) {
     float scrolled = -1.0f;
     float later = -1.0f;
     char message[200];
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     g_enhanced_focus_id = row;
     viewport.text_size_pct = g_flow_text_size_pct;
@@ -6069,7 +6457,7 @@ static void enhanced_panel_case_set(int which) {
         which == 3 ? k_enhanced_panel_long_sentence : NULL;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     g_enhanced_focus_id = which >= 0 ? k_enhanced_panel_cases[which].focus : 0u;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
 }
 
 /* A page of the case laid out in a launcher window at a UI scale and text size, focus on the
@@ -6464,7 +6852,7 @@ static void test_enhanced_walk_at_every_text_size(void) {
     const NkUiId saved_focus = g_enhanced_focus_id;
     const int saved_text = g_flow_text_size_pct;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     g_enhanced_focus_id = 0u;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         for (size_t w = 0u; w < sizeof(windows) / sizeof(windows[0]); ++w) {
@@ -6590,7 +6978,7 @@ static void test_enhanced_selected_value_styles(void) {
     const NkUiTheme *theme = nk_ui_theme_n1();
     const int saved_tab = g_enhanced_tab;
     const NkUiId saved_focus = g_enhanced_focus_id;
-    const char *saved_mode = g_enhanced_mode;
+    const int saved_mode = g_enhanced_mode_index;
     /* WCAG 2.1 SC 1.4.11: what identifies a state stands 3:1 from what is next to it. The
        edge of a value marked without the accent does, from the list's ground and from its
        own box; an unselected value's hairline does not, which is what tells them apart. */
@@ -6611,7 +6999,7 @@ static void test_enhanced_selected_value_styles(void) {
           "a value's text keeps 4.5:1 on its box: selected Off, selected on, the library's "
           "value, and an unselected value");
     g_enhanced_focus_id = 0u;
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         const bool title = pages[g] == FLOW_SETTINGS_ACE_TITLE;
         for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
@@ -6620,7 +7008,7 @@ static void test_enhanced_selected_value_styles(void) {
                 const char *word = value >= 0 ? k_enhanced_words[part].labels[value] : NULL;
                 const int marked = value < 0 ? 0 : value + (title ? 1 : 0);
                 const int boxes = k_enhanced_words[part].count + (title ? 1 : 0);
-                const bool dimmed = title && enhanced_part_is_ace_only(part);
+                const bool dimmed_row = title && enhanced_part_is_ace_only(part);
                 const bool off = word != NULL && strcmp(word, "Off") == 0;
                 NkUi *ui = NULL;
                 const NkUiDrawList *draw;
@@ -6631,6 +7019,8 @@ static void test_enhanced_selected_value_styles(void) {
                 g_enhanced_tab = enhanced_tab_of(part);
                 draw = flow_case_layout(pages[g], 1280, 1600, &ui);
                 for (int box = 0; box < boxes; ++box) {
+                    const bool dimmed = dimmed_row ||
+                        (title && part == PLAYER_PART_LOAD && box == ACE_WAITS_CHOICE + 1);
                     const NkUiId id = ENHANCED_TEST_CHOICE_ID(part, box);
                     uint32_t fill = 0u;
                     uint32_t edge = 0u;
@@ -6699,7 +7089,7 @@ static void test_enhanced_selected_value_styles(void) {
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     g_enhanced_tab = saved_tab;
     g_enhanced_focus_id = saved_focus;
-    g_enhanced_mode = saved_mode;
+    g_enhanced_mode_index = saved_mode;
 }
 
 /* Settings > Enhanced keeps its rows where they are. On every tab of the library's page and
@@ -6728,7 +7118,7 @@ static void test_enhanced_rows_stay_put(void) {
             char message[200];
             g_enhanced_tab = tab;
             memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-            g_enhanced_mode = NULL;
+            g_enhanced_mode_index = -1;
             base = enhanced_row_places(pages[g]);
             CHECK(base.box[0][0] >= 0 && base.box[0][1] > base.box[0][0] &&
                       base.box[1][0] >= 0 && base.box[1][1] > base.box[1][0],
@@ -6774,7 +7164,7 @@ static void test_enhanced_rows_stay_put(void) {
             for (int step = -3; step < 4 + PLAYER_PART_COUNT * ENHANCED_MAX_WORDS; ++step) {
                 EnhancedRowPlaces moved;
                 memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-                g_enhanced_mode = NULL;
+                g_enhanced_mode_index = -1;
                 if (step == -3) {
                     if (pages[g] != FLOW_SETTINGS_ACE_TITLE) continue;
                     g_enhanced_value[PLAYER_PART_SMOOTH] = k_enhanced_smooth_at_60;
@@ -6790,12 +7180,10 @@ static void test_enhanced_rows_stay_put(void) {
                 } else if (step < 4) {
                     int count = pages[g] == FLOW_SETTINGS_ACE_TITLE ? 4 : 2;
                     if (step + 1 >= count) continue;
-                    g_enhanced_mode = pages[g] == FLOW_SETTINGS_ACE_TITLE
-                                          ? k_enhanced_title_modes[step + 1]
-                                          : k_enhanced_library_modes[step + 1];
+                    g_enhanced_mode_index = step + 1;
                     (void)snprintf(message, sizeof(message),
-                                   "page %d, %s: play mode %s moves no row", (int)g,
-                                   k_enhanced_shown[tab].tab, g_enhanced_mode);
+                                   "page %d, %s: play mode choice %d moves no row", (int)g,
+                                   k_enhanced_shown[tab].tab, g_enhanced_mode_index);
                 } else {
                     int part = (step - 4) / ENHANCED_MAX_WORDS;
                     int value = (step - 4) % ENHANCED_MAX_WORDS;
@@ -6814,7 +7202,7 @@ static void test_enhanced_rows_stay_put(void) {
     }
     g_enhanced_tab = saved_tab;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
 }
 
 /* The find page (FLOW_PAGE_LIBRARY_FIND, the shared keyboard under its field) at
@@ -8193,7 +8581,8 @@ static void test_online_play_text_is_never_cut(void) {
     static const struct { int w; int h; } sizes[] = {{960, 540}, {1280, 720}};
     static const int text_sizes[] = {100, 125, 150};
     static const FlowCase pages[] = {FLOW_SETTINGS_ONLINE_PLAY_SERVERS,
-                                     FLOW_SETTINGS_ONLINE_PLAY_CARD};
+                                     FLOW_SETTINGS_ONLINE_PLAY_CARD,
+                                     FLOW_SETTINGS_ACHIEVEMENTS_CARD};
     int saved = g_flow_text_size_pct;
     for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
         g_flow_text_size_pct = text_sizes[t];
@@ -8318,6 +8707,8 @@ static void test_game_page_text_is_never_cut(void) {
         {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
         {FLOW_SETTINGS_ONLINE_PLAY, NULL, 0u, "Settings > Online play", 125},
         {FLOW_SETTINGS_ONLINE_PLAY_CARD, NULL, 0u, "the Online play card", 125},
+        {FLOW_SETTINGS_ACHIEVEMENTS_CARD, NULL, 0u, "RetroAchievements' consent card", 125},
+        {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, NULL, 0u, "RetroAchievements' sign-in form", 125},
         {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, NULL, 0u, "the Online play server picker", 125},
         {FLOW_SETTINGS_ONLINE_ON, NULL, 0u, "Settings > Online with Online mode on", 125},
         {FLOW_SETTINGS_ONLINE_DISCORD_ON, NULL, 0u, "Settings > Online with Discord status on",
@@ -8364,7 +8755,7 @@ static void test_texture_scaling_rows(void) {
     int saved_tab = g_enhanced_tab;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         /* Every factor's word in the panel, with the smart 2D filter on beside it. */
         for (int factor = 2; factor <= 6; ++factor) {
@@ -8433,7 +8824,7 @@ static void test_texture_scaling_rows(void) {
     g_enhanced_tab = saved_tab;
     g_enhanced_focus_id = 0u;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
 }
 
 /* Supersampling's guard (owner, 2026-11-15): at a render scale of 3x or 4x the row with 4x picked
@@ -8458,7 +8849,7 @@ static void test_ssaa_warning_rows(void) {
     g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA);
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     memset(g_enhanced_sentence, 0, sizeof(g_enhanced_sentence));
-    g_enhanced_mode = NULL;
+    g_enhanced_mode_index = -1;
     for (size_t k = 0u; k < sizeof(cases) / sizeof(cases[0]); ++k) {
         g_enhanced_value[PLAYER_PART_SSAA] = cases[k].value;
         g_enhanced_sentence[PLAYER_PART_SSAA] = cases[k].sentence;
@@ -9299,6 +9690,8 @@ static int capture_screens(const char *directory) {
             {FLOW_CONSENT, "flow-prereq-consent", PLAYER_UI_ID_PREREQ_ACCEPT},
             {FLOW_PROGRESS, "flow-prereq-progress", PLAYER_UI_ID_PREREQ_CANCEL},
             {FLOW_ERROR, "flow-error", PLAYER_UI_ID_ERROR_RECOVER},
+            {FLOW_PAGE_QUEUE, "flow-build-queue", PLAYER_UI_ID_QUEUE_PAUSE},
+            {FLOW_PAGE_QUEUE_HELD, "flow-build-queue-held", PLAYER_UI_ID_QUEUE_PAUSE},
             {FLOW_WIZ_WELCOME, "wizard-welcome", PLAYER_UI_ID_WIZARD_PRIMARY},
             {FLOW_WIZ_CHOSEN, "wizard-chosen", PLAYER_UI_ID_WIZARD_PRIMARY},
             {FLOW_WIZ_COPYING, "wizard-copying", PLAYER_UI_ID_WIZARD_CANCEL},
@@ -9320,6 +9713,10 @@ static int capture_screens(const char *directory) {
              PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE},
             {FLOW_SETTINGS_ONLINE_PLAY_CARD, "settings-online-play-card",
              PLAYER_UI_ID_ONLINE_PLAY_NOT_NOW},
+            {FLOW_SETTINGS_ACHIEVEMENTS_CARD, "settings-achievements-card",
+             PLAYER_UI_ID_ACHIEVEMENTS_NOT_NOW},
+            {FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, "settings-achievements-sign-in",
+             PLAYER_UI_ID_ACHIEVEMENTS_USERNAME},
             {FLOW_SETTINGS_ONLINE_PLAY_SERVERS, "settings-online-play-servers",
              PLAYER_UI_ID_ONLINE_PLAY_SERVER_BASE},
             {FLOW_SETTINGS_NOTICES, "settings-notices", PLAYER_UI_ID_SETTINGS_BACK},
@@ -10796,8 +11193,8 @@ static bool queue_op_is(PlayerUiAction action, PlayerUiQueueOp op, size_t title_
 }
 
 /* The build queue: the queue screen lists the one building first, then the
-   games that wait with Up, Down and Remove, a page at a time, and Resume when
-   paused; the library line opens it; the title page offers Add to queue beside
+   games that wait with Up, Down and Remove, a page at a time, and one Pause or
+   Resume button; the library line opens it; the title page offers Add to queue beside
    BUILD PACKAGE and Remove from queue while the game waits; the build card
    says how many follow. */
 static void test_build_queue_screens(void) {
@@ -10852,7 +11249,40 @@ static void test_build_queue_screens(void) {
     CHECK(strstr(dump, "\"PAGE\"") == NULL && strstr(dump, "\"RESUME\"") == NULL &&
               strstr(dump, "\"LATER GAMES\"") == NULL,
           "one page and a running queue need no pager and no Resume");
+    CHECK(strstr(dump, "\"PAUSE\"") != NULL, "a running queue offers Pause");
+    CHECK(strstr(dump, "One build at a time, so this PC stays usable.") != NULL,
+          "a running queue's hint says one build runs at a time");
     nk_ui_destroy(ui);
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAUSE, &queue),
+                      PLAYER_UI_QUEUE_PAUSE, 0u), "Pause pauses a running queue");
+
+    /* Paused by the person while a game builds: the title, the lead and the
+       hint say so, and the same button resumes. */
+    queue.held = true;
+    queue.building = true;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the held build queue UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_queue(ui, &queue);
+        (void)end_frame(ui);
+    }
+    (void)dump_frame(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"Paused: 3 games in the queue\"") != NULL,
+          "a paused queue says so in its title");
+    CHECK(strstr(dump, "The current build finishes, then the queue waits.") != NULL,
+          "a paused queue says the current build finishes first");
+    CHECK(strstr(dump, "Paused after this build. Resume starts the next game.") != NULL,
+          "a paused queue's hint says so");
+    CHECK(strstr(dump, "\"RESUME\"") != NULL && strstr(dump, "\"PAUSE\"") == NULL,
+          "a paused queue's one button is Resume");
+    nk_ui_destroy(ui);
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAUSE, &queue),
+                      PLAYER_UI_QUEUE_RESUME, 0u), "Resume goes on with a paused queue");
+    queue.held = false;
+    queue.building = false;
 
     CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_DOWN_BASE + 1u, &queue),
                       PLAYER_UI_QUEUE_LATER, 5u), "Down moves that game one place later");
@@ -10875,7 +11305,7 @@ static void test_build_queue_screens(void) {
     queue.paused = true;
     queue.first_row = 4u;
     queue.total = 9u;
-    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_RESUME, &queue),
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAUSE, &queue),
                       PLAYER_UI_QUEUE_RESUME, 0u), "Resume starts a paused queue");
     CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAGE_BACK, &queue),
                       PLAYER_UI_QUEUE_PAGE_BACK, 0u), "Earlier games turns back a page");
@@ -10893,7 +11323,7 @@ static void test_build_queue_screens(void) {
     (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "\"GAMES 5-7 OF 9, IN BUILD ORDER\"") != NULL,
           "a page names which games it shows");
-    (void)snprintf(expect, sizeof(expect), "%08X \"Paused: a build could not start.",
+    (void)snprintf(expect, sizeof(expect), "%08X \"A build could not start.",
                    (unsigned)theme->warning);
     CHECK(strstr(dump, expect) != NULL, "a paused queue says why, in the warning colour");
     CHECK(strstr(dump, "\"RESUME\"") != NULL, "a paused queue offers Resume");
@@ -11412,8 +11842,10 @@ static void test_nickname_keyboard(void) {
           "Shift turns the letters to upper case");
     (void)nickname_press(ui, &model, q);
     (void)nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SPACE);
+    /* Shift: the 0 key shows and types its second character, ~ (#1316). */
     (void)nickname_press(ui, &model, key + 9u);
-    CHECK(strcmp(typed, "qQ 0") == 0, "keys type in the case shown; Space types a space");
+    CHECK(strcmp(typed, "qQ ~") == 0 && nickname_dump_has(ui, &model, "\"~\""),
+          "keys type in the case shown; Space types a space");
     action = nickname_press(ui, &model, key + UI_KEYBOARD_KEY_DELETE);
     CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "qQ ") == 0 &&
               nickname_dump_has(ui, &model, "\"3 / 32 bytes\""),
@@ -11837,6 +12269,221 @@ static void test_wizard_refused_pick_is_not_chosen(void) {
     CHECK(strstr(dump, expect) != NULL, "the refusal reads in the warning colour");
 }
 
+/* #1316: RetroAchievements' consent card and sign-in form are launcher pages, not a Windows
+   message box and the Windows credential dialog. The card names both hosts and every item the
+   consent covers, whole, at the smallest window with Larger text; its buttons are AGREE AND TURN
+   ON and NOT NOW. The form shows the username and one star for each password character, and its
+   SIGN IN waits for both. The password editor shows stars, never the password. */
+/* Whether a dump's text, every drawn run's text in order joined by spaces, holds `sentence`:
+   a wrapped paragraph reads whole even where its box's border is dumped between its lines. */
+static bool dump_text_says(const char *dump, const char *sentence) {
+    static char text[CASE_DUMP_CAP];
+    size_t used = 0u;
+    for (const char *line = dump; line != NULL && *line != '\0';) {
+        const char *eol = strchr(line, '\n');
+        const char *end = eol != NULL ? eol : line + strlen(line);
+        const char *open = memchr(line, '"', (size_t)(end - line));
+        const char *close = end;
+        while (close > line && close[-1] != '"') --close;
+        if (open != NULL && close - 1 > open + 1) {
+            size_t n = (size_t)(close - 1 - (open + 1));
+            if (used + n + 2u >= sizeof(text)) return false;
+            if (used > 0u) text[used++] = ' ';
+            memcpy(text + used, open + 1, n);
+            used += n;
+        }
+        line = eol != NULL ? eol + 1 : NULL;
+    }
+    text[used] = '\0';
+    return strstr(text, sentence) != NULL;
+}
+
+/* Whether a text run containing `needle` is drawn whole in the window on the page's first,
+   unscrolled frame: not clipped at all, by a scroll container or by the window's edge. */
+static bool flow_case_shows_whole(FlowCase which, int width, int height, const char *needle) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    const size_t needle_length = strlen(needle);
+    bool whole = false;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd && !whole; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
+        if (cmd->kind != NK_UI_DRAW_TEXT || run == NULL || run->length != needle_length ||
+            memcmp(run->text, needle, needle_length) != 0) {
+            continue;
+        }
+        whole = command_shows(cmd) && cmd->clip[0] == cmd->bounds[0] &&
+                cmd->clip[1] == cmd->bounds[1] && cmd->clip[2] == cmd->bounds[2] &&
+                cmd->clip[3] == cmd->bounds[3] && cmd->bounds[0] >= 0 && cmd->bounds[1] >= 0 &&
+                cmd->bounds[2] <= width && cmd->bounds[3] <= height;
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return whole;
+}
+
+static void test_achievements_card_and_sign_in(void) {
+    static char dump[CASE_DUMP_CAP];
+    /* The Windows message box this card replaces was wider than the screen, its buttons and even
+       its title bar's off the edge, so Enter (its default) agreed with no choice in sight. The
+       card shows both choices whole on its first frame, before any scroll, at every window and
+       text size; the UI test (test_player_ui.py) shows its focus starts on NOT NOW. */
+    static const int card_sizes[][3] = {
+        {960, 540, 100}, {960, 540, 150}, {1280, 720, 100}, {1280, 720, 150},
+        {1920, 1080, 100}, {1920, 1080, 150}
+    };
+    for (size_t i = 0u; i < sizeof(card_sizes) / sizeof(card_sizes[0]); ++i) {
+        const int saved = g_flow_text_size_pct;
+        bool both;
+        g_flow_text_size_pct = card_sizes[i][2];
+        both = flow_case_shows_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, card_sizes[i][0],
+                                     card_sizes[i][1], "AGREE AND TURN ON") &&
+               flow_case_shows_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, card_sizes[i][0],
+                                     card_sizes[i][1], "NOT NOW");
+        g_flow_text_size_pct = saved;
+        if (!both) {
+            fprintf(stderr, "  at %d x %d, %d%% text\n", card_sizes[i][0], card_sizes[i][1],
+                    card_sizes[i][2]);
+        }
+        CHECK(both, "the consent card shows AGREE AND TURN ON and NOT NOW whole on its first "
+                    "frame, before any scroll");
+    }
+    static const char *const card_says[] = {
+        "What Nakagawa sends to " NK_ACH_HOST,
+        "Your RetroAchievements username and its sign-in token.",
+        "Your password, once, when you sign in, to get that token. It is never saved; the token "
+        "is kept in Windows Credential Manager.",
+        "The game's RetroAchievements hash",
+        "The achievements you unlock.",
+        "Every two minutes while a game runs, its Rich Presence text: what the game's "
+        "achievement set says you are doing.",
+        "this player's name and version, your operating system and the rcheevos version.",
+        "downloaded from " NK_ACH_BADGE_HOST ", the only other host.",
+        "Those requests send no username, token or console ID",
+        "The pictures are kept on this PC until you sign out.",
+        "Hardcore is not available. Achievements are off while cheats are on or with 60 FPS game "
+        "logic.",
+        "Nakagawa never sends your game files, your saves, the game's memory",
+        "RetroAchievements stays off until you choose AGREE AND TURN ON."
+    };
+    /* Whole on one screen at 1920 x 1080, so the dump holds every line; at smaller windows the
+       card scrolls, and flow_case_text_whole below reads it to its end. */
+    bool says_all = flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 1920, 1080, dump,
+                                   sizeof(dump));
+    for (size_t i = 0u; says_all && i < sizeof(card_says) / sizeof(card_says[0]); ++i) {
+        if (!dump_text_says(dump, card_says[i])) {
+            fprintf(stderr, "  the card does not say: %s\n", card_says[i]);
+            says_all = false;
+        }
+    }
+    CHECK(says_all && strstr(dump, "\"AGREE AND TURN ON\"") != NULL &&
+              strstr(dump, "\"NOT NOW\"") != NULL,
+          "RetroAchievements' consent card says every host and item sent, with AGREE AND TURN "
+          "ON and NOT NOW");
+    /* The last word of each of the card's long lines, which no wrap splits (flow_case_text_whole
+       looks for 8 at most). */
+    static const char *const card_ends[] = {
+        "Manager.", "play.", "doing.", "version.", "out.", "logic.", "PC.", "Achievements."
+    };
+    for (int pct = 100; pct <= 150; pct += 50) {
+        const int saved = g_flow_text_size_pct;
+        g_flow_text_size_pct = pct;
+        CHECK(flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 960, 540, NULL, 0u) &&
+                  flow_case_text_whole(FLOW_SETTINGS_ACHIEVEMENTS_CARD, 960, 540,
+                                       PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT,
+                                       card_ends, sizeof(card_ends) / sizeof(card_ends[0])),
+              "RetroAchievements' consent card fits 960 x 540 and shows every line whole as it "
+              "is scrolled, at 100% and 150% text");
+        g_flow_text_size_pct = saved;
+    }
+    CHECK(flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"USERNAME: PLAYER_ONE\"") != NULL &&
+              strstr(dump, "\"PASSWORD: *********\"") != NULL &&
+              dump_says(dump, "RetroAchievements has no sign-in web page for other apps"),
+          "the sign-in form shows the username and nine stars for a nine-character password");
+    CHECK(settings_op_is(activate_flow_button(PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN,
+                                              FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN),
+                         PLAYER_UI_SETTINGS_ACHIEVEMENTS_SUBMIT),
+          "a filled sign-in form's SIGN IN signs in");
+    g_ra_form_empty = true;
+    CHECK(flow_case_fits(FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"USERNAME: ENTER\"") != NULL &&
+              strstr(dump, "\"PASSWORD: ENTER\"") != NULL &&
+              activate_flow_button(PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN,
+                                   FLOW_SETTINGS_ACHIEVEMENTS_SIGN_IN).kind ==
+                  PLAYER_UI_ACTION_NONE,
+          "an empty sign-in form's SIGN IN does nothing");
+    g_ra_form_empty = false;
+    CHECK(flow_case_fits(FLOW_RA_PASSWORD, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "hunter2") == NULL && strstr(dump, "cret") == NULL &&
+              strstr(dump, "\"**************|\"") != NULL &&
+              strstr(dump, "bytes") == NULL,
+          "the password editor shows one star per character and neither the password nor its "
+          "byte count");
+    {
+        /* A controller types any password RetroAchievements takes: between its two layers, the
+           on-screen keyboard has every printable ASCII character but the space (its own key),
+           and the password field takes each of them. Failing before: no layer had
+           $ % ^ = / \ ; " | ~ < > ` [ ] { }. */
+        char missing[96];
+        size_t n_missing = 0u;
+        for (uint32_t ch = 0x21u; ch <= 0x7Eu; ++ch) {
+            bool found = false;
+            for (unsigned place = 0u; place < UI_KEYBOARD_CHAR_KEYS && !found; ++place) {
+                found = ui_keyboard_key_char(place, false) == ch ||
+                        ui_keyboard_key_char(place, true) == ch;
+            }
+            if (!found || !player_ui_ra_password_accepts(ch, NULL)) {
+                missing[n_missing++] = (char)ch;
+            }
+        }
+        missing[n_missing] = '\0';
+        if (n_missing != 0u) fprintf(stderr, "  not typeable: %s\n", missing);
+        CHECK(n_missing == 0u,
+              "the on-screen keyboard types every printable ASCII character into a password");
+        CHECK(ui_keyboard_key_char(0u, false) == '1' && ui_keyboard_key_char(0u, true) == '$' &&
+                  ui_keyboard_key_char(10u, true) == 'Q' &&
+                  ui_keyboard_key_char(29u, true) == ':',
+              "Shift gives the digits' row its symbols, upper-case letters, and ' its colon");
+    }
+    {
+        /* The form's helpers: SIGN IN takes the password once and wipes the form's copy. */
+        PlayerUiSignInForm form;
+        char user[PLAYER_UI_RA_USERNAME_MAX + 1u];
+        char pass[PLAYER_UI_RA_PASSWORD_MAX + 1u];
+        bool wiped = true;
+        memset(&form, 0, sizeof(form));
+        (void)snprintf(form.username, sizeof(form.username), "%s", "player_one");
+        (void)snprintf(form.password, sizeof(form.password), "%s", "p\xc3\xa4ss word");
+        CHECK(player_ui_sign_in_password_chars(&form) == 9u,
+              "the form counts the password's characters, not its bytes");
+        CHECK(player_ui_sign_in_take(&form, user, sizeof(user), pass, sizeof(pass)) &&
+                  strcmp(user, "player_one") == 0 && strcmp(pass, "p\xc3\xa4ss word") == 0,
+              "SIGN IN takes the username and the password");
+        for (size_t i = 0u; i < sizeof(form.password); ++i) wiped = wiped && form.password[i] == 0;
+        CHECK(wiped && strcmp(form.username, "player_one") == 0,
+              "taking the password wipes every byte of the form's copy; the username stays");
+        CHECK(!player_ui_sign_in_take(&form, user, sizeof(user), pass, sizeof(pass)),
+              "a second SIGN IN has no password to send: it is sent once");
+        (void)snprintf(form.password, sizeof(form.password), "%s", "secret");
+        CHECK(!player_ui_sign_in_take(&form, user, 4u, pass, sizeof(pass)) &&
+                  form.password[0] == 0,
+              "a username too long for the request is refused, and the password is wiped all "
+              "the same");
+        (void)snprintf(form.password, sizeof(form.password), "%s", "secret");
+        player_ui_sign_in_wipe(&form);
+        CHECK(form.username[0] == 0 && form.password[0] == 0,
+              "wiping the form empties both fields");
+        CHECK(player_ui_ra_username_accepts('a', NULL) && !player_ui_ra_username_accepts(' ', NULL) &&
+                  !player_ui_ra_username_accepts(0xE9u, NULL) &&
+                  player_ui_ra_password_accepts(' ', NULL) &&
+                  player_ui_ra_password_accepts(0xE9u, NULL) &&
+                  !player_ui_ra_password_accepts('\t', NULL) &&
+                  !player_ui_ra_password_accepts(0x85u, NULL),
+              "a username takes printable ASCII without spaces; a password anything but a "
+              "control character");
+    }
+}
+
 int main(int argc, char **argv) {
     static char library[DUMP_CAP];
     static char title[DUMP_CAP];
@@ -11845,6 +12492,10 @@ int main(int argc, char **argv) {
     bool write = false;
     const char *capture_dir = NULL;
     for (int i = 1; i < argc; ++i) {
+#ifdef NK_UI_PSEUDO_LAYOUT_TEST
+        if (strcmp(argv[i], "--pseudo-layout") == 0) return pseudo_layout_report(true);
+        if (strcmp(argv[i], "--english-layout") == 0) return pseudo_layout_report(false);
+#endif
         if (strcmp(argv[i], "--write-goldens") == 0) {
             write = true;
         } else if (strncmp(argv[i], "--capture-dir=", 14u) == 0) {
@@ -11867,6 +12518,7 @@ int main(int argc, char **argv) {
     test_enhanced_walk_at_every_text_size();
     test_enhanced_title_with_an_ellipsis();
     test_enhanced_stale_ace_steps_from_ace();
+    test_enhanced_load_choices_without_ace();
     test_enhanced_row_takes_the_press_made_on_it();
     test_enhanced_pacing_says_all_games();
     test_enhanced_wheel_scrolls_past_the_focused_row();

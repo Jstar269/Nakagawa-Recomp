@@ -28,8 +28,10 @@ shows up there as a false equality rather than as a silent pass.
 Three couplings do not manifest as a function body and are covered by direct
 unit tests instead:
 
-* ``HST_MANUAL_CALLABLES`` / ``HST_RESUME_OWNERS`` change entry *roles*
-  (:func:`codegen.build_entry_catalog`);
+* ``HST_RESUME_OWNERS`` changes entry *roles* (:func:`codegen.build_entry_catalog`).
+  The six callable seeds that stood beside it are retired (#363), and
+  :class:`RetiredCallableSeedTests` proves ``--profile=hst`` adds no callable
+  entry: the analyzer finds those leaves from the image under every profile;
 * ``_SV_SPECIAL`` suppresses ``--static-verify`` emission
   (:func:`codegen.sv_points`) -- the differential covers it too, because the
   differential runs with ``--static-verify`` enabled;
@@ -58,6 +60,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from io import StringIO
 from pathlib import Path
 from typing import NamedTuple
@@ -100,6 +103,26 @@ def _addiu_sp(imm: int) -> int:
     return (0x09 << 26) | (29 << 21) | (29 << 16) | (imm & 0xFFFF)
 
 
+_A1 = 5
+
+
+def _lui(rt: int, imm: int) -> int:
+    return (0x0F << 26) | (rt << 16) | (imm & 0xFFFF)
+
+
+def _addiu(rt: int, rs: int, imm: int) -> int:
+    return (0x09 << 26) | (rs << 21) | (rt << 16) | (imm & 0xFFFF)
+
+
+def _hi16(addr: int) -> int:
+    """The `lui` half of an `la`, adjusted for the sign of the `addiu` half."""
+    return ((addr + 0x8000) >> 16) & 0xFFFF
+
+
+def _j(target: int) -> int:
+    return 0x08000000 | ((target >> 2) & 0x03FFFFFF)
+
+
 # --- the address-coupled inventory, taken from codegen's own tables ---------
 
 # The SR_BOOT_DIAG entry and inline probes were retired with the generic-runtime
@@ -124,14 +147,22 @@ BODY_COUPLED = (
 )
 
 # Role-coupled only (catalog classification, not body text).
-HST_MANUAL_CALLABLES = tuple(sorted(codegen.HST_MANUAL_CALLABLES))
 HST_RESUME_OWNERS = dict(codegen.HST_RESUME_OWNERS)
 
+#: The six addresses ``--profile=hst`` seeded as callable entries, each recorded as an
+#: "address-taken-tiny-leaf".  Retired under #363 (2026-11-24): the analyzer finds a leaf
+#: entered only through a pointer from the image, under every profile.  This module owns
+#: the list now, so that the specimen keeps a body at each address and
+#: :class:`RetiredCallableSeedTests` can prove that no profile treats one specially.
+RETIRED_CALLABLE_SEEDS: tuple[int, ...] = (
+    0x00014430, 0x0003DB3C, 0x00042998, 0x0005A648, 0x000E1724, 0x000E3B24,
+)
+
 # Everything a leak could key on.  The AST inventory test asserts that no gate
-# in codegen.py names an address outside this set.
+# in codegen.py names an address outside this set.  The retired callable seeds
+# are deliberately not in it: a gate that named one would be reported uncovered.
 COVERED = frozenset(
     BODY_COUPLED
-    + HST_MANUAL_CALLABLES
     + tuple(HST_RESUME_OWNERS)
     + tuple(HST_RESUME_OWNERS.values())
     + tuple(codegen._SV_SPECIAL)
@@ -156,8 +187,18 @@ def _shape_for(addr: int) -> list[int]:
     return _body_leaf()
 
 
-def _build_specimen_words(extra: dict[int, list[int]] | None = None) -> dict[int, int]:
-    """The shared specimen; `extra` adds bodies (address -> words) reached from the entry."""
+def _build_specimen_words(extra: dict[int, list[int]] | None = None, *,
+                          retired_seed_leaves: bool = True,
+                          pointers: tuple[int, ...] = (),
+                          slot_pointers: tuple[int, ...] = ()) -> dict[int, int]:
+    """The shared specimen; `extra` adds bodies (address -> words) reached from the entry.
+
+    `retired_seed_leaves=False` leaves the retired callable-seed addresses to the caller.
+    `pointers` and `slot_pointers` are addresses the entry only materializes (``lui`` +
+    ``addiu``) and hands to a callee, without calling them: a `pointers` address has both
+    halves before the call, a `slot_pointers` address has its low half in the call's delay
+    slot, as a callback registration often compiles.
+    """
     words: dict[int, int] = {}
     extra = extra or {}
 
@@ -171,9 +212,13 @@ def _build_specimen_words(extra: dict[int, list[int]] | None = None) -> dict[int
         place(addr, body)
         place(addr + CONTROL_DELTA, body)
 
-    # Role-coupled addresses need a body so they exist as entries at all.
-    for addr in HST_MANUAL_CALLABLES:
+    # The retired callable seeds keep a called leaf here, and a byte-identical
+    # control copy, so the specimen still exercises every address the profile
+    # used to name.
+    seed_leaves = RETIRED_CALLABLE_SEEDS if retired_seed_leaves else ()
+    for addr in seed_leaves:
         place(addr, _body_leaf())
+        place(addr + CONTROL_DELTA, _body_leaf())
 
     # Resume/owner pairs.  The owner opens an o32 frame, branches into the
     # resume, and the resume closes it -- the shape entry_frame_balance
@@ -191,7 +236,8 @@ def _build_specimen_words(extra: dict[int, list[int]] | None = None) -> dict[int
     targets = (
         list(BODY_COUPLED)
         + [a + CONTROL_DELTA for a in BODY_COUPLED]
-        + list(HST_MANUAL_CALLABLES)
+        + list(seed_leaves)
+        + [a + CONTROL_DELTA for a in seed_leaves]
         + list(HST_RESUME_OWNERS.values())
         + sorted(extra)
     )
@@ -199,6 +245,22 @@ def _build_specimen_words(extra: dict[int, list[int]] | None = None) -> dict[int
         words[ENTRY + i * 8] = _jal(tgt)
         words[ENTRY + i * 8 + 4] = NOP
     tail = ENTRY + len(targets) * 8
+    if pointers or slot_pointers:
+        # The callee that receives each pointer; it sits after the entry's own return.
+        sink = tail + len(pointers) * 16 + len(slot_pointers) * 12 + 8
+        for addr in pointers:
+            words[tail] = _lui(_A1, _hi16(addr))
+            words[tail + 4] = _addiu(_A1, _A1, addr & 0xFFFF)
+            words[tail + 8] = _jal(sink)
+            words[tail + 12] = NOP
+            tail += 16
+        for addr in slot_pointers:
+            words[tail] = _lui(_A1, _hi16(addr))
+            words[tail + 4] = _jal(sink)
+            words[tail + 8] = _addiu(_A1, _A1, addr & 0xFFFF)
+            tail += 12
+        words[sink] = JR_RA
+        words[sink + 4] = NOP
     words[tail] = JR_RA
     words[tail + 4] = NOP
     return words
@@ -292,8 +354,23 @@ class _CodegenRun:
 
 
 def _codegen_functions(words: dict[int, int], profile: str,
-                       static_verify: bool = False) -> dict[str, str]:
-    """Run codegen.main in process over `words` and return its emitted functions."""
+                       static_verify: bool = False,
+                       catalogs: list[dict] | None = None) -> dict[str, str]:
+    """Run codegen.main in process over `words` and return its emitted functions.
+
+    A `catalogs` list receives every entry catalog that run of codegen.main built, in
+    order; the last one is the catalog its emission loop used.
+    """
+    if catalogs is not None:
+        real = codegen.build_entry_catalog
+
+        def recording(*args, **kwargs):
+            catalog = real(*args, **kwargs)
+            catalogs.append(catalog)
+            return catalog
+
+        with unittest.mock.patch.object(codegen, "build_entry_catalog", recording):
+            return _codegen_functions(words, profile, static_verify)
     with tempfile.TemporaryDirectory(prefix="nakagawa-profile-isolation-") as tmp:
         tmp_path = Path(tmp)
         elf_path = tmp_path / "specimen.elf"
@@ -466,7 +543,8 @@ class ProfileHstCouplingTests(unittest.TestCase):
 
 
 class ProfileHstLegacyTests(unittest.TestCase):
-    """profile=hst must still emit each legacy behavior, in production config."""
+    """What profile=hst emits in production config. Every body it used to put in place of the
+    title's own code is retired (#363), so the checks left are that none comes back."""
 
     @classmethod
     def setUpClass(cls):
@@ -477,20 +555,16 @@ class ProfileHstLegacyTests(unittest.TestCase):
         _CodegenRun._cache.clear()
 
     def test_legacy_hst_emission_is_unchanged(self):
-        expected = (
-            "sr_newlib_malloc(s->r[5], owner_ra)",
-            "sr_newlib_free(s->r[5], owner_ra)",
-            "sr_newlib_memalign",
-            "sr_newlib_realloc",
-            "sr_native_memmove(dest, s->r[5], s->r[6], 0x00011090u)",
-            "sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x000114c0u)",
-        )
-        missing = [s for s in expected if s not in self.combined]
-        self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
+        # Nothing is left to expect: the last legacy bodies (the allocator bridges and the
+        # native copy and fill) are retired, and no "custom stub" may be emitted at all.
+        self.assertNotIn("custom stub", self.combined, "profile=hst emits a hand-written body")
         # Retired under #363: the guest's own loops and abort() run as written.
         # The native sprintf went on 2026-11-11: the title's own formatter runs.
+        # The native copy and fill went on 2026-11-23: the title's own routines run.
+        # The four allocator bridges went together: the title's own allocator runs.
         for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)",
-                        "sr_guest_sprintf"):
+                        "sr_guest_sprintf", "sr_newlib_", "sr_native_memmove",
+                        "sr_native_memset"):
             self.assertNotIn(retired, self.combined, f"profile=hst still emits {retired}")
 
     def test_diagnostic_probes_stay_compiled_out_in_production(self):
@@ -514,16 +588,19 @@ class NonBodyCouplingTests(unittest.TestCase):
         # Only the owners are analyzer-discovered.  The resume addresses exist
         # in the catalog solely because HST_RESUME_OWNERS seeds them, which is
         # exactly the coupling under test.
-        analyzed = set(HST_MANUAL_CALLABLES) | set(HST_RESUME_OWNERS.values())
+        analyzed = set(RETIRED_CALLABLE_SEEDS) | set(HST_RESUME_OWNERS.values())
         ranges = [(0, 0x00200000)]
         return codegen.build_entry_catalog(analyzed, ranges, profile=profile, elf=None)
 
-    def test_manual_callables_carry_no_hst_provenance_under_none(self):
-        for profile in (None, "none"):
+    def test_retired_callable_seeds_carry_only_analyzer_provenance(self):
+        # Under profile=hst this used to read {"analyzer", "hst-profile",
+        # "address-taken-tiny-leaf"}; the entry is the analyzer's alone now.
+        for profile in (None, "none", "hst"):
             catalog = self._catalog(profile)
-            for addr in HST_MANUAL_CALLABLES:
-                self.assertNotIn(
-                    "hst-profile", catalog[addr].provenance,
+            for addr in RETIRED_CALLABLE_SEEDS:
+                self.assertEqual(
+                    catalog[addr],
+                    codegen.EntryInfo(addr, True, False, None, frozenset({"analyzer"})),
                     f"0x{addr:08x} inherited an HST role under profile={profile}",
                 )
 
@@ -539,11 +616,31 @@ class NonBodyCouplingTests(unittest.TestCase):
 
     def test_roles_are_still_assigned_under_hst(self):
         catalog = self._catalog("hst")
-        for addr in HST_MANUAL_CALLABLES:
-            self.assertIn("hst-profile", catalog[addr].provenance)
+        # The callable role is still there, and it is the analyzer's.
+        for addr in RETIRED_CALLABLE_SEEDS:
+            self.assertTrue(catalog[addr].callable)
+            self.assertFalse(catalog[addr].resumable)
+            self.assertNotIn("hst-profile", catalog[addr].provenance)
         for resume, owner in HST_RESUME_OWNERS.items():
             self.assertTrue(catalog[resume].resumable)
             self.assertEqual(catalog[resume].owner, owner)
+            self.assertEqual(catalog[resume].provenance,
+                             frozenset({"hst-profile", "manual-seed"}))
+        # Exactly the three resume entries are the profile's; nothing else is.
+        self.assertEqual(
+            {addr for addr, info in catalog.items() if "hst-profile" in info.provenance},
+            set(HST_RESUME_OWNERS),
+        )
+
+    def test_hst_adds_no_entry_at_a_retired_callable_seed_the_analyzer_did_not_find(self):
+        # Only the resume owners are analyzer-discovered here.  The profile used to
+        # create a callable entry at each seed address whatever the image held.
+        analyzed = set(HST_RESUME_OWNERS.values())
+        catalog = codegen.build_entry_catalog(
+            analyzed, [(0, 0x00200000)], profile="hst", elf=None)
+        self.assertEqual(set(catalog), analyzed | set(HST_RESUME_OWNERS))
+        for addr in RETIRED_CALLABLE_SEEDS:
+            self.assertNotIn(addr, catalog, f"profile=hst seeded 0x{addr:08x}")
 
     def test_sv_special_holds_only_guest_patch_addresses(self):
         # The four stand-alone HST exclusions were retired under #363, so _SV_SPECIAL
@@ -597,7 +694,6 @@ ADDRESS_TABLES = {
     "_SV_SPECIAL": "hst_profile",
     "SIMPLE_STUBS": "empty-under-none",
     "HST_CUSTOM_STUBS": "hst_profile",
-    "HST_MANUAL_CALLABLES": "catalog-early-return",
     "HST_RESUME_OWNERS": "catalog-early-return",
 }
 
@@ -853,9 +949,12 @@ class GateInventoryTests(unittest.TestCase):
 
     def test_address_tables_have_not_grown_silently(self):
         """Every table entry is inside the specimen's covered set."""
-        for name in ("GUEST_PATCHES", "HST_MANUAL_CALLABLES"):
-            for addr in getattr(codegen, name):
-                self.assertIn(addr, COVERED, f"{name} 0x{addr:08x} uncovered")
+        for addr in codegen.GUEST_PATCHES:
+            self.assertIn(addr, COVERED, f"GUEST_PATCHES 0x{addr:08x} uncovered")
+        # The callable-seed table is retired (#363); it has no entries to cover and
+        # must not come back under its old name.
+        self.assertFalse(hasattr(codegen, "HST_MANUAL_CALLABLES"),
+                         "the retired callable-seed table is back in tools/codegen.py")
         for addr in codegen._SV_SPECIAL:
             self.assertIn(addr, COVERED, f"_SV_SPECIAL 0x{addr:08x} uncovered")
         for addr in HST_SIMPLE_STUBS:
@@ -984,9 +1083,12 @@ class RetiredAddressGuardTests(unittest.TestCase):
             self.assertNotIn(addr, COVERED, f"{hex_addr} reintroduced into COVERED")
             self.assertNotIn(addr, codegen.GUEST_PATCHES, f"{hex_addr} in GUEST_PATCHES")
             self.assertNotIn(addr, codegen._SV_SPECIAL, f"{hex_addr} in _SV_SPECIAL")
-            self.assertNotIn(addr, codegen.HST_MANUAL_CALLABLES, f"{hex_addr} in HST_MANUAL_CALLABLES")
             self.assertNotIn(addr, codegen.HST_RESUME_OWNERS, f"{hex_addr} in HST_RESUME_OWNERS (as resume)")
             self.assertNotIn(addr, codegen.HST_RESUME_OWNERS.values(), f"{hex_addr} in HST_RESUME_OWNERS (as owner)")
+            self.assertNotIn(addr, RETIRED_CALLABLE_SEEDS, f"{hex_addr} is listed as a retired callable seed too")
+        # The callable-seed table these addresses could once be moved into is retired as well.
+        self.assertFalse(hasattr(codegen, "HST_MANUAL_CALLABLES"),
+                         "the retired callable-seed table is back in tools/codegen.py")
 
     def test_retired_addresses_are_not_in_compat_overrides_manifest(self):
         active_custom_stubs = {
@@ -1009,7 +1111,7 @@ class RetiredAddressGuardTests(unittest.TestCase):
     def test_retired_46d14_cannot_be_classified_in_entry_catalog(self):
         # 0x000468c8 is the real enclosing function entry discovered by the analyzer.
         # Even under profile="hst", the catalog must not invent an entry for 0x00046d14.
-        analyzed = set(HST_MANUAL_CALLABLES) | set(HST_RESUME_OWNERS.values()) | {0x000468C8}
+        analyzed = set(RETIRED_CALLABLE_SEEDS) | set(HST_RESUME_OWNERS.values()) | {0x000468C8}
         ranges = [(0, 0x00200000)]
         for profile in (None, "none", "hst"):
             catalog = codegen.build_entry_catalog(analyzed, ranges, profile=profile, elf=None)
@@ -1173,10 +1275,17 @@ class RetiredAddressGuardTests(unittest.TestCase):
 #: on 2026-11-11). Under profile=hst each of these addresses used to emit a title stub (a
 #: static-success simple stub, the heap-statistics walk skip, the backdrop chooser's
 #: postcondition wrapper, or a native sprintf) in place of, or around, its own body. Each
-#: now translates its own instructions under every profile.
+#: now translates its own instructions under every profile. The last four are the allocator
+#: family (_free_r, _memalign_r, _malloc_r, _realloc_r), whose bridges to the runtime's own
+#: heap were retired together.
 RETIRED_363_STUB_ADDRESSES: tuple[int, ...] = (
     0x00015F98, 0x0001034C, 0x0001C010, 0x0001C0FC, 0x0001C104, 0x0001C560,
     0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0, 0x000143B0,
+    0x0000F538, 0x000101C4, 0x00010738, 0x00013524,
+) + (
+    # The native copy (sr_native_memmove) and fill (sr_native_memset) bodies, retired on
+    # 2026-11-23: the title's own copy and fill routines translate as written.
+    0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
 )
 
 
@@ -1425,6 +1534,23 @@ def _calls(text: str, names: set[str]):
             yield match.group(1), text[open_at + 1:_balanced(text, open_at) - 1]
 
 
+#: A body of scalar loads and stores for NullPageGuardTests, at an address no HST table names.
+GUARDED_ACCESS = 0x00012000
+
+
+def _guarded_access_body() -> list[int]:
+    a0, t0 = 4, 8
+    return [
+        _itype(0x23, a0, t0, 0),     # lw  t0, 0(a0)
+        _itype(0x2B, a0, t0, 4),     # sw  t0, 4(a0)
+        _itype(0x24, a0, t0, 8),     # lbu t0, 8(a0)
+        _itype(0x28, a0, t0, 9),     # sb  t0, 9(a0)
+        _itype(0x25, a0, t0, 10),    # lhu t0, 10(a0)
+        _itype(0x29, a0, t0, 12),    # sh  t0, 12(a0)
+        JR_RA, NOP,
+    ]
+
+
 class NullPageGuardTests(unittest.TestCase):
     """A zero-based image occupies the range the PSP leaves unmapped, so a null base plus a
     field offset reaches real image bytes instead of faulting (#363)."""
@@ -1478,12 +1604,19 @@ class NullPageGuardTests(unittest.TestCase):
         # Generic over emitters: every runtime helper that reaches the arena (g_mem), directly
         # or through another helper, is found from the preprocessed header, and every call a
         # guarded HST body makes to one must carry a checked address. A bulk shortcut that
-        # forms its own host pointer is caught the same way as a scalar access.
+        # forms its own host pointer is caught the same way as a scalar access. The last
+        # hand-written bulk bodies (the native copy and fill) were retired under #363, so the
+        # specimen carries a translated body of scalar loads and stores of its own: the check
+        # must not pass because no body touches memory.
         cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if cc is None:
             self.skipTest("TOOLCHAIN_MISSING: no C compiler")
-        bodies = _CodegenRun.functions("hst")
-        self.assertIn("sr_native_memmove(", "".join(bodies.values()))
+        self.assertNotIn(GUARDED_ACCESS, COVERED)
+        bodies = _codegen_functions(
+            _build_specimen_words({GUARDED_ACCESS: _guarded_access_body()}), "hst")
+        access = bodies[f"f_{GUARDED_ACCESS:08x}"]
+        for form in ("MEM_R32(", "MEM_W32_PC(", "MEM_R8(", "MEM_W8_PC(", "MEM_R16(", "MEM_W16_PC("):
+            self.assertIn(form, access, "the specimen's access body lost a load or store")
         marker = "int nk_guarded_bodies_start;"
         source = ('#define SR_NULL_PAGE_GUARD 1\n#include "recomp.h"\n' + marker + "\n"
                   + "\n".join(bodies.values()) + "\n")
@@ -1499,12 +1632,15 @@ class NullPageGuardTests(unittest.TestCase):
         self.assertIn("sr_host_address", helpers)
         self.assertIn("sr_guest_fill", helpers)
         unchecked = []
+        checked = 0
         for name, args in _calls(generated, helpers):
             if "sr_null_page_checked(" in args or "sr_null_span_checked(" in args:
+                checked += 1
                 continue
             if re.fullmatch(r"[\s(]*0x[0-9a-fA-F]+u?[\s)]*", args.split(",")[0]):
                 continue  # a translation-time address: the body reading its own code
             unchecked.append(f"{name}({' '.join(args.split())[:120]})")
+        self.assertGreaterEqual(checked, 6, "the access body's loads and stores were not checked")
         self.assertEqual(sorted(set(unchecked)), [],
                          "these guarded calls reach guest memory with no null-page check")
 
@@ -1552,6 +1688,278 @@ class RetiredStubBodyTests(unittest.TestCase):
                 self.assertNotIn(addr, BODY_COUPLED)
                 self.assertNotIn(addr, codegen.GUEST_PATCHES)
                 self.assertNotIn(addr, manifest)
+
+
+# ---------------------------------------------------------------------------
+# 8. The retired callable seeds: the image decides the role, under every profile (#363)
+# ---------------------------------------------------------------------------
+
+#: Frameless leaves a compiler emits for a callback or an accessor. Nothing calls them:
+#: the image only takes their address.
+_POINTER_LEAF_SHAPES: tuple[tuple[str, list[int]], ...] = (
+    ("jr ra; move v0, zero", [JR_RA, 0x00001025]),
+    ("lw v0, 0(a0); jr ra; nop", [0x8C820000, JR_RA, NOP]),
+    ("addiu v0, zero, 1; jr ra; nop", [0x24020001, JR_RA, NOP]),
+    ("move v0, a0; jr ra; nop", [0x00801025, JR_RA, NOP]),
+)
+
+_ANALYZER_CALLABLE = frozenset({"analyzer"})
+
+
+def _symbols_at(funcs: dict[str, str], addr: int) -> list[str]:
+    return [sym for sym in (f"f_{addr:08x}", f"r_{addr:08x}") if sym in funcs]
+
+
+class RetiredCallableSeedTests(unittest.TestCase):
+    """``--profile=hst`` seeds no callable entry: the image decides, as under ``none``.
+
+    The profile used to name six addresses as callable entries ("address-taken-tiny-leaf")
+    and to stop with DUAL-ROLE ENTRY DETECTED when a continuation audit classified one of
+    them as a resume. Both are gone. What these tests hold in their place, through
+    ``codegen.main`` on synthetic images built around those six addresses:
+
+    * a leaf entered only through a pointer is a callable entry with analyzer provenance
+      under both profiles, and its emitted text is the same under both;
+    * a word in the middle of a function is no entry under ``hst`` just because it sits at
+      one of the six addresses (the seed used to split the function there);
+    * no audit turns such a leaf into a resume. A balanced leaf never has a continuation's
+      stack signature, so it is not a candidate whatever jumps to it; and a target that
+      does release a frame it did not open, entered by a direct edge from the function that
+      opened it, stays a callable entry when the image takes its address with an ``la``
+      ahead of a call. That veto is in :mod:`entry_frame_balance` and names no address.
+
+    One case is deliberately not pinned here. The audits' evidence census
+    (``analyze.code_pointer_evidence``) does not see an ``la`` whose low half sits in a
+    call's delay slot, although the analyzer does, so a frame-releasing target whose
+    address is taken only that way, and which one balanced owner jumps to, is made that
+    owner's resume. That is so under every profile and at every address; before the seeds
+    were retired the DUAL-ROLE stop caught it at the six seeded addresses only.
+
+    Evidence tier: production path on a synthetic image. No private title image is read.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pointer_leaves = cls._run(cls._pointer_leaf_words())
+        cls.interior = cls._run(cls._interior_words())
+        cls.jumped_to = cls._run(cls._jumped_to_words())
+
+    @staticmethod
+    def _run(words):
+        result = {}
+        for profile in ("none", "hst"):
+            catalogs: list[dict] = []
+            funcs = _codegen_functions(words, profile, catalogs=catalogs)
+            result[profile] = (funcs, catalogs[-1])
+        return result
+
+    # --- the three images -------------------------------------------------------------
+
+    @staticmethod
+    def _pointer_leaf_words():
+        """Each retired seed, and its control copy, is a leaf right after another function's
+        return: no fall-through, no call and no jump reaches it, only an `la`."""
+        extra = {}
+        pointers, slot_pointers = [], []
+        for index, seed in enumerate(RETIRED_CALLABLE_SEEDS):
+            _, leaf = _POINTER_LEAF_SHAPES[index % len(_POINTER_LEAF_SHAPES)]
+            for addr in (seed, seed + CONTROL_DELTA):
+                extra[addr - 8] = [JR_RA, NOP] + leaf
+                # Both ways a compiler hands the pointer to a callee, three seeds each.
+                (slot_pointers if index % 2 == 0 else pointers).append(addr)
+        return _build_specimen_words(extra, retired_seed_leaves=False,
+                                     pointers=tuple(pointers),
+                                     slot_pointers=tuple(slot_pointers))
+
+    _INTERIOR_BODY = [LUI_T0, ORI_T0, LW_T0_A0, NOP, JR_RA, NOP]
+
+    @classmethod
+    def _interior_words(cls):
+        """Each retired seed, and its control copy, is the third word of a called function."""
+        extra = {}
+        for seed in RETIRED_CALLABLE_SEEDS:
+            extra[seed - 8] = cls._INTERIOR_BODY
+            extra[seed - 8 + CONTROL_DELTA] = cls._INTERIOR_BODY
+        return _build_specimen_words(extra, retired_seed_leaves=False)
+
+    #: What sits at each retired seed in the third image, in RETIRED_CALLABLE_SEEDS order:
+    #: the target's shape, the direct edge its owner reaches it by, and how the image takes
+    #: its address ("la": both halves ahead of a call; "slot": low half in the call's delay
+    #: slot; None: not at all).
+    _JUMPED_TO_CASES = (
+        ("releases-frame", "j", "la"),
+        ("leaf", "j", "slot"),
+        ("releases-frame", "branch", "la"),
+        ("leaf", "j", "la"),
+        ("releases-frame", "j", "la"),
+        ("leaf", "j", None),
+    )
+    _OWNER_BEFORE = 0x40
+
+    @classmethod
+    def _jumped_to_words(cls):
+        """Each retired seed is the target of a direct edge from a function 0x40 below it.
+
+        A "releases-frame" target is `jr ra` with `addiu sp, sp, 32` in its delay slot,
+        reached from an owner that opened that frame: a continuation's stack signature. A
+        "leaf" target is `jr ra; nop`, reached from an owner that opened no frame.
+        """
+        extra = {}
+        pointers, slot_pointers = [], []
+        for seed, (shape, edge, taken) in zip(RETIRED_CALLABLE_SEEDS, cls._JUMPED_TO_CASES, strict=True):
+            owner = seed - cls._OWNER_BEFORE
+            transfer = _j(seed) if edge == "j" else _beq_fwd(seed - (owner + 8))
+            opener = _addiu_sp(-32 & 0xFFFF) if shape == "releases-frame" else LUI_T0
+            extra[owner] = [opener, NOP, transfer, NOP]
+            if taken == "la":
+                pointers.append(seed)
+            elif taken == "slot":
+                slot_pointers.append(seed)
+        words = _build_specimen_words(extra, retired_seed_leaves=False,
+                                      pointers=tuple(pointers),
+                                      slot_pointers=tuple(slot_pointers))
+        for seed, (shape, _, _) in zip(RETIRED_CALLABLE_SEEDS, cls._JUMPED_TO_CASES, strict=True):
+            words[seed] = JR_RA
+            words[seed + 4] = _addiu_sp(32) if shape == "releases-frame" else NOP
+        return words
+
+    # --- nothing in the tree names a callable seed ---------------------------------------
+
+    def test_codegen_and_the_inventory_name_no_callable_seed(self):
+        self.assertFalse(hasattr(codegen, "HST_MANUAL_CALLABLES"))
+        tree = ast.parse((TOOLS / "codegen.py").read_text(encoding="utf-8"))
+        self.assertEqual(
+            scan_ast_literals_for_addrs(tree, frozenset(RETIRED_CALLABLE_SEEDS)), [],
+            "tools/codegen.py names a retired callable-seed address again",
+        )
+        self.assertEqual(
+            {(item["address"], item["role"]) for item in compat_overrides.HST_ENTRY_ROLES},
+            {(resume, "resume") for resume in HST_RESUME_OWNERS},
+            "the HST entry-role inventory lists something other than the three resume entries",
+        )
+        self.assertTrue(set(RETIRED_CALLABLE_SEEDS).isdisjoint(COVERED))
+        self.assertEqual(len(set(RETIRED_CALLABLE_SEEDS)), 6)
+
+    # --- a leaf entered only through a pointer -------------------------------------------
+
+    def test_pointer_only_leaf_is_a_callable_analyzer_entry_under_both_profiles(self):
+        for profile in ("none", "hst"):
+            _, catalog = self.pointer_leaves[profile]
+            for index, seed in enumerate(RETIRED_CALLABLE_SEEDS):
+                shape = _POINTER_LEAF_SHAPES[index % len(_POINTER_LEAF_SHAPES)][0]
+                for addr in (seed, seed + CONTROL_DELTA):
+                    with self.subTest(profile=profile, addr=f"0x{addr:08x}", shape=shape):
+                        self.assertEqual(
+                            catalog.get(addr),
+                            codegen.EntryInfo(addr, True, False, None, _ANALYZER_CALLABLE),
+                            "the analyzer alone must make this leaf a callable entry",
+                        )
+
+    def test_pointer_only_leaf_emits_the_same_function_under_both_profiles(self):
+        none, _ = self.pointer_leaves["none"]
+        hst, _ = self.pointer_leaves["hst"]
+        for seed in RETIRED_CALLABLE_SEEDS:
+            with self.subTest(addr=f"0x{seed:08x}"):
+                self.assertEqual(_symbols_at(hst, seed), [f"f_{seed:08x}"])
+                self.assertEqual(hst[f"f_{seed:08x}"], none[f"f_{seed:08x}"])
+                # ... and the same as its byte-identical copy at an address the profile
+                # never named.
+                _, control = _find(hst, seed + CONTROL_DELTA)
+                self.assertEqual(_normalise(hst[f"f_{seed:08x}"], seed),
+                                 _normalise(control, seed + CONTROL_DELTA))
+
+    # --- a word inside a function --------------------------------------------------------
+
+    def test_interior_word_at_a_retired_seed_is_no_entry_under_hst(self):
+        for profile in ("none", "hst"):
+            funcs, catalog = self.interior[profile]
+            for seed in RETIRED_CALLABLE_SEEDS:
+                with self.subTest(profile=profile, addr=f"0x{seed:08x}"):
+                    self.assertNotIn(seed, catalog,
+                                     "the profile made an entry the image does not have")
+                    self.assertEqual(_symbols_at(funcs, seed), [])
+                    self.assertEqual(
+                        catalog.get(seed - 8),
+                        codegen.EntryInfo(seed - 8, True, False, None, _ANALYZER_CALLABLE))
+
+    def test_function_around_a_retired_seed_is_not_split_under_hst(self):
+        none, _ = self.interior["none"]
+        hst, _ = self.interior["hst"]
+        for seed in RETIRED_CALLABLE_SEEDS:
+            with self.subTest(addr=f"0x{seed:08x}"):
+                start = seed - 8
+                text = hst[f"f_{start:08x}"]
+                self.assertEqual(text, none[f"f_{start:08x}"])
+                # The whole body is there: the word at the seed and the return after it.
+                for offset in range(0, len(self._INTERIOR_BODY) * 4, 4):
+                    self.assertIn(f"{start + offset:08x}", text,
+                                  f"the word at +0x{offset:x} left the function")
+                self.assertEqual(
+                    _normalise(text, start),
+                    _normalise(hst[f"f_{start + CONTROL_DELTA:08x}"], start + CONTROL_DELTA))
+
+    # --- what stands where the DUAL-ROLE stop stood --------------------------------------
+
+    def _jumped_to(self, shape, taken=True):
+        return [
+            (seed, edge) for seed, (case_shape, edge, case_taken)
+            in zip(RETIRED_CALLABLE_SEEDS, self._JUMPED_TO_CASES, strict=True)
+            if case_shape == shape and (case_taken is not None) == taken
+        ]
+
+    def test_jumped_to_image_covers_every_case_it_claims(self):
+        self.assertEqual(len(self._JUMPED_TO_CASES), len(RETIRED_CALLABLE_SEEDS))
+        self.assertEqual(len(self._jumped_to("releases-frame")), 3)
+        self.assertEqual({edge for _, edge in self._jumped_to("releases-frame")}, {"j", "branch"})
+        self.assertEqual(len(self._jumped_to("leaf")), 2)
+        self.assertEqual(len(self._jumped_to("leaf", taken=False)), 1)
+
+    def test_address_taken_target_that_releases_a_frame_stays_callable(self):
+        for profile in ("none", "hst"):
+            funcs, catalog = self.jumped_to[profile]
+            for seed, edge in self._jumped_to("releases-frame"):
+                with self.subTest(profile=profile, addr=f"0x{seed:08x}", edge=edge):
+                    self.assertEqual(
+                        catalog.get(seed),
+                        codegen.EntryInfo(seed, True, False, None, _ANALYZER_CALLABLE),
+                        "a target whose address the image takes was made resume-only",
+                    )
+                    self.assertEqual(_symbols_at(funcs, seed), [f"f_{seed:08x}"])
+                    owner = seed - self._OWNER_BEFORE
+                    self.assertEqual(
+                        catalog.get(owner),
+                        codegen.EntryInfo(owner, True, False, None, _ANALYZER_CALLABLE))
+
+    def test_balanced_leaf_a_function_jumps_to_stays_callable(self):
+        for profile in ("none", "hst"):
+            funcs, catalog = self.jumped_to[profile]
+            for seed, edge in self._jumped_to("leaf"):
+                with self.subTest(profile=profile, addr=f"0x{seed:08x}", edge=edge):
+                    self.assertEqual(
+                        catalog.get(seed),
+                        codegen.EntryInfo(seed, True, False, None, _ANALYZER_CALLABLE))
+                    self.assertEqual(_symbols_at(funcs, seed), [f"f_{seed:08x}"])
+
+    def test_jump_target_nothing_else_names_is_no_entry_under_hst(self):
+        # The owner jumps to it and nothing takes its address: it is the owner's own tail.
+        for profile in ("none", "hst"):
+            funcs, catalog = self.jumped_to[profile]
+            for seed, _ in self._jumped_to("leaf", taken=False):
+                with self.subTest(profile=profile, addr=f"0x{seed:08x}"):
+                    self.assertNotIn(seed, catalog,
+                                     "the profile made an entry the image does not have")
+                    self.assertEqual(_symbols_at(funcs, seed), [])
+
+    def test_jumped_to_image_emits_the_same_text_under_both_profiles(self):
+        none, _ = self.jumped_to["none"]
+        hst, _ = self.jumped_to["hst"]
+        for seed in RETIRED_CALLABLE_SEEDS:
+            with self.subTest(addr=f"0x{seed:08x}"):
+                owner = seed - self._OWNER_BEFORE
+                self.assertEqual(_find(hst, owner), _find(none, owner))
+                self.assertEqual(_symbols_at(hst, seed), _symbols_at(none, seed))
+                for symbol in _symbols_at(hst, seed):
+                    self.assertEqual(hst[symbol], none[symbol])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
    system (nk_ui_theme.h, docs/PLAYER_UI_DESIGN.md). */
 
 #include "player_ui_nk.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -275,22 +276,22 @@ size_t player_ui_library_grid_position(const PlayerUiLibraryModel *model, size_t
 
 static void library_prompts(NkUi *ui, bool has_titles, bool finding) {
     static const NkUiPromptItem with_titles[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"},
-        {NK_UI_PROMPT_ACT_CONFIRM, "Open"},
-        {NK_UI_PROMPT_ACT_OPTIONS, "Find"},
-        {NK_UI_PROMPT_ACT_MENU, "Settings"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(LIBRARY_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(LIBRARY_OPEN)},
+        {NK_UI_PROMPT_ACT_OPTIONS, NK_UI_STR(LIBRARY_FIND)},
+        {NK_UI_PROMPT_ACT_MENU, NK_UI_STR(LIBRARY_SETTINGS)}
     };
     /* The find box's keyboard shortcuts, as the nickname editor names them. */
     static const NkUiPromptItem find[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"},
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_OPTIONS, "Delete"},
-        {NK_UI_PROMPT_ACT_MENU, "Done"},
-        {NK_UI_PROMPT_ACT_BACK, "Clear"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(LIBRARY_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(LIBRARY_SELECT)},
+        {NK_UI_PROMPT_ACT_OPTIONS, NK_UI_STR(LIBRARY_DELETE)},
+        {NK_UI_PROMPT_ACT_MENU, NK_UI_STR(LIBRARY_DONE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(LIBRARY_CLEAR)}
     };
     static const NkUiPromptItem empty[] = {
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_MENU, "Settings"}
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(LIBRARY_SELECT)},
+        {NK_UI_PROMPT_ACT_MENU, NK_UI_STR(LIBRARY_SETTINGS)}
     };
     if (finding) {
         nk_ui_prompt_bar(ui, LIBRARY_ID_PROMPTS, "", find, sizeof(find) / sizeof(find[0]));
@@ -343,9 +344,9 @@ static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *mod
                 char shown[96];
                 text.wrap = false;
                 if (query[0] != '\0') {
-                    (void)snprintf(shown, sizeof(shown), "%s|", query);
+                    (void)snprintf(shown, sizeof(shown), NK_UI_STR(LIBRARY_FIND_EDIT_FORMAT), query);
                 } else {
-                    (void)snprintf(shown, sizeof(shown), "Type a name or disc ID");
+                    (void)snprintf(shown, sizeof(shown), NK_UI_STR(LIBRARY_FIND_PLACEHOLDER));
                 }
                 nk_ui_text(ui, LIBRARY_ID_FIND_TEXT, shown, &text);
                 nk_ui_end_container(ui);
@@ -414,11 +415,10 @@ static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
             nk_ui_shapes(ui, LIBRARY_ID_EMPTY_ART, sizing_grow(), sizing_grow(), &disc_art);
             nk_ui_end_container(ui);
         }
-        nk_ui_text_role(ui, LIBRARY_ID_EMPTY_TITLE, "Add your first game",
+        nk_ui_text_role(ui, LIBRARY_ID_EMPTY_TITLE, NK_UI_STR(LIBRARY_EMPTY_TITLE),
                         NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, LIBRARY_ID_EMPTY_TEXT,
-                        "The setup wizard checks a disc image (.iso) of a PSP game you "
-                        "own and gets it ready to play on this PC.",
+                        NK_UI_STR(LIBRARY_EMPTY_SETUP_HELP),
                         NK_UI_TYPE_BODY, theme->muted);
         {
             NkUiLayout actions = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
@@ -426,12 +426,12 @@ static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
             actions.align_y = NK_UI_ALIGN_CENTER;
             actions.padding_top = NK_UI_SPACE_2;
             if (nk_ui_begin_container(ui, LIBRARY_ID_EMPTY_ACTIONS, &actions, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_EMPTY_WIZARD, "Start setup wizard",
+                if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_EMPTY_WIZARD, NK_UI_STR(LIBRARY_START_SETUP),
                                  NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_LARGE)) {
                     result = action(PLAYER_UI_ACTION_START_WIZARD, 0u, PLAYER_UI_PRIMARY_NONE);
                 }
                 /* Not a default: START SETUP WIZARD is the one default action. */
-                if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_EMPTY_ADD, "Choose a disc image",
+                if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_EMPTY_ADD, NK_UI_STR(LIBRARY_CHOOSE_DISC),
                                  NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
                     result = action(PLAYER_UI_ACTION_ADD_DISC, 0u, PLAYER_UI_PRIMARY_NONE);
                 }
@@ -439,7 +439,7 @@ static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
             }
         }
         nk_ui_text_role(ui, LIBRARY_ID_EMPTY_NOTE,
-                        "Or drop an .iso onto this window.",
+                        NK_UI_STR(LIBRARY_DROP_DISC_HINT),
                         NK_UI_TYPE_CAPTION, theme->dim);
         nk_ui_end_container(ui);
     }
@@ -507,12 +507,12 @@ static bool library_demo_card(NkUi *ui, NkUiId id, const PlayerUiTitle *title, f
             NkUiTextStyle name = nk_ui_type(NK_UI_TYPE_TILE_TITLE, theme->paper);
             const char *status_word = nk_ui_caps(ui, safe_text(title->library_status, ""));
             nk_ui_text(ui, nk_ui_child_id(id, 4u),
-                       nk_ui_text_clamp(ui, safe_text(title->title, "Nakagawa demo"), &name,
+                       nk_ui_text_clamp(ui, safe_text(title->title, NK_UI_STR(LIBRARY_DEMO_FALLBACK)), &name,
                                         text_width, 2), &name);
             if (title->status_marker != NULL && title->status_marker[0] != '\0') {
-                (void)snprintf(meta, sizeof(meta), "%s %s", title->status_marker, status_word);
+                (void)snprintf(meta, sizeof(meta), NK_UI_STR(LIBRARY_MARKED_STATUS_FORMAT), title->status_marker, status_word);
             } else {
-                (void)snprintf(meta, sizeof(meta), "%s", status_word);
+                (void)snprintf(meta, sizeof(meta), NK_UI_STR(LIBRARY_STATUS_FORMAT), status_word);
             }
             nk_ui_text_role(ui, nk_ui_child_id(id, 5u), meta, NK_UI_TYPE_LABEL_S,
                             title->status_rgba != 0u ? title->status_rgba : theme->muted);
@@ -554,11 +554,10 @@ static PlayerUiAction library_demos(NkUi *ui, const PlayerUiLibraryModel *model,
             label.align_y = NK_UI_ALIGN_CENTER;
             if (nk_ui_begin_container(ui, LIBRARY_ID_DEMOS_LABEL, &label, NULL)) {
                 NkUiTextStyle lead = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
-                nk_ui_eyebrow(ui, LIBRARY_ID_DEMOS_EYEBROW, "Test this PC");
+                nk_ui_eyebrow(ui, LIBRARY_ID_DEMOS_EYEBROW, NK_UI_STR(LIBRARY_DEMOS_HEADING));
                 nk_ui_text(ui, LIBRARY_ID_DEMOS_LEAD,
                            nk_ui_text_clamp(ui,
-                                            "Play a demo that comes with Nakagawa to check "
-                                            "graphics, sound and controls.",
+                                            NK_UI_STR(LIBRARY_DEMOS_HELP),
                                             &lead, cell, 2),
                            &lead);
                 nk_ui_end_container(ui);
@@ -592,14 +591,14 @@ static bool library_heading_fits(NkUi *ui, const PlayerUiLibraryModel *model,
     NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL_S, 0u);
     uint32_t small = NK_UI_BUTTON_SMALL;
     /* The heading, the count and the spacer, with the gaps after them. */
-    float used = nk_ui_text_width(ui, "LIBRARY", &heading) + NK_UI_SPACE_4 +
+    float used = nk_ui_text_width(ui, NK_UI_STR(LIBRARY_HEADING), &heading) + NK_UI_SPACE_4 +
                  nk_ui_text_width(ui, count_text, &caption) + NK_UI_SPACE_4;
     if (has_games && !model->find_open) {
-        used += NK_UI_SPACE_4 + nk_ui_button_width(ui, "Find", small);
+        used += NK_UI_SPACE_4 + nk_ui_button_width(ui, NK_UI_STR(LIBRARY_FIND), small);
     }
     if (has_games && model->sort_label != NULL) {
         char sort[64];
-        (void)snprintf(sort, sizeof(sort), "Sort: %s", model->sort_label);
+        (void)snprintf(sort, sizeof(sort), NK_UI_STR(LIBRARY_SORT_FORMAT), model->sort_label);
         used += NK_UI_SPACE_4 + nk_ui_button_width(ui, sort, small);
     }
     if (model->update_notice != NULL) {
@@ -609,24 +608,24 @@ static bool library_heading_fits(NkUi *ui, const PlayerUiLibraryModel *model,
         caption.wrap = false;
         used += NK_UI_SPACE_4 + nk_ui_text_width(ui, model->verify_notice, &caption) +
                 NK_UI_SPACE_3 +
-                nk_ui_button_width(ui, model->verify_offers_cancel ? "Cancel" : "Hide", small);
+                nk_ui_button_width(ui, model->verify_offers_cancel ? NK_UI_STR(LIBRARY_CANCEL) : NK_UI_STR(LIBRARY_HIDE), small);
     }
     if (model->rebuild_notice != NULL && model->rebuild_notice[0] != '\0') {
         caption.wrap = false;
         used += NK_UI_SPACE_4 + nk_ui_text_width(ui, model->rebuild_notice, &caption);
         if (model->rebuild_notice_offers_all) {
-            used += 2.0f * NK_UI_SPACE_3 + nk_ui_button_width(ui, "Rebuild all", small) +
-                    nk_ui_button_width(ui, "Hide", small);
+            used += 2.0f * NK_UI_SPACE_3 + nk_ui_button_width(ui, NK_UI_STR(LIBRARY_REBUILD_ALL), small) +
+                    nk_ui_button_width(ui, NK_UI_STR(LIBRARY_HIDE), small);
         }
         if (model->rebuild_notice_offers_queue) {
-            used += NK_UI_SPACE_3 + nk_ui_button_width(ui, "Queue", small);
+            used += NK_UI_SPACE_3 + nk_ui_button_width(ui, NK_UI_STR(LIBRARY_QUEUE), small);
         }
     }
     if (page_count > 1u) {
-        used += NK_UI_SPACE_4 + nk_ui_button_width(ui, "Previous", small) + NK_UI_SPACE_3 +
-                nk_ui_text_width(ui, nk_ui_caps(ui, safe_text(model->page_label, "More titles")),
+        used += NK_UI_SPACE_4 + nk_ui_button_width(ui, NK_UI_STR(LIBRARY_PREVIOUS), small) + NK_UI_SPACE_3 +
+                nk_ui_text_width(ui, nk_ui_caps(ui, safe_text(model->page_label, NK_UI_STR(LIBRARY_MORE_TITLES))),
                                  &label) +
-                NK_UI_SPACE_3 + nk_ui_button_width(ui, "Next", small);
+                NK_UI_SPACE_3 + nk_ui_button_width(ui, NK_UI_STR(LIBRARY_NEXT), small);
     }
     return used <= room;
 }
@@ -707,13 +706,13 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
         page_count = item_count == 0u ? 1u : (item_count + page_size - 1u) / page_size;
 
         if (model->find_open) {
-            (void)snprintf(count_text, sizeof(count_text), "%zu of %zu title%s", game_count,
-                           model->game_total, model->game_total == 1u ? "" : "s");
+            (void)snprintf(count_text, sizeof(count_text), NK_UI_STR(LIBRARY_FILTERED_TITLE_COUNT), game_count,
+                           model->game_total, model->game_total == 1u ? "" : NK_UI_STR(LIBRARY_TITLE_PLURAL_SUFFIX));
         } else if (has_games) {
-            (void)snprintf(count_text, sizeof(count_text), "%zu title%s",
-                           game_count, game_count == 1u ? "" : "s");
+            (void)snprintf(count_text, sizeof(count_text), NK_UI_STR(LIBRARY_TITLE_COUNT),
+                           game_count, game_count == 1u ? "" : NK_UI_STR(LIBRARY_TITLE_PLURAL_SUFFIX));
         } else {
-            (void)snprintf(count_text, sizeof(count_text), "No games yet");
+            (void)snprintf(count_text, sizeof(count_text), NK_UI_STR(LIBRARY_NO_GAMES));
         }
         /* Heading row: the screen name, its count, and the pager when needed. */
         layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_4);
@@ -724,7 +723,7 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                is left out, as Settings leaves its own out of a short window. */
             if (library_heading_fits(ui, model, count_text, has_games, page_count,
                                      width - 2.0f * gutter)) {
-                nk_ui_text_role(ui, LIBRARY_ID_HEADING, "LIBRARY", NK_UI_TYPE_DISPLAY,
+                nk_ui_text_role(ui, LIBRARY_ID_HEADING, NK_UI_STR(LIBRARY_HEADING), NK_UI_TYPE_DISPLAY,
                                 theme->paper);
             }
             {
@@ -740,13 +739,13 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
             }
             nk_ui_spacer(ui, LIBRARY_ID_HEAD_SPACER, sizing_grow(), sizing_fixed(1.0f));
             if (has_games && !model->find_open &&
-                nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_FIND, "Find",
+                nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_FIND, NK_UI_STR(LIBRARY_FIND),
                              NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                 result = action(PLAYER_UI_ACTION_FIND_OPEN, 0u, PLAYER_UI_PRIMARY_NONE);
             }
             if (has_games && model->sort_label != NULL) {
                 char sort[64];
-                (void)snprintf(sort, sizeof(sort), "Sort: %s", model->sort_label);
+                (void)snprintf(sort, sizeof(sort), NK_UI_STR(LIBRARY_SORT_FORMAT), model->sort_label);
                 if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_SORT, sort,
                                  NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                     result = action(PLAYER_UI_ACTION_CYCLE_SORT, 0u, PLAYER_UI_PRIMARY_NONE);
@@ -774,12 +773,12 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                     text.wrap = false;
                     nk_ui_text(ui, LIBRARY_ID_VERIFY_TEXT, model->verify_notice, &text);
                     if (model->verify_offers_cancel) {
-                        if (nk_ui_button(ui, PLAYER_UI_ID_DISC_VERIFY_CANCEL, "Cancel",
+                        if (nk_ui_button(ui, PLAYER_UI_ID_DISC_VERIFY_CANCEL, NK_UI_STR(LIBRARY_CANCEL),
                                          NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result.kind = PLAYER_UI_ACTION_DISC_VERIFY;
                             result.primary = (PlayerUiPrimaryAction)PLAYER_UI_DISC_VERIFY_CANCEL;
                         }
-                    } else if (nk_ui_button(ui, PLAYER_UI_ID_DISC_VERIFY_HIDE, "Hide",
+                    } else if (nk_ui_button(ui, PLAYER_UI_ID_DISC_VERIFY_HIDE, NK_UI_STR(LIBRARY_HIDE),
                                             NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                         result.kind = PLAYER_UI_ACTION_DISC_VERIFY;
                         result.primary = (PlayerUiPrimaryAction)PLAYER_UI_DISC_VERIFY_HIDE;
@@ -800,19 +799,19 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                     text.wrap = false;
                     nk_ui_text(ui, LIBRARY_ID_REBUILD_TEXT, model->rebuild_notice, &text);
                     if (model->rebuild_notice_offers_all) {
-                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_REBUILD_ALL, "Rebuild all",
+                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_REBUILD_ALL, NK_UI_STR(LIBRARY_REBUILD_ALL),
                                          NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result.kind = PLAYER_UI_ACTION_REBUILD;
                             result.primary = (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_ALL;
                         }
-                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_REBUILD_HIDE, "Hide",
+                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_REBUILD_HIDE, NK_UI_STR(LIBRARY_HIDE),
                                          NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result.kind = PLAYER_UI_ACTION_REBUILD;
                             result.primary = (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_HIDE_BANNER;
                         }
                     }
                     if (model->rebuild_notice_offers_queue) {
-                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_QUEUE, "Queue",
+                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_QUEUE, NK_UI_STR(LIBRARY_QUEUE),
                                          NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result.kind = PLAYER_UI_ACTION_QUEUE;
                             result.primary = (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_OPEN;
@@ -828,15 +827,15 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                 if (nk_ui_begin_container(ui, LIBRARY_ID_PAGER, &pager, NULL)) {
                     /* Neither is the screen's default focus: that is the
                        first card. */
-                    if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_PAGE_PREVIOUS, "Previous",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_PAGE_PREVIOUS, NK_UI_STR(LIBRARY_PREVIOUS),
                                      NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT |
                                      (model->page_index == 0u ? NK_UI_BUTTON_DISABLED : 0u))) {
                         result = action(PLAYER_UI_ACTION_PAGE_PREVIOUS, 0u, PLAYER_UI_PRIMARY_NONE);
                     }
                     nk_ui_text_role(ui, LIBRARY_ID_PAGE_LABEL,
-                                    nk_ui_caps(ui, safe_text(model->page_label, "More titles")),
+                                    nk_ui_caps(ui, safe_text(model->page_label, NK_UI_STR(LIBRARY_MORE_TITLES))),
                                     NK_UI_TYPE_LABEL_S, theme->muted);
-                    if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_PAGE_NEXT, "Next",
+                    if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_PAGE_NEXT, NK_UI_STR(LIBRARY_NEXT),
                                      NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT |
                                      (model->page_index + 1u >= page_count
                                           ? NK_UI_BUTTON_DISABLED : 0u))) {
@@ -863,7 +862,7 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
         if (model->find_open && game_count == 0u) {
             char none[160];
             NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY, theme->muted);
-            (void)snprintf(none, sizeof(none), "No games match \"%s\".",
+            (void)snprintf(none, sizeof(none), NK_UI_STR(LIBRARY_FIND_NO_MATCH_FORMAT),
                            safe_text(model->find_query, ""));
             nk_ui_text(ui, LIBRARY_ID_NO_MATCH, nk_ui_text_clamp(ui, none, &text,
                                                               width - 2.0f * gutter, 1),
@@ -907,13 +906,13 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                             const PlayerUiTitle *title = &model->titles[index];
                             NkUiTileSpec tile;
                             memset(&tile, 0, sizeof(tile));
-                            tile.title = safe_text(title->title, "Untitled PSP game");
+                            tile.title = safe_text(title->title, NK_UI_STR(LIBRARY_UNTITLED_GAME));
                             tile.disc_id = title->disc_id;
                             tile.status_marker = title->status_marker;
                             tile.status_word = safe_text(title->library_status, "");
                             tile.status_rgba = title->status_rgba;
                             tile.badge = title->art_kind != NK_UI_ART_NONE && title->badge == NULL
-                                ? "Showcase demo" : title->badge;
+                                ? NK_UI_STR(LIBRARY_SHOWCASE_BADGE) : title->badge;
                             /* Enhanced or Ace is in effect for the title (#2055). */
                             tile.badge_right = title->play_badge;
                             tile.art = title->cover != NULL ? NK_UI_ART_NONE
@@ -925,8 +924,8 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                                 PLAYER_UI_PRIMARY_NONE);
                             }
                         } else if (nk_ui_add_tile(ui, PLAYER_UI_ID_LIBRARY_ADD,
-                                                  "Add a disc image you own",
-                                                  "Choose an .iso file",
+                                                  NK_UI_STR(LIBRARY_ADD_DISC_TITLE),
+                                                  NK_UI_STR(LIBRARY_ADD_DISC_ACTION),
                                                   tile_width, tile_height)) {
                             result = action(PLAYER_UI_ACTION_ADD_DISC, 0u, PLAYER_UI_PRIMARY_NONE);
                         }

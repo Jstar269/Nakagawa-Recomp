@@ -352,7 +352,7 @@
     "classification": "dedicated",
     "handler": "h_AudioOutputPannedBlocking",
     "name": "sceAudioOutputPannedBlocking",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x1575d64b": {
     "classification": "controlled_unsupported",
@@ -393,14 +393,20 @@
   },
   "0x172d316e": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStdin",
     "name": "sceKernelStdin",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x17768e14": {
     "classification": "dedicated",
     "handler": "h_RegSetKeyValue",
     "name": "sceRegSetKeyValue",
+    "status": "partial"
+  },
+  "0x17943399": {
+    "classification": "dedicated",
+    "handler": "h_NetInetInit",
+    "name": "sceNetInetInit",
     "status": "partial"
   },
   "0x17c1684e": {
@@ -2638,7 +2644,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogStatus",
     "name": "sceUtilityMsgDialogGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x9ac2eeac": {
     "classification": "dedicated",
@@ -2878,9 +2884,9 @@
   },
   "0xa6bab2e9": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStdout",
     "name": "sceKernelStdout",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xa703fe0f": {
     "classification": "dedicated",
@@ -2922,6 +2928,12 @@
     "classification": "dedicated",
     "handler": "h_ReferMutexStatus",
     "name": "sceKernelReferMutexStatus",
+    "status": "partial"
+  },
+  "0xa9ed66b9": {
+    "classification": "dedicated",
+    "handler": "h_NetInetTerm",
+    "name": "sceNetInetTerm",
     "status": "partial"
   },
   "0xaa73c935": {
@@ -3319,6 +3331,12 @@
     "classification": "dedicated",
     "handler": "h_ReferLwMutexStatus",
     "name": "sceKernelReferLwMutexStatus",
+    "status": "partial"
+  },
+  "0xc2145e80": {
+    "classification": "dedicated",
+    "handler": "h_SysclibSnprintf",
+    "name": "snprintf",
     "status": "partial"
   },
   "0xc2df770e": {
@@ -4150,9 +4168,9 @@
   },
   "0xf78ba90a": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStderr",
     "name": "sceKernelStderr",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xf79472d7": {
     "classification": "dedicated",

@@ -1197,7 +1197,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   `vwbn.s` applies the rule at every exponent; only the eight listed have cells. Unmeasured, and failing closed in
   both lanes: a pending prefix (the T and D prefixes were never set), the other widths, `vf2h`, `vrnds`, and
   `vc2i`. `vus2i.s/.p` are implemented in both lanes from an unrecorded PSP read (probe case `vfpu-vus2i`,
-  which also read `vs2i`); `vus2i.t/.q` still fail closed.
+  which also read `vs2i`). The exact identity-prefix `vus2i.t` word `0xd03a8008` uses
+  the later `PSP-VFPU-RESERVED-001` result. Other `.t` operand encodings and `.q` still stop.
 
 - **PSP-3000 single-case run of the `ge-sample` probe on commit `86e55611` (2026-10-28)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `86e55611` is the commit that adds the probe (case 109 in
@@ -2259,7 +2260,10 @@ One console is one data point; see §11. Nothing here closes issue #70
   nearest even, `vf2iu` up and `vf2id` down, with the same saturation and NaN results. `vi2f` rounds to nearest
   (`0x7fffffff` gives `0x4f000000`) and a scale divides by 2^scale. `vi2s.q` takes the upper 16 bits of each lane
   pair, `vi2c.q` the top bytes of four lanes, `vi2us.q` bits 30..15 and `vi2uc.q` bits 30..23, the unsigned forms
-  clamping negatives to 0. `.p`, `.t` and `.q` agree with `.s` lane for lane.
+  clamping negatives to 0. `.p`, `.t` and `.q` agree with `.s` lane for lane. The [scale regression](https://github.com/Jstar269/Nakagawa-Recomp/issues/2809)
+  checks scales 0, 8 and 31 in `tests/native/vfpu_interp_selftest.c` at all four widths and in
+  `tools/test_codegen_fp_convert.py` through compiled generated scalar instructions. It pins the published rounding
+  example and uses fixed result words derived from this rule for the remaining cases.
 
   `vfpu-cc-cmov` (#326): VFPU_CC reads `0x20` at launch. Of the values written with `mtvc` only the low six bits are
   stored (bits 6 and up read back as 0). `vcmovt` and `vcmovf` with imm3 0-5 are all-or-nothing over the lanes of the
@@ -2345,6 +2349,15 @@ One console is one data point; see §11. Nothing here closes issue #70
     unused slot's) moved a quad.
   - *Layout:* weights, then the colour aligned to 4 bytes, then the position, with the vertex size a multiple of
     4, for three and five u8 weights and three u16 weights.
+
+  `test_ge_weight_cells_match_psp` in `tests/native/hle_thread_selftest.c` runs the sixteen display lists
+  through production dispatch and the software GE: every cell's 17 window rows match the PSP's, checked by
+  the corpus window digest and by the one pixel each sample must light (column s, its modelled row, its
+  vertex colour). The input-sensitivity pass recodes each u8 weight byte `b` to `round(128*b/255)` so the
+  stock `w/128` decoder approximates the `w/255` scale. Exactly the four u8 windows must change
+  (`u8-w1`, `u8-hi`, `u8-c3`, `u8-c5`), and the other twelve must still match their PSP digests.
+  The separate scratch decoder build uses `1.0f / 255.0f` in `read_weights` on the original input.
+  In that build, exactly the four u8 cells fail and the other twelve still match.
 
 - **PSP-3000 single-case run of the `insn-trace` probe on commit `84568280` (2026-10-29)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000, case 119 in `tests/fixtures/psp_oracle/probe_insn_trace.c` with
