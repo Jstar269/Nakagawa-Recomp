@@ -2331,6 +2331,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
                 s_first_gpu_frame = 0;
                 sr_gui_boot_event("BOOT_EVENT phase=first_frame source=gpu presented=1");
             }
+            sr_display_note_gpu_present();
             accepted = 1;
         }
         if (gpu_action != GUI_GPU_TRY_CPU) goto pace;

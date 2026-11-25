@@ -100,6 +100,41 @@ static uint32_t h_KernelPrintf(CpuState *s) {
     return (uint32_t)written;
 }
 
+/* Positive-capacity termination and the full rendered count follow uOFW
+ * f7b0623168842f02cddbdbf9437ac0c2380c51c8, src/kd/sysmem/sysclib.c
+ * (prnt/snprintf_char), and PPSSPP cdf563b85c42c275ec2835a0883f48d63a9c9406,
+ * Core/HLE/sceKernelInterrupt.cpp (sysclib_snprintf). Reference-derived, not
+ * PSP-measured. Zero capacity is outside this model: uOFW's callback can
+ * still write a terminator, so do not assume C99 zero-capacity behavior. */
+static uint32_t h_SysclibSnprintf(CpuState *s) {
+    uint32_t capacity = A1;
+    if (!capacity)
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "zero capacity");
+    if (!A0 || !sr_guest_span_writable_any_view(A0, capacity))
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "unwritable destination span");
+    char fmt_check[1024];
+    if (!guest_cstr(A2, fmt_check, sizeof(fmt_check)))
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "unreadable or oversized format");
+
+    /* Stage the result so rejected formats or arguments never write guest memory. */
+    char result[SR_SYSCLIB_SNPRINTF_LIMIT + 1];
+    int cap = (capacity < sizeof(result)) ? (int)capacity : (int)sizeof(result);
+    int written = sr_guest_format_sysclib_snprintf(s, A2, result, cap);
+    if (written < 0)
+        return hle_unmodelled_stop("SysclibForKernel_snprintf",
+                                   "unsupported format, argument or output length");
+    uint32_t size = (written < cap) ? (uint32_t)written + 1u : (uint32_t)cap;
+    if (!sr_guest_copy_out(A0, result, size))
+        return hle_unmodelled_stop("SysclibForKernel_snprintf", "unwritable output span");
+    if (g_sr_heap_watch) sr_heap_note_bulk_write(A0, size, 0u);
+    static int noted;
+    if (!noted) {
+        noted = 1;
+        fprintf(stderr, "HLE: reference-derived, not PSP-measured: SysclibForKernel_snprintf\n");
+    }
+    return (uint32_t)written;
+}
+
 /* General-purpose I/O pins (TD-24 batch 4). sceKernelSetGPO stores the
  * output latch; sceKernelGetGPI reads the input pins, which are always 0 on
  * retail PSP (see the previous registration comment). The two are independent
@@ -134,6 +169,7 @@ void hle_register_bulk_memory_kernel_utils(void) {
     sr_hle_register(0x10f3bb61, "memset", h_Memset);
     sr_hle_register(0x52df196c, "strlen", h_Strlen);
     sr_hle_register(0x1839852a, "sceKernelMemcpy", h_Memcpy);
+    sr_hle_register(0xc2145e80u, "snprintf", h_SysclibSnprintf);
 }
 
 #ifndef SR_MPEG_MEDIA_SELFTEST

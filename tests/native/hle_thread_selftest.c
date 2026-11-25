@@ -303,6 +303,7 @@ extern void sr_hle_test_audio_reset(void);
 extern void sr_hle_test_audio_wait_reset(void);
 extern void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us));
 extern uint64_t sr_hle_test_audio_wait_total_us(void);
+extern void sr_hle_test_audio_refusal_note_reset(void);
 extern void sr_hle_test_audio_lead_reset(void);
 extern uint32_t sr_hle_test_audio_late_wake_us(void);
 extern void sr_hle_test_audio_lead_feed(uint32_t vbl, int ch, int queued);
@@ -728,7 +729,12 @@ static void audio_fixture_reset(void) {
 static int s_test_gui_on;
 static unsigned long s_test_gui_present_calls;
 static uint32_t s_test_gui_last_addr, s_test_gui_last_stride;
+static unsigned long s_test_gpu_guest_flips;
 static int s_test_gui_last_fmt;
+static int s_test_gui_sample_pixel;
+static int s_test_gui_refuse_once;
+static int s_test_gui_gpu_source;
+static uint32_t s_test_gui_first_pixel;
 int gui_on(void) { return s_test_gui_on; }
 /* A real host window with a person at it (not the offscreen sink or an acceptance launch). */
 static int s_test_gui_interactive;
@@ -780,6 +786,14 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     s_test_gui_last_addr = fbaddr;
     s_test_gui_last_fmt = fmt;
     s_test_gui_last_stride = stride;
+    if (s_test_gui_refuse_once) {
+        s_test_gui_refuse_once = 0;
+        return 0;
+    }
+    if (s_test_gui_gpu_source)
+        sr_display_note_gpu_present();
+    if (s_test_gui_sample_pixel)
+        memcpy(&s_test_gui_first_pixel, SR_HOST_LINEAR(fbaddr), sizeof s_test_gui_first_pixel);
     return 1;
 }
 /* The host-neutral HLE selftest omits the Vulkan backend. With no live GPU target,
@@ -797,7 +811,7 @@ int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc) {
     if (desc) g_sync_last = *desc;
     return 2; /* GEGPU_SYNC_NO_TARGET */
 }
-void gegpu_note_guest_flip(void) {}
+void gegpu_note_guest_flip(void) { s_test_gpu_guest_flips++; }
 void sr_profile_dump(void) {}
 void sr_profile_dump_final(void) {}
 uint64_t SDL_GetTicksNS(void) { return 0; }
@@ -13920,16 +13934,33 @@ static bool d9_fast_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ct
     return true;
 }
 
+enum { D9_SLOW_HELD, D9_SLOW_RELEASED, D9_SLOW_ACKNOWLEDGED, D9_SLOW_TIMED_OUT };
+
+/* A resolver detached during cleanup can outlive the guest fixture frame. */
+static atomic_uint s_d9_slow_calls;
+static atomic_int s_d9_slow_gate;
+
 static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
-    (void)host;
-    int *calls = (int *)ctx;
-    if (calls) (*calls)++;
+    (void)host; (void)ctx;
+    if (atomic_fetch_add(&s_d9_slow_calls, 1u) != 0u) return false;
+    const uint64_t deadline = sr_host_monotonic_ms() + 3000u;
+    while (atomic_load(&s_d9_slow_gate) == D9_SLOW_HELD) {
+        if (sr_host_monotonic_ms() >= deadline) {
+            int held = D9_SLOW_HELD;
+            /* If Init joins the unfinished worker, let the fixture report failure. */
+            if (atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_TIMED_OUT))
+                return false;
+            break;
+        }
 #ifdef _WIN32
-    Sleep(150u);
+        Sleep(1u);
 #else
-    adh_p2_usleep(150000);
+        adh_p2_usleep(1000u);
 #endif
+    }
+    if (atomic_load(&s_d9_slow_gate) != D9_SLOW_RELEASED) return false;
     out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
+    atomic_store(&s_d9_slow_gate, D9_SLOW_ACKNOWLEDGED);
     return true;
 }
 
@@ -14009,19 +14040,24 @@ static void d89_main_fn(CpuState *cpu) {
            "d9: wrote D9PLAYER overlay");
     sysreg_restart();
 
-    /* D9: 150ms slow DNS must not block sceNetAdhocctlInit on the guest thread. */
-    int resolve_calls = 0;
-    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, &resolve_calls);
+    /* D9: the successful resolver stays unfinished until Init and Create have returned. */
+    atomic_store(&s_d9_slow_calls, 0u);
+    atomic_store(&s_d9_slow_gate, D9_SLOW_HELD);
+    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, NULL);
     const uint64_t t0 = sr_host_monotonic_ms();
     const uint32_t d9_init_rc = adh_init(0x2000u, 0x30u, ADH_ID);
     const uint64_t elapsed = sr_host_monotonic_ms() - t0;
+    const bool create_queued = d9_init_rc == 0u &&
+                               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+                               adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u;
+    /* Release on a failed setup too, without overwriting the watchdog state. */
+    int held = D9_SLOW_HELD;
+    const bool released = atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_RELEASED);
     snprintf(msg, sizeof(msg),
-             "d9: sceNetAdhocctlInit does not block on slow DNS (rc=0x%08x elapsed=%llu ms calls=%d)",
-             d9_init_rc, (unsigned long long)elapsed, resolve_calls);
-    expect(d9_init_rc == 0u && elapsed < 50u, msg);
-    expect(adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
-           adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u,
-           "d9: Create queues while DNS resolves");
+             "d9: Init and Create return before the resolver watchdog (rc=0x%08x elapsed=%llu ms calls=%u gate=%d)",
+             d9_init_rc, (unsigned long long)elapsed, atomic_load(&s_d9_slow_calls), held);
+    expect(d9_init_rc == 0u && released, msg);
+    expect(create_queued, "d9: Create queues while DNS resolves");
     for (int w = 0; w < 120 && (adh_state() != 1u || s_adh_events == 0u); w++) {
 #ifdef _WIN32
         Sleep(5u);
@@ -14031,8 +14067,11 @@ static void d89_main_fn(CpuState *cpu) {
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
     }
-    expect(adh_state() == 1u && s_adh_events == 1u && resolve_calls == 1,
-           "d9: async DNS resolved once and Create connected cleanly");
+    expect(atomic_load(&s_d9_slow_gate) == D9_SLOW_ACKNOWLEDGED,
+           "d9: successful DNS fixture acknowledges release after Create");
+    expect(adh_state() == 1u && s_adh_events == 1u && ADH_AT(0).event == 1 && ADH_AT(0).error == 0u &&
+               atomic_load(&s_d9_slow_calls) == 1u,
+           "d9: async DNS resolved once and Create delivered the CONNECT callback");
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d9: Term");
 
     /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error(). */
@@ -15493,6 +15532,35 @@ static void test_storage_dialog_parameter_sizes(void) {
                "storage dialog rejects a truncated parameter block");
         sr_hle_test_osk_slot_reset();
     }
+}
+
+/* sceUtilityMsgDialogGetStatus (0x9a1c91d7) with no utility dialog started: one measured cell, on
+ * its own (#2807). PSP-HLE-UTILITY-NONE-001 (docs/HARDWARE_ORACLE.md, cell utility-none-msgdialog:
+ * a PSP-3000 on system software 6.61, one launch from the XMB context, boot 115, 2026-11-04)
+ * records 0x80110005 (WRONG_TYPE) for each GetStatus of the message dialog in a process that
+ * calls no InitStart.
+ *
+ * What stands for that state here: sr_hle_init() registers the production handler, and
+ * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog. That is the state
+ * the runtime starts a program in (the slot's initial value, and the one the LoadExec guest reset
+ * restores through the same utility_dialogs_reset_locked). The NID is dispatched here directly
+ * through sr_syscall, with no InitStart, Update or ShutdownStart before it.
+ *
+ * What this cell does not show. The reset is synthetic: the measured process was freshly
+ * launched, not one whose earlier dialogs were forgotten, so nothing here says a PSP answers
+ * WRONG_TYPE again after a dialog was used. Every status after an InitStart (1, 2, 3, 4 and the 0
+ * after use) is outside the record, and so is a process in the game context, which is how the
+ * runtime starts its programs: the record is one launch from the XMB. The record's Update(1) and
+ * ShutdownStart results, and the other dialog kinds, belong to other handlers and are asserted
+ * together in test_utility_dialog_single_slot below. */
+static void test_msg_dialog_status_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "sceUtilityMsgDialogGetStatus with no InitStart returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog, one launch from the XMB context");
 }
 
 static void test_utility_dialog_single_slot(void) {
@@ -18140,6 +18208,7 @@ static void reset_fixture(void) {
     s_test_gui_pulse = 0u;
     s_test_gui_poll_ns = 0u;
     s_test_gui_present_calls = 0;
+    s_test_gpu_guest_flips = 0;
     s_test_gui_last_addr = 0;
     s_test_gui_last_fmt = 0;
     s_test_gui_last_stride = 0;
@@ -19130,6 +19199,116 @@ static void test_audio_regular_output_refuses_bad_volumes(void) {
            "AudioOutputPanned takes a negative volume, as the reference does");
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
            "volume fixture releases its channel");
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* sceAudioOutputPannedBlocking (0x13f592bc) on a channel number 0 to 7 that is not reserved (#341),
+ * entered through the production registration. HOST_TESTED; no PSP record measures this API.
+ * Each cell's evidence class:
+ *  - an unreserved channel with valid volumes returns NOT_INITIALIZED (0x80260001), plays nothing
+ *    and does not park the caller: PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ *    caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/__sceAudio.cpp, __AudioEnqueue).
+ *    PSPAutotests tests/audio/sceaudio/output.expected at ea71108f00933712c4662276261b39cd42249b1e
+ *    records 0x80260001 for sceAudioOutputBlocking on channel 5 only, never for this NID.
+ *  - a volume of 0x10000 on that channel is INVALID_VOL, the volume checked first: the order is
+ *    PPSSPP-derived (Core/HLE/sceAudio.cpp, sceAudioOutputPannedBlocking); output.expected records
+ *    0x8026000b for this NID only on a reserved channel, so the order is not recorded there.
+ *  - a reserved channel still returns its length and hands the host both volumes: output.expected
+ *    records the length for this NID on a reserved channel (corroboration only).
+ *  - the first refusal of a run is reported once, by name.
+ * Channel 8 (INVALID_CH) and a negative volume through this NID are asserted by
+ * test_audio_regular_output_refuses_bad_channels and test_audio_regular_output_refuses_bad_volumes.
+ *
+ * MUTANT: skip the reservation check in h_AudioOutputPannedBlocking -- the unreserved channel
+ *   returns its zero length instead of NOT_INITIALIZED and waits 1 ms open-loop.
+ * MUTANT: check the channel before the volumes -- 0x10000 on the unreserved channel returns
+ *   NOT_INITIALIZED. */
+static void test_audio_output_panned_blocking_unreserved_channel(void) {
+    enum {
+        STEREO_BUF = 0x08a00000u,
+        NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING = 0x13f592bcu,
+        UNRESERVED_CH = 2u,
+        RESERVED_CH = 0u,
+        OUT_OF_RANGE_CH = 8u,
+        FRAMES = 64u,
+        FORMAT_STEREO = 0u,
+        VOL_LEFT = 0x8000u,
+        VOL_RIGHT = 0x4000u,
+        VOL_OVER = 0x10000u,
+    };
+    static const char REPORT[] =
+        "HLE: PPSSPP-derived, not PSP-measured: sceAudioOutputPannedBlocking refuses channel "
+        "0x00000002 with 0x80260001";
+    CpuState cpu;
+    FILE *capture = NULL;
+    int saved_fd = -1, reserved = -1;
+    char log[2048];
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    sr_hle_test_audio_refusal_note_reset();
+    const unsigned long silence_before = s_audio_silence_calls;
+    expect(sr_hle_test_audio_state(UNRESERVED_CH, &reserved, NULL, NULL) && reserved == 0,
+           "PannedBlocking fixture: channel 2 starts unreserved");
+
+    log[0] = '\0';
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = UNRESERVED_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    const uint32_t unreserved = sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = OUT_OF_RANGE_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    const uint32_t out_of_range = sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    expect(unreserved == SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "PPSSPP-derived, not PSP-measured: AudioOutputPannedBlocking refuses a valid, unreserved "
+           "channel with NOT_INITIALIZED");
+    expect(s_audio_push_calls == 0u && s_audio_silence_calls == silence_before,
+           "PPSSPP-derived, not PSP-measured: the unreserved PannedBlocking output plays nothing");
+    expect(sr_hle_test_audio_wait_total_us() == 0u,
+           "PPSSPP-derived, not PSP-measured: the unreserved PannedBlocking output does not park "
+           "the caller");
+    expect(out_of_range == SCE_AUDIO_ERROR_INVALID_CH,
+           "PPSSPP-derived, not PSP-measured: the second refusal (channel 8) is INVALID_CH");
+    size_t reports = 0u;
+    for (const char *at = log; (at = strstr(at, "refuses channel")) != NULL; at++) reports++;
+    expect(capturing && strstr(log, REPORT) != NULL,
+           "the first refusal of a run is reported by name (sceAudioOutputPannedBlocking, channel "
+           "and code)");
+    expect(capturing && reports == 1u, "a second refusal in the same run is not reported again");
+
+    /* Control: the volume is checked before the channel. */
+    const uint32_t over[][2] = {{VOL_LEFT, VOL_OVER}, {VOL_OVER, VOL_RIGHT}};
+    for (size_t i = 0; i < sizeof(over) / sizeof(over[0]); i++) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = UNRESERVED_CH; cpu.r[5] = over[i][0]; cpu.r[6] = over[i][1];
+        cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_VOL,
+               "PPSSPP-derived order, not PSP-measured: a volume of 0x10000 on the unreserved "
+               "channel is INVALID_VOL before the channel check");
+    }
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "PPSSPP-derived, not PSP-measured: a refused PannedBlocking volume plays nothing and "
+           "never waits");
+
+    /* Control: a reserved channel with valid volumes still plays. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, RESERVED_CH, FRAMES, FORMAT_STEREO) ==
+               RESERVED_CH,
+           "PannedBlocking fixture reserves a 64-frame stereo channel 0");
+    s_audio_queue_result = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = RESERVED_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == FRAMES &&
+               s_audio_push_calls == 1u && s_audio_push_frames == (int)FRAMES &&
+               s_audio_push_vol_l == (int)VOL_LEFT && s_audio_push_vol_r == (int)VOL_RIGHT,
+           "PSPAutotests-corroborated, not PSP-measured here: AudioOutputPannedBlocking on a reserved "
+           "channel returns its length and hands the host the left and right volumes");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, RESERVED_CH, 0u, 0u) == 0u,
+           "PannedBlocking fixture releases its channel");
     sr_hle_test_audio_reset();
     audio_fixture_reset();
     reset_fixture();
@@ -30555,6 +30734,7 @@ static void test_wait_thread_end_cb_execution(void) {
 #define NID_SCE_KERNEL_MEMCPY 0x1839852au
 #define NID_SYSLIB_MEMSET 0x10f3bb61u
 #define NID_SYSLIB_STRLEN 0x52df196cu
+#define NID_SYSLIB_SNPRINTF 0xc2145e80u
 /* PSP DMAC error classes, measured on hardware (see test_dmac_semantics). */
 #define SCE_DMAC_ILLEGAL_ADDR 0x80000103u
 #define SCE_DMAC_ILLEGAL_SIZE 0x80000104u
@@ -30606,6 +30786,109 @@ static void test_sysclib_memory_imports(void) {
     }
     expect(filled,
            "SysclibForKernel memset writes the complete validated guest span");
+}
+
+static uint32_t sysclib_snprintf(uint32_t dst, uint32_t size, uint32_t fmt) {
+    s_cpu->r[4] = dst;
+    s_cpu->r[5] = size;
+    s_cpu->r[6] = fmt;
+    return sr_syscall(s_cpu, NID_SYSLIB_SNPRINTF);
+}
+
+static void test_sysclib_snprintf(void) {
+    const uint32_t fmt = 0x08301000u, dst = 0x08302000u, str = 0x08303000u;
+    const uint32_t stack = 0x08304000u, last = 0x0bffffffu;
+    const uint32_t stopped = 0x80020002u;  /* selftest return for a named stop */
+    reset_fixture();
+    sr_hle_init();
+
+    uint8_t sentinel[64];
+    memset(sentinel, 0xa5, sizeof(sentinel));
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "mutex%d");
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 32u, fmt) == 6u,
+           "Sysclib snprintf dispatch reads its first variadic word from a3");
+    expect(memcmp(SR_HOST(dst), "mutex1", sizeof("mutex1")) == 0 &&
+               memcmp(SR_HOST(dst + 7u), sentinel + 7u, sizeof(sentinel) - 7u) == 0,
+           "Sysclib snprintf terminates the output and leaves later bytes alone");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 4u, fmt) == 6u &&
+               memcmp(SR_HOST(dst), "mut", sizeof("mut")) == 0 &&
+               memcmp(SR_HOST(dst + 4u), sentinel + 4u, sizeof(sentinel) - 4u) == 0,
+           "Sysclib snprintf truncation stores capacity-1 bytes and returns the full count");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 1u, fmt) == 6u && MEM_R8(dst) == 0u &&
+               memcmp(SR_HOST(dst + 1u), sentinel + 1u, sizeof(sentinel) - 1u) == 0,
+           "Sysclib snprintf capacity one stores only the terminator");
+
+    title_hle_write_cstr(fmt, "%-6.3s|%+4d|%X|%c|%u|%i|%%");
+    title_hle_write_cstr(str, "tennis");
+    const char expected[] = "ten   |  +7|2A|P|9|-4|%";
+    s_cpu->r[7] = str;
+    s_cpu->r[8] = 7u;
+    s_cpu->r[9] = 42u;
+    s_cpu->r[10] = 'P';
+    s_cpu->r[11] = 9u;
+    uint32_t original_sp = s_cpu->r[29];
+    s_cpu->r[29] = stack;
+    MEM_W32(stack, (uint32_t)-4);
+    expect(sysclib_snprintf(dst, (uint32_t)sizeof(expected), fmt) == sizeof(expected) - 1u &&
+               memcmp(SR_HOST(dst), expected, sizeof(expected)) == 0 &&
+               MEM_R8(dst + (uint32_t)sizeof(expected)) == 0xa5u,
+           "Sysclib snprintf formats bounded scalar fields and reads the sixth word at entry sp");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = str;
+    s_cpu->r[29] = last - 1u;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unreadable variadic spill before storing");
+    s_cpu->r[29] = original_sp;
+
+    title_hle_write_cstr(fmt, "");
+    expect(sysclib_snprintf(dst, 64u, fmt) == 0u && MEM_R8(dst) == 0u &&
+               MEM_R8(dst + 1u) == 0xa5u,
+           "Sysclib snprintf empty output stores one NUL and returns zero");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "literal");
+    expect(sysclib_snprintf(dst, 0u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses unmodeled zero capacity before storing");
+    MEM_W8(last, 0x5au);
+    expect(sysclib_snprintf(last, 2u, fmt) == stopped && MEM_R8(last) == 0x5au,
+           "Sysclib snprintf refuses a destination span that leaves guest memory");
+    expect(sysclib_snprintf(dst, 64u, last) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated format at the arena boundary");
+
+    title_hle_write_cstr(fmt, "prefix %s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated string without copying the prefix");
+    title_hle_write_cstr(fmt, "%.1s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 2u, fmt) == 1u &&
+               MEM_R8(dst) == 0x5au && MEM_R8(dst + 1u) == 0u,
+           "Sysclib snprintf string precision bounds the read at the last arena byte");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    const char *unsupported[] = {"prefix %p", "prefix %n", "%08d", "%*d", "%lld",
+                                 "%4097d", "%4096d+", "trailing %"};
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+        title_hle_write_cstr(fmt, unsupported[i]);
+        s_cpu->r[7] = str;
+        expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+                   memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0 &&
+                   memcmp(SR_HOST(str), "tennis", sizeof("tennis")) == 0,
+               "Sysclib snprintf refuses unsupported formats and bounds without guest writes");
+    }
 }
 
 static void test_refer_thread_status(void) {
@@ -42547,6 +42830,144 @@ static void test_display_narrow_stride_span(void) {
            "a stride-64 framebuffer whose last 480-pixel row runs past RAM is not presented");
     expect(display_set(0x041ef000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
            "a stride-64 framebuffer whose last 480-pixel row runs past eDRAM is not presented");
+    s_test_gui_on = 0;
+}
+
+static void test_display_static_scanout(void) {
+    const uint32_t vram = 0x04000000u;
+    const uint32_t vram_alias = 0x44000000u;
+    const uint32_t other_vram = 0x04100000u;
+    const uint32_t ram = 0x09000000u;
+    unsigned long calls, immediate, latched, rejected;
+    unsigned long initial_calls, initial_immediate, initial_latched, initial_rejected;
+    uint32_t last_error;
+
+    reset_fixture();
+    sr_hle_init();
+    s_test_gui_on = 1;
+    s_test_gui_sample_pixel = 1;
+    sr_display_test_flip_counts(&initial_calls, &initial_immediate, &initial_latched,
+                                &initial_rejected, &last_error);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 0u, "the boot placeholder is not presented");
+    expect(display_set(vram_alias, 512, 3, 0) == 0u &&
+               s_test_gui_present_calls == 1u && s_test_gui_first_pixel == 0u,
+           "the guest presents its initial blank scanout once");
+
+    MEM_W32(other_vram, 0xff223344u);
+    MEM_W32(vram + 480u * 4u, 0xff223344u); /* stride padding */
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 1u, "outside writes do not refresh the visible scanout");
+
+    unsigned long presents = s_test_gui_present_calls;
+    MEM_W16(vram, 0x5678u);
+    MEM_W16(vram + 2u, 0xff34u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_last_addr == vram_alias &&
+               s_test_gui_first_pixel == 0xff345678u,
+           "a VBLANK presents CPU changes in the active VRAM alias without a guest flip");
+    presents = s_test_gui_present_calls;
+    MEM_W32(vram, 0xff345678u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents, "a repeated store of the same pixels does not present again");
+    sr_display_test_flip_counts(&calls, &immediate, &latched, &rejected, &last_error);
+    expect(calls == initial_calls + 1u && immediate == initial_immediate + 1u &&
+               latched == initial_latched && rejected == initial_rejected &&
+               s_test_gpu_guest_flips == 1u,
+           "refreshing a static image does not count as a guest flip");
+
+    MEM_W32(vram, 0xff112233u);
+    expect(display_set(ram, 512, 3, 1) == 0u, "the guest queues a different framebuffer");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_last_addr == ram,
+           "a pending flip takes precedence over refresh of the old active image");
+
+    presents = s_test_gui_present_calls;
+    MEM_W32(ram, 0xffa1b2c3u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_last_addr == ram &&
+               s_test_gui_first_pixel == 0xffa1b2c3u,
+           "a VBLANK also presents CPU changes in a main-RAM scanout");
+    sr_display_advance_vcount(1u);
+    presents = s_test_gui_present_calls;
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents, "unchanged main-RAM scanout does not present again");
+
+    s_test_gui_refuse_once = 1;
+    MEM_W32(ram, 0xff112233u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_first_pixel == 0xffa1b2c3u,
+           "a declined host refresh leaves the previous picture on screen");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 2u && s_test_gui_first_pixel == 0xff112233u,
+           "the changed scanout is tried again after a host decline");
+
+    presents = s_test_gui_present_calls;
+    expect(display_set(0, 0, 0, 1) == 0u, "the guest queues display-off");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    MEM_W32(ram, 0xffabcdefu);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents, "writing a retired display buffer does not refresh it");
+    s_test_gui_sample_pixel = 0;
+    s_test_gui_on = 0;
+}
+
+static void test_display_gpu_scanout_cpu_writes(void) {
+    const uint32_t active = 0x04000000u;
+    const uint32_t alias = 0x44000000u;
+    const uint32_t rendered = 0xff13579bu;
+    const uint32_t cpu_pixel = 0xff2468acu;
+    reset_fixture();
+    sr_hle_init();
+    s_test_gui_on = 1;
+    s_test_gui_sample_pixel = 1;
+    s_test_gui_gpu_source = 1;
+    expect(display_set(alias, 512, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "the guest's explicit flip shows a GPU-resident image");
+
+    /* A renderer may deliver its pixels back to guest memory without a CPU
+     * store commitment. Changing those bytes alone must not wake scanout. */
+    memcpy(SR_HOST_LINEAR(active), &rendered, sizeof rendered);
+    sr_gpu_vram_dirty(active, sizeof rendered);
+    MEM_W32(active + 480u * 4u, 0xff123456u);
+    MEM_W32(0x04100000u, 0xff123456u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 1u,
+           "GPU readback, row padding and a different VRAM buffer leave scanout alone");
+
+    s_test_gui_refuse_once = 1;
+    MEM_W32(active, cpu_pixel);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 2u && s_test_gui_first_pixel != cpu_pixel,
+           "a CPU write to the displayed GPU target requests one host refresh");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 3u && s_test_gui_last_addr == alias &&
+               s_test_gui_first_pixel == cpu_pixel,
+           "a declined refresh retries and reaches the presenter with the written pixel");
+    const unsigned long presents = s_test_gui_present_calls;
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents && s_test_gpu_guest_flips == 1u,
+           "accepted refresh consumes the CPU update and preserves the guest flip count");
+
+    s_test_gui_refuse_once = 0;
+    s_test_gui_gpu_source = 0;
+    expect(display_set(0, 0, 0, 1) == 0u, "the guest queues display-off after GPU scanout");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    s_test_gui_sample_pixel = 0;
     s_test_gui_on = 0;
 }
 
@@ -68947,6 +69368,14 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--display-static-scanout") == 0) {
+        test_display_static_scanout();
+        test_display_gpu_scanout_cpu_writes();
+        fprintf(stderr, "display-static-scanout: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--auto-load") == 0) {
         test_auto_load_disc_and_silent_audio();
         test_pad_vblank_deadline(); /* the next fixture must see its own clock */
@@ -69013,6 +69442,11 @@ static int hle_selftest_main(int argc, char **argv) {
         fprintf(stderr, "msgpipe-rendezvous: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--sysclib-snprintf") == 0) {
+        test_sysclib_snprintf();
+        fprintf(stderr, "sysclib-snprintf: %d checks, %d failures\n", s_checks, s_failures);
+        return s_failures != 0;
     }
 
     if (argc > 1 && strcmp(argv[1], "--title-config") == 0) {
@@ -69201,6 +69635,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_osk_keyboard_keeps_guest_time_running();
     test_storage_dialog_parameter_sizes();
     test_netconf_parameter_sizes();
+    test_msg_dialog_status_with_no_dialog_started();
     test_utility_dialog_single_slot();
     test_utility_dialog_refused_cancel();
     test_utility_dialog_status_sequence();
@@ -69245,6 +69680,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_regular_contract_safety();
     test_audio_regular_output_refuses_bad_channels();
     test_audio_regular_output_refuses_bad_volumes();
+    test_audio_output_panned_blocking_unreserved_channel();
     test_audio_output2_release_refuses_while_queued();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
@@ -69308,6 +69744,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_bulk_guest_span_atomicity();
     test_inline_stores_match_full_bodies();
     test_sysclib_memory_imports();
+    test_sysclib_snprintf();
     test_thread_stack_free_size_contract();
     test_check_thread_stack_contract();
     test_refer_thread_status();
@@ -69335,6 +69772,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_queued_callers_are_served_in_arrival_order();
     test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
+    test_display_static_scanout();
+    test_display_gpu_scanout_cpu_writes();
     test_display_narrow_stride_span();
     test_display_get_mode_span();
     test_time_domains_are_coherent();
