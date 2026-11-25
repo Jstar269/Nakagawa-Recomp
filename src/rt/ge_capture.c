@@ -171,8 +171,8 @@ static int cpu_vram_store_pending(void) {
     return 1;
 }
 
-/* Walk the saved pages under [addr, addr + bytes). A GE read observes live RAM or
- * the provided resident representation. A GE write updates the captured timeline. */
+/* Walk the saved pages under [addr, addr + bytes). A GE read observes live guest
+ * memory or the retained representation. A GE write updates the captured timeline. */
 static int note_span(uint32_t addr, uint32_t bytes, const uint8_t *src, const uint8_t *cached) {
     if (!s_capture.active || bytes == 0) return 1;
     if (cpu_vram_store_pending()) return 0;
@@ -228,10 +228,11 @@ static int note_span(uint32_t addr, uint32_t bytes, const uint8_t *src, const ui
     return 1;
 }
 
-int ge_capture_note_observed_ram(uint32_t addr, const void *resident, uint32_t bytes) {
+int ge_capture_note_observed_sparse(uint32_t addr, const void *resident, uint32_t bytes) {
     const uint32_t physical = SR_PHYS(addr);
-    if (!resident || physical < SR_RAM_BASE || !bytes ||
-        (uint64_t)physical + bytes > 0x0C000000u ||
+    const uint64_t end = (uint64_t)physical + bytes;
+    if (!resident || !bytes || end > GE_CAPTURE_ARENA_SIZE ||
+        (physical < SR_VRAM_CPU_END && end > SR_VRAM_CPU_BASE) ||
         !sr_guest_span_readable_current(addr, bytes))
         return 0;
     return note_span(addr, bytes, NULL, resident);

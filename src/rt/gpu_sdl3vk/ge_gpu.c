@@ -7178,21 +7178,17 @@ static void tex_slot_unmake(TexEnt *e) {
     e->smp = VK_NULL_HANDLE; e->view = VK_NULL_HANDLE; e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE;
 }
 
-static int tex_is_ram(uint32_t addr) {
-    const uint32_t physical = SR_PHYS(addr);
-    return physical >= SR_RAM_BASE && physical < 0x0C000000u;
-}
-
-static const char *tex_capture_cached_ram(const TexEnt *e) {
-    int any_ram = tex_is_ram(e->addr);
-    int all_ram = any_ram;
-    for (uint32_t i = 0; i < e->mip.max_level; i++) {
-        const int ram = tex_is_ram(e->mip.addr[i]);
-        any_ram |= ram;
-        all_ram &= ram;
+static const char *tex_capture_cached_source(const TexEnt *e) {
+    int sparse = 0, vram = 0;
+    for (uint32_t level = 0; level <= e->mip.max_level; ++level) {
+        switch (ge_capture_texture_storage(level)) {
+        case GE_CAPTURE_TEXTURE_SPARSE: sparse = 1; break;
+        case GE_CAPTURE_TEXTURE_VRAM: vram = 1; break;
+        default: return "texture source footprint is outside captured memory";
+        }
     }
-    if (!any_ram) return NULL; /* VRAM has its own snapshot and writes. */
-    if (!all_ram) return "mixed RAM and non-RAM mip chain";
+    if (!sparse) return NULL; /* Every active byte is covered by the eager VRAM copy. */
+    if (vram) return "mixed sparse memory and VRAM mip chain";
     if (!e->shadow || e->shadow_gen != e->gen) return "missing current resident source";
     if (e->addr != s_ge->tex_addr || e->w != s_ge->tex_w || e->h != s_ge->tex_h ||
         e->bufw != s_ge->tex_bufw || e->shadow_fmt != s_ge->tex_fmt ||
@@ -7214,7 +7210,7 @@ static const char *tex_capture_cached_ram(const TexEnt *e) {
 }
 
 static void tex_capture_cached_read(const TexEnt *e) {
-    const char *reason = tex_capture_cached_ram(e);
+    const char *reason = tex_capture_cached_source(e);
     if (reason && g_ge_capture_active) {
         fprintf(stderr, "GE_CAPTURE: cached texture at 0x%08x cannot be captured: %s\n",
                 e->addr, reason);

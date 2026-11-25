@@ -76,29 +76,29 @@ static void run_ge_store_then_read(void) {
 }
 
 static void check_cached_reads(const char *path, const GeState *initial, const GeState *final) {
-    const uint32_t base = 0x08530000u;
+    const uint32_t base = 0x00010300u;
     const uint8_t resident[] = {0x12, 0x34};
     const uint8_t live[] = {0x56, 0x78};
     const uint8_t stored[] = {0xAB, 0xCD};
     memcpy(SR_HOST(base), live, sizeof(live));
     assert(ge_capture_begin(path, 5, 0x00123000u, initial, zbuf));
-    assert(!ge_capture_note_observed_ram(GE_CAPTURE_VRAM_BASE, resident, sizeof(resident)));
-    assert(ge_capture_note_observed_ram(base, resident, sizeof(resident)));
-    assert(ge_capture_note_observed_ram(base, resident, sizeof(resident)));
+    assert(!ge_capture_note_observed_sparse(GE_CAPTURE_VRAM_BASE, resident, sizeof(resident)));
+    assert(ge_capture_note_observed_sparse(base, resident, sizeof(resident)));
+    assert(ge_capture_note_observed_sparse(base, resident, sizeof(resident)));
     assert(memcmp(SR_HOST(base), live, sizeof(live)) == 0);
     ge_capture_note_write(base, stored, sizeof(stored));
     memcpy(SR_HOST(base), stored, sizeof(stored));
-    assert(ge_capture_note_observed_ram(base, stored, sizeof(stored)));
+    assert(ge_capture_note_observed_sparse(base, stored, sizeof(stored)));
     assert(ge_capture_end(final));
     GeCaptureFixture fixture;
     assert(ge_capture_load(path, &fixture));
-    assert(fixture.page_count == 1 && fixture.pages[0].addr == base &&
-           memcmp(fixture.pages[0].data, resident, sizeof(resident)) == 0);
+    assert(fixture.page_count == 1 && fixture.pages[0].addr == (base & ~(GE_CAPTURE_PAGE_SIZE - 1u)) &&
+           memcmp(fixture.pages[0].data + 0x300u, resident, sizeof(resident)) == 0);
     ge_capture_free(&fixture);
     remove(path);
 
     assert(ge_capture_begin(path, 5, 0x00123000u, initial, zbuf));
-    assert(ge_capture_note_observed_ram(base, resident, sizeof(resident)));
+    assert(ge_capture_note_observed_sparse(base, resident, sizeof(resident)));
     ge_capture_note_memory(base, sizeof(resident));
     assert(!ge_capture_active());
     assert(!ge_capture_end(final));

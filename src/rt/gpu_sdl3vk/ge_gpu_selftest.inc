@@ -15660,6 +15660,8 @@ static int mvc_guest_frame(uint32_t *out) {
  * The target starts empty in both live rendering and the fresh replay arena. */
 #define NC_TEXTURE 0x08610FE0u
 #define NC_MIP     0x08630000u
+#define NC_SCRATCH 0x00010300u
+#define NC_VRAM    0x041E0000u
 #define NC_CLUT    0x08740000u
 #define NC_LIST    0x08530000u
 #define NC_VERTS   0x08532000u
@@ -15676,7 +15678,20 @@ typedef struct {
     const char *name;
     uint32_t wlog, hlog, pitch;
     int cold, indexed, mip, stale, off, conflict, palette_change, no_shadow;
+    uint32_t address, mip_address;
+    int mixed_vram, dxt1;
 } NgefRamCase;
+
+static uint32_t ngef_texture_addr(const NgefRamCase *c) {
+    return c->address ? c->address : NC_TEXTURE;
+}
+
+static uint32_t ngef_mip_addr(const NgefRamCase *c) {
+    return c->mip_address ? c->mip_address : NC_MIP;
+}
+
+/* PSP DXT1 stores indices first, then its 565 endpoints. All select solid red. */
+static const uint8_t ngef_dxt1_red[8] = {0, 0, 0, 0, 0x1F, 0, 0, 0};
 
 static uint32_t ngef_clut_index(uint32_t x, uint32_t y) {
     return 0x40u + ((3u * x + 5u * y) & 31u);
@@ -15714,15 +15729,17 @@ static void ngef_ram_list(const NgefRamCase *c, uint32_t framebuffer) {
     NC_EMIT(0x4C, 0); NC_EMIT(0x4D, 0);
     NC_EMIT(0x15, 0); NC_EMIT(0x16, (271u << 10) | 479u);
     NC_EMIT(0xD4, 0); NC_EMIT(0xD5, (271u << 10) | 479u);
-    NC_EMIT(0xA0, NC_TEXTURE & 0xFFFFFFu);
-    NC_EMIT(0xA8, c->pitch | ((NC_TEXTURE >> 8) & 0xFF0000u));
+    const uint32_t texture = ngef_texture_addr(c);
+    NC_EMIT(0xA0, texture & 0xFFFFFFu);
+    NC_EMIT(0xA8, c->pitch | ((texture >> 8) & 0xFF0000u));
     NC_EMIT(0xB8, c->wlog | (c->hlog << 8));
     NC_EMIT(0xC0, 0); NC_EMIT(0xC2, c->mip ? 1u << 16 : (unsigned)c->indexed);
-    NC_EMIT(0xC3, c->indexed ? 5u : 3u);
+    NC_EMIT(0xC3, c->indexed ? 5u : c->dxt1 ? 8u : 3u);
     NC_EMIT(0xC6, c->mip ? 4u : 0u); NC_EMIT(0xC7, 0);
     if (c->mip) {
-        NC_EMIT(0xA1, NC_MIP & 0xFFFFFFu);
-        NC_EMIT(0xA9, 16u | ((NC_MIP >> 8) & 0xFF0000u));
+        const uint32_t mip = ngef_mip_addr(c);
+        NC_EMIT(0xA1, mip & 0xFFFFFFu);
+        NC_EMIT(0xA9, 16u | ((mip >> 8) & 0xFF0000u));
         NC_EMIT(0xB9, 4u | (4u << 8));
         NC_EMIT(0xC8, 1u | (16u << 16)); /* constant LOD 1 */
     }
@@ -15739,16 +15756,22 @@ static uint32_t ngef_c8_offset(uint32_t x, uint32_t y) {
 
 static void ngef_fill_ram(const NgefRamCase *c) {
     const uint32_t w = 1u << c->wlog, h = 1u << c->hlog;
-    memset(SR_HOST(NC_TEXTURE), 0xBD, c->indexed ? 512u : (c->pitch * h * 4u));
+    const uint32_t texture = ngef_texture_addr(c);
+    if (c->dxt1) {
+        for (uint32_t i = 0; i < (w / 4u) * (h / 4u); ++i)
+            memcpy(SR_HOST(texture + i * sizeof(ngef_dxt1_red)), ngef_dxt1_red, sizeof(ngef_dxt1_red));
+        return;
+    }
+    memset(SR_HOST(texture), 0xBD, c->indexed ? 512u : (c->pitch * h * 4u));
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++) {
             if (c->indexed)
-                sr_w8(NC_TEXTURE + ngef_c8_offset(x, y), (uint8_t)ngef_clut_index(x, y));
+                sr_w8(texture + ngef_c8_offset(x, y), (uint8_t)ngef_clut_index(x, y));
             else
-                sr_w32(NC_TEXTURE + (y * c->pitch + x) * 4u, NC_COLOUR);
+                sr_w32(texture + (y * c->pitch + x) * 4u, NC_COLOUR);
         }
     if (c->mip)
-        for (uint32_t i = 0; i < 16u * 16u; ++i) sr_w32(NC_MIP + i * 4u, NC_LEVEL1);
+        for (uint32_t i = 0; i < 16u * 16u; ++i) sr_w32(ngef_mip_addr(c) + i * 4u, NC_LEVEL1);
 }
 
 static unsigned ngef_diff_pixels(const NgefRamCase *c) {
@@ -15757,7 +15780,7 @@ static unsigned ngef_diff_pixels(const NgefRamCase *c) {
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++) {
             const uint32_t want = c->indexed ? ngef_clut_colour(ngef_clut_index(x, y))
-                                           : c->mip ? NC_LEVEL1 : NC_COLOUR;
+                                           : c->mip ? NC_LEVEL1 : c->dxt1 ? 0xFF0000FFu : NC_COLOUR;
             const uint32_t got = sr_r32(NC_TARGET + ((y + 8u) * 512u + x + 8u) * 4u);
             diff += (got & 0xFFFFFFu) != (want & 0xFFFFFFu);
         }
@@ -15765,6 +15788,8 @@ static unsigned ngef_diff_pixels(const NgefRamCase *c) {
 }
 
 static int ngef_page_byte(const GeCaptureFixture *f, uint32_t addr, uint8_t expected) {
+    if (sr_vram_cpu_aperture(addr))
+        return f->initial_vram[sr_vram_cpu_address(addr) - GE_CAPTURE_VRAM_BASE] == expected;
     const uint32_t page = addr & ~(GE_CAPTURE_PAGE_SIZE - 1u);
     for (uint32_t i = 0; i < f->page_count; ++i)
         if (f->pages[i].addr == page)
@@ -15777,24 +15802,31 @@ static int ngef_check_fixture(const NgefRamCase *c, const char *path, const uint
     if (!ge_capture_load(path, &f)) return 0;
     int ok = f.list_count == 1;
     const uint32_t w = 1u << c->wlog, h = 1u << c->hlog;
-    for (uint32_t y = 0; y < h; ++y)
-        for (uint32_t x = 0; x < w; ++x) {
-            if (c->indexed) {
-                ok &= ngef_page_byte(&f, NC_TEXTURE + ngef_c8_offset(x, y), (uint8_t)ngef_clut_index(x, y));
-            } else {
-                const uint32_t addr = NC_TEXTURE + (y * c->pitch + x) * 4u;
-                for (uint32_t channel = 0; channel < 4u; channel++)
-                    ok &= ngef_page_byte(&f, addr + channel, (uint8_t)(NC_COLOUR >> (8u * channel)));
+    const uint32_t texture = ngef_texture_addr(c);
+    if (c->dxt1) {
+        for (uint32_t i = 0; i < (w / 4u) * (h / 4u) * sizeof(ngef_dxt1_red); ++i)
+            ok &= ngef_page_byte(&f, texture + i, ngef_dxt1_red[i % sizeof(ngef_dxt1_red)]);
+    } else {
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) {
+                if (c->indexed) {
+                    ok &= ngef_page_byte(&f, texture + ngef_c8_offset(x, y),
+                                         (uint8_t)ngef_clut_index(x, y));
+                } else {
+                    const uint32_t addr = texture + (y * c->pitch + x) * 4u;
+                    for (uint32_t channel = 0; channel < 4u; channel++)
+                        ok &= ngef_page_byte(&f, addr + channel, (uint8_t)(NC_COLOUR >> (8u * channel)));
+                }
             }
-        }
+    }
     if (c->indexed)
         ok &= f.initial_state.clut_fmt == NC_CLUTFMT &&
               memcmp(palette, f.initial_state.clutram, sizeof(f.initial_state.clutram)) == 0;
-    if (c->indexed && c->wlog == 3u) ok &= ngef_page_byte(&f, NC_TEXTURE + 8u, 0xFEu);
+    if (c->indexed && c->wlog == 3u) ok &= ngef_page_byte(&f, texture + 8u, 0xFEu);
     if (c->mip) {
         for (uint32_t i = 0; i < 16u * 16u; ++i)
             for (uint32_t channel = 0; channel < 4u; ++channel)
-                ok &= ngef_page_byte(&f, NC_MIP + i * 4u + channel,
+                ok &= ngef_page_byte(&f, ngef_mip_addr(c) + i * 4u + channel,
                                      (uint8_t)(NC_LEVEL1 >> (8u * channel)));
     }
 
@@ -15838,6 +15870,15 @@ static int coherence_run_ngef_ram(const char *name) {
         {.name = "ngef-mip",          .wlog = 5, .hlog = 5, .pitch = 64, .mip = 1},
         {.name = "ngef-conflict",     .wlog = 5, .hlog = 5, .pitch = 64, .stale = 1, .conflict = 1},
         {.name = "ngef-no-shadow",    .wlog = 5, .hlog = 5, .pitch = 64, .no_shadow = 1},
+        {.name = "ngef-scratch-cold", .wlog = 3, .hlog = 3, .pitch = 8, .cold = 1,
+         .address = NC_SCRATCH},
+        {.name = "ngef-scratch-warm", .wlog = 3, .hlog = 3, .pitch = 8, .address = NC_SCRATCH},
+        {.name = "ngef-scratch-dxt1", .wlog = 3, .hlog = 3, .pitch = 8, .address = NC_SCRATCH, .dxt1 = 1},
+        {.name = "ngef-scratch-ram",  .wlog = 5, .hlog = 5, .pitch = 32, .mip = 1,
+         .address = NC_SCRATCH},
+        {.name = "ngef-scratch-vram", .wlog = 5, .hlog = 5, .pitch = 32, .mip = 1,
+         .address = NC_SCRATCH, .mip_address = NC_VRAM, .mixed_vram = 1},
+        {.name = "ngef-vram-eager",   .wlog = 3, .hlog = 3, .pitch = 8, .address = NC_VRAM},
     };
     const NgefRamCase *c = NULL;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
@@ -15888,7 +15929,7 @@ static int coherence_run_ngef_ram(const char *name) {
     ge_set_gpu_hooks(&k_hooks);
     if (next || s_ngef_active_at_draw != !c->off) return 0;
     const int hit = s_tex_cur && s_tex_cur == resident && s_cnt_texup == before_draw;
-    const int drop = c->conflict || c->palette_change || c->no_shadow;
+    const int drop = c->conflict || c->palette_change || c->no_shadow || c->mixed_vram;
     if (c->conflict && ge_capture_active()) ge_capture_note_memory(changed, 4u);
     if (c->indexed && c->wlog == 3u && ge_capture_active()) {
         /* This byte is in the tile but outside the texture's active rows. */

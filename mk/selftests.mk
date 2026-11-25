@@ -1132,7 +1132,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	@d=$$(mktemp -d "$(BUILD_DIR)/ngef-ram.XXXXXX") || exit $$?; \
 	unset SR_GE_CAPTURE_EXIT SR_GE_CAPTURE_MIN_PRIMS SR_GPU_TEX_SHADOW_DISABLE; \
 	for cell in ngef-cold ngef-warm ngef-resident ngef-no-capture ngef-clut8 ngef-clut8-masked \
-		  ngef-palette ngef-mip ngef-conflict ngef-no-shadow; do \
+		  ngef-palette ngef-mip ngef-conflict ngef-scratch-cold ngef-scratch-warm \
+		  ngef-scratch-dxt1 ngef-scratch-ram ngef-scratch-vram ngef-vram-eager ngef-no-shadow; do \
 		export SR_GE_CAPTURE_PATH="$$d/$$cell.ngef"; \
 		if [ "$$cell" = ngef-no-capture ]; then unset SR_GE_CAPTURE_FRAME; \
 		else export SR_GE_CAPTURE_FRAME=2; fi; \

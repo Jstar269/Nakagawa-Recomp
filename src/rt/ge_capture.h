@@ -50,9 +50,9 @@ int  ge_capture_begin(const char *path, uint32_t frame, uint32_t start_list_addr
                       const GeState *state, const uint16_t *zbuf);
 int  ge_capture_add_list(uint32_t list_addr);
 void ge_capture_note_memory(uint32_t addr, uint32_t bytes);
-/* A cached read consumes these exact retained RAM bytes. Return 0 on an invalid
- * source or a contradiction with a previous read or recorded GE write. */
-int  ge_capture_note_observed_ram(uint32_t addr, const void *resident, uint32_t bytes);
+/* Record exact retained bytes from a guest span outside the eager VRAM snapshot.
+ * Return 0 on an invalid source or a contradictory observation. */
+int  ge_capture_note_observed_sparse(uint32_t addr, const void *resident, uint32_t bytes);
 /* The GE is about to write `bytes` bytes from `src` at `addr`. */
 void ge_capture_note_write(uint32_t addr, const void *src, uint32_t bytes);
 /* A CPU-side store to VRAM (sr_ge_vram_write_commit outside the GE's own stores). */
