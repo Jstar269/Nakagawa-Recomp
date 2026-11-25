@@ -5361,8 +5361,12 @@ int sched_thread_run_status(uint32_t uid, SrThreadRunStatus *out) {
      * not cleared when a thread is resumed (e.g. sched_thread_wakeup sets TH_READY
      * without zeroing it), so reading it unconditionally would leak a stale object id
      * into a RUNNING/READY thread's status. PSP reports 0 when the thread is not
-     * waiting; gate it on waitType to stay consistent with that and with waitType. */
-    out->waitId = (out->waitType == PSP_WAIT_NONE)  ? 0u
+     * waiting; gate it on waitType to stay consistent with that and with waitType.
+     * A sleep waits on no object: its wait_obj is the scheduler's own marker (the thread's
+     * uid), and a PSP reports waitId 0 for it (PSPAutotests tests/threads/threads/
+     * refer.expected, recorded on a PSP: "slumber after start: ... wait=1 for 0"). */
+    out->waitId = (out->waitType == PSP_WAIT_NONE ||
+                   out->waitType == PSP_WAIT_SLEEP) ? 0u
                 : (t->state == TH_WAIT_DELAY)       ? uid
                                                     : t->wait_obj;
     out->wakeupCount = (uint32_t)t->wakeups;

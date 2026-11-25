@@ -30094,6 +30094,48 @@ static void run_worker(TCB *worker) {
     s_cur = -1;
 }
 
+/* A thread in sceKernelSleepThread reports waitType 1 (sleep) and waitId 0: PSPAutotests
+ * tests/threads/threads/refer.expected, recorded on a PSP ("slumber after start: ... wait=1 for
+ * 0", in both SDK layouts); PPSSPP sleeps with WAITTYPE_SLEEP and wait id 0. The scheduler's
+ * own sleep marker (the thread's uid as its wait object) is not the guest-visible waitId. */
+static void test_refer_thread_status_sleep_wait_id(void) {
+    extern uint32_t sr_hle_test_refer_thread_run_status(CpuState *s);
+    enum {
+        NID_REFER_THREAD_STATUS = 0x17c1684eu,
+        SLEEPER = 0x13cu,
+        INFO = 0x08302000u,
+        RUN_INFO = 0x08303000u,
+    };
+    reset_fixture();
+    sr_hle_init();
+    TCB *sleeper = fixture_thread(SLEEPER, TH_WAIT_OBJ, 32);
+    sleeper->started = 1;
+    sleeper->sleeping = 1;
+    sleeper->wait_obj = sleeper->uid;   /* what sched_thread_sleep records */
+    sleeper->wake = SCHED_WAIT_FOREVER;
+
+    MEM_W32(INFO, (uint32_t)sizeof(SrThreadInfo));
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = SLEEPER;
+    cpu.r[5] = INFO;
+    expect(sr_syscall(&cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(INFO + 0x28u) == PSP_THREAD_WAITING &&
+               MEM_R32(INFO + 0x44u) == PSP_WAIT_SLEEP,
+           "ReferThreadStatus reports a sleeping thread as waiting in sleep");
+    expect(MEM_R32(INFO + 0x48u) == 0u,
+           "ReferThreadStatus reports waitId 0 for a sleeping thread (refer.expected)");
+
+    MEM_W32(RUN_INFO, 0x2cu);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = SLEEPER;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u &&
+               MEM_R32(RUN_INFO + 0x0cu) == PSP_WAIT_SLEEP && MEM_R32(RUN_INFO + 0x10u) == 0u,
+           "ReferThreadRunStatus reports waitId 0 for a sleeping thread");
+    reset_fixture();
+}
+
 static void test_exit_thread_does_not_wake_launcher(int launcher_wakeups) {
     reset_fixture();
 
@@ -30132,7 +30174,7 @@ static void test_exit_thread_does_not_wake_launcher(int launcher_wakeups) {
            "launcher status remains queryable");
     expect(launcher_status.status == PSP_THREAD_WAITING &&
            launcher_status.waitType == PSP_WAIT_SLEEP &&
-           launcher_status.waitId == launcher->uid,
+           launcher->wait_obj == launcher->uid && launcher_status.waitId == 0u,
            "unrelated sleeping launcher stays asleep on its own wait object");
     expect(launcher_status.wakeupCount == (uint32_t)launcher_wakeups,
            "ExitThread preserves the launcher's existing wakeup count exactly");
@@ -69657,6 +69699,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_utility_dialog_measured_states();
     test_osk_nested_ranges();
     test_utility_dialog_wrong_states_unmeasured_types();
+    test_refer_thread_status_sleep_wait_id();
     test_exit_thread_does_not_wake_launcher(0);
     test_exit_thread_does_not_wake_launcher(2);
     test_explicit_exit_status_exact((int32_t)0x800201acu, 0x800200d2u);
