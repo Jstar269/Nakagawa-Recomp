@@ -1277,6 +1277,10 @@ def inspect_iso(
         )
 
 
+def _experimental_profile_id(disc_id: str) -> str:
+    return f"experimental-{disc_id.lower()}"
+
+
 def write_experimental_profile(
     iso_path: Path | str,
     user_data_dir: Path | str,
@@ -1311,7 +1315,7 @@ def write_experimental_profile(
         raise IsoInspectionError("PARAM.SFO does not contain a valid PSP disc ID")
 
     disc_id = info.disc_id.upper()
-    profile_id = f"experimental-{disc_id.lower()}"
+    profile_id = _experimental_profile_id(disc_id)
     region = info.region if info.region in {"JP", "NA", "EU", "KR", "ASIA", "OTHER"} else "OTHER"
     display_name = info.title.strip() if info.title and info.title.strip() else f"PSP Title ({disc_id})"
     if any(ord(char) < 0x20 for char in display_name):
@@ -2678,11 +2682,15 @@ def iso_executable_sha256(iso_path: Path | str, name: str) -> str | None:
     involved (#2140). None means the image has no such file, it is empty, or it
     is beyond the supported size bound.
     """
+    return _iso_member_sha256(iso_path, ("PSP_GAME", "SYSDIR", name))
+
+
+def _iso_member_sha256(iso_path: Path | str, member: tuple[str, ...]) -> str | None:
     try:
         path = _plain_iso_path(iso_path)
         size_bytes = path.stat().st_size
         with path.open("rb") as stream:
-            entry = _lookup_iso_file(stream, size_bytes, ("PSP_GAME", "SYSDIR", name))
+            entry = _lookup_iso_file(stream, size_bytes, member)
             if entry is None:
                 return None
             lba, size = entry
@@ -2757,6 +2765,54 @@ def select_boot_executable_source(iso_path: Path | str) -> str | None:
         return None
     except (OSError, struct.error):
         return None
+
+
+def _experimental_package_problem(
+    package_dir: Path,
+    user_root: Path,
+    iso_path: Path,
+    metadata: IsoMetadata,
+    selected: str | None,
+    decrypted_elf: Path | None,
+) -> str | None:
+    identity = package_cache.read_local_title_input_identity(user_root, metadata.disc_id)
+    if identity is None:
+        return "The saved title input identity is missing or unreadable."
+    disc = identity["disc"]
+    if disc["id"] != metadata.disc_id:
+        return "The saved title input identity names a different disc."
+    if identity["manifest"]["id"] != _experimental_profile_id(metadata.disc_id):
+        return "The saved title input identity names a different experimental profile."
+    revision = disc["disc_version"]
+    sfo = identity["param_sfo"]
+    if (revision is not None and revision != metadata.version) or (
+        sfo is not None and sfo != metadata.param_sfo_facts
+    ):
+        return "The disc revision or PARAM.SFO differs from the saved title input identity."
+    valid, reason = package_cache.validate_package_cache(
+        package_dir, expected_title_identity=identity, require_authentic=True,
+    )
+    if not valid:
+        return f"Package validation failed ({reason.rstrip('.')})."
+
+    source = identity["source_media"]
+    executable = identity["main_executable"]
+    if source is None or selected is None:
+        return "The package does not identify a usable source executable."
+    if selected == "EBOOT.elf":
+        try:
+            actual_hash = package_cache.sha256_file(decrypted_elf) if decrypted_elf is not None else None
+        except OSError:
+            actual_hash = None
+        if actual_hash != executable["sha256"]:
+            return "The supplied decrypted executable differs from the package's input."
+    elif selected != executable["name"] or source["executable"]["sha256"] != executable["sha256"]:
+        return "The selected executable differs from the package's input."
+
+    for member in (source["executable"], *source["modules"]):
+        if _iso_member_sha256(iso_path, tuple(member["path"].split("/"))) != member["sha256"]:
+            return "The selected disc's executable or module bytes differ from the package's input."
+    return None
 
 
 def inspect_compatibility_preflight(
@@ -2974,9 +3030,7 @@ def inspect_compatibility_preflight(
             "issues": [308],
         }
 
-    package_present, _package_reason = package_cache.validate_package_cache(
-        root / "packages" / metadata.disc_id
-    )
+    package_dir = root / "packages" / metadata.disc_id
     is_experimental = (
         metadata.matched_profile is None and disc_check["status"] == "OK" and
         title_manifest.DISC_ID_RE.fullmatch(metadata.disc_id.upper()) is not None
@@ -2989,18 +3043,32 @@ def inspect_compatibility_preflight(
     } if is_experimental else None
 
     if is_experimental:
-        runtime_check = {
-            "code": "RUNTIME_PACKAGE", "status": "MISSING",
-            "message": "Experimental title runtime package is missing; build it from the library.",
-            "issues": [308],
-        }
+        if not (package_dir / "package.json").is_file():
+            runtime_check = {
+                "code": "RUNTIME_PACKAGE", "status": "MISSING",
+                "message": "Experimental title runtime package is missing; build it from the library.",
+                "issues": [308],
+            }
+        else:
+            problem = _experimental_package_problem(
+                package_dir, root, path, metadata, selected, decrypted_elf,
+            )
+            runtime_check = {
+                "code": "RUNTIME_PACKAGE",
+                "status": "UNSUPPORTED" if problem else "OK",
+                "message": (
+                    f"Experimental title runtime package cannot be used. {problem} Rebuild it from the library."
+                    if problem else "Experimental runtime package is present and matches the selected disc."
+                ),
+                "issues": [308] if problem else [],
+            }
     elif metadata.matched_profile is None:
         runtime_check = {
             "code": "RUNTIME_PACKAGE", "status": "UNSUPPORTED",
             "message": "This game isn't in Nakagawa's list of supported games yet.",
             "issues": [308],
         }
-    elif package_present:
+    elif package_cache.validate_package_cache(package_dir)[0]:
         runtime_check = {
             "code": "RUNTIME_PACKAGE", "status": "OK",
             "message": "Generated runtime executable and image are present.", "issues": [],
