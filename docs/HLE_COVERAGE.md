@@ -671,7 +671,7 @@ a title that translates none has generated code unchanged.
 | `0xd5c28cc0` | `sceAtracEndEntry` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xd5ebbbcd` | `__sceSasSetSteepWave` | audio | `synthetic` | HLE selftest dispatch |
 | `0xd61e6961` | `sceKernelReleaseSubIntrHandler` | kernel_interrupt | `synthetic` | HLE selftest dispatch |
-| `0xd675ebb8` | `sceKernelSelfStopUnloadModule` | kernel_module | `synthetic` | HLE selftest dispatch |
+| `0xd675ebb8` | `sceKernelSelfStopUnloadModule` | kernel_module | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd6a5f2f7` | `sceAtracGetMaxSample` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xd6da4ba1` | `sceKernelCreateSema` | kernel_sync | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd7763699` | `sceWlanGetSwitchState` | network | `synthetic` | HLE selftest dispatch |
