@@ -53897,6 +53897,80 @@ static void test_mbx_send_wakes_a_blocked_receiver(void) {
     s_cur = -1;
 }
 
+/* ---- A thread-priority mailbox (attr 0x100) serves its best-priority receiver ------
+ * Three receivers block in the order A (priority 40), B (20), C (20). With attr 0x100 each
+ * send goes to the waiter of best current priority, the earliest among equals: B, C, then A.
+ * Without the attribute the same queue is served in arrival order: A first.
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelMbx.cpp, sceKernelSendMbx (SCE_KERNEL_MBA_THPRI picks
+ * HLEKernel::FindBestPriorityWaiter).
+ * MUTANT: serve waiters[0] whatever the attribute -- A takes the first message. */
+static void test_mbx_thread_priority_serves_best_receiver(void) {
+    for (int prio_attr = 1; prio_attr >= 0; prio_attr--) {
+        reset_fixture();
+        sr_hle_init();
+        TCB *cur = fixture_thread(0x1c0u, TH_RUNNING, 8);
+        s_cur = (int)(cur - s_tcb);
+        cur->started = 1;
+        uint32_t mbx = selftest_mbx_create(prio_attr ? 0x100u : 0u);
+        SelftestMbxWaiterCtx w[3];
+        static const int prios[3] = {40, 20, 20};
+        memset(w, 0, sizeof w);
+        for (int i = 0; i < 3; i++) {
+            w[i].uid = 0x1c1u + (uint32_t)i;
+            w[i].mbx_uid = mbx;
+            w[i].outptr = MBX_BULK_BASE + 0x1900u + 4u * (uint32_t)i;
+            MEM_W32(w[i].outptr, 0xfeedfaceu);
+            w[i].tcb = fixture_thread(w[i].uid, TH_READY, prios[i]);
+            w[i].tcb->started = 1;
+            w[i].tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, &w[i], (size_t)1 << 20);
+            s_cur = (int)(w[i].tcb - s_tcb);
+            w[i].tcb->state = TH_RUNNING;
+            sr_coro_switch(w[i].tcb->coro);
+            s_cur = (int)(cur - s_tcb);
+        }
+        expect(w[0].tcb->state == TH_WAIT_OBJ && w[1].tcb->state == TH_WAIT_OBJ &&
+                   w[2].tcb->state == TH_WAIT_OBJ,
+               "MBX priority: three receivers block on the empty mailbox");
+        const int order[2][3] = {{0, 1, 2}, {1, 2, 0}};
+        for (int k = 0; k < 3; k++) {
+            const int want = order[prio_attr][k];
+            const uint32_t msg_addr = MBX_MSG_BASE + 0x10u * (uint32_t)k;
+            mbx_init_packet(msg_addr, 0u);
+            expect(selftest_mbx_send(mbx, msg_addr) == 0u, "MBX priority: SendMbx succeeds");
+            int ready = -1, readied = 0;
+            for (int i = 0; i < 3; i++)
+                if (!w[i].returned && w[i].tcb->state == TH_READY) { ready = i; readied++; }
+            char msg[200];
+            snprintf(msg, sizeof msg, "MBX priority: attr 0x%x send %d wakes receiver %c "
+                                      "(woke %c, %d readied)", prio_attr ? 0x100u : 0u, k,
+                     'A' + want, ready < 0 ? '-' : 'A' + ready, readied);
+            expect(readied == 1 && ready == want, msg);
+            if (ready >= 0) {
+                s_cur = (int)(w[ready].tcb - s_tcb);
+                w[ready].tcb->state = TH_RUNNING;
+                sr_coro_switch(w[ready].tcb->coro);
+                s_cur = (int)(cur - s_tcb);
+                snprintf(msg, sizeof msg, "MBX priority: attr 0x%x receiver %c takes message %d",
+                         prio_attr ? 0x100u : 0u, 'A' + ready, k);
+                expect(w[ready].returned && w[ready].ret == 0u &&
+                           MEM_R32(w[ready].outptr) == msg_addr, msg);
+            }
+        }
+        (void)selftest_mbx_delete(mbx);
+        for (int i = 0; i < 3; i++) {
+            if (!w[i].returned && w[i].tcb->state == TH_READY) {
+                s_cur = (int)(w[i].tcb - s_tcb);
+                w[i].tcb->state = TH_RUNNING;
+                sr_coro_switch(w[i].tcb->coro);
+                s_cur = (int)(cur - s_tcb);
+            }
+            if (w[i].tcb->coro) { sr_coro_destroy(w[i].tcb->coro); w[i].tcb->coro = NULL; }
+        }
+        s_cur = -1;
+    }
+}
+
 /* ---- ReceiveMbxCB takes a message its own callback sent ----------------------------
  * The receiver runs a pending callback before it blocks; the callback sends to the mailbox
  * the receiver waits on. The send finds the receiver running, not blocked, so the receiver
@@ -70002,6 +70076,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mbx_lifecycle_and_ordering();
     test_mbx_has_no_host_table_limits();
     test_mbx_send_wakes_a_blocked_receiver();
+    test_mbx_thread_priority_serves_best_receiver();
     test_mbx_receive_cb_takes_callback_message();
     test_mbx_refer_honours_size_word();
     test_intr_context_conformance();

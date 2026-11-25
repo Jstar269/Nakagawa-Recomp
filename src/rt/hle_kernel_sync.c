@@ -810,6 +810,7 @@ void hle_register_msgpipe_handlers(void) {
     sr_hle_register(0x33be4024, "sceKernelReferMsgPipeStatus", h_ReferMsgPipeStatus);
 }
 #define PSP_MBX_ATTR_PRIORITY          0x400u
+#define PSP_MBX_ATTR_THREAD_PRIORITY   0x100u
 
 /* Rewrite guest-visible circular next links so first->...->last->first matches
  * host delivery order (HARDWARE_ORACLE.md: FIFO mailboxes link packets circularly). */
@@ -907,6 +908,36 @@ static uint32_t h_DeleteMbx(CpuState *s) {
     return 0;
 }
 
+/* The queue index a send serves: the head, or, with attr 0x100 (thread priority), the
+ * receiver still blocked on the mailbox (waitType 5) with the best current priority, the
+ * earliest queued among equals; the head when none is blocked, so the send passes over the
+ * rest as it does in arrival order. PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelMbx.cpp, sceKernelSendMbx
+ * (SCE_KERNEL_MBA_THPRI picks HLEKernel::FindBestPriorityWaiter); logged once per run. */
+static int s_mbx_thread_priority_noted;
+static int mbx_next_waiter(const Mbx *m) {
+    if (!(m->attr & PSP_MBX_ATTR_THREAD_PRIORITY)) return 0;
+    int best = -1;
+    uint32_t best_pri = 0u;
+    for (int i = 0; i < m->nwaiters; i++) {
+        SrThreadRunStatus rs;
+        if (sched_thread_run_status(m->waiters[i], &rs) != 0 || rs.waitType != 5u ||
+            rs.waitId != m->uid) continue;
+        if (best < 0 || rs.currentPriority < best_pri) {
+            best = i;
+            best_pri = rs.currentPriority;
+        }
+    }
+    if (best < 0) return 0;
+    if (!s_mbx_thread_priority_noted) {
+        s_mbx_thread_priority_noted = 1;
+        fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelSendMbx hands a "
+                        "thread-priority (attr 0x100) mailbox's message to its best-priority "
+                        "receiver\n");
+    }
+    return best;
+}
+
 static uint32_t h_SendMbx(CpuState *s) {
     Mbx *m = mbx_find(A0);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MBXID;
@@ -919,8 +950,9 @@ static uint32_t h_SendMbx(CpuState *s) {
      * callbacks in ReceiveMbxCB, or timed out and not yet back) is passed over: it finds the
      * message itself when it resumes, and the wake goes to the next one. */
     while (m->nwaiters > 0) {
-        uint32_t thid = m->waiters[0];
-        for (int j = 0; j + 1 < m->nwaiters; j++) m->waiters[j] = m->waiters[j + 1];
+        const int pick = mbx_next_waiter(m);
+        uint32_t thid = m->waiters[pick];
+        for (int j = pick; j + 1 < m->nwaiters; j++) m->waiters[j] = m->waiters[j + 1];
         m->nwaiters--;
         if (sched_wake_one_object_waiter(A0, thid)) {
             sched_preempt();
