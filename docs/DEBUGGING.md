@@ -2319,15 +2319,12 @@ mingw32-make --no-print-directory form-sweep-selftest
 - **Deeper run.** `mingw32-make --no-print-directory form-sweep-deep` runs every instance of every
   form with 2048 states each.
 
-Two choices keep the comparison honest. When two named float registers hold NaNs with different
-payloads the harness makes them equal and counts it on stderr: an arithmetic result then carries
-whichever payload the host compiler's operand order picks inside the shared helper
-(`src/rt/fp_convert.h`), the translated body and the reference are built with different flags,
-and the PSP's own pick is unmeasured. And the reference's results come from `src/ref`, which
-shares the `sr_fpu_*` helpers with generated code for the float arithmetic: for those forms the
-sweep checks the translation around the helper (operand and destination handling, aliasing,
-rounding-mode plumbing), not the helper's arithmetic, which `fp_convert_selftest` and the cosim
-FPU reference cover.
+The reference's results come from `src/ref`, which shares the `sr_fpu_*` helpers with generated
+code for the float arithmetic: for those forms the sweep checks the translation around the helper
+(operand and destination handling, aliasing, rounding-mode plumbing), not the helper's arithmetic,
+which `fp_convert_selftest` and the cosim FPU reference cover. Two NaN operands with different
+payloads are compared as drawn: the helper picks the result NaN from the operand bits, so the
+translated body and the reference agree whatever flags each is built with.
 
 ## Naming generated functions from a symbol map
 

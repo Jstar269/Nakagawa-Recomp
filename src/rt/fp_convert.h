@@ -387,9 +387,20 @@ static inline float sr_fpu_soft_ftz_div(float a, float b, float r) {
  * operand is a NaN and the result is one, the result word is 0x7FC00000 on every host. The host
  * default NaN differs (x86 SSE writes 0xFFC00000, AArch64 0x7FC00000), so without this the same
  * guest instruction left different register bits on the x86-64 and arm64 builds. The word is the
- * one mul.s returns for Inf * 0. For these three forms it is project semantics, not PSP-measured:
- * the PSP's word for them is unmeasured. A NaN operand propagates as the host returns it. The
- * classification reads raw bits, so the host FP environment cannot affect it. */
+ * one mul.s returns for Inf * 0. It is the PSP's word: pspautotests tests/cpu/fpu/fpu_nan.expected
+ * at e37443a6 (recorded on a PSP) has 0x7FC00000 for 0 / 0, -0 / 0, Inf - Inf, -Inf + Inf,
+ * Inf / Inf and -Inf / Inf, and for Inf * 0 and 0 * -Inf, under RM 0 with FS clear.
+ *
+ * A NaN operand of add.s, sub.s, mul.s or div.s gives the first NaN operand with its quiet bit
+ * set and its sign and payload kept. roundmode.expected at the same commit has that word under
+ * every RM for a quiet NaN of either sign or a positive signaling NaN in fs, for a quiet NaN in
+ * ft beside a number, and for a quiet NaN in both. The helper picks it from the operand bits:
+ * the host's own pick follows the order the compiler gives the operands of a commutative add or
+ * multiply, and GCC -O0 on x86-64 puts ft first, so add.s and mul.s of two NaNs returned ft's.
+ * With a signaling NaN in ft, or a negative one in fs, the PSP's word is unrecorded and this
+ * pick is project semantics (for a quiet NaN in fs and a signaling one in ft, AArch64 itself
+ * returns ft quieted). The classification reads raw bits, so the host FP environment cannot
+ * affect it. */
 #define SR_FPU_INVALID_OP_NAN_BITS 0x7fc00000u
 
 static inline int sr_fpu_bits_are_nan(uint32_t bits) {
@@ -397,11 +408,12 @@ static inline int sr_fpu_bits_are_nan(uint32_t bits) {
 }
 
 static inline float sr_fpu_invalid_op_nan(uint32_t a_bits, uint32_t b_bits, float r) {
-    if (!sr_fpu_bits_are_nan(sr_float_bits(r)) ||
-        sr_fpu_bits_are_nan(a_bits) || sr_fpu_bits_are_nan(b_bits)) {
+    if (!sr_fpu_bits_are_nan(sr_float_bits(r))) {
         return r;
     }
-    const uint32_t bits = SR_FPU_INVALID_OP_NAN_BITS;
+    const uint32_t bits = sr_fpu_bits_are_nan(a_bits) ? a_bits | 0x00400000u
+                        : sr_fpu_bits_are_nan(b_bits) ? b_bits | 0x00400000u
+                        : SR_FPU_INVALID_OP_NAN_BITS;
     float out;
     memcpy(&out, &bits, sizeof out);
     return out;
@@ -466,8 +478,10 @@ static inline float sr_fpu_sub_s(float a, float b, uint32_t fcr31) {
 static inline float sr_fpu_mul_s(float a, float b, uint32_t fcr31) {
     volatile float va = a;
     volatile float vb = b;
-    const uint32_t a_mag = sr_float_bits(va) & 0x7fffffffu;
-    const uint32_t b_mag = sr_float_bits(vb) & 0x7fffffffu;
+    const uint32_t a_bits = sr_float_bits(va);
+    const uint32_t b_bits = sr_float_bits(vb);
+    const uint32_t a_mag = a_bits & 0x7fffffffu;
+    const uint32_t b_mag = b_bits & 0x7fffffffu;
     if ((a_mag == 0x7f800000u && b_mag == 0u) ||
         (b_mag == 0x7f800000u && a_mag == 0u)) {
         const uint32_t canonical_qnan = 0x7fc00000u;
@@ -484,7 +498,7 @@ static inline float sr_fpu_mul_s(float a, float b, uint32_t fcr31) {
 #endif
     sr_fpu_scalar_barrier();
     sr_fpu_env_restore(saved);
-    return vr;
+    return sr_fpu_invalid_op_nan(a_bits, b_bits, vr);
 }
 
 static inline float sr_fpu_div_s(float a, float b, uint32_t fcr31) {
