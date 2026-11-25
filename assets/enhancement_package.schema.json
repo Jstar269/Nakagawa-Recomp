@@ -804,7 +804,27 @@
         "required": ["sites", "data_sites"],
         "properties": {
           "category": { "const": "timing_frame_presentation" },
-          "sites": { "maxItems": 0 }
+          "sites": { "maxItems": 0 },
+          "data_sites": {
+            "items": {
+              "properties": {
+                "transform": { "not": { "const": "probability_per_update_x0.5" } }
+              }
+            }
+          },
+          "data_files": {
+            "items": {
+              "properties": {
+                "cells": {
+                  "items": {
+                    "properties": {
+                      "transform": { "not": { "const": "probability_per_update_x0.5" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

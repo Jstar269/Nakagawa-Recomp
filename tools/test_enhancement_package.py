@@ -5344,6 +5344,26 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 validate_package(dict(private, update_boundary=update_boundary,
                                       ace_parts={"load": {"sites": [load_site]}}))
 
+            probability_transform = "probability_per_update_x0.5"
+            probability_site = dict(private["data_sites"][0], transform=probability_transform)
+            probability_file = {
+                "id": "SYNTH_PROBABILITY", "path": "data/probability.csv",
+                "sha256": hashlib.sha256(b"Rate\n0.25\n").hexdigest(),
+                "format": "csv", "header_row": 0, "first_data_row": 1,
+                "cells": [{"column": "Rate", "type": "f32", "transform": probability_transform}],
+            }
+            for field, elements in (("data_sites", [probability_site]), ("data_files", [probability_file])):
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    EnhancementPackageError, "probability rescaling requires an RNG policy"
+                ):
+                    validate_package(dict(private, **{field: elements}))
+            for mode in ("rescale_probability", "subtick_30hz"):
+                with self.subTest(mode=mode):
+                    legacy = dict(private, sites=instruction_sites, update_boundary=update_boundary,
+                                  data_sites=[probability_site], data_files=[probability_file],
+                                  rng_policy={"mode": mode, "reason": "Legacy timing policy."})
+                    self.assertEqual(validate_package(legacy)["rng_policy"]["mode"], mode)
+
             for label, value, diagnostic in (
                 ("local-mismatch", private, "Stock data digest mismatch"),
                 ("published-mismatch", published, "site_mismatch"),

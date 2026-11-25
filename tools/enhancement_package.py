@@ -792,10 +792,11 @@ def validate_package(data: Any) -> dict[str, Any]:
                 "alternate logic updates, counted where each update begins",
             )
 
+        rng_unmodified = not code_hook and data["rng_policy"]["mode"] == "unmodified"
         if "data_sites" in data:
-            _validate_data_sites(data["data_sites"])
+            _validate_data_sites(data["data_sites"], rng_unmodified=rng_unmodified)
         if "data_files" in data:
-            _validate_data_files(data["data_files"])
+            _validate_data_files(data["data_files"], rng_unmodified=rng_unmodified)
         if "ace_parts" in data:
             _validate_ace_parts(data, seen_site_ids)
 
@@ -1178,7 +1179,7 @@ def _check_int(value: Any, path: str, lo: int, hi: int) -> int:
     return value
 
 
-def _validate_data_sites(data_sites: Any) -> None:
+def _validate_data_sites(data_sites: Any, *, rng_unmodified: bool = False) -> None:
     if not isinstance(data_sites, list) or not data_sites:
         fail("data_sites", "data_sites must be a non-empty array")
     seen_ids: set[str] = set()
@@ -1207,6 +1208,8 @@ def _validate_data_sites(data_sites: Any) -> None:
         if not isinstance(transform, str) or transform not in DATA_SITE_TRANSFORMS:
             fail(f"{path}.transform",
                  f"Transform {transform!r} has no data rescale; must be one of {sorted(DATA_SITE_TRANSFORMS)}")
+        if rng_unmodified and transform == "probability_per_update_x0.5":
+            fail(f"{path}.transform", "probability rescaling requires an RNG policy other than 'unmodified'")
         if transform == "f32_x3" and dtype != "f32":
             fail(f"{path}.type", "f32_x3 requires type 'f32'")
         lo, hi = offset, offset + size * count
@@ -1216,7 +1219,7 @@ def _validate_data_sites(data_sites: Any) -> None:
         seen_spans.append((symbol, lo, hi))
 
 
-def _validate_data_files(data_files: Any) -> None:
+def _validate_data_files(data_files: Any, *, rng_unmodified: bool = False) -> None:
     if not isinstance(data_files, list) or not data_files:
         fail("data_files", "data_files must be a non-empty array")
     seen_ids: set[str] = set()
@@ -1260,9 +1263,12 @@ def _validate_data_files(data_files: Any) -> None:
                          f"column {column!r} must be an ASCII header name matching {CSV_COLUMN_RE.pattern}")
             else:
                 column = _check_int(cell["column_index"], f"{cpath}.column_index", 0, 255)
-            if cell["transform"] not in DATA_TRANSFORMS:
+            transform = cell["transform"]
+            if not isinstance(transform, str) or transform not in DATA_TRANSFORMS:
                 fail(f"{cpath}.transform",
-                     f"Transform {cell['transform']!r} has no data rescale; must be one of {sorted(DATA_TRANSFORMS)}")
+                     f"Transform {transform!r} has no data rescale; must be one of {sorted(DATA_TRANSFORMS)}")
+            if rng_unmodified and transform == "probability_per_update_x0.5":
+                fail(f"{cpath}.transform", "probability rescaling requires an RNG policy other than 'unmodified'")
             if "type" in cell and cell["type"] not in DATA_TYPES:
                 fail(f"{cpath}.type", f"Unknown data type {cell['type']!r}; must be one of {sorted(DATA_TYPES)}")
             if "rows" in cell:

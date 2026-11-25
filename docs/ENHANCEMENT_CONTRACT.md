@@ -402,7 +402,8 @@ Both are covered by the package digest, so a change to either is a different enh
 
 A timing declaration can use `sites: []` when it has at least one `data_sites` entry and declares
 `rng_policy.mode: unmodified`. The mode means the package authors no RNG transform. It is available
-only without instruction rewrite sites, including the optional Short loads part. The data span must
+only without instruction rewrite sites, including the optional Short loads part, and forbids
+`probability_per_update_x0.5` in data sites and data files. The data span must
 have one full file-backed load mapping that agrees with the data section, and no overlapping
 allocated section may classify it as code or zero-fill. Real-time RNG behavior and physics still
 need measurement at the new rate. Such a package uses the same build and runtime opt-in. The `f32_x3` transform
