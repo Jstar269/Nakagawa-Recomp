@@ -704,6 +704,51 @@ class LiveManifestTests(unittest.TestCase):
             digest = hashlib.sha1(name.encode("ascii")).digest()
             self.assertEqual(int.from_bytes(digest[:4], "little"), nid)
 
+    def test_msg_dialog_get_status_is_partial_on_its_one_measured_cell(self) -> None:
+        """#2807: sceUtilityMsgDialogGetStatus is reviewed for the no-InitStart cell of PSP-HLE-UTILITY-NONE-001 only."""
+        nid, handler = 0x9A1C91D7, "h_MsgDialogStatus"
+        cell = "test_msg_dialog_status_with_no_dialog_started"
+        registration = self.regs[nid]
+        self.assertEqual(registration["name"], "sceUtilityMsgDialogGetStatus")
+        self.assertEqual(registration["handler"], handler)
+        self.assertEqual(registration["classification"], "dedicated")
+        self.assertEqual(registration["status"], "partial")
+        evidence = meta.HANDLER_EVIDENCE[handler]
+        self.assertEqual(
+            evidence,
+            [
+                "docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)",
+                f"tests/native/hle_thread_selftest.c:{cell}",
+            ],
+        )
+        self._assert_cited_cells_are_manifest_cells(evidence)
+        # The limitation names the one cell, its single launch and context, and what stays unmeasured.
+        limitation = meta.HANDLER_LIMITATIONS[handler]
+        for needle in (
+            "one cell only", "no InitStart", "0x80110005", "one launch from the XMB context",
+            "synthetic reset", "nothing after an InitStart", "game context", "unmeasured",
+            "separate handlers", "not reviewed here",
+        ):
+            self.assertIn(needle, limitation)
+        # The cell enters the NID through sr_syscall itself. Cut from the selftest with the one
+        # constant it names, it is a dispatch of this NID and of no other, and it starts no dialog.
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(source))
+        define = _matched(
+            re.search(r"^#define NID_MSG_DIALOG_STATUS[ \t]+0x9a1c91d7u$", source, re.MULTILINE)
+        ).group(0)
+        body = _matched(
+            re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+        ).group(0)
+        self.assertEqual(hle_manifest.selftest_dispatched_nids(f"{define}\n{body}"), {nid})
+        self.assertIn("sr_hle_init();", body)
+        self.assertNotIn("_INIT", body)
+        for needle in ("== 0x80110005u", "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog", "XMB context"):
+            self.assertIn(needle, body)
+        # The record's other message-dialog calls did not ride along with this status.
+        for sibling in ("h_MsgDialogUpdate", "h_MsgDialogShutdown"):
+            self.assertNotIn(sibling, meta.HANDLER_METADATA)
+
     def test_sce_atrac_get_channel_uses_the_canonical_nid(self) -> None:
         """Regression for the 0x31668bba -> 0x31668baa transcription fix."""
         self.assertNotIn(0x31668BBA, self.regs)
