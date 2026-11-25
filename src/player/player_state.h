@@ -691,6 +691,15 @@ typedef struct {
     char stop_boundary[96];
     int stop_exit_code;
     bool stop_has_exit_code;
+    /* The card is about one launch of its game (#2998): the run stopped
+       (player_app_set_game_stop_error) or the launch refused its texture pack
+       before a child started. Copy details then names only the package that
+       launch spawned, as the launch session recorded it, and never the library's
+       stored status for the title, which can describe another build. Both lines
+       are "" when no package was spawned. */
+    bool about_launch;
+    char launch_package[96];  /* the report's Package line: "ready, identity <12 hex>" */
+    char launch_runtime_source[192];  /* as PlayerRuntimePackageCacheEntry.runtime_source */
 } ErrorState;
 
 typedef enum {
