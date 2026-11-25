@@ -12117,21 +12117,72 @@ static int adh_p2_recv_exact(adh_p2_sock_t s, void *buf, size_t n) {
     return 0;
 }
 
+/* A synthetic peer that answers after the guest has given up and closed its sockets gets an
+ * error back, not a SIGPIPE that ends the whole selftest run. */
+#ifdef MSG_NOSIGNAL
+#define ADH_P2_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define ADH_P2_SEND_FLAGS 0
+#endif
+
 static int adh_p2_send_all(adh_p2_sock_t s, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t sent = 0u;
     while (sent < n) {
-        int r = send(s, (const char *)(p + sent), (int)(n - sent), 0);
+        int r = send(s, (const char *)(p + sent), (int)(n - sent), ADH_P2_SEND_FLAGS);
         if (r <= 0) return -1;
         sent += (size_t)r;
     }
     return 0;
 }
 
+extern uint64_t sr_host_monotonic_ms(void);
+
+/* How far a synthetic real-TCP peer thread has got. Each stage is set after the bytes it names
+ * have been read or sent, so a guest that sees it can count on them being on the socket. */
+enum {
+    ADH_P2_PEER_WAITING,
+    ADH_P2_PEER_READ_CREATE,   /* read LOGIN and the Create (lobby CONNECT) frame */
+    ADH_P2_PEER_LOBBY_REPLIED, /* sent its lobby answer to that Create */
+    ADH_P2_PEER_DATA_REPLIED   /* answered the guest's PDP datagram */
+};
+
+enum {
+    ADH_P2_PEER_WAIT_MS = 5000,
+    ADH_P2_PEER_GUEST_STEP_US = 1000,
+    ADH_P2_PEER_GUEST_BUDGET_US = 500000 /* a tenth of the 5 s online request timeout */
+};
+
+/* Waits for a synthetic peer thread to reach `want` (#2996). The peer runs in host time, while
+ * guest time moves only when the guest delays, so a guest polling loop alone can use up a guest
+ * deadline (the 5 s online request timeout) before the peer's thread has run at all. Here the
+ * guest delays between host sleeps only until ADH_P2_PEER_GUEST_BUDGET_US of guest time has
+ * passed, which lets its pumps connect and send what the peer is waiting for; after that guest
+ * time holds still while the peer catches up. The wait ends after ADH_P2_PEER_WAIT_MS of host
+ * time, and the caller reports that as a fixture failure. */
+static bool adh_p2_wait_peer(CpuState *cpu, atomic_int *stage, int want) {
+    const uint64_t deadline = sr_host_monotonic_ms() + (uint64_t)ADH_P2_PEER_WAIT_MS;
+    const uint64_t guest_until = sched_vtime_us() + (uint64_t)ADH_P2_PEER_GUEST_BUDGET_US;
+    while (atomic_load(stage) < want) {
+        if (sr_host_monotonic_ms() >= deadline) return false;
+        if (sched_vtime_us() < guest_until) {
+            cpu->r[4] = ADH_P2_PEER_GUEST_STEP_US;
+            (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        }
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000ul);
+#endif
+    }
+    return true;
+}
+
 typedef struct {
     adh_p2_sock_t lsn;
     volatile int stop;
     int got_pdp_ping;
+    atomic_int stage; /* ADH_P2_PEER_* */
 } AdhP2TcpServer;
 
 #ifdef _WIN32
@@ -12154,6 +12205,7 @@ static void *adh_p2_tcp_server_thread(void *arg) {
                 if (op == 2u) {
                     uint8_t grp[8];
                     if (adh_p2_recv_exact(lobby, grp, 8u) != 0) break;
+                    atomic_store(&srv->stage, ADH_P2_PEER_READ_CREATE);
                     uint8_t bssid_pkt[7] = {6u, peer_mac[0], peer_mac[1], peer_mac[2],
                                             peer_mac[3], peer_mac[4], peer_mac[5]};
                     uint8_t conn_pkt[139];
@@ -12162,8 +12214,9 @@ static void *adh_p2_tcp_server_thread(void *arg) {
                     memcpy(conn_pkt + 1, "LoopPeer", 8u);
                     memcpy(conn_pkt + 129, peer_mac, 6u);
                     conn_pkt[135] = 7u;
-                    (void)adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt));
-                    (void)adh_p2_send_all(lobby, conn_pkt, sizeof(conn_pkt));
+                    if (adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt)) == 0 &&
+                        adh_p2_send_all(lobby, conn_pkt, sizeof(conn_pkt)) == 0)
+                        atomic_store(&srv->stage, ADH_P2_PEER_LOBBY_REPLIED);
                     data = accept(srv->lsn, NULL, NULL);
                     if (data != ADH_P2_BAD_SOCK) {
                         uint8_t init[24], hdr[14], pay[64];
@@ -12182,7 +12235,8 @@ static void *adh_p2_tcp_server_thread(void *arg) {
                                 rep[9] = hdr[9];
                                 rep[10] = 6u;
                                 memcpy(rep + 14, "TCP_OK", 6u);
-                                (void)adh_p2_send_all(data, rep, sizeof(rep));
+                                if (adh_p2_send_all(data, rep, sizeof(rep)) == 0)
+                                    atomic_store(&srv->stage, ADH_P2_PEER_DATA_REPLIED);
                             }
                         }
                         /* Keep data socket alive briefly until lobby closes. */
@@ -12204,12 +12258,16 @@ static void *adh_p2_tcp_server_thread(void *arg) {
 }
 
 static int s_adh_p2_tcp_done;
+static AdhP2TcpServer *s_adh_p2_tcp_srv;
 
 static void adh_p2_tcp_main_fn(CpuState *cpu) {
+    char msg[192];
     const uint8_t peer_mac[6] = {0x02u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
     const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    atomic_int *peer_stage = &s_adh_p2_tcp_srv->stage;
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
     expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
            adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
            adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
@@ -12217,8 +12275,27 @@ static void adh_p2_tcp_main_fn(CpuState *cpu) {
            "adhoc tcp loopback: Net/Adhocctl init succeed");
     expect(adh(ADH_NID_CREATE, adh_name(0, "LOOPGRP"), 0u, 0u) == 0u,
            "adhoc tcp loopback: Create starts");
+    /* The answer is waited for mostly in host time, so the Create's 5 s guest deadline cannot pass
+     * while the peer's thread is late. */
+    const bool lobby_answered = adh_p2_wait_peer(cpu, peer_stage, ADH_P2_PEER_LOBBY_REPLIED);
+    snprintf(msg, sizeof(msg),
+             "adhoc tcp loopback: fixture peer answered LOGIN and Create within %d ms (stage=%d)",
+             ADH_P2_PEER_WAIT_MS, atomic_load(peer_stage));
+    expect(lobby_answered, msg);
+    if (!lobby_answered) {
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
+    }
     adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u, "adhoc tcp loopback: reaches CONNECTED state");
+    snprintf(msg, sizeof(msg),
+             "adhoc tcp loopback: reaches CONNECTED state with one CONNECT callback "
+             "(state=%u events=%u ev=%d err=0x%08x)",
+             adh_state(), s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u);
+    expect(adh_state() == 1u && s_adh_events == 1u && ADH_AT(0).event == 1 &&
+               ADH_AT(0).error == 0u,
+           msg);
     MEM_W32(ADH_P2_LEN, 256u);
     for (int w = 0; w < 40; w++) {
         MEM_W32(ADH_P2_LEN, 256u);
@@ -12238,8 +12315,13 @@ static void adh_p2_tcp_main_fn(CpuState *cpu) {
     expect(adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp, ADH_P2_PEER_MAC,
                          0x3100u, ADH_P2_BUF, 6u, 0u, 0u, 0u) == 0u,
            "adhoc tcp loopback: PdpSend sends TCP_GO");
+    const bool data_answered = adh_p2_wait_peer(cpu, peer_stage, ADH_P2_PEER_DATA_REPLIED);
+    snprintf(msg, sizeof(msg),
+             "adhoc tcp loopback: fixture peer answered TCP_GO within %d ms (stage=%d)",
+             ADH_P2_PEER_WAIT_MS, atomic_load(peer_stage));
+    expect(data_answered, msg);
     uint32_t rrc = 1u;
-    for (int w = 0; w < 40; w++) {
+    for (int w = 0; data_answered && w < 40; w++) {
         MEM_W32(ADH_P2_LEN, 64u);
         rrc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp,
                             ADH_P2_BUF + 64u, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u, 0u);
@@ -12281,7 +12363,8 @@ static void test_adhoc_online_real_tcp_loopback_e2e(void) {
     char srv_spec[64];
     snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u", port, port);
 
-    AdhP2TcpServer srv = {lsn, 0, 0};
+    AdhP2TcpServer srv = {lsn, 0, 0, ADH_P2_PEER_WAITING};
+    s_adh_p2_tcp_srv = &srv;
 #ifdef _WIN32
     uintptr_t th = _beginthreadex(NULL, 0, adh_p2_tcp_server_thread, &srv, 0, NULL);
     expect(th != 0u, "adhoc tcp loopback: server thread started");
@@ -12313,6 +12396,7 @@ static void test_adhoc_online_real_tcp_loopback_e2e(void) {
 #else
     if (pt_ok) pthread_join(th, NULL);
 #endif
+    s_adh_p2_tcp_srv = NULL;
 }
 
 /* ---- D2 & D12.{2,3,4,5} regressions -------------------------------------------------------- */
@@ -12338,6 +12422,7 @@ typedef struct {
     adh_p2_sock_t trig_lsn;
     volatile int stop;
     volatile int sent_unsolicited;
+    atomic_int stage; /* ADH_P2_PEER_* */
 } D122TcpServer;
 
 #ifdef _WIN32
@@ -12359,9 +12444,11 @@ static void *d122_tcp_server_thread(void *arg) {
                 if (op == 2u) {
                     uint8_t grp[8];
                     if (adh_p2_recv_exact(lobby, grp, 8u) != 0) break;
+                    atomic_store(&srv->stage, ADH_P2_PEER_READ_CREATE);
                     uint8_t bssid_pkt[7] = {6u, bssid[0], bssid[1], bssid[2],
                                             bssid[3], bssid[4], bssid[5]};
-                    (void)adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt));
+                    if (adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt)) == 0)
+                        atomic_store(&srv->stage, ADH_P2_PEER_LOBBY_REPLIED);
                     adh_p2_sock_t trig = accept(srv->trig_lsn, NULL, NULL);
                     if (trig != ADH_P2_BAD_SOCK) {
                         const uint8_t scan_done = 5u; /* NK_LOBBY_SCAN_COMPLETE */
@@ -12398,8 +12485,25 @@ static void d122_main_fn(CpuState *cpu) {
            adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
            "d12.2: init");
     expect(adh(ADH_NID_CREATE, adh_name(0, "GRP122"), 0u, 0u) == 0u, "d12.2: Create starts");
-    adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u && s_adh_events == 1u, "d12.2: connected in GRP122");
+    /* As in the loopback cell (#2996): the BSSID answer is waited for mostly in host time, so the
+     * Create's 5 s guest deadline cannot pass while the peer's thread is late. */
+    atomic_int *peer_stage = &s_d122_srv->stage;
+    const bool lobby_answered = adh_p2_wait_peer(cpu, peer_stage, ADH_P2_PEER_LOBBY_REPLIED);
+    char d122_msg[160];
+    snprintf(d122_msg, sizeof(d122_msg),
+             "d12.2: fixture peer answered LOGIN and Create within %d ms (stage=%d)",
+             ADH_P2_PEER_WAIT_MS, atomic_load(peer_stage));
+    expect(lobby_answered, d122_msg);
+    if (lobby_answered) adh_p2_wait_state(cpu, 1u, 1u);
+    const bool connected = adh_state() == 1u && s_adh_events == 1u && ADH_AT(0).event == 1;
+    expect(connected, "d12.2: connected in GRP122");
+    if (!connected) {
+        /* The unsolicited scan answer is only meaningful in the group: leave it unsent. The peer's
+         * thread leaves its wait for the trigger when the listener closes. */
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
+    }
     /* Poke trigger socket so server immediately sends unsolicited SCAN_COMPLETE while in state 1. */
     adh_p2_sock_t poke = socket(AF_INET, SOCK_STREAM, 0);
     if (poke != ADH_P2_BAD_SOCK) {
@@ -12419,7 +12523,6 @@ static void d122_main_fn(CpuState *cpu) {
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
         if (adh_state() != 1u || s_adh_events != 1u) break;
     }
-    char d122_msg[160];
     snprintf(d122_msg, sizeof(d122_msg),
              "d12.2: unsolicited SCAN_COMPLETE while in group keeps state 1 and fires no event "
              "(state=%u events=%u)", adh_state(), s_adh_events);
@@ -12599,7 +12702,7 @@ static void test_adhoc_d2_d12_regressions(void) {
         expect(bind_ok, "d12.2: bound 127.0.0.1:0");
         if (bind_ok) {
             s_d122_trig_port = ntohs(tsa.sin_port);
-            D122TcpServer srv = {lsn, trig, 0, 0};
+            D122TcpServer srv = {lsn, trig, 0, 0, ADH_P2_PEER_WAITING};
             s_d122_srv = &srv;
 #ifdef _WIN32
             uintptr_t th = _beginthreadex(NULL, 0, d122_tcp_server_thread, &srv, 0, NULL);
@@ -14210,8 +14313,6 @@ static void test_adhoc_d3_dead_and_silent_lobby(void) {
 #endif
 }
 
-extern uint64_t sr_host_monotonic_ms(void);
-
 static bool d9_fast_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
     (void)host; (void)ctx;
     out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
@@ -14224,14 +14325,15 @@ enum { D9_SLOW_HELD, D9_SLOW_RELEASED, D9_SLOW_ACKNOWLEDGED, D9_SLOW_TIMED_OUT }
 static atomic_uint s_d9_slow_calls;
 static atomic_int s_d9_slow_gate;
 
-static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
-    (void)host; (void)ctx;
+/* Holds the first lookup until the guest releases the gate. Returns whether it was released;
+ * a lookup still held after 3 s marks the gate timed out instead, so that a guest that never
+ * gets to release it (Init joining the unfinished worker) reports the failure. */
+static bool d9_hold_resolve(void) {
     if (atomic_fetch_add(&s_d9_slow_calls, 1u) != 0u) return false;
     const uint64_t deadline = sr_host_monotonic_ms() + 3000u;
     while (atomic_load(&s_d9_slow_gate) == D9_SLOW_HELD) {
         if (sr_host_monotonic_ms() >= deadline) {
             int held = D9_SLOW_HELD;
-            /* If Init joins the unfinished worker, let the fixture report failure. */
             if (atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_TIMED_OUT))
                 return false;
             break;
@@ -14242,15 +14344,38 @@ static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ct
         adh_p2_usleep(1000u);
 #endif
     }
-    if (atomic_load(&s_d9_slow_gate) != D9_SLOW_RELEASED) return false;
+    return atomic_load(&s_d9_slow_gate) == D9_SLOW_RELEASED;
+}
+
+static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host; (void)ctx;
+    if (!d9_hold_resolve()) return false;
     out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
     atomic_store(&s_d9_slow_gate, D9_SLOW_ACKNOWLEDGED);
     return true;
 }
 
+/* The failing lookup is held the same way (#2995): released at once, it can fail and be pumped
+ * before Create, which then answers 0x80410b09 itself instead of queuing the request whose
+ * DISCONNECT callback D8.3 checks. */
 static bool d9_fail_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
     (void)host; (void)out_ipv4; (void)ctx;
+    if (d9_hold_resolve()) atomic_store(&s_d9_slow_gate, D9_SLOW_ACKNOWLEDGED);
     return false;
+}
+
+/* Waits in host time, without moving guest time, for a released lookup to finish. */
+static bool d9_wait_resolve_acknowledged(void) {
+    const uint64_t deadline = sr_host_monotonic_ms() + 3000u;
+    while (atomic_load(&s_d9_slow_gate) != D9_SLOW_ACKNOWLEDGED) {
+        if (sr_host_monotonic_ms() >= deadline) return false;
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000u);
+#endif
+    }
+    return true;
 }
 
 static AdhP2MiniRelay *s_d89_srv;
@@ -14358,14 +14483,30 @@ static void d89_main_fn(CpuState *cpu) {
            "d9: async DNS resolved once and Create delivered the CONNECT callback");
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d9: Term");
 
-    /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error(). */
+    /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error().
+     * The failure is held until Create has returned, so that it arrives for a queued request. */
     s_adh_events = 0u;
+    atomic_store(&s_d9_slow_calls, 0u);
+    atomic_store(&s_d9_slow_gate, D9_SLOW_HELD);
     nk_relay_client_set_resolve_hook_for_test(d9_fail_resolve_hook, NULL);
-    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
-           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
-           adh(ADH_NID_CREATE, adh_name(0, "D9FAIL1"), 0u, 0u) == 0u,
-           "d8.3/d9: Init+Create starts before async DNS failure");
-    for (int w = 0; w < 80 && s_adh_events == 0u; w++) {
+    const uint32_t fail_init_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    const uint32_t fail_handler_rc = adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u);
+    const uint32_t fail_create_rc = adh(ADH_NID_CREATE, adh_name(0, "D9FAIL1"), 0u, 0u);
+    held = D9_SLOW_HELD;
+    const bool fail_released =
+        atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_RELEASED);
+    const bool fail_finished = fail_released && d9_wait_resolve_acknowledged();
+    snprintf(msg, sizeof(msg),
+             "d8.3/d9: fixture holds the DNS failure until Create returns "
+             "(calls=%u gate=%d finished=%d)",
+             atomic_load(&s_d9_slow_calls), held, fail_finished);
+    expect(fail_finished && atomic_load(&s_d9_slow_calls) == 1u, msg);
+    snprintf(msg, sizeof(msg),
+             "d8.3/d9: Init+Create starts before async DNS failure "
+             "(init=0x%08x handler=0x%08x create=0x%08x)",
+             fail_init_rc, fail_handler_rc, fail_create_rc);
+    expect(fail_init_rc == 0u && fail_handler_rc == 0u && fail_create_rc == 0u, msg);
+    for (int w = 0; fail_finished && w < 80 && s_adh_events == 0u; w++) {
 #ifdef _WIN32
         Sleep(2u);
 #else
