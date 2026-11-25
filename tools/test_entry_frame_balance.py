@@ -1093,6 +1093,22 @@ class BranchEdgeCensusTests(unittest.TestCase):
         )
 
 
+def delay_slot_link_cases(base):
+    pc, target = base + 4, base + 0x18
+    return (
+        ("jal-ra", jal(target), RA, False),
+        ("jal-a1", jal(target), A1, True),
+        ("jalr-s0", jalr(T9, S0), S0, False),
+        ("jalr-zero", jalr(T9, 0), RA, True),
+        ("bgezal-taken", regimm_link(0x11, 0, pc, target), RA, False),
+        ("bltzal-untaken", regimm_link(0x10, 0, pc, target), RA, False),
+        ("bgezall-taken", regimm_link(0x13, 0, pc, target), RA, False),
+        ("bal-pc-read", regimm_link(0x11, 0, pc, pc + 8), RA, False),
+        ("bgez-no-link", regimm_link(0x01, 0, pc, target), RA, True),
+        ("bgezal-a1", regimm_link(0x11, 0, pc, target), A1, True),
+    )
+
+
 class CodePointerEvidenceTests(unittest.TestCase):
     """Each provenance kind must be reported apart from the others."""
 
@@ -1178,6 +1194,17 @@ class CodePointerEvidenceTests(unittest.TestCase):
                         frozenset({0x1020}),
                     )
 
+    def test_immediate_evidence_respects_links_written_before_the_slot(self):
+        # The executable-looking 0x1020 comes from the old high half.
+        # A real link overwrites that half before the delayed add or OR.
+        for name, transfer, register, preserves_high in delay_slot_link_cases(0x1000):
+            for low in (addiu, ori):
+                with self.subTest(transfer=name, low=low.__name__):
+                    self.assertEqual(
+                        self.immediate(lui(register, 0), transfer, low(register, register, 0x1020)),
+                        frozenset({0x1020}) if preserves_high else frozenset(),
+                    )
+
     def test_only_what_the_delay_slot_wrote_outlives_the_transfer(self):
         for name, transfer in self.TRANSFERS:
             with self.subTest(transfer=name, slot="lui"):
@@ -1261,6 +1288,20 @@ class AddressMaterializationTests(unittest.TestCase):
             shadow=frozenset(),
             materialized={},
         )
+
+    def test_a_link_destination_does_not_seed_an_entry_from_its_old_high_half(self):
+        base, leaf = self.BASE, self.BASE + 0x60
+        for name, transfer, register, preserves_high in delay_slot_link_cases(base):
+            for low in (addiu, ori):
+                with self.subTest(transfer=name, low=low.__name__):
+                    discovery = self.discovery({
+                        base: lui(register, base >> 16),
+                        base + 4: transfer,
+                        base + 8: low(register, register, leaf & 0xFFFF),
+                        leaf: jr(RA),
+                    })
+                    analyze._seed_address_materializations(discovery)
+                    self.assertEqual(leaf in discovery.hc, preserves_high)
 
     def test_chained_la_tracks_the_completed_value_not_the_stale_high_half(self):
         base = self.BASE

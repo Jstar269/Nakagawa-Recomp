@@ -1745,6 +1745,15 @@ COMPUTED_GOTO_WINDOW = 16
 COMPUTED_GOTO_MAX_TARGETS = 64
 
 
+def _discard_transfer_link(tracked, word):
+    """Drop the old link destination before decoding the transfer's delay slot."""
+    op = word >> 26
+    if op == 3 or (op == 1 and ((word >> 16) & 31) in REGIMM_LINK_RT):
+        tracked.pop(31, None)
+    elif op == 0 and (word & 63) == 9:
+        tracked.pop((word >> 11) & 31, None)
+
+
 def _gpr_writes(word):
     """GPRs ``word`` writes: a frozenset, ``None`` for a control transfer, or
     ``"unknown"`` for an encoding this decoder does not classify."""
@@ -1992,6 +2001,7 @@ def code_pointer_evidence(elf, ranges):
         elif branch_target(addr, word) is not None or op in (2, 3) or (
             op == 0 and (word & 0x3F) in (0x08, 0x09)
         ):
+            _discard_transfer_link(hireg, word)
             slot_at = addr + 4
 
     # `sections` is absent on the owned synthetic word images, which carry no data
@@ -2384,6 +2394,7 @@ def _seed_address_materializations(d):
             is_branch = branch_target(addr, word) is not None
             is_jump_or_call = op in (2, 3) or (op == 0 and (word & 0x3F) in (0x08, 0x09))
             if (is_branch or is_jump_or_call) and clear_at is None:
+                _discard_transfer_link(hireg, word)
                 clear_at = addr + 8
 
             if op == 0x0F:  # lui rt, imm
