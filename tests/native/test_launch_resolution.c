@@ -3393,27 +3393,41 @@ static void memstick_write_aged_file(const char *path, const char *bytes, uint32
 }
 
 #if !defined(_WIN32) && !defined(_WIN64)
-static void test_memstick_skipped_slot(const char *base) {
-    puts("[LAUNCH_TEST] Shared Memory Stick rejects a case-folded skipped legacy slot");
+typedef struct {
+    const char *fixture;
+    const char *ordinary;
+    const char *skipped;
+    const char *unrelated;
+    const char *link_target;
+} MemstickSkippedNameCase;
+
+static void test_memstick_skipped_name_case(const char *base, const MemstickSkippedNameCase *fixture) {
+    printf("[LAUNCH_TEST] Shared Memory Stick rejects a case-folded skipped name in %s\n", fixture->fixture);
     const NkMemstickPlanInput inputs[] = {{"test00001", NULL}, {"usable-slot", NULL}};
     char saves[NK_MAX_PATH], target[NK_MAX_PATH], path[NK_MAX_PATH], data[NK_MAX_PATH];
     char skipped[NK_MAX_PATH], immutable[NK_MAX_PATH], checkpoint[NK_MAX_PATH];
-    memstick_fixture_path(saves, base, "memstick-skipped-slot");
+    memstick_fixture_path(saves, base, fixture->fixture);
     memstick_fixture_path(target, saves, "Usable-Slot");
     memstick_fixture_path(path, target, "PSP/SAVEDATA/SAVE");
     assert(nk_platform_mkdir_p(path));
     memstick_fixture_path(data, path, "DATA.BIN");
     write_file_utf8(data, "synthetic legacy save");
-    memstick_fixture_path(path, saves, "unrelated-link");
+    if (fixture->ordinary) {
+        memstick_fixture_path(path, saves, fixture->ordinary);
+        assert(nk_platform_mkdir_p(path));
+    }
+    memstick_fixture_path(target, saves, fixture->link_target);
+    memstick_fixture_path(path, saves, fixture->unrelated);
     assert(symlink(target, path) == 0);
-    memstick_fixture_path(skipped, saves, "TEST00001");
+    memstick_fixture_path(skipped, saves, fixture->skipped);
 
     NkMemstickPaths layout;
     NkMemstickSavePlan initial, current;
     assert(nk_memstick_layout_paths(saves, &layout));
     assert(nk_memstick_plan_savedata(saves, inputs, 2u, &initial));
     assert(initial.source_count == 2u && initial.unit_count == 1u);
-    assert(initial.sources[0].status == NK_MEMSTICK_PLAN_SOURCE_ABSENT);
+    assert(initial.sources[0].status == (fixture->ordinary ? NK_MEMSTICK_PLAN_SOURCE_READABLE
+                                                          : NK_MEMSTICK_PLAN_SOURCE_ABSENT));
     assert(initial.sources[1].status == NK_MEMSTICK_PLAN_SOURCE_READABLE);
     assert(!strcmp(initial.sources[1].slot, "Usable-Slot"));
 
@@ -3446,8 +3460,8 @@ static void test_memstick_skipped_slot(const char *base) {
     if (slot_status != NK_MEMSTICK_PLAN_SOURCE_UNREADABLE ||
         begin != NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE ||
         resumed != NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE || complete) {
-        fprintf(stderr, "Skipped legacy slot: status=%d begin=%d resume=%d complete=%d\n",
-                slot_status, (int)begin, (int)resumed, (int)complete);
+        fprintf(stderr, "Skipped case-folded %s: status=%d begin=%d resume=%d complete=%d\n",
+                fixture->fixture, slot_status, (int)begin, (int)resumed, (int)complete);
     }
     assert(slot_status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE);
     assert(begin == NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE && !wrote_plan);
@@ -3457,8 +3471,40 @@ static void test_memstick_skipped_slot(const char *base) {
     assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) == NK_MEMSTICK_COLLISION_COPIED && complete);
     memstick_fixture_path(path, layout.staging, "PSP/SAVEDATA/SAVE/DATA.BIN");
     assert_file_text(path, "synthetic legacy save");
+
+    /* Check the same lookup when a completed output gains a skipped alias. */
+    if (fixture->ordinary) {
+        char output_alias[NK_MAX_PATH];
+        memstick_fixture_path(output_alias, layout.staging, "PSP/SAVEDATA/save");
+        assert(symlink(target, output_alias) == 0);
+        char *progress = read_text_file(checkpoint);
+        assert(progress);
+        assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) ==
+               NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT);
+        assert(!complete);
+        assert_file_text(checkpoint, progress);
+        assert_file_text(path, "synthetic legacy save");
+        assert_file_text(data, "synthetic legacy save");
+        assert(unlink(output_alias) == 0);
+        assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) == NK_MEMSTICK_COLLISION_COPIED && complete);
+        assert_file_text(checkpoint, progress);
+        free(progress);
+    }
+
     nk_memstick_save_plan_free(&initial);
     nk_platform_file_lock_release(&lock);
+}
+
+static void test_memstick_skipped_slot(const char *base) {
+    static const MemstickSkippedNameCase cases[] = {
+        {"memstick-skipped-slot", NULL, "TEST00001", "unrelated-link", "Usable-Slot"},
+        {"memstick-skipped-psp", "test00001/PSP", "test00001/psp", "test00001/unrelated-link",
+         "Usable-Slot/PSP"},
+        {"memstick-skipped-savedata", "test00001/PSP/SAVEDATA", "test00001/PSP/savedata",
+         "test00001/PSP/unrelated-link", "Usable-Slot/PSP/SAVEDATA"},
+    };
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i)
+        test_memstick_skipped_name_case(base, &cases[i]);
 }
 #endif
 

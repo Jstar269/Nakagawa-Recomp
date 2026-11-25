@@ -854,6 +854,7 @@ typedef struct {
     char *spelling;
     bool found;
     bool ambiguous;
+    bool skipped;
 } UnitLookup;
 
 static bool unit_lookup_entry(const char *name, bool is_dir, void *opaque) {
@@ -868,15 +869,21 @@ static bool unit_lookup_entry(const char *name, bool is_dir, void *opaque) {
     return true;
 }
 
-/* Resolve a directory by PSP spelling. A missing result returns the requested new path.
- * Otherwise require an ordinary, unambiguous directory. */
+static bool unit_lookup_skipped(const char *name, void *opaque) {
+    UnitLookup *lookup = opaque;
+    lookup->skipped = true;
+    return unit_lookup_entry(name, false, opaque);
+}
+
+/* Resolve a directory by PSP spelling. A skipped entry with the same folded name
+ * is ambiguous even if an ordinary directory also matches. When there is no match,
+ * keep the strict refusal to create a path amid skipped entries. */
 static bool unit_directory(const char *parent, const char *name, bool create,
                            char out[NK_MAX_PATH]) {
     char spelling[NK_MAX_PATH];
-    UnitLookup lookup = {name, spelling, false, false};
-    size_t skipped = 0u;
-    if (!nk_platform_list_dir_counted(parent, unit_lookup_entry, &lookup, &skipped) ||
-        lookup.ambiguous || (!lookup.found && skipped != 0u) ||
+    UnitLookup lookup = {.name = name, .spelling = spelling};
+    if (!nk_platform_list_dir_report_skipped(parent, unit_lookup_entry, unit_lookup_skipped, &lookup) ||
+        lookup.ambiguous || (!lookup.found && lookup.skipped) ||
         !layout_join(parent, lookup.found ? spelling : name, out)) return false;
     if (lookup.found) return unit_plain_directory(out) && (!create || nk_platform_sync_dir(parent));
     if (!nk_platform_path_missing(out)) return false;
