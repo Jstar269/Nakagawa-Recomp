@@ -3392,6 +3392,76 @@ static void memstick_write_aged_file(const char *path, const char *bytes, uint32
 #endif
 }
 
+#if !defined(_WIN32) && !defined(_WIN64)
+static void test_memstick_skipped_slot(const char *base) {
+    puts("[LAUNCH_TEST] Shared Memory Stick rejects a case-folded skipped legacy slot");
+    const NkMemstickPlanInput inputs[] = {{"test00001", NULL}, {"usable-slot", NULL}};
+    char saves[NK_MAX_PATH], target[NK_MAX_PATH], path[NK_MAX_PATH], data[NK_MAX_PATH];
+    char skipped[NK_MAX_PATH], immutable[NK_MAX_PATH], checkpoint[NK_MAX_PATH];
+    memstick_fixture_path(saves, base, "memstick-skipped-slot");
+    memstick_fixture_path(target, saves, "Usable-Slot");
+    memstick_fixture_path(path, target, "PSP/SAVEDATA/SAVE");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(data, path, "DATA.BIN");
+    write_file_utf8(data, "synthetic legacy save");
+    memstick_fixture_path(path, saves, "unrelated-link");
+    assert(symlink(target, path) == 0);
+    memstick_fixture_path(skipped, saves, "TEST00001");
+
+    NkMemstickPaths layout;
+    NkMemstickSavePlan initial, current;
+    assert(nk_memstick_layout_paths(saves, &layout));
+    assert(nk_memstick_plan_savedata(saves, inputs, 2u, &initial));
+    assert(initial.source_count == 2u && initial.unit_count == 1u);
+    assert(initial.sources[0].status == NK_MEMSTICK_PLAN_SOURCE_ABSENT);
+    assert(initial.sources[1].status == NK_MEMSTICK_PLAN_SOURCE_READABLE);
+    assert(!strcmp(initial.sources[1].slot, "Usable-Slot"));
+
+    NkFileLock lock;
+    NkMemstickLayout moving;
+    assert(nk_platform_file_lock_acquire(&lock, layout.lock, 0));
+    assert(nk_memstick_layout_init(&moving, NK_MEMSTICK_STATE_MOVING, "test"));
+    assert(nk_memstick_layout_write(saves, &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&moving);
+    memstick_fixture_path(immutable, layout.migration, "psp-savedata/plan.json");
+    memstick_fixture_path(checkpoint, layout.migration, "psp-savedata/progress.json");
+
+    assert(symlink(target, skipped) == 0);
+    assert(nk_memstick_plan_savedata(saves, inputs, 2u, &current));
+    assert(current.source_count == 2u);
+    const int slot_status = current.sources[0].status;
+    assert(current.sources[1].status == NK_MEMSTICK_PLAN_SOURCE_READABLE && current.unit_count == 1u);
+    nk_memstick_save_plan_free(&current);
+    const NkMemstickCollisionResult begin = nk_memstick_savedata_move_begin(saves, &initial);
+    const bool wrote_plan = !nk_platform_path_missing(immutable);
+    assert(unlink(skipped) == 0);
+
+    assert(nk_memstick_savedata_move_begin(saves, &initial) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(symlink(target, skipped) == 0);
+    bool complete = true;
+    const NkMemstickCollisionResult resumed = nk_memstick_savedata_move_resume(saves, 0u, &complete);
+    const bool wrote_progress = !nk_platform_path_missing(checkpoint);
+    const bool wrote_staging = !nk_platform_path_missing(layout.staging);
+    assert_file_text(data, "synthetic legacy save");
+    if (slot_status != NK_MEMSTICK_PLAN_SOURCE_UNREADABLE ||
+        begin != NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE ||
+        resumed != NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE || complete) {
+        fprintf(stderr, "Skipped legacy slot: status=%d begin=%d resume=%d complete=%d\n",
+                slot_status, (int)begin, (int)resumed, (int)complete);
+    }
+    assert(slot_status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE);
+    assert(begin == NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE && !wrote_plan);
+    assert(resumed == NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE && !complete);
+    assert(!wrote_progress && !wrote_staging);
+    assert(unlink(skipped) == 0);
+    assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) == NK_MEMSTICK_COLLISION_COPIED && complete);
+    memstick_fixture_path(path, layout.staging, "PSP/SAVEDATA/SAVE/DATA.BIN");
+    assert_file_text(path, "synthetic legacy save");
+    nk_memstick_save_plan_free(&initial);
+    nk_platform_file_lock_release(&lock);
+}
+#endif
+
 static void test_memstick_save_planner(const char *base) {
     puts("[LAUNCH_TEST] Shared Memory Stick legacy election and replay");
     static const struct {
@@ -4196,6 +4266,9 @@ int main(int argc, char **argv) {
     test_homebrew_folder_named_as_picked(base);
     test_memstick_layout(base, sep);
     test_memstick_save_collision(base);
+#if !defined(_WIN32) && !defined(_WIN64)
+    test_memstick_skipped_slot(base);
+#endif
     test_memstick_save_planner(base);
     test_memstick_journal_restart(base);
 

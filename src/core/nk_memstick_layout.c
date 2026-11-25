@@ -1233,6 +1233,10 @@ static bool plan_find_slot(const char *name, bool is_dir, void *opaque) {
     return true;
 }
 
+static bool plan_find_skipped_slot(const char *name, void *opaque) {
+    return plan_find_slot(name, false, opaque);
+}
+
 static int plan_candidate_order(const void *left, const void *right) {
     const PlanCandidate *a = left, *b = right;
     int by_key = ascii_compare_ignoring_case(a->unit.name, b->unit.name);
@@ -1267,8 +1271,7 @@ static bool plan_read_source(const char *saves, const NkMemstickPlanInput *input
     }
     if (source->status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE) return true;
     if (source->status == NK_MEMSTICK_PLAN_SOURCE_ABSENT) {
-        /* Unsupported entries are omitted from the enumeration. If its exact
-           name exists anyway, don't treat that legacy source as absent. */
+        /* An exact spelling may have appeared after the enumeration. */
         if (!nk_platform_path_missing(slot)) source->status = NK_MEMSTICK_PLAN_SOURCE_UNREADABLE;
         return true;
     }
@@ -1378,8 +1381,7 @@ bool nk_memstick_plan_savedata(const char *saves_root, const NkMemstickPlanInput
     }
     if (ok && input_count) {
         PlanSlots slots = {sorted, out->sources, input_count};
-        size_t skipped = 0u;
-        ok = nk_platform_list_dir_counted(saves, plan_find_slot, &slots, &skipped);
+        ok = nk_platform_list_dir_report_skipped(saves, plan_find_slot, plan_find_skipped_slot, &slots);
     }
     for (size_t i = 0; ok && i < input_count; ++i) {
         ok = plan_read_source(saves, &sorted[i], &out->sources[i], &candidates);
@@ -1737,6 +1739,10 @@ static NkMemstickCollisionResult move_match_inventory(const NkMemstickPaths *pat
         result = NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
     } else {
         for (size_t i = 0; i < plan->source_count; ++i) {
+            if (current.sources[i].status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE) {
+                result = NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE;
+                break;
+            }
             if (plan->sources[i].status != current.sources[i].status ||
                 strcmp(plan->sources[i].slot, current.sources[i].slot)) {
                 result = NK_MEMSTICK_COLLISION_SOURCE_CHANGING;

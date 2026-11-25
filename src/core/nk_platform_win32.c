@@ -391,9 +391,9 @@ bool nk_platform_list_files(const char *dir, NkDirFileFn fn, void *ctx) {
     return true;
 }
 
-/* Both directory walks. With skipped NULL this is nk_platform_list_dir; with it,
-   every entry left out is counted and a listing that stops on an error fails. */
-static bool win32_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *skipped) {
+/* Count or report skipped entries only for strict walks. */
+static bool win32_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *skipped,
+                          NkDirFileFn skipped_name) {
     if (!dir || !*dir || !fn) return false;
     /* Extended-length buffers stay off the stack: a caller walking a tree may
        hold several of its own frames. */
@@ -401,6 +401,7 @@ static bool win32_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *
     /* A cloud file that is not on this computer: reading it would download it. */
     const DWORD cloud = FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN |
                         FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    const bool strict = skipped || skipped_name;
     char *pattern = (char *)malloc(WIDE_PATTERN_CHARS);
     WCHAR *wpattern = (WCHAR *)malloc(sizeof(WCHAR) * WIDE_PATTERN_CHARS);
     bool ok = false;
@@ -419,22 +420,31 @@ static bool win32_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *
                 do {
                     if (wcscmp(data.cFileName, L".") == 0 ||
                         wcscmp(data.cFileName, L"..") == 0) continue;
-                    if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-                        (skipped && (data.dwFileAttributes & cloud))) {
+                    const bool usable = !(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                                        (!strict || !(data.dwFileAttributes & cloud));
+                    if (!usable) {
                         if (skipped) ++*skipped;
-                        continue;
+                        if (!skipped_name) continue;
                     }
                     char name[1024];
                     if (!wide_to_utf8(data.cFileName, name, sizeof(name))) {
+                        if (skipped_name) {
+                            ok = false;
+                            stopped = true;
+                            break;
+                        }
                         if (skipped) ++*skipped;
                         continue;
                     }
-                    if (!fn(name, (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, ctx)) {
+                    const bool keep_walking = usable
+                        ? fn(name, (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, ctx)
+                        : skipped_name(name, ctx);
+                    if (!keep_walking) {
                         stopped = true;
                         break;
                     }
                 } while (FindNextFileW(find, &data));
-                if (skipped && !stopped && GetLastError() != ERROR_NO_MORE_FILES) ok = false;
+                if (strict && !stopped && GetLastError() != ERROR_NO_MORE_FILES) ok = false;
                 FindClose(find);
             }
         }
@@ -445,13 +455,18 @@ static bool win32_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *
 }
 
 bool nk_platform_list_dir(const char *dir, NkDirEntryFn fn, void *ctx) {
-    return win32_list_dir(dir, fn, ctx, NULL);
+    return win32_list_dir(dir, fn, ctx, NULL, NULL);
 }
 
 bool nk_platform_list_dir_counted(const char *dir, NkDirEntryFn fn, void *ctx,
                                   size_t *skipped) {
     size_t none = 0;
-    return win32_list_dir(dir, fn, ctx, skipped ? skipped : &none);
+    return win32_list_dir(dir, fn, ctx, skipped ? skipped : &none, NULL);
+}
+
+bool nk_platform_list_dir_report_skipped(const char *dir, NkDirEntryFn fn,
+                                        NkDirFileFn skipped_name, void *ctx) {
+    return skipped_name && win32_list_dir(dir, fn, ctx, NULL, skipped_name);
 }
 
 bool nk_platform_sync_file(FILE *f) {

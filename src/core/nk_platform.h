@@ -104,6 +104,11 @@ bool nk_platform_list_dir(const char *dir, NkDirEntryFn fn, void *ctx);
  * stops on a read error part way. */
 bool nk_platform_list_dir_counted(const char *dir, NkDirEntryFn fn, void *ctx,
                                   size_t *skipped);
+/* A strict walk that reports skipped names without following or opening their
+ * entries. An unrepresentable name fails the listing, and either callback can
+ * stop it early by returning false. */
+bool nk_platform_list_dir_report_skipped(const char *dir, NkDirEntryFn fn,
+                                        NkDirFileFn skipped_name, void *ctx);
 /* Flush f's buffered bytes and have the operating system put them on the disk
  * (fflush, then FlushFileBuffers or fsync). False when either fails. */
 bool nk_platform_sync_file(FILE *f);
