@@ -24,9 +24,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 179 | 88 |
+| `ppsspp-derived` | 180 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 301 | 183 |
+| `synthetic` | 300 | 183 |
 | `unverified` | 173 | 22 |
 | total | 717 | 367 |
 
@@ -132,7 +132,7 @@ a title that translates none has generated code unchanged.
 | `0x13407f13` | `sceMpegRingbufferDestruct` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x136caf51` | `sceAudioOutputBlocking` | audio | `ppsspp-derived` | registry notes name PPSSPP; unlinked hardware note |
 | `0x13a5abef` | `sceKernelPrintf` | kernel_utils | `unverified` | no recorded evidence |
-| `0x13f592bc` | `sceAudioOutputPannedBlocking` | audio | `synthetic` | HLE selftest dispatch |
+| `0x13f592bc` | `sceAudioOutputPannedBlocking` | audio | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x1575d64b` | `sceAtracLowLevelInitDecoder` | audio_codec | `unverified` | no recorded evidence |
 | `0x1579a159` | `sceUtilityLoadNetModule` | utility | `synthetic` | HLE selftest dispatch |
 | `0x157e6225` | `sceNetAdhocPtpClose` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
