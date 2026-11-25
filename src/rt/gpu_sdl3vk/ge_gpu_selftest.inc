@@ -3807,6 +3807,95 @@ static int coherence_run_texture_ram_unnotified_change(void) {
     return 1;
 }
 
+/* A linear texture can expose more texels in its last row than fit in the declared
+ * pitch. A plain RAM store to that tail must change what the next GPU draw samples. */
+static int coherence_texture_ram_linear_tail_cell(unsigned fmt, unsigned pitch) {
+    enum { W = 32, H = 4, X0 = 10, X1 = 50, Y = 10 };
+    const uint32_t base = 0x04140000u, stride = 512u;
+    const uint32_t tex_addr = 0x08530000u, clut_addr = 0x08540000u;
+    const uint32_t list_addr = 0x00100800u, rgb = 0x00FFFFFFu;
+    const unsigned bits = fmt == 3u ? 32u : 8u;
+    const unsigned tail = (H - 1u) * ge_tex_row_bytes(pitch, bits) + (W - 1u) * bits / 8u;
+    const uint32_t old_rgb = 0x00313131u;
+    const uint32_t new_rgb = fmt == 3u ? 0x003131C3u : 0x00C3C3C3u;
+    uint32_t *guest = (uint32_t *)SR_HOST(base);
+    uint8_t *tex = SR_HOST(tex_addr);
+    uint32_t *clut = (uint32_t *)SR_HOST(clut_addr);
+    uint32_t decoded[W * H];
+
+    coherence_reset_targets();
+    memset(guest, 0, stride * FB_H * 4u);
+    sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+    memset(tex, 0x31, 2048u);
+    for (uint32_t i = 0; i < 256u; i++) clut[i] = 0xFF000000u | (i * 0x00010101u);
+
+    wrap_state(base, stride);
+    const uint32_t list[] = {
+        0xA0000000u | (tex_addr & 0x00FFFFFFu),
+        0xA8000000u | ((tex_addr & 0xFF000000u) >> 8) | pitch,
+        0xB8000205u, /* 32 x 4 */
+        0xC2000000u, /* linear */
+        0xC3000000u | fmt,
+        0xC6000000u, /* nearest */
+        0xC9000103u, /* replace, RGBA */
+        0xB0000000u | (clut_addr & 0x00FFFFFFu),
+        0xB1000000u | ((clut_addr & 0xFF000000u) >> 8),
+        0xC500FF03u, /* 8888, shift 0, mask 0xFF */
+        0xC4000020u, /* load 256 palette entries */
+        0x1E000001u, /* texture enable */
+        0x0F000000u, 0x0C000000u,
+    };
+    memcpy(SR_HOST(list_addr), list, sizeof(list));
+    ge_set_gpu_hooks(&k_hooks);
+    if (ge_run_list(list_addr, 0) || s_ge->tex_w != W || s_ge->tex_h != H ||
+        s_ge->tex_bufw != pitch) {
+        fprintf(stderr, "gpu coherence selftest [texture-ram-linear-tail]: GE setup failed\n");
+        return 0;
+    }
+
+    ge_decode_tex_rgba(decoded);
+    const uint32_t ref_first = decoded[W * H - 1u] & rgb;
+    GeVtx p0, p1;
+    wrap_vtx(&p0, X0, Y, 0xFFFFFFFFu);
+    wrap_vtx(&p1, X0 + W, Y + H, 0xFFFFFFFFu);
+    p1.u = W;
+    p1.v = H;
+    int ok = hook_sprite(&p0, &p1, 0) && submit_pending();
+
+    tex[tail] = 0xC3; /* No notification or texture state change between draws. */
+    ge_decode_tex_rgba(decoded);
+    const uint32_t ref_second = decoded[W * H - 1u] & rgb;
+    p0.x += X1 - X0;
+    p1.x += X1 - X0;
+    ok = ok && hook_sprite(&p0, &p1, 0) && s_cur && target_readback(s_cur);
+    const uint32_t first = guest[(Y + H - 1) * stride + X0 + W - 1] & rgb;
+    const uint32_t second = guest[(Y + H - 1) * stride + X1 + W - 1] & rgb;
+    coherence_reset_targets();
+
+    if (!ok || ref_first != old_rgb || ref_second != new_rgb ||
+        first != ref_first || second != ref_second) {
+        fprintf(stderr, "gpu coherence selftest [texture-ram-linear-tail]: "
+                "fmt=%u pitch=%u tail=%u draw=%d gpu=%06x/%06x reference=%06x/%06x "
+                "expected=%06x/%06x\n",
+                fmt, pitch, tail, ok, first, second, ref_first, ref_second, old_rgb, new_rgb);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS texture-ram-linear-tail "
+           "fmt=%u pitch=%u tail=%u gpu=%06x/%06x reference=%06x/%06x\n",
+           fmt, pitch, tail, first, second, ref_first, ref_second);
+    return 1;
+}
+
+static int coherence_run_texture_ram_linear_tail(void) {
+    const unsigned formats[] = { 3u, 5u }; /* RGBA8888 and CLUT8 */
+    const unsigned pitches[] = { 8u, 16u, 32u, 64u }; /* narrow, equal, and padded */
+    int ok = 1;
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++)
+        for (size_t j = 0; j < sizeof(pitches) / sizeof(pitches[0]); j++)
+            if (!coherence_texture_ram_linear_tail_cell(formats[i], pitches[j])) ok = 0;
+    return ok;
+}
+
 /* One CLUT8 texture drawn twice through the same palette bytes with a different CLUT format
  * word: the palette identity in the texture cache key covers the format, so the second draw
  * decodes again (index >> 1 picks another entry) instead of reusing the first decode. The
@@ -16949,6 +17038,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
         if (strcmp(only, "through-float-z") == 0) return coherence_run_through_float_z();
         if (strcmp(only, "clut-stride-padding") == 0) return coherence_run_clut_stride_padding();
+        if (strcmp(only, "texture-ram-linear-tail") == 0) return coherence_run_texture_ram_linear_tail();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
         if (strcmp(only, "patch-tess") == 0) return coherence_run_patch_tess();
@@ -17056,6 +17146,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_texture_dirty_same_state()) ok = 0;
     if (!coherence_run_texture_clean_page_index()) ok = 0;
     if (!coherence_run_texture_ram_unnotified_change()) ok = 0;
+    if (!coherence_run_texture_ram_linear_tail()) ok = 0;
     if (!coherence_run_clut_format_same_palette()) ok = 0;
     if (!coherence_run_clut_format_list()) ok = 0;
     if (!coherence_run_through_float_z()) ok = 0;
