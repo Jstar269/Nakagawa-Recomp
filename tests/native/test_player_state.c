@@ -14404,6 +14404,7 @@ static void test_acceptance_launch_uses_stock_package(const char *self_executabl
     const char *disc_id = "TEST00001";
     const char *title_id = "synthetic-allegrex-v1";
     const char *timing_id = "fixture-60hz";
+    const char *executable = "synthetic-allegrex-v1.exe";
     char root[NK_MAX_PATH], iso[NK_MAX_PATH], report_path[NK_MAX_PATH];
     char declaration_dir[NK_MAX_PATH + 32];
     char declaration[NK_MAX_PATH + 64], data_root[NK_MAX_PATH + 64];
@@ -14425,9 +14426,9 @@ static void test_acceptance_launch_uses_stock_package(const char *self_executabl
              "{\"executable\":{\"path\":\"PSP_GAME/SYSDIR/EBOOT.BIN\","
              "\"sha256\":\"%s\"},\"modules\":[]}", FIXTURE_SHA256);
     write_runtime_package_fixture_with_source_media(root, disc_id, title_id,
-        SR_CPUSTATE_ABI_VERSION, "stock-fixture.exe", FIXTURE_SHA256, self_executable, media);
+        SR_CPUSTATE_ABI_VERSION, executable, FIXTURE_SHA256, self_executable, media);
     write_runtime_package_fixture_variant(root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION,
-        "timing-fixture.exe", FIXTURE_SHA256, self_executable, media, 0, false, timing_id, timing_id);
+        executable, FIXTURE_SHA256, self_executable, media, 0, false, timing_id, timing_id);
 
     PlayerApp *app = calloc(1, sizeof(*app));
     assert(app);
@@ -14476,8 +14477,15 @@ static void test_acceptance_launch_uses_stock_package(const char *self_executabl
         assert(app->launch_session.package_launch && app->is_game_running);
         assert(strcmp(app->launch_session.enhancement_package_id,
                       cases[i].timing ? timing_id : "") == 0);
-        assert(strstr(app->launch_session.executable_path,
-                      cases[i].timing ? "timing-fixture.exe" : "stock-fixture.exe") != NULL);
+        char expected_executable[128];
+        snprintf(expected_executable, sizeof(expected_executable), "%cpackages%c%s%s%s%c%s",
+                 sep, sep, disc_id, cases[i].timing ? "-enhanced-" : "",
+                 cases[i].timing ? timing_id : "", sep, executable);
+        const char *chosen_executable = app->launch_session.executable_path;
+        size_t path_length = strlen(chosen_executable);
+        size_t expected_length = strlen(expected_executable);
+        assert(path_length >= expected_length &&
+               strcmp(chosen_executable + path_length - expected_length, expected_executable) == 0);
         assert(app->running_play_mode == (cases[i].timing ? PLAYER_PLAY_ACE : PLAYER_PLAY_AUTHENTIC));
         assert(nk_launch_wait(&app->launch_session, 10000) == 0);
         RepeatLaunchReport report = read_repeat_launch_report(report_path);
