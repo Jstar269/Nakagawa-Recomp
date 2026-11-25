@@ -7910,7 +7910,9 @@ static void player_read_boot_events(PlayerApp *app, bool live) {
                 line[used] = '\0';
                 if (live) player_consume_stall_event_line(app, line);
                 player_app_consume_render_path_line(app, line);
-                if (live && player_app_boot_event_is_window_ready(line)) {
+                /* Also on the final drain: a child that opened its window and
+                   exited between two ticks still started. */
+                if (player_app_boot_event_is_window_ready(line)) {
                     app->child_window_ready = true;
                 }
             }
@@ -7944,7 +7946,12 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
     bool has_semantic_stop = player_read_semantic_stop(
         app->boot_event_file_path, stopped_boundary, sizeof(stopped_boundary),
         &stopped_issue);
-    bool runtime_failed = elapsed_ms < 500 || code != 0 || has_semantic_stop;
+    /* A child that exits within 500 ms without ever opening its window closed
+       while starting. One that reached window_ready or first_frame did start:
+       a clean exit 0 is then a short but successful run (#306). A non-zero
+       exit stays premature however far it got. */
+    bool premature_exit = elapsed_ms < 500 && (code != 0 || !app->child_window_ready);
+    bool runtime_failed = premature_exit || code != 0 || has_semantic_stop;
     /* Restart game on the card relaunches this one. */
     char stopped_disc_id[sizeof(app->last_error.subject_disc_id)];
     snprintf(stopped_disc_id, sizeof(stopped_disc_id), "%s",
@@ -8001,7 +8008,7 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
         player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", stopped_boundary,
                                        stopped_issue, code, elapsed_ms, stopped_disc_id,
                                        run_log);
-    } else if (elapsed_ms < 500) {
+    } else if (premature_exit) {
         player_app_set_game_stop_error(app, "RUNTIME_PREMATURE_EXIT", NULL, 0, code,
                                        elapsed_ms, stopped_disc_id, run_log);
     } else if (code != 0) {

@@ -2437,8 +2437,10 @@ NkResult player_app_apply_input_profile_to_session(PlayerApp *app, const GameRec
 /* Advance the running-game session state machine one tick at `now_ms`.
  *
  * Returns true when this tick observed the child's exit and finalized the
- * session. A child that exits before 500 ms of wall time is reported through
- * the structured RUNTIME_PREMATURE_EXIT error; a later non-zero exit becomes
+ * session. A child that exits before 500 ms of wall time, with a non-zero
+ * code or before the runtime reported window_ready or first_frame, is reported
+ * through the structured RUNTIME_PREMATURE_EXIT error (a clean exit 0 after
+ * that report is a short successful run, #306); a later non-zero exit becomes
  * RUNTIME_ERROR_EXIT. A child still running PLAYER_GAME_START_TIMEOUT_MS
  * after launch without having written a single boot event never started: the
  * tick stops it, reports RUNTIME_START_TIMEOUT and returns true (#1290).

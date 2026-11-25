@@ -1935,6 +1935,15 @@ static int repeat_launch_child_mode(void) {
         if (fclose(events) != 0) ok = 0;
         if (!ok) return 6;
     }
+    const char *window_ready = getenv("NK_REPEAT_LAUNCH_WINDOW_READY");
+    if (window_ready && *window_ready && boot_event_path && *boot_event_path) {
+        /* The runtime's own report that its window opened (src/rt/gui.c). */
+        FILE *events = fopen(boot_event_path, "ab");
+        if (!events) return 6;
+        ok = fprintf(events, "BOOT_EVENT phase=%s source=cpu\n", window_ready) >= 0;
+        if (fclose(events) != 0) ok = 0;
+        if (!ok) return 6;
+    }
     if (stop_reason && strcmp(stop_reason, "hold-without-boot-event") == 0) {
         /* A child that runs but never reaches the runtime's first boot event
            (#1290): it writes none and stays alive until the player stops it.
@@ -21164,6 +21173,48 @@ int main(int argc, char **argv) {
         /* Recovery after the premature exit. */
         set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
         repeat_launch_and_settle(rep, 0, 6000, 6500, memstick1);
+
+        /* #306: a clean exit 0 inside 500 ms is a short successful run once
+           the runtime reported its window or first frame. Without that report,
+           or with a non-zero exit, the early exit stays RUNTIME_PREMATURE_EXIT. */
+        {
+            static const char *const reached[] = {"window_ready", "first_frame"};
+            for (size_t r = 0; r < sizeof(reached) / sizeof(reached[0]); r++) {
+                set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+                set_environment_value("NK_REPEAT_LAUNCH_WINDOW_READY", reached[r]);
+                memset(&rep->last_error, 0, sizeof(rep->last_error));
+                assert(player_app_launch_game(rep, 0));
+                rep->launch_time_ms = 7000;
+                assert(nk_launch_wait(&rep->launch_session, 10000) == 0);
+                assert(player_app_monitor_game_session(rep, 7082));
+                assert(!rep->is_game_running);
+                assert_session_released(&rep->launch_session);
+                assert(rep->last_error.error_code[0] == '\0');
+                assert(rep->active_view != VIEW_ERROR);
+                assert(!rep->child_window_ready);
+            }
+            /* Non-zero exit after the window opened: still a failure. */
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+            assert(player_app_launch_game(rep, 0));
+            rep->launch_time_ms = 7200;
+            assert(nk_launch_wait(&rep->launch_session, 10000) == 7);
+            assert(player_app_monitor_game_session(rep, 7282));
+            assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+            assert(rep->active_view == VIEW_ERROR);
+            /* Exit 0 with no window report (never signalled): still premature. */
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+            set_environment_value("NK_REPEAT_LAUNCH_WINDOW_READY", "");
+            assert(player_app_launch_game(rep, 0));
+            rep->launch_time_ms = 7400;
+            assert(nk_launch_wait(&rep->launch_session, 10000) == 0);
+            assert(player_app_monitor_game_session(rep, 7482));
+            assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+            assert(rep->active_view == VIEW_ERROR);
+            /* A stale window report never carries over to the next launch. */
+            memset(&rep->last_error, 0, sizeof(rep->last_error));
+            rep->active_view = VIEW_LIBRARY;
+            repeat_launch_and_settle(rep, 0, 7600, 8100, memstick1);
+        }
 
         /* Failure C: a longer-lived child exiting non-zero is classified as
            RUNTIME_ERROR_EXIT. */

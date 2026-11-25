@@ -241,7 +241,7 @@ The **Where** column of each table names the places a code can appear:
 | `RUNTIME_NOT_FOUND` | player | The game's recompiled program is not available. |
 | `RUNTIME_NO_NEW_FRAMES` | player | The game presented no new frame for a long stretch, and it was stopped from the stall notice. |
 | `RUNTIME_NO_PICTURE` | player | The game kept presenting frames, but every one was dark for a long stretch, and it was stopped from the stall notice. |
-| `RUNTIME_PREMATURE_EXIT` | player | The game's process exited within 500 ms of starting, whatever its exit code. |
+| `RUNTIME_PREMATURE_EXIT` | player | The game's process exited within 500 ms of starting, before its window opened, or with a non-zero exit code. A clean exit 0 after the runtime reported its window or first frame is a short successful run, not this code. |
 | `RUNTIME_SEMANTIC_BOUNDARY` | report, player | The game reached a feature Nakagawa does not run; the [stop boundary](#stop-boundaries) names it. |
 | `RUNTIME_START_TIMEOUT` | player | The game's process wrote no boot event within the start time limit, so the player stopped it. |
 | `RUNTIME_TRACE_UNAVAILABLE` | report | The runtime could not read a usable reference trace. |
