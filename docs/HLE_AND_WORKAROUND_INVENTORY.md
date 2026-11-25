@@ -1047,9 +1047,9 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_suspended_waiter_keeps_wait_semantics
   - Evidence: tests/native/sched_selftest.c:test_suspended_wait_still_completes
 - **`h_SysClock2USec`** (`sceKernel`): `sceKernelSysClock2USec` (0xba6b92e2)
-  - Limitation: uses the runtime's microsecond system-clock representation and splits it into low/high outputs; hardware conversion and error-precedence cells are not measured
+  - Limitation: splits the runtime's 64-bit microsecond system clock into whole seconds (first output) and the remaining microseconds (second output), each cut to 32 bits, as PPSSPP and JPCSP do; hardware conversion and error-precedence cells are not measured
 - **`h_SysClock2USecWide`** (`sceKernel`): `sceKernelSysClock2USecWide` (0xe1619d7c)
-  - Limitation: takes the 64-bit clock as the $a0/$a1 pair and writes its low/high words through $a2/$a3 on the same microsecond representation as h_SysClock2USec; invalid-output-pointer error code and hardware conversion are not measured
+  - Limitation: takes the 64-bit clock as the $a0/$a1 pair and writes its whole seconds through $a2 and its remaining microseconds through $a3, as h_SysClock2USec does (PPSSPP and JPCSP agree); invalid-output-pointer error code and hardware conversion are not measured
 - **`h_TerminateDeleteThread`** (`sceKernel`): `sceKernelTerminateDeleteThread` (0x383f7bcc)
   - Limitation: as sceKernelTerminateThread; the release of the thread's stack partition is not observed by any cell (#341)
   - Evidence: PSPAutotests tests/threads/threads/terminate.expected (sceKernelTerminateDeleteThread: created, ready, finished, suspended and waiting threads 0; 0 and the current thread 0x80020197; the id answers 0x80020198 afterwards)

@@ -20526,9 +20526,23 @@ static void test_kernel_import_sweep_sysclock_conversion(void) {
     cpu.r[4] = clock;
     cpu.r[5] = low_out;
     cpu.r[6] = high_out;
+    /* The two outputs are the whole seconds and the microseconds left over (PPSSPP
+     * Core/HLE/sceKernelTime.cpp and JPCSP ThreadManForUser agree; not PSP-measured here),
+     * not the clock's raw low/high words. */
+    const uint64_t wide_value = ((uint64_t)0x12345678u << 32) | 0x89abcdefu;
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
-               MEM_R32(low_out) == 0x89abcdefu && MEM_R32(high_out) == 0x12345678u,
-           "sceKernelSysClock2USec splits the modeled 64-bit microsecond value");
+               MEM_R32(low_out) == (uint32_t)(wide_value / 1000000u) &&
+               MEM_R32(high_out) == (uint32_t)(wide_value % 1000000u),
+           "sceKernelSysClock2USec splits the 64-bit microsecond clock into seconds and microseconds");
+    MEM_W32(clock, 1234567890u);
+    MEM_W32(clock + 4u, 0u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = clock;
+    cpu.r[5] = low_out;
+    cpu.r[6] = high_out;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
+               MEM_R32(low_out) == 1234u && MEM_R32(high_out) == 567890u,
+           "sceKernelSysClock2USec turns 1234567890 us into 1234 s and 567890 us");
 
     const uint32_t sentinel = 0xa57c3de1u;
     MEM_W32(low_out, sentinel);
@@ -20564,9 +20578,19 @@ static void test_unregistered_batch_sysclock_wide(void) {
     cpu.r[5] = 0x12345678u;
     cpu.r[6] = WIDE_LOW_OUT;
     cpu.r[7] = WIDE_HIGH_OUT;
+    const uint64_t wide_value = ((uint64_t)0x12345678u << 32) | 0x89abcdefu;
     expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
-               MEM_R32(WIDE_LOW_OUT) == 0x89abcdefu && MEM_R32(WIDE_HIGH_OUT) == 0x12345678u,
-           "sceKernelSysClock2USecWide splits the by-value 64-bit clock into low/high outputs");
+               MEM_R32(WIDE_LOW_OUT) == (uint32_t)(wide_value / 1000000u) &&
+               MEM_R32(WIDE_HIGH_OUT) == (uint32_t)(wide_value % 1000000u),
+           "sceKernelSysClock2USecWide splits the by-value clock into seconds and microseconds");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1234567890u;   /* the probe's PSP-KERNEL-MISC-001 sysclock-wide input */
+    cpu.r[5] = 0u;
+    cpu.r[6] = WIDE_LOW_OUT;
+    cpu.r[7] = WIDE_HIGH_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
+               MEM_R32(WIDE_LOW_OUT) == 1234u && MEM_R32(WIDE_HIGH_OUT) == 567890u,
+           "sceKernelSysClock2USecWide turns 1234567890 us into 1234 s and 567890 us");
 
     MEM_W32(WIDE_LOW_OUT, sentinel);
     memset(&cpu, 0, sizeof(cpu));
@@ -20612,8 +20636,8 @@ static void test_kernel_usec_sysclock_conversions(void) {
         cpu.r[5] = LOW_OUT;
         cpu.r[6] = HIGH_OUT;
         expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
-                   MEM_R32(LOW_OUT) == usec && MEM_R32(HIGH_OUT) == 0u,
-               "sceKernelUSec2SysClock round-trips through sceKernelSysClock2USec");
+                   MEM_R32(LOW_OUT) == usec / 1000000u && MEM_R32(HIGH_OUT) == usec % 1000000u,
+               "sceKernelUSec2SysClock round-trips through sceKernelSysClock2USec as seconds and microseconds");
 
         memset(&cpu, 0, sizeof(cpu));
         cpu.r[4] = usec;

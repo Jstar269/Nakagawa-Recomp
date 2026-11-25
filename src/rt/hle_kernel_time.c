@@ -299,33 +299,44 @@ static uint32_t h_GetSystemTime(CpuState *s) {
     (void)s;
     return rtc_write_u64(A0, now_usec()) ? 0u : RTC_ILLEGAL_ADDR;
 }
-/* sceKernelSysClock2USec receives the low/high word pair of the same
- * microsecond clock exposed by GetSystemTime and writes that 64-bit value as
- * low/high output words. Read the complete input before writing either output
+/* sceKernelSysClock2USec(SceKernelSysClock *clock, u32 *sec, u32 *usec): the clock is the
+ * 64-bit microsecond count GetSystemTime writes, and the call splits it into whole seconds
+ * (first output) and the microseconds left over (second output), each cut to 32 bits.
+ * PSPSDK names the outputs low/high, but PPSSPP (Core/HLE/sceKernelTime.cpp,
+ * sceKernelSysClock2USec: time / 1000000 and time % 1000000) and JPCSP (ThreadManForUser
+ * sceKernelSysClock2USec(sysClockAddr, secAddr, microSecAddr)) agree on seconds and
+ * microseconds; not PSP-measured here. Read the complete input before writing either output
  * so overlapping guest spans remain deterministic. */
+static void sysclock_split_usec(uint64_t clock, uint32_t *sec, uint32_t *usec) {
+    *sec = (uint32_t)(clock / 1000000u);
+    *usec = (uint32_t)(clock % 1000000u);
+}
 static uint32_t h_SysClock2USec(CpuState *s) {
     (void)s;
     if (!A0 || !sr_guest_span_readable(A0, 8u) ||
         !A1 || !A2 || !sr_guest_span_writable(A1, 4u) ||
         !sr_guest_span_writable(A2, 4u))
         return HLE_KERNEL_ERROR_ILLEGAL_ADDR;
-    uint32_t low = MEM_R32(A0);
-    uint32_t high = MEM_R32(A0 + 4u);
-    MEM_W32(A1, low);
-    MEM_W32(A2, high);
+    uint64_t clock = (uint64_t)MEM_R32(A0) | ((uint64_t)MEM_R32(A0 + 4u) << 32);
+    uint32_t sec, usec;
+    sysclock_split_usec(clock, &sec, &usec);
+    MEM_W32(A1, sec);
+    MEM_W32(A2, usec);
     return 0;
 }
-/* sceKernelSysClock2USecWide(SceInt64 clock, unsigned *low, unsigned *high): the 64-bit
- * clock is passed by value, so under the o32 convention its low word is $a0 and its high
- * word is $a1, with the two output pointers in $a2 and $a3 (PSPSDK pspthreadman.h). It
- * uses the same microsecond clock representation as h_SysClock2USec, so the split is the
- * identity on the value. Both output spans are validated before either word is written. */
+/* sceKernelSysClock2USecWide(SceInt64 clock, u32 *sec, u32 *usec): the 64-bit clock is
+ * passed by value, so under the o32 convention its low word is $a0 and its high word is
+ * $a1, with the two output pointers in $a2 and $a3 (PSPSDK pspthreadman.h). It splits the
+ * clock as h_SysClock2USec does (PPSSPP sceKernelSysClock2USecWide and JPCSP agree). Both
+ * output spans are validated before either word is written. */
 static uint32_t h_SysClock2USecWide(CpuState *s) {
     (void)s;
     if (!A2 || !A3 || !sr_guest_span_writable(A2, 4u) || !sr_guest_span_writable(A3, 4u))
         return HLE_KERNEL_ERROR_ILLEGAL_ADDR;
-    MEM_W32(A2, A0);
-    MEM_W32(A3, A1);
+    uint32_t sec, usec;
+    sysclock_split_usec((uint64_t)A0 | ((uint64_t)A1 << 32), &sec, &usec);
+    MEM_W32(A2, sec);
+    MEM_W32(A3, usec);
     return 0;
 }
 /* The runtime models SceKernelSysClock as a microsecond count split into low/high

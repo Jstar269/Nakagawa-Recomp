@@ -99,7 +99,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_SysClock2USec": {
         "status": "partial",
-        "limitation": "uses the runtime's microsecond system-clock representation and splits it into low/high outputs; hardware conversion and error-precedence cells are not measured",
+        "limitation": "splits the runtime's 64-bit microsecond system clock into whole seconds (first output) and the remaining microseconds (second output), each cut to 32 bits, as PPSSPP and JPCSP do; hardware conversion and error-precedence cells are not measured",
     },
     "h_USec2SysClock": {
         "status": "partial",
@@ -141,7 +141,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_SysClock2USecWide": {
         "status": "partial",
-        "limitation": "takes the 64-bit clock as the $a0/$a1 pair and writes its low/high words through $a2/$a3 on the same microsecond representation as h_SysClock2USec; invalid-output-pointer error code and hardware conversion are not measured",
+        "limitation": "takes the 64-bit clock as the $a0/$a1 pair and writes its whole seconds through $a2 and its remaining microseconds through $a3, as h_SysClock2USec does (PPSSPP and JPCSP agree); invalid-output-pointer error code and hardware conversion are not measured",
     },
     "h_ReferProfilerNull": {
         "status": "partial",
