@@ -127,10 +127,12 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     cases.append((0xD0210000, "vrndi-s-issues", 1))
     cases.append((0xD021006E, "vrndi-s-s323", 1))
 
-    # mtvc $a1 to each VFPU control register (128..143). check_mtvc_control_write_masks() finds
-    # them by name and pins both lanes to the words pspautotests' prefix_ctrl and vrnd read back.
-    for ctrl in range(16):
-        cases.append(((0x12 << 26) | (7 << 21) | (5 << 16) | (128 + ctrl), f"mtvc-ctrl-{128 + ctrl}", 1))
+    # Write each VFPU control with mtvc $a1, then read it through mfvc $a2 in the selftest.
+    for ctrl in range(128, 144):
+        cases.append(((0x12 << 26) | (7 << 21) | (5 << 16) | ctrl, f"mtvc-ctrl-{ctrl}", 1))
+        cases.append(((0x12 << 26) | (3 << 21) | (6 << 16) | ctrl, f"mfvc-ctrl-{ctrl}", 1))
+    cases.append(((0x12 << 26) | (7 << 21) | 136, "mtvc-zero-rcx0", 1))
+    cases.append(((0x12 << 26) | (3 << 21) | 136, "mfvc-zero-rcx0", 1))
 
     # PSP-VFPU-FORMS-001 (issue #326): the vfpu-forms probe words (probe_hle_issues.c).
     # check_vfpu_forms_measured() finds them by name and pins both lanes to the measured

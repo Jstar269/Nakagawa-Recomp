@@ -3034,29 +3034,29 @@ static int check_vrndi_rule_cells(void) {
     return bad;
 }
 
-/* mtvc $a1 to control register 128 + ctrl in one lane: the AOT body tools/codegen.py emits
- * (via the overlap-diff header) or the production interpreter. Returns 0 when the lane's
- * word is missing or the interpreter refuses it. */
+/* Run the generated C body for the transfer, or the same word in the production interpreter. */
+static int run_vfpu_control_transfer(CpuState *s, int aot, const char *name, uint32_t word) {
+    if (!aot) return sr_vfpu_interp(s, word) == SR_VFPU_COMPUTE;
+    const int c = find_overlap_diff_case(name);
+    if (c < 0 || overlap_diff_cases[c].w != word) return 0;
+    overlap_diff_run_codegen(s, c);
+    return 1;
+}
+
 static int mtvc_in_lane(CpuState *s, int aot, int ctrl, uint32_t value) {
     char name[24];
     snprintf(name, sizeof(name), "mtvc-ctrl-%d", 128 + ctrl);
     s->r[5] = value;
-    if (aot) {
-        const int c = find_overlap_diff_case(name);
-        if (c < 0) return 0;
-        overlap_diff_run_codegen(s, c);
-        return 1;
-    }
-    return sr_vfpu_interp(s, cop2_transfer(7, 5, 128 + ctrl)) == SR_VFPU_COMPUTE;
+    return run_vfpu_control_transfer(s, aot, name, cop2_transfer(7, 5, 128 + ctrl));
 }
 
-/* Read control register 128 + ctrl as the lane sees it: the AOT mfvc body is a plain copy,
- * so that lane reads the register; the interpreter lane runs mfvc $a2. */
-static uint32_t mfvc_in_lane(CpuState *s, int aot, int ctrl) {
-    if (aot) return s->vfpuCtrl[ctrl];
+static int mfvc_in_lane(CpuState *s, int aot, int ctrl, uint32_t *value) {
+    char name[24];
+    snprintf(name, sizeof(name), "mfvc-ctrl-%d", 128 + ctrl);
     s->r[6] = 0xa5a5a5a5u;
-    if (sr_vfpu_interp(s, cop2_transfer(3, 6, 128 + ctrl)) != SR_VFPU_COMPUTE) return 0xdeadbeefu;
-    return s->r[6];
+    if (!run_vfpu_control_transfer(s, aot, name, cop2_transfer(3, 6, 128 + ctrl))) return 0;
+    *value = s->r[6];
+    return 1;
 }
 
 static int check_mtvc_control_write_masks(void) {
@@ -3105,6 +3105,9 @@ static int check_mtvc_control_write_masks(void) {
          {0x3f815619u, 0x3f803f7fu, 0x3f80f0f0u, 0x3f8000b3u, 0x3f801a54u, 0x3f807f0bu,
           0x3f80aa55u, 0x3f800465u}},
     };
+    /* Existing behavior controls: VFPU_CC keeps its mask and $132-$135 keep the full word. */
+    static const uint32_t control_reads[] = {0x00000039u, 0x123456f9u, 0x123456f9u,
+                                             0x123456f9u, 0x123456f9u};
     static const char *const lane_names[2] = {"interpreter", "generated code"};
     const int vrndi = find_overlap_diff_case("vrndi-s-issues");
     int bad = 0;
@@ -3114,11 +3117,13 @@ static int check_mtvc_control_write_masks(void) {
             setup_identity_compute(&s);
             int ok = 1;
             for (int k = 0; k < 3; k++) ok &= mtvc_in_lane(&s, aot, k, prefix_rows[r].wrote[k]);
-            for (int k = 0; k < 3; k++) ok &= mfvc_in_lane(&s, aot, k) == prefix_rows[r].reads[k];
+            uint32_t readback[3] = {0};
+            for (int k = 0; k < 3; k++)
+                ok &= mfvc_in_lane(&s, aot, k, &readback[k]) && readback[k] == prefix_rows[r].reads[k];
             if (!ok)
-                fprintf(stderr, "mtvc prefixes %s row %zu: wrote %08x,%08x,%08x read %08x,%08x,%08x\n",
+                fprintf(stderr, "mtvc/mfvc prefixes %s row %zu: wrote %08x,%08x,%08x read %08x,%08x,%08x\n",
                         lane_names[aot], r, prefix_rows[r].wrote[0], prefix_rows[r].wrote[1],
-                        prefix_rows[r].wrote[2], s.vfpuCtrl[0], s.vfpuCtrl[1], s.vfpuCtrl[2]);
+                        prefix_rows[r].wrote[2], readback[0], readback[1], readback[2]);
             CHECKB(bad, ok, "mtvc to the S/T/D prefixes keeps the bits the PSP reads back");
         }
         for (size_t r = 0; r < sizeof(rcx_rows) / sizeof(rcx_rows[0]); r++) {
@@ -3127,10 +3132,12 @@ static int check_mtvc_control_write_masks(void) {
             sr_vfpu_thread_ctrl_init(&s);
             int ok = 1;
             for (int k = 0; k < 8; k++) ok &= mtvc_in_lane(&s, aot, 8 + k, rcx_rows[r].wrote[k]);
-            for (int k = 0; k < 8; k++) ok &= mfvc_in_lane(&s, aot, 8 + k) == rcx_rows[r].reads[k];
+            uint32_t readback[8] = {0};
+            for (int k = 0; k < 8; k++)
+                ok &= mfvc_in_lane(&s, aot, 8 + k, &readback[k]) && readback[k] == rcx_rows[r].reads[k];
             if (!ok)
-                fprintf(stderr, "mtvc RCX %s row %zu: RCX0 wrote %08x read %08x\n", lane_names[aot],
-                        r, rcx_rows[r].wrote[0], s.vfpuCtrl[8]);
+                fprintf(stderr, "mtvc/mfvc RCX %s row %zu: RCX0 wrote %08x read %08x\n", lane_names[aot],
+                        r, rcx_rows[r].wrote[0], readback[0]);
             CHECKB(bad, ok, "mtvc to RCX0-7 keeps bits 0-19 and reads 0x3f8 above them");
             if (aot) {
                 CHECKB(bad, vrndi >= 0, "vrndi.s word is in the overlap-diff header (AOT emits it)");
@@ -3139,13 +3146,34 @@ static int check_mtvc_control_write_masks(void) {
                 CHECKB(bad, sr_vfpu_interp(&s, 0xd0210000u) == SR_VFPU_COMPUTE,
                        "vrndi.s after an RCX write executes");
             }
-            ok = s.vi[0] == rcx_rows[r].draw &&
-                 memcmp(&s.vfpuCtrl[8], rcx_rows[r].after, sizeof(rcx_rows[r].after)) == 0;
+            ok = s.vi[0] == rcx_rows[r].draw;
+            for (int k = 0; k < 8; k++) {
+                readback[k] = 0u;
+                ok &= mfvc_in_lane(&s, aot, 8 + k, &readback[k]) && readback[k] == rcx_rows[r].after[k];
+            }
             if (!ok)
                 fprintf(stderr, "vrndi.s after mtvc RCX %s row %zu: drew %08x RCX0 %08x\n",
-                        lane_names[aot], r, s.vi[0], s.vfpuCtrl[8]);
+                        lane_names[aot], r, s.vi[0], readback[0]);
             CHECKB(bad, ok, "vrndi.s after an RCX write draws the PSP word and leaves its RCX0-7");
         }
+
+        CpuState control;
+        setup_identity_compute(&control);
+        uint32_t readback = 0u;
+        for (int k = 3; k < 8; k++) {
+            const int wrote = mtvc_in_lane(&control, aot, k, 0x123456f9u);
+            const int read = mfvc_in_lane(&control, aot, k, &readback);
+            CHECKB(bad, wrote && read && readback == control_reads[k - 3],
+                   "mtvc/mfvc preserves existing behavior of VFPU_CC and controls $132-$135");
+        }
+        const int wrote_zero = run_vfpu_control_transfer(&control, aot, "mtvc-zero-rcx0",
+                                                          cop2_transfer(7, 0, 136));
+        const int read_rcx0 = mfvc_in_lane(&control, aot, 8, &readback);
+        CHECKB(bad, wrote_zero && read_rcx0 && readback == 0x3f800000u,
+               "mtvc from $zero installs RCX0's fixed upper bits");
+        const int read_zero = run_vfpu_control_transfer(&control, aot, "mfvc-zero-rcx0",
+                                                         cop2_transfer(3, 0, 136));
+        CHECKB(bad, read_zero && control.r[0] == 0u, "mfvc into $zero ignores the destination write");
     }
     return bad;
 }
