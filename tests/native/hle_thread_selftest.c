@@ -39270,6 +39270,38 @@ static void test_ge_sync_ids_match_psp(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* sceGeListEnQueue refuses a list or stall address that is not word-aligned with
+ * SCE_ERROR_INVALID_POINTER (0x80000103) and queues nothing (uofw src/kd/ge/ge.c
+ * _sceGeListEnQueue; PPSSPP GPUCommon::EnqueueList agrees; UNMEASURED on a PSP). A
+ * misaligned stall address is never reached by the word-stepping list walker, so a list
+ * accepted with one ran past the fence the guest set into words it had not written. */
+static void test_ge_enqueue_refuses_misaligned_addresses(void) {
+    const uint32_t dl = 0x08927000u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(dl, 0xcd000011u);        /* FOG1 0x11 */
+    MEM_W32(dl + 4u, 0x0f000000u);   /* FINISH */
+    MEM_W32(dl + 8u, 0x0c000000u);   /* END */
+    const uint32_t first = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect(first == 0x35000000u && gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x11u,
+           "an aligned list runs to its END and takes the first slot's id");
+
+    MEM_W32(dl + 16u, 0xcd000022u);  /* FOG1 0x22: the guest has not released this word */
+    MEM_W32(dl + 20u, 0x0f000000u);
+    MEM_W32(dl + 24u, 0x0c000000u);
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 16u, dl + 18u, 0xffffffffu, 0u) == 0x80000103u,
+           "sceGeListEnQueue with a stall address that is not word-aligned is 0x80000103");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x11u,
+           "the refused list ran no command past its misaligned stall address");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 18u, 0u, 0xffffffffu, 0u) == 0x80000103u,
+           "sceGeListEnQueue with a list address that is not word-aligned is 0x80000103");
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u &&
+               gsw_call(NID_SCE_GE_DRAW_SYNC, 1u, 0u, 0u, 0u) == 0u,
+           "a refused enqueue takes no list slot and leaves the GE idle");
+    sr_hle_test_ge_lists_reset();
+}
+
 /* A SIGNAL whose behaviour is JUMP (0x10), CALL (0x11), RET (0x12) or their relative (0x13,
  * 0x14) and origin (0x15, 0x16) forms, with the END after it, moves the list: the GE driver's
  * interrupt handler jumps, or saves the caller on the list's stack and calls, or returns
@@ -69613,6 +69645,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_savedata_thread_ended_inside_a_parked_save();
     test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
+    test_ge_enqueue_refuses_misaligned_addresses();
     test_ge_signal_jump_call_ret();
     test_ge_list_call_ret_faults_and_long_runs();
     test_ge_block_transfer_unmeasured_stride_is_named();

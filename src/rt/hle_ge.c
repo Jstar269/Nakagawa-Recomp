@@ -432,6 +432,12 @@ static uint32_t h_GeListEnQueue(CpuState *s) {
     uint32_t stall = A1;
     uint32_t cbid = A2;
     uint32_t cbarg = A3;
+    /* A list or stall address that is not word-aligned is SCE_ERROR_INVALID_POINTER and
+     * queues nothing (uofw src/kd/ge/ge.c _sceGeListEnQueue; PPSSPP GPUCommon::EnqueueList
+     * agrees; UNMEASURED on a PSP). The walker steps a word at a time from the list address
+     * and stops where it equals the stall address, so a misaligned stall is never reached
+     * and the list would run past the fence the guest set. */
+    if (((list | stall) & 3u) != 0u) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     /* The SIGNAL CALL stack (ge.c ge_signal_end): 32 entries for a title compiled before SDK
      * 2.00, none after, unless the optional SceGeListArgs (A3, size >= 16) names numStacks,
      * which must be below 256 (uofw src/kd/ge/ge.c _sceGeListEnQueue, behaviour only). */
