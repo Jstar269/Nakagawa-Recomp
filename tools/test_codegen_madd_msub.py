@@ -374,6 +374,102 @@ class TestAllegrexEncodingsDocumented(unittest.TestCase):
                 self.assertIn("s->hi", stmt)
 
 
+class TestDivDivuEmission(unittest.TestCase):
+    """div and divu leave the PSP's LO and HI for a zero divisor and for INT_MIN / -1 (#3031).
+
+    Every row is a line of pspautotests tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7,
+    recorded on a PSP. The emitted C must reach those results without evaluating C's / or %
+    on INT_MIN / -1 or a zero divisor, which are undefined behavior.
+    """
+
+    # (instruction, funct, rs value, rt value, LO, HI)
+    MEASURED = (
+        ("div", 0x1A, 0x80000000, 0xFFFFFFFF, 0x80000000, 0x00000000),
+        ("div", 0x1A, 0x00000000, 0x00000000, 0xFFFFFFFF, 0x00000000),
+        ("div", 0x1A, 0xFFFFFFFF, 0x00000000, 0x00000001, 0xFFFFFFFF),
+        ("div", 0x1A, 0x7FFFFFFF, 0x00000000, 0xFFFFFFFF, 0x7FFFFFFF),
+        ("div", 0x1A, 0x80000000, 0x00000000, 0x00000001, 0x80000000),
+        ("div", 0x1A, 0xFFFFFF9C, 0x00000007, 0xFFFFFFF2, 0xFFFFFFFE),
+        ("div", 0x1A, 0x80000000, 0x00000007, 0xEDB6DB6E, 0xFFFFFFFE),
+        ("div", 0x1A, 0x80000000, 0xFFFFFFF9, 0x12492492, 0xFFFFFFFE),
+        ("div", 0x1A, 0x7FFFFFFF, 0xFFFFFFF9, 0xEDB6DB6E, 0x00000001),
+        ("divu", 0x1B, 0x80000000, 0xFFFFFFFF, 0x00000000, 0x80000000),
+        ("divu", 0x1B, 0x00000001, 0x00000000, 0x0000FFFF, 0x00000001),
+        ("divu", 0x1B, 0xFFFFFFFF, 0x00000000, 0xFFFFFFFF, 0xFFFFFFFF),
+        ("divu", 0x1B, 0x7FFFFFFF, 0x00000000, 0xFFFFFFFF, 0x7FFFFFFF),
+        ("divu", 0x1B, 0xFFFFFF9C, 0x00000007, 0x24924916, 0x00000002),
+    )
+
+    def _run(self, flags):
+        """LO and HI for every MEASURED row, from one program built with `flags`."""
+        cases = []
+        for i, (name, funct, _, _, _, _) in enumerate(self.MEASURED):
+            stmt, _, _ = codegen.effect(0, encode_special(4, 5, 0, funct))
+            cases.append(f"        case {i}: {stmt} break; /* {name} */")
+        rows = ", ".join(f"{{0x{a:08x}u, 0x{b:08x}u}}" for _, _, a, b, _, _ in self.MEASURED)
+        # The operands are volatile so the compiler cannot fold a division away.
+        src = f"""
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+struct CpuState {{ uint32_t r[32]; uint32_t hi, lo; }};
+static volatile const uint32_t rows[][2] = {{ {rows} }};
+int main(void) {{
+    for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {{
+        struct CpuState state;
+        struct CpuState *s = &state;
+        memset(&state, 0, sizeof state);
+        s->hi = 0xa5a5a5a5u; s->lo = 0x5a5a5a5au;  /* both must be written */
+        s->r[4] = rows[i][0]; s->r[5] = rows[i][1];
+        switch (i) {{
+{chr(10).join(cases)}
+        }}
+        printf("%08x %08x\\n", s->lo, s->hi);
+    }}
+    return 0;
+}}
+"""
+        with scratch_dir.TemporaryDirectory() as td:
+            assert GCC is not None
+            c_path = Path(td) / "div.c"
+            exe_path = Path(td) / ("div.exe" if sys.platform == "win32" else "div")
+            c_path.write_text(src)
+            subprocess.run([GCC, *flags, "-std=c11", "-Wall", "-Werror", "-o", str(exe_path), str(c_path)],
+                           check=True, capture_output=True, text=True)
+            out = subprocess.run([str(exe_path)], capture_output=True, text=True)
+        if out.returncode != 0:  # a sanitizer report names the undefined operation
+            self.fail(f"{flags}: exit {out.returncode}\n{out.stderr}")
+        return [tuple(int(v, 16) for v in line.split()) for line in out.stdout.splitlines()]
+
+    def _assert_measured(self, flags):
+        got = self._run(flags)
+        self.assertEqual(len(got), len(self.MEASURED))
+        for (name, _, a, b, want_lo, want_hi), (lo, hi) in zip(self.MEASURED, got, strict=True):
+            with self.subTest(insn=name, rs=f"0x{a:08x}", rt=f"0x{b:08x}", flags=flags):
+                self.assertEqual((f"0x{lo:08x}", f"0x{hi:08x}"),
+                                 (f"0x{want_lo:08x}", f"0x{want_hi:08x}"))
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
+    def test_div_and_divu_match_the_psp_O0(self):
+        self._assert_measured(["-O0"])
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
+    def test_div_and_divu_match_the_psp_O2(self):
+        self._assert_measured(["-O2"])
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: no host C compiler on PATH")
+    def test_div_and_divu_evaluate_no_undefined_division(self):
+        flags = ["-O1", "-fsanitize=undefined", "-fno-sanitize-recover=undefined"]
+        with scratch_dir.TemporaryDirectory() as td:
+            probe = Path(td) / "probe.c"
+            probe.write_text("int main(void) { return 0; }\n")
+            built = subprocess.run([GCC, *flags, "-o", str(Path(td) / "probe"), str(probe)],
+                                   capture_output=True, text=True)
+        if built.returncode != 0:
+            self.skipTest("TOOLCHAIN_MISSING: the host C compiler cannot link -fsanitize=undefined")
+        self._assert_measured(flags)
+
+
 class TestSyncDecoding(unittest.TestCase):
     """SPECIAL funct 0x0f is SYNC (stype 0): a barrier with no architectural effect on this
     single-hart, sequentially consistent runtime. It must translate to a no-op, not make the

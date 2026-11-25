@@ -701,15 +701,12 @@ class _OmitAot:
 # HST compatibility inventory.  These are structural entry classifications, not
 # replacement behavior: every address is translated from the guest ELF.  Keep the
 # profile explicit so unrelated zero-based MIPS ELFs do not inherit title addresses.
-HST_MANUAL_CALLABLES = {
-    0x0005A648: "address-taken-tiny-leaf",
-    0x00042998: "address-taken-tiny-leaf",
-    0x0003DB3C: "address-taken-tiny-leaf",
-    0x000E1724: "address-taken-tiny-leaf",
-    0x000E3B24: "address-taken-tiny-leaf",
-    0x00014430: "address-taken-tiny-leaf",
-}
-
+#
+# Only resume entries are left.  The six callable seeds the profile used to add here
+# ("address-taken-tiny-leaf") are retired (#363): the analyzer finds a leaf entered only
+# through a pointer on its own (analyze._is_address_taken_entry and the data-pointer
+# census), so a callable entry comes from the image under every profile and no profile
+# adds one.
 HST_RESUME_OWNERS = {
     0x000310B0: 0x00030FDC,
     0x00021C78: 0x00021AC0,
@@ -749,13 +746,6 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
             old = catalog.get(candidate.addr)
             if old is None:
                 continue
-            if "hst-profile" in old.provenance or (
-                profile == "hst" and candidate.addr in HST_MANUAL_CALLABLES
-            ):
-                raise RuntimeError(
-                    f"DUAL-ROLE ENTRY DETECTED: direct-j resume "
-                    f"0x{candidate.addr:08x} overlaps a profile callable"
-                )
             provenance = set(old.provenance)
             provenance.update({"direct-j", "frame-balance-verified"})
             catalog[candidate.addr] = EntryInfo(
@@ -790,13 +780,6 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
                         f"derived as a continuation of 0x{old.owner:08x} and of "
                         f"0x{owner:08x}"
                     )
-            elif "hst-profile" in old.provenance or (
-                profile == "hst" and candidate.addr in HST_MANUAL_CALLABLES
-            ):
-                raise RuntimeError(
-                    f"DUAL-ROLE ENTRY DETECTED: direct-branch resume "
-                    f"0x{candidate.addr:08x} overlaps a profile callable"
-                )
             provenance = set(old.provenance)
             provenance.update({"direct-branch", "frame-balance-verified"})
             catalog[candidate.addr] = EntryInfo(
@@ -809,14 +792,6 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
 
     if profile is None or profile == "none":
         return catalog
-
-    for addr, why in HST_MANUAL_CALLABLES.items():
-        if not in_ranges(addr, ranges):
-            continue
-        old = catalog.get(addr)
-        provenance = set(old.provenance if old else ())
-        provenance.update({"hst-profile", why})
-        catalog[addr] = EntryInfo(addr, True, False, None, frozenset(provenance))
 
     for addr, owner in HST_RESUME_OWNERS.items():
         if not in_ranges(addr, ranges):
@@ -2279,8 +2254,11 @@ def _effect_sync(addr, w, options, delay_branch_pc):
 
 
 def _effect_div(addr, w, options, delay_branch_pc):
+    # INT_MIN / -1 and a zero divisor are tested before C's / and %, which are undefined for
+    # both. The PSP leaves LO 0x80000000 and HI 0 for the overflow (pspautotests
+    # tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7, recorded on a PSP; #3031).
     a, b = rs(w), rt(w)
-    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0xFFFFFFFFu;} "
+    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0u;} "
             "else if (_b!=0){s->lo=(uint32_t)(_a/_b);s->hi=(uint32_t)(_a%%_b);} else {s->lo=_a<0?1u:0xFFFFFFFFu;s->hi=(uint32_t)_a;} }") % (R(a), R(b)), None, 0
 
 
@@ -3318,8 +3296,11 @@ def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
     si = vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     cond = w & 0xF
+    # Each lane result must be 0 or 1 before it is shifted into CC: glibc's isinf() returns -1
+    # for -inf, which set every bit above the lane (pspautotests e37443a6
+    # tests/cpu/vfpu/specials.expected, recorded on a PSP, reads EI 0x1c for (NaN, -NaN, inf, -inf)).
     _C = {0: "0", 1: "_x==_y", 2: "_x<_y", 3: "_x<=_y", 4: "1", 5: "_x!=_y",
-          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "isnan(_x)", 10: "isinf(_x)",
+          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "(isnan(_x)!=0)", 10: "(isinf(_x)!=0)",
           11: "(isnan(_x)||isinf(_x))", 12: "_x!=0.0f", 13: "!isnan(_x)",
           14: "!isinf(_x)", 15: "!(isnan(_x)||isinf(_x))"}[cond]
     body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "

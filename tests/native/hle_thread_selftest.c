@@ -15764,6 +15764,35 @@ static void test_storage_dialog_parameter_sizes(void) {
     }
 }
 
+/* sceUtilityMsgDialogGetStatus (0x9a1c91d7) with no utility dialog started: one measured cell, on
+ * its own (#2807). PSP-HLE-UTILITY-NONE-001 (docs/HARDWARE_ORACLE.md, cell utility-none-msgdialog:
+ * a PSP-3000 on system software 6.61, one launch from the XMB context, boot 115, 2026-11-04)
+ * records 0x80110005 (WRONG_TYPE) for each GetStatus of the message dialog in a process that
+ * calls no InitStart.
+ *
+ * What stands for that state here: sr_hle_init() registers the production handler, and
+ * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog. That is the state
+ * the runtime starts a program in (the slot's initial value, and the one the LoadExec guest reset
+ * restores through the same utility_dialogs_reset_locked). The NID is dispatched here directly
+ * through sr_syscall, with no InitStart, Update or ShutdownStart before it.
+ *
+ * What this cell does not show. The reset is synthetic: the measured process was freshly
+ * launched, not one whose earlier dialogs were forgotten, so nothing here says a PSP answers
+ * WRONG_TYPE again after a dialog was used. Every status after an InitStart (1, 2, 3, 4 and the 0
+ * after use) is outside the record, and so is a process in the game context, which is how the
+ * runtime starts its programs: the record is one launch from the XMB. The record's Update(1) and
+ * ShutdownStart results, and the other dialog kinds, belong to other handlers and are asserted
+ * together in test_utility_dialog_single_slot below. */
+static void test_msg_dialog_status_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "sceUtilityMsgDialogGetStatus with no InitStart returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog, one launch from the XMB context");
+}
+
 static void test_utility_dialog_single_slot(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilitySavedata", NID_SAVEDATA_DIALOG_INIT, NID_SAVEDATA_DIALOG_UPDATE,
@@ -18242,6 +18271,122 @@ static void test_utility_dialog_wrong_states_unmeasured_types(void) {
         expect(utility_status(&cpu, dialogs[i].status) == 0u, what);
         sr_hle_test_osk_slot_reset();
     }
+}
+
+/* Netconf, gamedata install and game sharing with no utility dialog started: the measured
+ * sequence of PSP-HLE-UTILITY-NONE-001, one kind per cell (#2807). The record
+ * (docs/HARDWARE_ORACLE.md, cells utility-none-netconf, utility-none-gamedata and
+ * utility-none-sharing: a PSP-3000 on system software 6.61, one launch from the XMB context, boot
+ * 115, 2026-11-04) calls GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart
+ * and GetStatus of each kind, in that order, in a process that calls no InitStart, and every one of
+ * the seven calls answers 0x80110005 (WRONG_TYPE). Each cell makes the same seven calls in the same
+ * order, back to back as the probe does, each one entering its NID directly through sr_syscall.
+ *
+ * What stands for that state here: sr_hle_init() registers the production handlers, and
+ * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog, the state the
+ * runtime starts a program in. No InitStart is called.
+ *
+ * What these cells do not show. The reset is synthetic: the measured process was freshly launched,
+ * not one whose earlier dialogs were forgotten, so nothing here says a PSP answers WRONG_TYPE again
+ * after a dialog was used. Every call after an InitStart (the INIT, RUNNING, FINISHED and SHUTDOWN
+ * states, NONE after use, and their timing) is outside the record, and so is a process in the game
+ * context, which is how the runtime starts its programs, and every call while another kind holds
+ * the slot. Those cells are test_utility_dialog_single_slot's and
+ * test_utility_dialog_wrong_states_unmeasured_types', and are not reviewed by these. */
+static void test_netconf_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-netconf, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_UPDATE) == 0x80110005u,
+           "netconf call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_SHUTDOWN) == 0x80110005u,
+           "netconf call 4, ShutdownStart with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_SHUTDOWN) == 0x80110005u,
+           "netconf call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_gamedata_install_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-gamedata, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_UPDATE) == 0x80110005u,
+           "gamedata install call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "gamedata install call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 5, GetStatus after ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "gamedata install call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 7, GetStatus after the second ShutdownStart, returns "
+           "0x80110005 (WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_game_sharing_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-sharing, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_UPDATE) == 0x80110005u,
+           "game sharing call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_SHUTDOWN) == 0x80110005u,
+           "game sharing call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_SHUTDOWN) == 0x80110005u,
+           "game sharing call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
 }
 
 static void test_utility_dialog_measured_states(void) {
@@ -30935,6 +31080,7 @@ static void test_wait_thread_end_cb_execution(void) {
 #define NID_SCE_KERNEL_MEMCPY 0x1839852au
 #define NID_SYSLIB_MEMSET 0x10f3bb61u
 #define NID_SYSLIB_STRLEN 0x52df196cu
+#define NID_SYSLIB_SNPRINTF 0xc2145e80u
 /* PSP DMAC error classes, measured on hardware (see test_dmac_semantics). */
 #define SCE_DMAC_ILLEGAL_ADDR 0x80000103u
 #define SCE_DMAC_ILLEGAL_SIZE 0x80000104u
@@ -30986,6 +31132,109 @@ static void test_sysclib_memory_imports(void) {
     }
     expect(filled,
            "SysclibForKernel memset writes the complete validated guest span");
+}
+
+static uint32_t sysclib_snprintf(uint32_t dst, uint32_t size, uint32_t fmt) {
+    s_cpu->r[4] = dst;
+    s_cpu->r[5] = size;
+    s_cpu->r[6] = fmt;
+    return sr_syscall(s_cpu, NID_SYSLIB_SNPRINTF);
+}
+
+static void test_sysclib_snprintf(void) {
+    const uint32_t fmt = 0x08301000u, dst = 0x08302000u, str = 0x08303000u;
+    const uint32_t stack = 0x08304000u, last = 0x0bffffffu;
+    const uint32_t stopped = 0x80020002u;  /* selftest return for a named stop */
+    reset_fixture();
+    sr_hle_init();
+
+    uint8_t sentinel[64];
+    memset(sentinel, 0xa5, sizeof(sentinel));
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "mutex%d");
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 32u, fmt) == 6u,
+           "Sysclib snprintf dispatch reads its first variadic word from a3");
+    expect(memcmp(SR_HOST(dst), "mutex1", sizeof("mutex1")) == 0 &&
+               memcmp(SR_HOST(dst + 7u), sentinel + 7u, sizeof(sentinel) - 7u) == 0,
+           "Sysclib snprintf terminates the output and leaves later bytes alone");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 4u, fmt) == 6u &&
+               memcmp(SR_HOST(dst), "mut", sizeof("mut")) == 0 &&
+               memcmp(SR_HOST(dst + 4u), sentinel + 4u, sizeof(sentinel) - 4u) == 0,
+           "Sysclib snprintf truncation stores capacity-1 bytes and returns the full count");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 1u, fmt) == 6u && MEM_R8(dst) == 0u &&
+               memcmp(SR_HOST(dst + 1u), sentinel + 1u, sizeof(sentinel) - 1u) == 0,
+           "Sysclib snprintf capacity one stores only the terminator");
+
+    title_hle_write_cstr(fmt, "%-6.3s|%+4d|%X|%c|%u|%i|%%");
+    title_hle_write_cstr(str, "tennis");
+    const char expected[] = "ten   |  +7|2A|P|9|-4|%";
+    s_cpu->r[7] = str;
+    s_cpu->r[8] = 7u;
+    s_cpu->r[9] = 42u;
+    s_cpu->r[10] = 'P';
+    s_cpu->r[11] = 9u;
+    uint32_t original_sp = s_cpu->r[29];
+    s_cpu->r[29] = stack;
+    MEM_W32(stack, (uint32_t)-4);
+    expect(sysclib_snprintf(dst, (uint32_t)sizeof(expected), fmt) == sizeof(expected) - 1u &&
+               memcmp(SR_HOST(dst), expected, sizeof(expected)) == 0 &&
+               MEM_R8(dst + (uint32_t)sizeof(expected)) == 0xa5u,
+           "Sysclib snprintf formats bounded scalar fields and reads the sixth word at entry sp");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = str;
+    s_cpu->r[29] = last - 1u;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unreadable variadic spill before storing");
+    s_cpu->r[29] = original_sp;
+
+    title_hle_write_cstr(fmt, "");
+    expect(sysclib_snprintf(dst, 64u, fmt) == 0u && MEM_R8(dst) == 0u &&
+               MEM_R8(dst + 1u) == 0xa5u,
+           "Sysclib snprintf empty output stores one NUL and returns zero");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "literal");
+    expect(sysclib_snprintf(dst, 0u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses unmodeled zero capacity before storing");
+    MEM_W8(last, 0x5au);
+    expect(sysclib_snprintf(last, 2u, fmt) == stopped && MEM_R8(last) == 0x5au,
+           "Sysclib snprintf refuses a destination span that leaves guest memory");
+    expect(sysclib_snprintf(dst, 64u, last) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated format at the arena boundary");
+
+    title_hle_write_cstr(fmt, "prefix %s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated string without copying the prefix");
+    title_hle_write_cstr(fmt, "%.1s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 2u, fmt) == 1u &&
+               MEM_R8(dst) == 0x5au && MEM_R8(dst + 1u) == 0u,
+           "Sysclib snprintf string precision bounds the read at the last arena byte");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    const char *unsupported[] = {"prefix %p", "prefix %n", "%08d", "%*d", "%lld",
+                                 "%4097d", "%4096d+", "trailing %"};
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+        title_hle_write_cstr(fmt, unsupported[i]);
+        s_cpu->r[7] = str;
+        expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+                   memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0 &&
+                   memcmp(SR_HOST(str), "tennis", sizeof("tennis")) == 0,
+               "Sysclib snprintf refuses unsupported formats and bounds without guest writes");
+    }
 }
 
 static void test_refer_thread_status(void) {
@@ -54858,6 +55107,178 @@ static void test_psp_mutex(void) {
     s_cur = -1;
 }
 
+/* sceKernelLockMutexCB (0x5bf4dd27) from a VBLANK sub-interrupt handler: the one cell of
+ * PSP-MUTEX-001 that measures this handler (#2807). The record (docs/HARDWARE_ORACLE.md, case
+ * mutex-interrupt-context: a PSP-3000 on system software 6.61, PSPLink 3.2.1, one launch of the
+ * probe built from ec5dd563, acceptance-eligible, 2026-10-15) runs six mutex calls in each of 20
+ * firings of a VBLANK sub-interrupt handler (sub-interrupt 0) that the main thread registered. In
+ * the probe's order they are LockMutex with an unknown UID, LockMutex with count 0, LockMutex
+ * (count 1, no timeout) on an unlocked mutex, LockMutexCB (count 1, no timeout) on the same mutex,
+ * TryLockMutex on it, and UnlockMutex of a mutex the main thread created held. In 20 of 20 firings
+ * each call returned 0x80020064 (ILLEGAL_CONTEXT), and the handler reached the end of its body
+ * every time, so none of the calls blocked it.
+ *
+ * Here the production path runs the same sequence: the main thread creates both mutexes through
+ * sceKernelCreateMutex, registers and enables the handler through sceKernelRegisterSubIntrHandler
+ * and sceKernelEnableSubIntr, and each of 20 VBLANKs is latched under sceKernelCpuSuspendIntr and
+ * delivered by sceKernelCpuResumeIntr through the scheduler's own deliver_vblank. The handler body
+ * is a host function bound at its guest entry, standing in for the generated translation of the
+ * probe's handler; every call it makes enters the NID through sr_syscall.
+ *
+ * This cell covers the interrupt-context refusal. In the separate mutex-timeout-quanta case,
+ * the probe calls LockMutexCB with a 250 us timeout on a mutex the main thread holds. It
+ * discards the return code and emits the timeout word and elapsed time in slots 13 and 14.
+ * The public summary does not qualify timeout behavior. Thread-context acquisition, wake
+ * outcomes and callback delivery remain outside this cell. The post-call mutex-state
+ * assertion checks runtime consistency. The interrupt probe reads no mutex status. */
+#define NID_MUTEX_INTR_LOCK_MUTEX     0xb011b11fu
+#define NID_MUTEX_INTR_LOCK_MUTEX_CB  0x5bf4dd27u
+#define NID_MUTEX_INTR_TRY_LOCK_MUTEX 0x0ddcd2c9u
+#define NID_MUTEX_INTR_UNLOCK_MUTEX   0x6b30100fu
+#define MUTEX_INTR_TRIALS             20
+#define MUTEX_INTR_HANDLER_ENTRY      0x08a3c040u
+#define MUTEX_INTR_UNKNOWN_UID        0x7fffffffu
+#define MUTEX_INTR_ILLEGAL_CONTEXT    0x80020064u
+
+typedef struct {
+    int      intr_context;
+    uint32_t r_bad_uid;
+    uint32_t r_bad_cnt;
+    uint32_t r_lock;
+    uint32_t r_lock_cb;
+    uint32_t r_try;
+    uint32_t r_unlock;
+    int      done;
+} MutexIntrTrial;
+
+static MutexIntrTrial s_mutex_intr_trials[MUTEX_INTR_TRIALS];
+static int s_mutex_intr_count;
+static uint32_t s_mutex_intr_unlocked;
+static uint32_t s_mutex_intr_main_owned;
+
+static void mutex_intr_subintr_fn(CpuState *cpu) {
+    const int idx = s_mutex_intr_count;
+    cpu->r[2] = 0u;
+    if (idx >= MUTEX_INTR_TRIALS) return;
+    MutexIntrTrial t;
+    memset(&t, 0, sizeof t);
+    t.intr_context = sched_is_intr_context();
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = MUTEX_INTR_UNKNOWN_UID; sc.r[5] = 1u;
+    t.r_bad_uid = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 0u;
+    t.r_bad_cnt = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u; sc.r[6] = 0u;
+    t.r_lock = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u; sc.r[6] = 0u;
+    t.r_lock_cb = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX_CB);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u;
+    t.r_try = sr_syscall(&sc, NID_MUTEX_INTR_TRY_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_main_owned; sc.r[5] = 1u;
+    t.r_unlock = sr_syscall(&sc, NID_MUTEX_INTR_UNLOCK_MUTEX);
+    t.done = 1;
+    s_mutex_intr_trials[idx] = t;
+    s_mutex_intr_count = idx + 1;
+}
+
+/* Open wait invocations, which a blocking call adds while it waits and removes when it finishes. */
+static int mutex_intr_wait_invocations(void) {
+    int n = 0;
+    for (const WaitInvocation *w = s_wait_invocations; w; w = w->next) n++;
+    return n;
+}
+
+static void test_lock_mutex_cb_refused_in_vblank_subintr(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(MUTEX_INTR_HANDLER_ENTRY, mutex_intr_subintr_fn);
+    s_vbl_next_us = UINT64_MAX;   /* only the VBLANKs this cell latches are delivered */
+    TCB *main_t = fixture_thread(0x5f8u, TH_RUNNING, 32);
+    main_t->started = 1;
+    s_cur = (int)(main_t - s_tcb);
+    s_mutex_intr_count = 0;
+    memset(s_mutex_intr_trials, 0, sizeof s_mutex_intr_trials);
+
+    SceKernelMutexInfoTest info;
+    s_mutex_intr_unlocked = mtx_create("oracle-intr-unl", 0, 0);
+    s_mutex_intr_main_owned = mtx_create("oracle-intr-own", 0, 1);
+    expect((int32_t)s_mutex_intr_unlocked > 0 && (int32_t)s_mutex_intr_main_owned > 0 &&
+               mtx_get_info(s_mutex_intr_unlocked, &info) && info.currentCount == 0 &&
+               mtx_get_info(s_mutex_intr_main_owned, &info) && info.currentCount == 1 &&
+               info.lockThread == (int32_t)main_t->uid,
+           "intr LockMutexCB: the main thread creates one unlocked mutex and one it holds");
+
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u; cpu.r[6] = MUTEX_INTR_HANDLER_ENTRY; cpu.r[7] = 0u;
+    const uint32_t reg = sr_syscall(&cpu, NID_SCE_KERNEL_REGISTER_SUBINTR);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t ena = sr_syscall(&cpu, NID_SCE_KERNEL_ENABLE_SUBINTR);
+    expect(reg == 0u && ena == 0u,
+           "intr LockMutexCB: the VBLANK sub-interrupt 0 handler registers and enables");
+
+    const int waits_before = mutex_intr_wait_invocations();
+    for (int i = 0; i < MUTEX_INTR_TRIALS; i++) {
+        memset(&cpu, 0, sizeof cpu);
+        const uint32_t token = sr_syscall(&cpu, NID_SCE_KERNEL_CPU_SUSPEND_INTR);
+        sched_raise_interrupt(SCHED_INTR_VBLANK);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = token;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_CPU_RESUME_INTR);
+    }
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t dis = sr_syscall(&cpu, NID_SCE_KERNEL_DISABLE_SUBINTR);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t rel = sr_syscall(&cpu, NID_SCE_KERNEL_RELEASE_SUBINTR);
+    expect(dis == 0u && rel == 0u,
+           "intr LockMutexCB: the handler disables and releases again, as the probe's teardown does");
+
+    expect(s_mutex_intr_count == MUTEX_INTR_TRIALS,
+           "intr LockMutexCB: the handler completes all 20 trials, as on the PSP (20 of 20)");
+    int in_intr = 1, lock_cb = 1, others = 1, done = 1;
+    for (int i = 0; i < s_mutex_intr_count; i++) {
+        const MutexIntrTrial *t = &s_mutex_intr_trials[i];
+        if (!t->intr_context) in_intr = 0;
+        if (!t->done) done = 0;
+        if (t->r_lock_cb != MUTEX_INTR_ILLEGAL_CONTEXT) lock_cb = 0;
+        if (t->r_bad_uid != MUTEX_INTR_ILLEGAL_CONTEXT || t->r_bad_cnt != MUTEX_INTR_ILLEGAL_CONTEXT ||
+            t->r_lock != MUTEX_INTR_ILLEGAL_CONTEXT || t->r_try != MUTEX_INTR_ILLEGAL_CONTEXT ||
+            t->r_unlock != MUTEX_INTR_ILLEGAL_CONTEXT)
+            others = 0;
+    }
+    expect(in_intr, "intr LockMutexCB: every trial runs in interrupt context");
+    expect(lock_cb,
+           "intr LockMutexCB: LockMutexCB(unlocked mutex, 1, NULL) in a VBLANK sub-interrupt handler "
+           "returns 0x80020064 (ILLEGAL_CONTEXT): PSP-MUTEX-001 mutex-interrupt-context, 20 of 20 trials");
+    expect(done, "intr LockMutexCB: the refused call returns to the handler, which never parks");
+    expect(others,
+           "intr LockMutexCB: the record's other five calls in the same trial also return 0x80020064");
+    expect(s_cur == (int)(main_t - s_tcb) && main_t->state == TH_RUNNING &&
+               mutex_intr_wait_invocations() == waits_before,
+           "intr LockMutexCB: the interrupted main thread is current again and no wait was opened");
+    expect(mtx_get_info(s_mutex_intr_unlocked, &info) && info.currentCount == 0 &&
+               info.lockThread == 0 && info.numWaitThreads == 0,
+           "intr LockMutexCB: the refused locks leave the mutex unlocked with no waiter (runtime check)");
+    expect(mtx_get_info(s_mutex_intr_main_owned, &info) && info.currentCount == 1 &&
+               info.lockThread == (int32_t)main_t->uid && info.numWaitThreads == 0,
+           "intr LockMutexCB: the refused unlock leaves the main thread's mutex held (runtime check)");
+
+    (void)mtx_delete(s_mutex_intr_unlocked);
+    (void)mtx_delete(s_mutex_intr_main_owned);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
+}
+
 /* ---- coroutine lifecycle invariants ---------------------------------------------------
  *
  * These read counters recorded by sr_coro.c itself as each operation happened, so they hold
@@ -58651,6 +59072,7 @@ static void lifecycle_stop_fn(CpuState *s) {
 #define SELFSTOP_ARG_ADDR 0x08a02000u
 static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
+static uint32_t s_selfstop_guest_result;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
 static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
@@ -58662,7 +59084,7 @@ static void selfstop_guest_entry(CpuState *s) {
     s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
     s->r[5] = s_selfstop_guest_args[1];
     s->r[6] = s_selfstop_guest_args[2];
-    (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
+    s_selfstop_guest_result = sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
 
@@ -59199,56 +59621,110 @@ static void test_late_prx_unload_reload_lifecycle(void) {
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
 
-    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
-     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
-     * with argument size 0 and argp 0, and the module is unloaded. */
-    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
-                                          LIFECYCLE_PATCH_OFF_A_1);
-    expect(self_uid != 0u &&
-               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
-                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
-           "self-stop (1, 0, NULL): module image loads");
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
-    memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = self_uid;
-    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
-    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
-     * so the call returns and the module stays loaded. */
-    s_lifecycle_stop_calls = 0u;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
-               sr_hle_test_module_count() == 1u,
-           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
-    s_lifecycle_stop_calls = 0u;
-    s_lifecycle_stop_arglen = 0xffffffffu;
-    s_lifecycle_stop_argp_word = 0xffffffffu;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 0u;
-    s_selfstop_guest_args[2] = 0u;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    s_selfstop_guest_args[0] = 0u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    expect(s_selfstop_guest_returned == 0u,
-           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
-    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
-               s_lifecycle_stop_argp_word == 0u,
-           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
-    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
-           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
-
     remove(path_a);
     remove(path_b);
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
+}
+
+static uint32_t s_selfstop_stop_argp;
+static void selfstop_zero_result_stop_fn(CpuState *s) {
+    s_lifecycle_stop_calls++;
+    s_lifecycle_stop_arglen = s->r[4];
+    s_selfstop_stop_argp = s->r[5]; /* Record the pointer itself, without reading it. */
+    s->r[2] = 0u;
+}
+
+static void test_self_stop_unload_measured_forms(void) {
+    extern void sr_hle_test_partition_reset(void);
+    const char *path = HLE_BUILD_ROOT "/hle_lifecycle_self_stop.prx";
+    const uint32_t entry = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
+    const uint32_t address_nid = 0xd8b73127u, export_pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_PATCH_OFF_A_1;
+    const struct {
+        uint32_t first, arglen, argp, refusal;
+    } cases[] = {
+        {0u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg0 */
+        {1u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg1 */
+        /* PSP-HLE-SELFSTOP-001's past-RAM cell unloaded with a substituted pointer.
+         * The host deliberately refuses an unreadable span instead. */
+        {0u, 4u, 0x0c000000u, 0x80000103u},
+        {1u, 4u, SELFSTOP_ARG_ADDR, 0x80020002u}, /* Unmeasured first argument of 1 with a block. */
+    };
+
+    if (!write_lifecycle_prx(path, 0x51570a0bu)) {
+        expect(0, "self-stop: synthetic image written");
+        return;
+    }
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_fixture();
+        sr_hle_init();
+        sr_test_guest_fn_reset();
+        sr_hle_test_module_reset();
+        /* A refusal deliberately leaves its fixed-address partition block allocated. */
+        sr_hle_test_partition_reset();
+
+        uint32_t uid = sr_hle_test_load_prx_image(path, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                                  LIFECYCLE_PATCH_OFF_A_1);
+        s_selfstop_guest_gp = 0x0aabbccdu;
+        const int loaded = uid != 0u &&
+            sr_hle_test_set_module_image(uid, LIFECYCLE_MOD_B_BASE,
+                                         LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, s_selfstop_guest_gp);
+        expect(loaded, "self-stop: fresh synthetic module image loaded");
+        if (!loaded) break;
+        sr_test_register_guest_fn(entry, lifecycle_start_fn);
+        sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_STOP_OFF, selfstop_zero_result_stop_fn);
+        sr_test_register_guest_fn(export_pc, lifecycle_export_b_fn);
+        CpuState cpu = {0};
+        cpu.r[4] = uid;
+        expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop: fresh module starts");
+        cpu.r[4] = entry;
+        expect(sr_syscall(&cpu, address_nid) == uid && sr_hle_test_module_count() == 1u &&
+                   sr_hle_test_image_count() == 1u && sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+               "self-stop: started module, image and export present before call");
+
+        s_selfstop_guest_args[0] = cases[i].first;
+        s_selfstop_guest_args[1] = cases[i].arglen;
+        s_selfstop_guest_args[2] = cases[i].argp;
+        s_selfstop_guest_result = UINT32_MAX;
+        s_selfstop_guest_returned = 0u;
+        s_selfstop_guest_in_scheduler = 0;
+        s_lifecycle_stop_calls = 0u;
+        s_lifecycle_stop_arglen = UINT32_MAX;
+        s_selfstop_stop_argp = UINT32_MAX;
+        sr_test_register_guest_fn(entry, selfstop_guest_entry);
+        sched_run(entry, 0u, 0u);
+
+        expect(s_selfstop_guest_in_scheduler && s_selfstop_guest_pc == entry,
+               "self-stop: caller runs as a scheduled thread in the started module");
+        cpu.r[4] = entry;
+        const uint32_t after = sr_syscall(&cpu, address_nid);
+        if (cases[i].refusal != 0u) {
+            expect(s_selfstop_guest_returned && s_selfstop_guest_result == cases[i].refusal &&
+                       s_lifecycle_stop_calls == 0u,
+                   "self-stop: unsupported argument form returns the refusal and runs no stop");
+            expect(after == uid && sr_hle_test_module_count() == 1u && sr_hle_test_image_count() == 1u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+                   "self-stop: refusal preserves the module, image and export");
+        } else {
+            expect(!s_selfstop_guest_returned && s_selfstop_guest_result == UINT32_MAX,
+                   cases[i].first ? "self-stop (1, 0, NULL) does not return" : "self-stop (0, 0, NULL) does not return");
+            expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u && s_selfstop_stop_argp == 0u,
+                   "self-stop: module_stop runs once with length zero and a raw null pointer");
+            expect(after == 0x8002012eu && sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
+                   "self-stop: module, image and export retired and address lookup no longer finds the module");
+        }
+    }
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    remove(path);
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
 }
 
 static void test_host_skipped_start_stop_unload_reload(void) {
@@ -64600,10 +65076,31 @@ static void test_font_glyph_image_and_handles(uint32_t served_index) {
            "the served font has a glyph whose bitmap fits a 16 x 16 buffer");
     uint32_t stops = sr_hle_test_unmodelled_stops();
     for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 4u, 0xa5u);
     flt_write_glyph_image(FLT_GI, 2u, 0, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
            "sceFontGetCharGlyphImage draws into a complete glyph image and bitmap");
+    /* The first glyph of each synthetic strike in test_flash0_font.py has coverage
+     * 0..15 in row order. Check what the guest actually sees at its 16-byte pitch. */
+    int coverage_ok = 1;
+    for (uint32_t y = 0; y < 4u; ++y) {
+        for (uint32_t x = 0; x < 4u; ++x) {
+            if (MEM_R8(FLT_BITMAP + 16u * y + x) != 17u * (4u * y + x)) coverage_ok = 0;
+        }
+    }
+    expect(coverage_ok && MEM_R8(FLT_BITMAP + 4u) == 0xa5u,
+           "format-2 glyph syscall writes all 16 coverage levels and preserves the next byte");
+
+    for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 5u, 0xa5u);
+    flt_write_glyph_image(FLT_GI, 2u, 32, 16u, 16u, 16u, FLT_BITMAP);
+    expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
+               sr_hle_test_unmodelled_stops() == stops &&
+               MEM_R8(FLT_BITMAP) == 0u && MEM_R8(FLT_BITMAP + 1u) == 9u &&
+               MEM_R8(FLT_BITMAP + 2u) == 25u && MEM_R8(FLT_BITMAP + 3u) == 43u &&
+               MEM_R8(FLT_BITMAP + 4u) == 25u && MEM_R8(FLT_BITMAP + 5u) == 0xa5u,
+           "half-pixel format-2 glyph write preserves the byte beyond its fifth column");
     flt_write_glyph_image(FLT_GI, 2u, 100 * 64, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
@@ -69540,6 +70037,18 @@ static int hle_selftest_main(int argc, char **argv) {
         free(g_mem_base);
         return s_failures ? 1 : 0;
     }
+    if (argc > 1 && strcmp(argv[1], "--sysclib-snprintf") == 0) {
+        test_sysclib_snprintf();
+        fprintf(stderr, "sysclib-snprintf: %d checks, %d failures\n", s_checks, s_failures);
+        return s_failures != 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--self-stop-unload") == 0) {
+        test_self_stop_unload_measured_forms();
+        fprintf(stderr, "self-stop-unload: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
 
     if (argc > 1 && strcmp(argv[1], "--title-config") == 0) {
         test_title_config_hle_bindings();
@@ -69727,6 +70236,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_osk_keyboard_keeps_guest_time_running();
     test_storage_dialog_parameter_sizes();
     test_netconf_parameter_sizes();
+    test_msg_dialog_status_with_no_dialog_started();
     test_utility_dialog_single_slot();
     test_utility_dialog_refused_cancel();
     test_utility_dialog_status_sequence();
@@ -69748,6 +70258,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_utility_dialog_measured_states();
     test_osk_nested_ranges();
     test_utility_dialog_wrong_states_unmeasured_types();
+    test_netconf_calls_with_no_dialog_started();
+    test_gamedata_install_calls_with_no_dialog_started();
+    test_game_sharing_calls_with_no_dialog_started();
     test_exit_thread_does_not_wake_launcher(0);
     test_exit_thread_does_not_wake_launcher(2);
     test_explicit_exit_status_exact((int32_t)0x800201acu, 0x800200d2u);
@@ -69835,6 +70348,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_bulk_guest_span_atomicity();
     test_inline_stores_match_full_bodies();
     test_sysclib_memory_imports();
+    test_sysclib_snprintf();
     test_thread_stack_free_size_contract();
     test_check_thread_stack_contract();
     test_refer_thread_status();
@@ -70098,12 +70612,14 @@ static int hle_selftest_main(int argc, char **argv) {
     test_intr_conformance_create_failure_is_setup_failure();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
+    test_lock_mutex_cb_refused_in_vblank_subintr();
     test_kernel_nested_join();
     test_kernel_nested_mutex();
     test_real_module_start_lifecycle();
     test_prx_stop_entry_boundaries();
     test_module_stop_join_failure_keeps_stop_single();
     test_late_prx_unload_reload_lifecycle();
+    test_self_stop_unload_measured_forms();
     test_module_without_entry_runs_no_code();
     test_host_skipped_start_stop_unload_reload();
     test_late_prx_duplicate_base_last_reference();

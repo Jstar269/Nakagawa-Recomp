@@ -2679,6 +2679,95 @@ static TexLevel tex_level(uint32_t level) {
     return t;
 }
 
+#ifndef SR_GE_VRAM_DECODER_CLI
+static const uint32_t capture_tex_bits[] = {16, 16, 16, 32, 4, 8, 16, 32};
+
+static int capture_texture_layout(const TexLevel *t, uint32_t level) {
+    return level <= 7u && ge.tex_fmt <= 10u && t->w > 0 && t->h > 0 &&
+           t->w <= 512 && t->h <= 512 && t->bufw <= 0xFFFFu;
+}
+
+static uint32_t capture_dxt_offset(uint32_t stride, uint32_t x, uint32_t y) {
+    uint32_t bpr = stride / 4u;
+    return ((y / 4u) * (bpr ? bpr : 1u) + x / 4u) * (ge.tex_fmt == 8u ? 8u : 16u);
+}
+
+static uint32_t capture_dxt_bytes(uint32_t rows) {
+    if (ge.tex_fmt == 8u) return 8u;
+    return ge.tex_fmt == 9u ? 8u + rows * 2u : 16u;
+}
+
+GeCaptureTextureStorage ge_capture_texture_storage(uint32_t level) {
+    const TexLevel t = tex_level(level);
+    if (!capture_texture_layout(&t, level)) return GE_CAPTURE_TEXTURE_INVALID;
+    const uint32_t stride = t.bufw ? t.bufw : (uint32_t)t.w;
+    uint32_t extent = 0;
+    if (ge.tex_fmt >= 8u) {
+        const uint32_t last_row = (uint32_t)t.h - 1u;
+        extent = capture_dxt_offset(stride, (uint32_t)t.w - 1u, last_row) +
+                 capture_dxt_bytes((last_row % 4u) + 1u);
+    } else {
+        const uint32_t bits = capture_tex_bits[ge.tex_fmt];
+        /* A narrow swizzled pitch can put an earlier row beyond the final row. */
+        for (uint32_t y = 0; y < (uint32_t)t.h; ++y) {
+            const uint32_t end = texel_offset(stride, (uint32_t)t.w - 1u, y, bits) +
+                                 (bits < 8u ? 1u : bits / 8u);
+            if (end > extent) extent = end;
+        }
+    }
+    if (!sr_inrange_n(t.addr, extent)) return GE_CAPTURE_TEXTURE_INVALID;
+    const uint32_t physical = SR_PHYS(t.addr);
+    const uint32_t end = physical + extent;
+    if (physical >= SR_VRAM_CPU_BASE && end <= SR_VRAM_CPU_END)
+        return GE_CAPTURE_TEXTURE_VRAM;
+    if (physical < SR_VRAM_CPU_END && end > SR_VRAM_CPU_BASE)
+        return GE_CAPTURE_TEXTURE_INVALID;
+    return GE_CAPTURE_TEXTURE_SPARSE;
+}
+
+static int capture_texture_run(const TexLevel *t, const uint8_t *resident, uint32_t available,
+                               uint32_t offset, uint32_t bytes) {
+    return offset <= available && bytes <= available - offset &&
+           (uint64_t)t->addr + offset + bytes <= UINT64_C(0x100000000) &&
+           ge_capture_note_observed_sparse(t->addr + offset, resident + offset, bytes);
+}
+
+int ge_capture_note_texture_level(uint32_t level, const uint8_t *resident, uint32_t available) {
+    const TexLevel t = tex_level(level);
+    if (!g_ge_capture_active || !resident || !capture_texture_layout(&t, level)) return 0;
+    const uint32_t width = (uint32_t)t.w, height = (uint32_t)t.h;
+    const uint32_t stride = t.bufw ? t.bufw : width;
+    if (ge.tex_fmt >= 8u) {
+        for (uint32_t y = 0; y < height; y += 4u) {
+            const uint32_t rows = height - y < 4u ? height - y : 4u;
+            for (uint32_t x = 0; x < width; x += 4u) {
+                const uint32_t offset = capture_dxt_offset(stride, x, y);
+                /* The first four bytes hold one index row each. Endpoints and
+                 * alpha bytes follow them, including in a partial block. */
+                if (!capture_texture_run(&t, resident, available, offset, rows) ||
+                    !capture_texture_run(&t, resident, available, offset + 4u,
+                                         capture_dxt_bytes(rows) - 4u))
+                    return 0;
+            }
+        }
+        return 1;
+    }
+    const uint32_t bits = capture_tex_bits[ge.tex_fmt];
+    /* Linear textures use one run per row. Swizzled tiles hold 16 row bytes.
+     * Visit each active run so stride padding and partial tiles stay unfixed. */
+    const uint32_t group = ge.tex_swizzle ? 128u / bits : width;
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x += group) {
+            const uint32_t count = width - x < group ? width - x : group;
+            if (!capture_texture_run(&t, resident, available, texel_offset(stride, x, y, bits),
+                                     (count * bits + 7u) / 8u))
+                return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
 /* Host bytes of the level a GPU decode is reading (tex_decode_host_begin), else NULL. */
 static const uint8_t *s_tex_host;
 static uint32_t s_tex_host_addr;

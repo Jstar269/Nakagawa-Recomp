@@ -133,6 +133,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "../recomp.h"
 #include "../ge_shared.h"
+#include "../ge_capture.h"
 #include "../perf.h"
 #include "../ace.h"   /* Ace Mode: the 30 Hz detector counts draws per target (Ace on only) */
 #include "tex_scale.h"   /* texture scaling (xBRZ) and the smart 2D filter (Ace on only) */
@@ -154,6 +155,8 @@
 #define FB_W 512            /* full PSP framebuffer stride (guest units) */
 #define FB_H 272
 #define DRAW_W 480          /* visible display width (presentation crop only) */
+#define MOVIE_COVER_WORDS ((DRAW_W + 63) / 64)
+#define MOVIE_HALF_PIXELS (DRAW_W * FB_H / 2)
 #define MAX_SCALE 4
 static int s_scale = 1;     /* integer render scale (SR_GPU_SCALE), 1..MAX_SCALE */
 #define SCL_W ((uint32_t)(FB_W * s_scale))   /* device-pixel canvas */
@@ -319,6 +322,9 @@ typedef struct {
     int pending;                           /* referenced by not-yet-submitted batches */
     uint8_t *shadow;
     uint32_t shadow_bytes;
+    uint64_t shadow_gen;
+    uint32_t shadow_fmt;
+    int shadow_swizzle;
     uint8_t shadow_clut[2048];
     uint32_t shadow_clut_fmt;
     int shadow_clut_valid;
@@ -455,11 +461,11 @@ typedef struct Target {
     VkImage rimg; VkDeviceMemory rmem;
     VkImageLayout rlayout;
     uint64_t cseq;                         /* s_write_seq of the image's last change (render_gen) */
-    /* Movie frames (#2111, SR_MOVIE_UPSCALE on): [mv_x0, mv_x1) x [mv_y0, mv_y1), in guest pixels, is
-     * the box of this frame's draws that sampled a noted movie picture (empty: none); mv_clock is
-     * sr_movie_clock() at the GE's last write to the image; mv_closed says the target was presented
-     * since its last write, so the next one starts a new frame's box. */
+    /* The box of this frame's movie draws and their unique rectangle pixels, capped at half the
+     * screen. The box still controls whether a later complete overwrite hides the movie.
+     * mv_clock records the last GE write and mv_closed marks the start of a fresh frame. */
     int mv_x0, mv_y0, mv_x1, mv_y1;
+    unsigned int mv_pixels;
     uint64_t mv_clock;
     int mv_closed;
 } Target;
@@ -950,6 +956,8 @@ static PipeEnt *s_pipes = NULL;
 static int s_pipe_n = 0, s_pipe_cap = 0;
 
 static Target   s_tgts[MAX_TGT];
+/* Kept out of Target so target creation and recycling do not clear it with tracking off. */
+static uint64_t s_movie_coverage[MAX_TGT][FB_H][MOVIE_COVER_WORDS];
 /* 1 for a target in s_tgts, 0 for a widescreen wing canvas's (WingEnt::t). Addresses compared as
  * integers: the two live in different arrays. */
 static int target_in_slots(const Target *t) {
@@ -3032,6 +3040,7 @@ typedef struct {
 typedef struct {
     unsigned descriptor_binds, scissors, blend_constants;
     unsigned render_pass_begins;
+    unsigned dst_set_binds, dst_read_draws;
 } GegpuSelftestRecordCommands;
 static GegpuSelftestRecordCommands s_selftest_record_commands;
 #endif
@@ -3101,6 +3110,9 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 2, 1,
                             rmw ? (twin ? &t->trmw_set : &t->rmw_set) : (twin ? &s_tdst_set : &s_dst_set),
                             0, NULL);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    s_selftest_record_commands.dst_set_binds++;
+#endif
 
     VkPipeline cur = VK_NULL_HANDLE;
     /* Dynamic state and set 0 belong to this command buffer and this compatible layout. A fresh
@@ -3171,6 +3183,9 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
             vkCmdDraw(s_cmd, b->count, 1, b->first - tv0, param_base - p0);
         else
             vkCmdDraw(s_cmd, b->count, 1, b->first - v0, 0);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+        if (batch_reads_dst(b)) s_selftest_record_commands.dst_read_draws++;
+#endif
     }
     vkCmdEndRenderPass(s_cmd);
     if (twin && !rmw) t->tlayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -4756,6 +4771,9 @@ static void tex_shadow_store(TexEnt *e) {
     uint64_t memcpy_started = cpu_profile_now();
     for (uint32_t l = 0, off = 0; l <= e->mip.max_level; off += tex_level_bytes(e, l++))
         memcpy(e->shadow + off, src[l], tex_level_bytes(e, l));
+    e->shadow_gen = e->gen;
+    e->shadow_fmt = s_ge->tex_fmt;
+    e->shadow_swizzle = s_ge->tex_swizzle;
     if (s_ge->tex_fmt >= 4 && s_ge->tex_fmt <= 7) {
         memcpy(e->shadow_clut, s_ge->clutram, sizeof(e->shadow_clut));
         e->shadow_clut_fmt = s_ge->clut_fmt;
@@ -7001,11 +7019,11 @@ static void tex_xs_retry(TexEnt *e, uint32_t levels) {
 /* ---- Movie frames (#2111) ---------------------------------------------------------------------
  * The renderer's half of movie provenance (ge_shared.h). With SR_MOVIE_UPSCALE on (gui.c turns
  * tracking on), presenting a GE target is a movie frame, which the movie upscaler enlarges as it
- * does a CPU-presented one, when its movie box covers at least half of the shown 480 x 272:
+ * does a CPU-presented one, when movie coverage reaches at least half of the shown 480 x 272:
  *   texture  draws since the target was last presented sampled a cache entry whose upload matched
- *            a noted picture (tex_movie_match); the movie box is the union of their boxes, clipped
- *            to the scissor and the shown area. A later GE draw, line, point or block transfer
- *            whose box covers the whole movie box hides the movie and empties the box; one over
+ *            a noted picture (tex_movie_match). Count the union of their draw rectangles, clipped
+ *            to the scissor and the shown area. A triangle contributes its bounds. A later GE draw,
+ *            line, point or block transfer that covers the whole movie box clears the coverage; one over
  *            part of it (subtitles, a prompt) does not, nor does a software-drawn primitive,
  *            whose box is not known.
  *   target   the target holds a whole noted picture, written after the GE's last write to the image
@@ -7060,14 +7078,44 @@ static int movie_draw_samples(const Batch *b) {
     return sr_movie_alive(e->movie_seq);
 }
 
+/* Count each pixel of the clipped draw rectangles once. After half the screen is covered only
+ * the outer box matters, until a complete overwrite or the next frame resets mv_pixels. */
+static void movie_add_coverage(Target *t, int x0, int y0, int x1, int y1) {
+    if (t->mv_pixels >= MOVIE_HALF_PIXELS) return;
+    if ((x1 - x0) * (y1 - y0) >= MOVIE_HALF_PIXELS) {
+        t->mv_pixels = MOVIE_HALF_PIXELS;
+        return;
+    }
+    uint64_t (*coverage)[MOVIE_COVER_WORDS] = s_movie_coverage[t - s_tgts];
+    if (!t->mv_pixels) memset(coverage, 0, sizeof(s_movie_coverage[0]));
+    const int first = x0 / 64, last = (x1 - 1) / 64;
+    const uint64_t left = UINT64_MAX << (x0 % 64);
+    const uint64_t right = UINT64_MAX >> (63 - ((x1 - 1) % 64));
+    for (int y = y0; y < y1; y++) {
+        for (int word = first; word <= last; word++) {
+            uint64_t mask = UINT64_MAX;
+            if (word == first) mask &= left;
+            if (word == last) mask &= right;
+            uint64_t *covered = &coverage[y][word];
+            t->mv_pixels += (unsigned int)__builtin_popcountll(mask & ~*covered);
+            *covered |= mask;
+        }
+        if (t->mv_pixels >= MOVIE_HALF_PIXELS) {
+            t->mv_pixels = MOVIE_HALF_PIXELS;
+            break;
+        }
+    }
+}
+
 /* A GE write to target `t`: a draw (movie = movie_draw_samples), a block transfer (scissored = 0:
  * the scissor does not limit it) or a software-drawn primitive, over [x0, x1) x [y0, y1) in guest
  * pixels (an empty box when it is not known). Nothing happens with tracking off. */
 static void movie_note_write(Target *t, int movie, int scissored, float x0, float y0, float x1,
                              float y1) {
-    if (!t || !sr_movie_tracking()) return;
+    if (!t || !sr_movie_tracking() || !target_in_slots(t)) return;
     if (t->mv_closed) {
         t->mv_x0 = t->mv_y0 = t->mv_x1 = t->mv_y1 = 0;
+        t->mv_pixels = 0;
         t->mv_closed = 0;
     }
     t->mv_clock = sr_movie_clock();
@@ -7080,6 +7128,7 @@ static void movie_note_write(Target *t, int movie, int scissored, float x0, floa
     const int ix0 = (int)floorf(x0), iy0 = (int)floorf(y0), ix1 = (int)ceilf(x1), iy1 = (int)ceilf(y1);
     const int have = t->mv_x0 < t->mv_x1 && t->mv_y0 < t->mv_y1;
     if (movie) {
+        movie_add_coverage(t, ix0, iy0, ix1, iy1);
         if (!have) {
             t->mv_x0 = ix0; t->mv_y0 = iy0; t->mv_x1 = ix1; t->mv_y1 = iy1;
         } else {
@@ -7091,6 +7140,7 @@ static void movie_note_write(Target *t, int movie, int scissored, float x0, floa
     } else if (have && x0 <= (float)t->mv_x0 && y0 <= (float)t->mv_y0 && x1 >= (float)t->mv_x1 &&
                y1 >= (float)t->mv_y1) {
         t->mv_x0 = t->mv_y0 = t->mv_x1 = t->mv_y1 = 0;
+        t->mv_pixels = 0;
     }
 }
 
@@ -7099,11 +7149,7 @@ static void movie_note_write(Target *t, int movie, int scissored, float x0, floa
  * then decides the same way. */
 static int movie_frame(Target *t) {
     if (!sr_movie_tracking()) return 0;
-    const int64_t half = (int64_t)DRAW_W * FB_H / 2;
-    int kind = 0;
-    if (t->mv_x0 < t->mv_x1 && t->mv_y0 < t->mv_y1 &&
-        (int64_t)(t->mv_x1 - t->mv_x0) * (t->mv_y1 - t->mv_y0) >= half)
-        kind = 1;
+    int kind = t->mv_pixels >= MOVIE_HALF_PIXELS ? 1 : 0;
     SrMoviePicture pic;
     const uint32_t bpp = t->fmt == 3u ? 4u : 2u, lo = SR_VRAM_CPU_BASE + t->fba;
 #ifdef NK_MOVIE_MUTANT_NO_MATCH   /* the selftest's mutant: no target holds a movie picture */
@@ -7117,7 +7163,7 @@ static int movie_frame(Target *t) {
         const int64_t px = off % t->stride, py = off / t->stride;
         const int64_t x1 = px + pic.width < DRAW_W ? px + pic.width : DRAW_W;
         const int64_t y1 = py + pic.height < FB_H ? py + pic.height : FB_H;
-        if (px < x1 && py < y1 && (x1 - px) * (y1 - py) >= half) kind = 2;
+        if (px < x1 && py < y1 && (x1 - px) * (y1 - py) >= MOVIE_HALF_PIXELS) kind = 2;
     }
     t->mv_closed = 1;
     if (!kind && sr_movie_held()) s_cnt_movie_present_ge++;
@@ -7174,6 +7220,46 @@ static void tex_slot_unmake(TexEnt *e) {
     e->smp = VK_NULL_HANDLE; e->view = VK_NULL_HANDLE; e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE;
 }
 
+static const char *tex_capture_cached_source(const TexEnt *e) {
+    int sparse = 0, vram = 0;
+    for (uint32_t level = 0; level <= e->mip.max_level; ++level) {
+        switch (ge_capture_texture_storage(level)) {
+        case GE_CAPTURE_TEXTURE_SPARSE: sparse = 1; break;
+        case GE_CAPTURE_TEXTURE_VRAM: vram = 1; break;
+        default: return "texture source footprint is outside captured memory";
+        }
+    }
+    if (!sparse) return NULL; /* Every active byte is covered by the eager VRAM copy. */
+    if (vram) return "mixed sparse memory and VRAM mip chain";
+    if (!e->shadow || e->shadow_gen != e->gen) return "missing current resident source";
+    if (e->addr != s_ge->tex_addr || e->w != s_ge->tex_w || e->h != s_ge->tex_h ||
+        e->bufw != s_ge->tex_bufw || e->shadow_fmt != s_ge->tex_fmt ||
+        e->shadow_swizzle != s_ge->tex_swizzle)
+        return "resident texture layout differs";
+    if (s_ge->tex_fmt >= 4u && s_ge->tex_fmt <= 7u &&
+        (!e->shadow_clut_valid || e->shadow_clut_fmt != s_ge->clut_fmt ||
+         memcmp(e->shadow_clut, s_ge->clutram, sizeof(e->shadow_clut)) != 0))
+        return "resident CLUT differs from GE state";
+    uint32_t offset = 0;
+    for (uint32_t level = 0; level <= e->mip.max_level; level++) {
+        const uint32_t bytes = tex_level_bytes(e, level);
+        if (bytes > e->shadow_bytes - offset ||
+            !ge_capture_note_texture_level(level, e->shadow + offset, bytes))
+            return "resident texture read is unrepresentable";
+        offset += bytes;
+    }
+    return NULL;
+}
+
+static void tex_capture_cached_read(const TexEnt *e) {
+    const char *reason = tex_capture_cached_source(e);
+    if (reason && g_ge_capture_active) {
+        fprintf(stderr, "GE_CAPTURE: cached texture at 0x%08x cannot be captured: %s\n",
+                e->addr, reason);
+        ge_capture_abort();
+    }
+}
+
 static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
     s_tex_bound_hm = 0;
@@ -7224,6 +7310,7 @@ static VkDescriptorSet tex_get(void) {
             if (xs_enabled()) tex_xs_retry(e, levels);
             tex_movie_refresh(e, levels);   /* #2111 */
             tex_dump_note(e, levels);
+            if (g_ge_capture_active) tex_capture_cached_read(e);
             return tex_bind_set(e, levels);
         }
         if (!e->content_valid && e->hash == hash && tex_shadow_matches(e)) {
@@ -7237,6 +7324,7 @@ static VkDescriptorSet tex_get(void) {
             if (sr_perf_enabled) sr_perf_texture_cache(1);
             if (xs_enabled()) tex_xs_retry(e, levels);
             tex_dump_note(e, levels);
+            if (g_ge_capture_active) tex_capture_cached_read(e);
             return tex_bind_set(e, levels);
         }
         /* same texture state, new contents: update in place (cache stays bounded) */
@@ -7481,6 +7569,7 @@ static int blend_dual_fix(uint32_t sfp, uint32_t dfp, uint32_t fixa, uint32_t fi
  *  - two DISTINCT FIX constants
  * min/max (eq 3/4) are exact in fixed function: both PSP and VK ignore the factors. */
 static int blend_needs_shader(uint32_t sfp, uint32_t dfp, uint32_t eq, uint32_t fixa, uint32_t fixb) {
+    if (eq == 3 || eq == 4) return 0;
     return eq >= 5 || (sfp >= 6 && sfp <= 9) || (dfp >= 6 && dfp <= 9) ||
            blend_dual_fix(sfp, dfp, fixa, fixb);
 }

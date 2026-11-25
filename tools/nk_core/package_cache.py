@@ -1872,7 +1872,10 @@ def validate_package_cache(
     package_dir: Path,
     *,
     expected_key: Mapping[str, Any] | None = None,
+    expected_title_identity: Mapping[str, Any] | None = None,
+    require_authentic: bool = False,
 ) -> tuple[bool, str]:
+    """Check a built package and any input or authentic-folder binding its caller requires."""
     package_dir = package_dir.resolve(strict=False)
     try:
         package = _read_json(package_dir / "package.json")
@@ -1899,6 +1902,11 @@ def validate_package_cache(
         return False, "package cache format or schema is unsupported"
     if not isinstance(cache.get("codegen_options"), dict):
         return False, "package cache codegen options are invalid"
+    if require_authentic and any(
+        field in cache["codegen_options"]
+        for field in ("enhancement_package_id", "enhancement_package_epoch", "code_hook_package_id")
+    ):
+        return False, "the package in the authentic package folder is an enhanced build"
     compatibility = cache.get("runtime_abi_compatibility")
     if not isinstance(compatibility, dict) or set(compatibility) != {"current_epoch", "generated_code_reusable"}:
         return False, "package cache runtime compatibility fields are invalid"
@@ -1933,6 +1941,8 @@ def validate_package_cache(
         identity = validate_title_input_identity(package.get("title_input_identity"))
     except PackageCacheError as exc:
         return False, str(exc)
+    if expected_title_identity is not None and identity != expected_title_identity:
+        return False, "package title input identity does not match the local record"
     if title_input_identity_digest(identity) != components.get("title_input_identity_sha256"):
         return False, "package title input identity disagrees with cache key"
     executable_input = inputs.get("executable", {})

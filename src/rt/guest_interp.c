@@ -1054,8 +1054,10 @@ static SrGuestInterpResult execute_noncontrol(
             const int32_t a = sr_u32_as_s32(read_gpr(s, rs));
             const int32_t b = sr_u32_as_s32(read_gpr(s, rt));
             if (a == INT32_MIN && b == -1) {
+                /* Tested before / and %, which are undefined here. HI is 0 on the PSP
+                 * (pspautotests tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7, #3031). */
                 s->lo = 0x80000000u;
-                s->hi = 0xffffffffu;
+                s->hi = 0u;
             } else if (b != 0) {
                 s->lo = (uint32_t)(a / b);
                 s->hi = (uint32_t)(a % b);
