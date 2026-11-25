@@ -4364,8 +4364,10 @@ static int parity_r6_chan(int s, int d, int sf, int df, int eq) {
 #define PARITY_FIXA 0x3F7F9Fu
 #define PARITY_FIXB 0x7F5F2Fu
 
-static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
-                            uint32_t fixb, uint32_t sprites, uint32_t mask_rgb) {
+static uint32_t parity_list_configured(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
+                                       uint32_t fixb, uint32_t sprites, uint32_t mask_rgb,
+                                       uint32_t fmt, int dither, uint32_t stencil_zpass,
+                                       uint32_t mask_alpha) {
     const uint32_t list_addr = 0x00100000u;
     uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
     uint32_t stride = 512u;
@@ -4375,17 +4377,28 @@ static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, 
     PARITY_EMIT(0x4C, 0);
     PARITY_EMIT(0x9C, base & 0x00FFFFFFu);
     PARITY_EMIT(0x9D, stride | ((base & 0xFF000000u) >> 8));
-    PARITY_EMIT(0xD2, 3);
+    PARITY_EMIT(0xD2, fmt);
     PARITY_EMIT(0xD3, 0);
     PARITY_EMIT(0x1D, 0);
     PARITY_EMIT(0x1E, 0);
     PARITY_EMIT(0x1F, 0);
-    PARITY_EMIT(0x20, 0);
+    PARITY_EMIT(0x20, dither);
+    if (dither) {
+        PARITY_EMIT(0xE2, 0x147Fu);
+        PARITY_EMIT(0xE3, 0x7F41u);
+        PARITY_EMIT(0xE4, 0x417Fu);
+        PARITY_EMIT(0xE5, 0x1F74u);
+    }
     PARITY_EMIT(0x22, 0);
     PARITY_EMIT(0x23, 0);
+    PARITY_EMIT(0x24, stencil_zpass != 0u);
+    if (stencil_zpass != 0u) {
+        PARITY_EMIT(0xDC, 1u | (0xFFu << 16));  /* ALWAYS: every covered pixel takes zpass. */
+        PARITY_EMIT(0xDD, stencil_zpass << 16);
+    }
     PARITY_EMIT(0xE7, 1);
     PARITY_EMIT(0xE8, mask_rgb);
-    PARITY_EMIT(0xE9, 0);
+    PARITY_EMIT(0xE9, mask_alpha);
     PARITY_EMIT(0x15, 0);
     PARITY_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
     PARITY_EMIT(0xD4, 0);
@@ -4402,6 +4415,11 @@ static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, 
     PARITY_EMIT(0x0C, 0);
     #undef PARITY_EMIT
     return list_addr;
+}
+
+static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
+                            uint32_t fixb, uint32_t sprites, uint32_t mask_rgb) {
+    return parity_list_configured(base, vaddr, blend_mode, fixa, fixb, sprites, mask_rgb, 3u, 0, 0u, 0u);
 }
 
 /* Guest vertex layout for VERTEXTYPE 8888 colour + float position: colour first. */
@@ -9122,6 +9140,116 @@ static int twin_ref_read(const char *path, TwinRef *r) {
     return 1;
 }
 
+/* Count both passes that bind set 2 (including ordinary pipelines) and recorded draws
+ * whose shader actually reads the destination through it. */
+static int coherence_run_minmax_routes(void) {
+    const uint32_t base = 0x04000000u | 0x00140000u, vaddr = 0x00101000u;
+    const uint32_t sprites = PARITY_GRID * PARITY_GRID;
+    const uint32_t alpha_sample = ((PARITY_ORIGIN + 1u) * FB_W + PARITY_ORIGIN + 1u) * 4u + 3u;
+    const uint32_t doubled = 6u | (8u << 4), inverse = 9u | (7u << 4), fix = 10u | (10u << 4);
+    const struct {
+        const char *name;
+        uint32_t mode, fmt;
+        int dither;
+        uint32_t stencil_zpass, mask_alpha;
+        int reads_dst;
+    } cases[] = {
+        { "min-doubled",         (3u << 8) | doubled, 3u, 0, 0u, 0u,    0 },
+        { "min-inverse",         (3u << 8) | inverse, 3u, 0, 0u, 0u,    0 },
+        { "min-dual-fix",        (3u << 8) | fix,     3u, 0, 0u, 0u,    0 },
+        { "max-doubled",         (4u << 8) | doubled, 3u, 0, 0u, 0u,    0 },
+        { "max-inverse",         (4u << 8) | inverse, 3u, 0, 0u, 0u,    0 },
+        { "max-dual-fix",        (4u << 8) | fix,     3u, 0, 0u, 0u,    0 },
+        { "add-doubled",                     doubled, 3u, 0, 0u, 0u,    1 },
+        { "add-dual-fix",                    fix,     3u, 0, 0u, 0u,    1 },
+        { "min-dither",          (3u << 8) | doubled, 3u, 1, 0u, 0u,    1 },
+        { "max-stencil",         (4u << 8) | inverse, 3u, 0, 3u, 0u,    1 },
+        { "min-565",             (3u << 8) | fix,     0u, 0, 0u, 0u,    1 },
+        /* ZERO stores alpha through fixed-function blending. A full preserve mask disables
+         * the alpha write. Preserving only some bits still needs a destination read. */
+        { "min-stencil-zero",    (3u << 8) | doubled, 3u, 0, 1u, 0u,    0 },
+        { "max-stencil-masked",  (4u << 8) | fix,     3u, 0, 1u, 0xffu, 0 },
+        { "min-stencil-partial", (3u << 8) | doubled, 3u, 0, 1u, 0x5au, 1 },
+    };
+    static uint8_t image[FB_W * FB_H * 4u];
+    parity_vertices(vaddr, sprites);
+    int ok = 1;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const uint32_t fmt = cases[i].fmt, bpp = fmt == 3u ? 4u : 2u;
+        const size_t bytes = (size_t)FB_W * FB_H * bpp;
+        const uint32_t list = parity_list_configured(base, vaddr, cases[i].mode, PARITY_FIXA,
+            PARITY_FIXB, sprites, 0, fmt, cases[i].dither, cases[i].stencil_zpass, cases[i].mask_alpha);
+        const GeGpuFbDescriptor desc = { .addr = base, .format = fmt, .stride = FB_W,
+                                          .width = 480, .height = FB_H };
+        coherence_reset_targets();
+        stp_fill_background(base, fmt);
+        const uint32_t initial_alpha = fmt == 3u ? ((const uint8_t *)SR_HOST(base))[alpha_sample] : 0u;
+        const GegpuSelftestRecordCommands commands0 = s_selftest_record_commands;
+        const unsigned long long draws0 = s_replay_stats.draws, fallbacks0 = s_replay_stats.fallback_prims;
+        const unsigned long long copies0 = s_replay_stats.snapshot_copies, rmw0 = s_cnt_rmw_ops;
+        const unsigned long long fixed0 = s_replay_stats.stencil_fixed;
+        ge_set_gpu_hooks(&k_hooks);
+        ge_run_list(list, 0);
+        const int readback = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+        memcpy(image, SR_HOST(base), bytes);
+        const unsigned binds = s_selftest_record_commands.dst_set_binds - commands0.dst_set_binds;
+        const unsigned reads = s_selftest_record_commands.dst_read_draws - commands0.dst_read_draws;
+        const unsigned long long draws = s_replay_stats.draws - draws0;
+        const unsigned long long fallbacks = s_replay_stats.fallback_prims - fallbacks0;
+        const unsigned long long copies = s_replay_stats.snapshot_copies - copies0;
+        const unsigned long long rmw = s_cnt_rmw_ops - rmw0;
+        const unsigned long long fixed = s_replay_stats.stencil_fixed - fixed0;
+
+        coherence_reset_targets();
+        stp_fill_background(base, fmt);
+        ge_set_gpu_hooks(NULL);
+        ge_run_list(list, 0);
+        ge_set_gpu_hooks(&k_hooks);
+        const uint8_t *software = (const uint8_t *)SR_HOST(base);
+        const int equal = memcmp(image, software, bytes) == 0;
+        printf("pipeline-minmax-route %s draws=%llu fallbacks=%llu dst_binds=%u dst_reads=%u "
+               "copies=%llu rmw=%llu stencil_fixed=%llu frame=%016llx scalar_equal=%d\n", cases[i].name, draws,
+               fallbacks, binds, reads, copies, rmw, fixed,
+               (unsigned long long)nk_pcache_fnv1a64(0, image, bytes), equal);
+        const int fixed_stencil_matches = cases[i].stencil_zpass == 0u ||
+                                          ((fixed != 0) == !cases[i].reads_dst);
+        if (!readback || !draws || fallbacks || !binds || (reads != 0) != cases[i].reads_dst ||
+            ((copies != 0 || rmw != 0) != cases[i].reads_dst) || !fixed_stencil_matches) {
+            fprintf(stderr, "gpu coherence selftest [pipeline-minmax]: FAIL %s destination route "
+                    "wanted shader destination reads=%d\n", cases[i].name, cases[i].reads_dst);
+            ok = 0;
+        }
+        if (cases[i].stencil_zpass == 1u) {
+            const uint32_t mask = cases[i].mask_alpha, expected_alpha = initial_alpha & mask;
+            const int distinguishable = initial_alpha != 0u && (mask == 0u || expected_alpha != 0u) &&
+                                        (mask == 0xffu || expected_alpha != initial_alpha);
+            printf("pipeline-minmax-alpha %s before=0x%02x mask=0x%02x expected=0x%02x "
+                   "gpu=0x%02x software=0x%02x\n", cases[i].name, initial_alpha, mask, expected_alpha,
+                   (unsigned)image[alpha_sample], (unsigned)software[alpha_sample]);
+            if (!distinguishable || image[alpha_sample] != expected_alpha) {
+                fprintf(stderr, "gpu coherence selftest [pipeline-minmax]: FAIL %s stencil alpha mask\n",
+                        cases[i].name);
+                ok = 0;
+            }
+        }
+        if (!equal) {
+            for (uint32_t pixel = 0; pixel < FB_W * FB_H; pixel++) {
+                const uint32_t off = pixel * bpp;
+                if (!memcmp(image + off, software + off, bpp)) continue;
+                uint32_t gpu = 0, sw = 0;
+                memcpy(&gpu, image + off, bpp);
+                memcpy(&sw, software + off, bpp);
+                fprintf(stderr, "gpu coherence selftest [pipeline-minmax]: FAIL %s pixel (%u,%u) "
+                        "GPU=%08x software=%08x\n", cases[i].name, pixel % FB_W, pixel / FB_W, gpu, sw);
+                break;
+            }
+            ok = 0;
+        }
+    }
+    coherence_reset_targets();
+    return ok;
+}
+
 /* #2361: regular Vulkan MIN/MAX ignore the RGB factors. The same geometry with either
  * factor pair must therefore reuse the pipeline and draw the same image. ADD keeps
  * both factors, and masking one channel still changes the MAX pipeline. */
@@ -9210,8 +9338,9 @@ static int coherence_run_pipeline_minmax(void) {
         }
     }
     coherence_reset_targets();
+    if (!coherence_run_minmax_routes()) ok = 0;
     if (ok) printf("gpu coherence selftest: PASS %-22s MIN/MAX reused both factor pairs; ADD and the mask "
-                   "kept separate pipelines and images\n", name);
+                   "kept separate pipelines and images; destination-read controls matched software\n", name);
     return ok;
 }
 
@@ -15573,16 +15702,21 @@ static void mvc_state(void) {
     ge_set_gpu_hooks(&k_hooks);
 }
 
-/* A through-mode sprite over [x0, x1) x [y0, y1): textured 1:1 from the picture, or one colour. */
-static int mvc_sprite(float x0, float y0, float x1, float y1, int textured, uint32_t colour) {
+/* A through-mode sprite over [x0, x1) x [y0, y1), with the first texture row at v0. */
+static int mvc_sprite_at_row(float x0, float y0, float x1, float y1, float v0,
+                             int textured, uint32_t colour) {
     s_ge->tex_enable = textured;
     ge_state_note_external_write();
     s_tmpl_ok = 0;
     GeVtx p0, p1;
     wrap_vtx(&p0, x0, y0, colour);
     wrap_vtx(&p1, x1, y1, colour);
-    p0.u = x0; p0.v = y0; p1.u = x1; p1.v = y1;
+    p0.u = x0; p0.v = v0; p1.u = x1; p1.v = v0 + (y1 - y0);
     return hook_sprite(&p0, &p1, 0);
+}
+
+static int mvc_sprite(float x0, float y0, float x1, float y1, int textured, uint32_t colour) {
+    return mvc_sprite_at_row(x0, y0, x1, y1, y0, textured, colour);
 }
 
 /* Presents the framebuffer and checks the kind the upscale pass was given. */
@@ -16261,6 +16395,115 @@ static int coherence_run_movie_target(void) {
     coherence_reset_targets();
     if (ok) printf("gpu coherence selftest: PASS %-22s decoded picture found; 5 ways it is not; guest VRAM unchanged\n",
                    cell);
+    return ok;
+}
+
+enum { MVC_STRIP_ROWS = 30, MVC_STRIP_COUNT = 9 };
+enum { MVC_NO_OVERLAY, MVC_SUBTITLE, MVC_OVERWRITE };
+
+typedef struct {
+    const char *step;
+    unsigned int strips;
+    unsigned int last_rows;
+    unsigned int first_draws;
+    int notes;
+    int overlay;
+    int kind;
+} MvcStripCase;
+
+static unsigned int mvc_strip_rows(const MvcStripCase *test, unsigned int strip) {
+    return test->strips >> (strip + 1u) ? MVC_STRIP_ROWS : test->last_rows;
+}
+
+/* This fixture supplies synthetic RGB and notes directly, then uses the real GE draw and present. */
+static int mvc_strip_frame(const MvcStripCase *test, int tracking) {
+    const uint32_t pitch = 512u * sizeof(uint32_t);
+    sr_movie_set_tracking(0);
+    sr_movie_set_tracking(tracking);
+    coherence_reset_targets();
+    mvc_state();
+    if (test->notes) {
+        for (unsigned int i = 0; i < MVC_STRIP_COUNT; i++)
+            sr_movie_note_picture(MVC_OWNER, MVC_PIC + i * MVC_STRIP_ROWS * pitch,
+                                  512u, 3u, DRAW_W, MVC_STRIP_ROWS);
+    }
+    if (!mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF3F5368u)) return 0;
+    for (unsigned int i = 1; i < MVC_STRIP_COUNT; i++) {
+        if (!(test->strips & (1u << i))) continue;
+        const unsigned int top = i * MVC_STRIP_ROWS;
+        s_ge->tex_addr = MVC_PIC + top * pitch;
+        s_ge->tex_h = 32;
+        const unsigned int draws = i == 1u ? test->first_draws : 1u;
+        for (unsigned int draw = 0; draw < draws; draw++)
+            if (!mvc_sprite_at_row(0.0f, (float)top, (float)DRAW_W,
+                                   (float)(top + mvc_strip_rows(test, i)), 0.0f, 1, 0xFFFFFFFFu))
+                return 0;
+    }
+    if (test->overlay == MVC_SUBTITLE) return mvc_sprite(0.0f, 245.0f, 48.0f, 255.0f, 0, 0xFFF09020u);
+    if (test->overlay == MVC_OVERWRITE)
+        return mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF176BADu);
+    return 1;
+}
+
+static int mvc_strip_pixels(const char *cell, const MvcStripCase *test, const uint32_t *frame) {
+    static const unsigned int samples[] = { 40u, 130u, 164u, 165u, 250u };
+    const unsigned int x = 10u;
+    for (unsigned int i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+        const unsigned int y = samples[i];
+        const unsigned int strip = y / MVC_STRIP_ROWS;
+        uint32_t expected = 0xFF3F5368u;
+        if ((test->strips & (1u << strip)) && y % MVC_STRIP_ROWS < mvc_strip_rows(test, strip))
+            expected = mvc_pixel(x, y, 7u);
+        if (test->overlay == MVC_SUBTITLE && y == 250u) expected = 0xFFF09020u;
+        if (test->overlay == MVC_OVERWRITE) expected = 0xFF176BADu;
+        const uint32_t actual = frame[y * 512u + x];
+        if ((actual & 0xFFFFFFu) != (expected & 0xFFFFFFu)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %s: framebuffer pixel at %u,%u differs\n",
+                    cell, test->step, x, y);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int coherence_run_movie_strip_coverage(void) {
+    const char *cell = "movie-strip-coverage";
+    static uint32_t on[512u * FB_H], off[512u * FB_H];
+    enum { SPARSE = (1u << 1) | (1u << 8), FIVE = 0x3eu, SURVIVING = 0x1feu };
+    static const MvcStripCase cases[] = {
+        { "two distant strips", SPARSE, 30u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "overlapping repeated strip", SPARSE, 30u, 4u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "135 covered rows", FIVE, 15u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "136 covered rows", FIVE, 16u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_MOVIE },
+        { "contiguous surviving strips", SURVIVING, 30u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_MOVIE },
+        { "same strips without notes", SURVIVING, 30u, 1u, 0, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "subtitles over strips", SURVIVING, 30u, 1u, 1, MVC_SUBTITLE, SDL3VK_FRAME_MOVIE },
+        { "opaque overwrite", SURVIVING, 30u, 1u, 1, MVC_OVERWRITE, SDL3VK_FRAME_GE },
+    };
+    int ok = 1;
+    mvc_write_picture(MVC_PIC, 512u, DRAW_W, FB_H, 7u);
+    s_mvc_pass_runs = 0;
+    sdl3vk_set_upscale_pass(mvc_upscale_pass);
+    for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const MvcStripCase *test = &cases[i];
+        if (!mvc_strip_frame(test, 1)) { ok = 0; break; }
+        if (!mvc_present(cell, test->step, test->kind)) ok = 0;
+        if (!mvc_guest_frame(on) || !mvc_strip_pixels(cell, test, on)) { ok = 0; break; }
+        if (!mvc_strip_frame(test, 0) || !mvc_present(cell, "tracking off", SDL3VK_FRAME_GE) ||
+            !mvc_guest_frame(off)) { ok = 0; break; }
+        if (memcmp(on, off, sizeof(on)) != 0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %s: guest framebuffer differs with tracking off\n",
+                    cell, test->step);
+            ok = 0;
+        }
+    }
+    if (!mvc_pass_ran(cell)) ok = 0;
+    sr_movie_set_tracking(0);
+    sdl3vk_set_upscale_pass(NULL);
+    coherence_reset_targets();
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s sparse, overlapping and threshold coverage; framebuffer unchanged\n",
+               cell);
     return ok;
 }
 
@@ -17389,6 +17632,7 @@ static int coherence_selftest_cases(void) {
         if (strncmp(only, "ngef-", 5) == 0) return coherence_run_ngef_ram(only);
         if (strcmp(only, "movie-texture") == 0) return coherence_run_movie_texture();
         if (strcmp(only, "movie-target") == 0) return coherence_run_movie_target();
+        if (strcmp(only, "movie-strip-coverage") == 0) return coherence_run_movie_strip_coverage();
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
         if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();
         if (strcmp(only, "soft-shadow") == 0) return coherence_run_soft_shadow();
@@ -17441,6 +17685,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_wide_raster()) ok = 0;
     if (!coherence_run_movie_texture()) ok = 0;   /* #2111 */
     if (!coherence_run_movie_target()) ok = 0;
+    if (!coherence_run_movie_strip_coverage()) ok = 0;
     if (!coherence_run_linear_sprite()) ok = 0;
     if (!coherence_run_tflt_filters()) ok = 0;
     if (!coherence_run_ring_wrap()) ok = 0;

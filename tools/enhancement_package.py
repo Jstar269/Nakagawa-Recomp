@@ -191,6 +191,7 @@ GUEST_WRITE_CAPABILITIES = {
 RNG_POLICY_MODES = frozenset({
     "rescale_probability",
     "subtick_30hz",
+    "unmodified",
 })
 
 ROOT_KEYS = frozenset({
@@ -271,6 +272,9 @@ DATA_TRANSFORMS = frozenset({
     "retention_m_to_sqrt(m)",
     "accel_x0.25",
 })
+
+# The explicit 3x scale applies only to f32 values in initialized executable data.
+DATA_SITE_TRANSFORMS = DATA_TRANSFORMS | {"f32_x3"}
 
 # A data file: a file the title reads from its disc, rewritten when it is opened.
 DATA_FILE_KEYS = frozenset({
@@ -671,8 +675,13 @@ def validate_package(data: Any) -> dict[str, Any]:
         sites = data["sites"]
         if not isinstance(sites, list):
             fail("sites", f"sites must be an array, got {type(sites).__name__}")
-        if len(sites) < 1:
+        if not sites and (code_hook or "data_sites" not in data):
             fail("sites", "sites array must contain at least 1 site")
+        if not code_hook:
+            if not sites and rng_mode != "unmodified":
+                fail("rng_policy.mode", "data-only timing packages must declare 'unmodified'")
+            if sites and rng_mode == "unmodified":
+                fail("rng_policy.mode", "'unmodified' is only for data-only timing packages")
         seen_site_ids: set[str] = set()
         seen_positions: set[tuple[str, int]] = set()
         for idx, site in enumerate(sites):
@@ -783,10 +792,11 @@ def validate_package(data: Any) -> dict[str, Any]:
                 "alternate logic updates, counted where each update begins",
             )
 
+        rng_unmodified = not code_hook and data["rng_policy"]["mode"] == "unmodified"
         if "data_sites" in data:
-            _validate_data_sites(data["data_sites"])
+            _validate_data_sites(data["data_sites"], rng_unmodified=rng_unmodified)
         if "data_files" in data:
-            _validate_data_files(data["data_files"])
+            _validate_data_files(data["data_files"], rng_unmodified=rng_unmodified)
         if "ace_parts" in data:
             _validate_ace_parts(data, seen_site_ids)
 
@@ -812,11 +822,13 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
     unknown_parts = sorted(set(parts) - ACE_PART_NAMES)
     if unknown_parts:
         fail("ace_parts", f"Unknown ace part {unknown_parts}; must be one of {sorted(ACE_PART_NAMES)}")
-    if "load" in parts and "update_boundary" not in data:
-        # The boundary marks the logic update's function, which no skipped wait may pace;
-        # without it nothing would keep a load site out of the update loop.
-        fail("update_boundary", "A package with ace_parts.load must declare update_boundary: no "
-                                "vblank_wait_skip site may be in the function where a logic update begins")
+    if "load" in parts:
+        if not data["sites"]:
+            fail("ace_parts.load", "data-only timing packages cannot declare load instruction sites")
+        if "update_boundary" not in data:
+            # The boundary marks the logic update's function, which no skipped wait may pace.
+            fail("update_boundary", "A package with ace_parts.load must declare update_boundary: no "
+                                    "vblank_wait_skip site may be in the function where a logic update begins")
     for name in sorted(parts):
         part_path = f"ace_parts.{name}"
         part = parts[name]
@@ -1167,7 +1179,7 @@ def _check_int(value: Any, path: str, lo: int, hi: int) -> int:
     return value
 
 
-def _validate_data_sites(data_sites: Any) -> None:
+def _validate_data_sites(data_sites: Any, *, rng_unmodified: bool = False) -> None:
     if not isinstance(data_sites, list) or not data_sites:
         fail("data_sites", "data_sites must be a non-empty array")
     seen_ids: set[str] = set()
@@ -1182,7 +1194,7 @@ def _validate_data_sites(data_sites: Any) -> None:
         if not SYMBOL_RE.match(symbol):
             fail(f"{path}.symbol", f"data site symbol {symbol!r} does not match required pattern {SYMBOL_RE.pattern}")
         dtype = site["type"]
-        if dtype not in DATA_TYPES:
+        if not isinstance(dtype, str) or dtype not in DATA_TYPES:
             fail(f"{path}.type", f"Unknown data type {dtype!r}; must be one of {sorted(DATA_TYPES)}")
         size = DATA_TYPES[dtype][0]
         offset = _check_int(site["offset"], f"{path}.offset", 0, 1 << 20)
@@ -1192,9 +1204,14 @@ def _validate_data_sites(data_sites: Any) -> None:
         digest = site["stock_digest"]
         if not isinstance(digest, str) or not SHA256_HEX_RE.match(digest):
             fail(f"{path}.stock_digest", "stock_digest must be a 64-character lowercase hex SHA-256 digest")
-        if site["transform"] not in DATA_TRANSFORMS:
+        transform = site["transform"]
+        if not isinstance(transform, str) or transform not in DATA_SITE_TRANSFORMS:
             fail(f"{path}.transform",
-                 f"Transform {site['transform']!r} has no data rescale; must be one of {sorted(DATA_TRANSFORMS)}")
+                 f"Transform {transform!r} has no data rescale; must be one of {sorted(DATA_SITE_TRANSFORMS)}")
+        if rng_unmodified and transform == "probability_per_update_x0.5":
+            fail(f"{path}.transform", "probability rescaling requires an RNG policy other than 'unmodified'")
+        if transform == "f32_x3" and dtype != "f32":
+            fail(f"{path}.type", "f32_x3 requires type 'f32'")
         lo, hi = offset, offset + size * count
         for other_symbol, other_lo, other_hi in seen_spans:
             if other_symbol == symbol and lo < other_hi and other_lo < hi:
@@ -1202,7 +1219,7 @@ def _validate_data_sites(data_sites: Any) -> None:
         seen_spans.append((symbol, lo, hi))
 
 
-def _validate_data_files(data_files: Any) -> None:
+def _validate_data_files(data_files: Any, *, rng_unmodified: bool = False) -> None:
     if not isinstance(data_files, list) or not data_files:
         fail("data_files", "data_files must be a non-empty array")
     seen_ids: set[str] = set()
@@ -1246,9 +1263,12 @@ def _validate_data_files(data_files: Any) -> None:
                          f"column {column!r} must be an ASCII header name matching {CSV_COLUMN_RE.pattern}")
             else:
                 column = _check_int(cell["column_index"], f"{cpath}.column_index", 0, 255)
-            if cell["transform"] not in DATA_TRANSFORMS:
+            transform = cell["transform"]
+            if not isinstance(transform, str) or transform not in DATA_TRANSFORMS:
                 fail(f"{cpath}.transform",
-                     f"Transform {cell['transform']!r} has no data rescale; must be one of {sorted(DATA_TRANSFORMS)}")
+                     f"Transform {transform!r} has no data rescale; must be one of {sorted(DATA_TRANSFORMS)}")
+            if rng_unmodified and transform == "probability_per_update_x0.5":
+                fail(f"{cpath}.transform", "probability rescaling requires an RNG policy other than 'unmodified'")
             if "type" in cell and cell["type"] not in DATA_TYPES:
                 fail(f"{cpath}.type", f"Unknown data type {cell['type']!r}; must be one of {sorted(DATA_TYPES)}")
             if "rows" in cell:
@@ -1662,15 +1682,35 @@ def _keyed_matcher(key: bytes, want: str) -> Callable[[bytes], bool]:
 ReadFn = Callable[[int, int], Any]
 
 
+def _elf_file_backed_offset(elf: Any, addr: int, size: int) -> int | None:
+    """File offset of a full span with one unambiguous PT_LOAD mapping."""
+    if size <= 0:
+        return None
+    end = addr + size
+    offset = None
+    for seg in elf.segments:
+        lo = seg["vaddr"]
+        if seg["type"] != 1 or not seg["memsz"] or lo >= end or addr >= lo + seg["memsz"]:
+            continue
+        if offset is not None or addr < lo or end > lo + seg["filesz"]:
+            return None
+        offset = seg["off"] + (addr - lo)
+    return offset
+
+
 def elf_readers(elf: Any) -> tuple[ReadFn, ReadFn]:
     """``(read_words, read_data)`` over an ``analyze.Elf`` as codegen reads it.
 
     ``read_words(vaddr, count)`` returns ``count`` little-endian words or ``None``;
     ``read_data(vaddr, size)`` returns initialised bytes of one allocated,
     non-executable PROGBITS section as the loader places them (relocated, for a
-    relocatable image), never code or zero-fill, or ``None``. Segments cannot tell,
-    since a title may load code and data in one RWX segment.
+    relocatable image), or ``None``. The span must have unambiguous file backing
+    and no conflicting allocated section. A load segment may mix code and data.
     """
+    from analyze import exec_ranges
+
+    code_spans = exec_ranges(elf)
+
     def read_words(vaddr: int, count: int) -> list[int] | None:
         out: list[int] = []
         for idx in range(count):
@@ -1681,15 +1721,27 @@ def elf_readers(elf: Any) -> tuple[ReadFn, ReadFn]:
         return out
 
     def read_data(vaddr: int, count: int) -> bytes | None:
-        rebase = elf.reloc.lo if elf.reloc is not None else 0
+        offset = _elf_file_backed_offset(elf, vaddr, count)
+        if offset is None:
+            return None
+        end = vaddr + count
+        if any(lo < end and vaddr < hi for lo, hi in code_spans):
+            return None
+        initialized = False
         for sec in elf.sections:
-            if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 4:
+            # analyze.Elf already places section addresses in the same space as its reads.
+            lo = sec["addr"]
+            hi = lo + sec["size"]
+            if not sec["flags"] & 2 or lo == hi or lo >= end or vaddr >= hi:
                 continue
-            lo = sec["addr"] + rebase
-            if lo <= vaddr and vaddr + count <= lo + sec["size"]:
-                raw = elf.read_at_vaddr(vaddr, count)
-                return None if raw is None else bytes(raw)
-        return None
+            if sec["typ"] != 1 or sec["flags"] & 4 or sec["off"] - lo != offset - vaddr:
+                return None
+            if lo <= vaddr and end <= hi:
+                initialized = True
+        if not initialized:
+            return None
+        raw = elf.read_at_vaddr(vaddr, count)
+        return bytes(raw) if raw is not None and len(raw) == count else None
 
     return read_words, read_data
 
@@ -3491,7 +3543,7 @@ def plan_data_value(transform: str, dtype: str, raw: bytes) -> bytes:
     if dtype == "f32":
         if not math.isfinite(value):
             raise ValueError(f"float {value!r} is not finite")
-        scaled = _scale_value(transform, value)
+        scaled = value * 3 if transform == "f32_x3" else _scale_value(transform, value)
         try:
             out = struct.pack(fmt, scaled)
         except OverflowError as exc:

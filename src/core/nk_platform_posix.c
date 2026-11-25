@@ -271,9 +271,9 @@ bool nk_platform_list_files(const char *dir, NkDirFileFn fn, void *ctx) {
     return true;
 }
 
-/* Both directory walks. With skipped NULL this is nk_platform_list_dir; with it,
-   every entry left out is counted and a listing that stops on an error fails. */
-static bool posix_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *skipped) {
+/* Count or report skipped entries only for strict walks. */
+static bool posix_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *skipped,
+                          NkDirFileFn skipped_name) {
     if (!dir || !*dir || !fn) return false;
     if (skipped) *skipped = 0;
     DIR *handle = opendir(dir);
@@ -284,7 +284,7 @@ static bool posix_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *
         errno = 0;
         item = readdir(handle);
         if (!item) {
-            if (skipped && errno != 0) ok = false;
+            if ((skipped || skipped_name) && errno != 0) ok = false;
             break;
         }
         if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) continue;
@@ -295,6 +295,7 @@ static bool posix_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *
         if (written < 0 || (size_t)written >= sizeof(path) || lstat(path, &st) != 0 ||
             (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
             if (skipped) ++*skipped;
+            if (skipped_name && !skipped_name(item->d_name, ctx)) break;
             continue;
         }
         if (!fn(item->d_name, S_ISDIR(st.st_mode), ctx)) break;
@@ -304,13 +305,18 @@ static bool posix_list_dir(const char *dir, NkDirEntryFn fn, void *ctx, size_t *
 }
 
 bool nk_platform_list_dir(const char *dir, NkDirEntryFn fn, void *ctx) {
-    return posix_list_dir(dir, fn, ctx, NULL);
+    return posix_list_dir(dir, fn, ctx, NULL, NULL);
 }
 
 bool nk_platform_list_dir_counted(const char *dir, NkDirEntryFn fn, void *ctx,
                                   size_t *skipped) {
     size_t none = 0;
-    return posix_list_dir(dir, fn, ctx, skipped ? skipped : &none);
+    return posix_list_dir(dir, fn, ctx, skipped ? skipped : &none, NULL);
+}
+
+bool nk_platform_list_dir_report_skipped(const char *dir, NkDirEntryFn fn,
+                                        NkDirFileFn skipped_name, void *ctx) {
+    return skipped_name && posix_list_dir(dir, fn, ctx, NULL, skipped_name);
 }
 
 bool nk_platform_sync_file(FILE *f) {
@@ -978,6 +984,17 @@ FILE *nk_platform_open_regular_file(const char *path) {
     FILE *file = fdopen(fd, "rb");
     if (!file) close(fd);
     return file;
+}
+
+bool nk_platform_file_write_time(FILE *file, NkFileWriteTime *out) {
+    struct stat st;
+    if (!file || !out || fstat(fileno(file), &st) != 0 || !S_ISREG(st.st_mode)) return false;
+#if defined(__APPLE__)
+    *out = (NkFileWriteTime){st.st_mtimespec.tv_sec, (uint32_t)st.st_mtimespec.tv_nsec};
+#else
+    *out = (NkFileWriteTime){st.st_mtim.tv_sec, (uint32_t)st.st_mtim.tv_nsec};
+#endif
+    return true;
 }
 
 FILE *nk_platform_open_read_deny_writes(const char *path, bool *opened_shared) {
@@ -2076,8 +2093,10 @@ NkHostKind nk_platform_host_kind(void) {
 #endif
 }
 
-bool nk_platform_linux_steam_find_root(char *root, size_t root_cap) {
-    char home[NK_MAX_PATH], first_root[NK_MAX_PATH] = "";
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap,
+                                      bool (*has_accounts)(const char *)) {
+    char home[NK_MAX_PATH];
+    unsigned best_rank = 0u;
     static const char *const suffixes[] = {"/.local/share/Steam", "/.steam/steam"};
     if (!root || root_cap == 0u) return false;
     root[0] = '\0';
@@ -2086,20 +2105,21 @@ bool nk_platform_linux_steam_find_root(char *root, size_t root_cap) {
     for (size_t i = 0u; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
         char candidate[NK_MAX_PATH], userdata[NK_MAX_PATH];
         int n = snprintf(candidate, sizeof(candidate), "%s%s", home, suffixes[i]);
-        if (n < 0 || (size_t)n >= sizeof(candidate) || !nk_platform_dir_exists(candidate)) continue;
-        if (first_root[0] == '\0') memcpy(first_root, candidate, (size_t)n + 1u);
+        if (n < 0 || (size_t)n >= sizeof(candidate) || (size_t)n >= root_cap ||
+            !nk_platform_dir_exists(candidate)) continue;
+        size_t candidate_length = (size_t)n;
+        unsigned rank = 1u;
         n = snprintf(userdata, sizeof(userdata), "%s/userdata", candidate);
-        if (n < 0 || (size_t)n >= sizeof(userdata) || !nk_platform_dir_exists(userdata)) continue;
-        n = snprintf(root, root_cap, "%s", candidate);
-        if (n >= 0 && (size_t)n < root_cap) return true;
-        root[0] = '\0';
+        if (n >= 0 && (size_t)n < sizeof(userdata) && nk_platform_dir_exists(userdata)) {
+            rank = has_accounts(candidate) ? 3u : 2u;
+        }
+        if (rank > best_rank) {
+            memcpy(root, candidate, candidate_length + 1u);
+            best_rank = rank;
+            if (rank == 3u) break;
+        }
     }
-    if (first_root[0] != '\0') {
-        int n = snprintf(root, root_cap, "%s", first_root);
-        if (n >= 0 && (size_t)n < root_cap) return true;
-    }
-    root[0] = '\0';
-    return false;
+    return best_rank != 0u;
 }
 
 bool nk_platform_linux_steam_client_running(void) {

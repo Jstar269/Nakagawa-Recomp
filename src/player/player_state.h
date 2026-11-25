@@ -9,6 +9,7 @@
 #include "nk_iso.h"
 #include "nk_disc_expand.h"
 #include "nk_library.h"
+#include "nk_memstick_layout.h"
 #include "nk_disc_verify.h"
 #include "nk_launch.h"
 #include "nk_steam_shortcuts.h"
@@ -1342,6 +1343,8 @@ struct PlayerApp {
        game's page hides it for that game and the effects it named, for the rest of this
        player session: another game, or an effect it did not name, shows it again. The last
        game hidden is the one remembered. */
+    int fsr1_session_preset;          /* requesting preset for the current launch */
+    NkFsr1Refusal fsr1_session_refusal;
     uint16_t render_effects;
     char render_effects_text[384];
     uint16_t render_effects_hidden;
@@ -1554,6 +1557,11 @@ bool player_app_save_backup_folder(const GameRecord *game, char *out, size_t out
 /* Why the title's saves can't be changed now, or NULL: a disc ID that can't name a folder,
  * or a game that starts or runs (it has the folder open). */
 const char *player_app_saves_blocker(const PlayerApp *app, int game_index);
+/* A read-only offer and a confirmed write for the selected title on a READY stick. */
+NkMemstickCollisionResult player_app_bring_in_offer(const PlayerApp *app, int game_index,
+                                                    NkMemstickPlanUnit *offer);
+NkMemstickCollisionResult player_app_bring_in(const PlayerApp *app, int game_index,
+                                              const NkMemstickPlanUnit *offer);
 /* The current local time as a backup stamp, YYYYMMDD-HHMMSS. */
 void player_app_save_stamp_now(char *out, size_t out_size);
 /* Writes a backup of the title's save folder, named with `stamp`, and reads it back whole

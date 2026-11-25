@@ -67,14 +67,14 @@ GLYPHS = (BOX_A, BAR_B, DIAGONAL_C, RING_D)
 ABSENT_CODE = 0x5A
 
 
-def _raster(glyph: Glyph) -> list[int]:
-    """The samples in raster order, undoing a column-major row order 2."""
+def _format2_raster(glyph: Glyph) -> bytes:
+    """Expand the writer's 4-bit samples to 8-bit coverage in raster order."""
     if glyph.row_order == 1:
-        return list(glyph.samples)
-    raster = [0] * (glyph.width * glyph.height)
+        return bytes(sample * 17 for sample in glyph.samples)
+    raster = bytearray(glyph.width * glyph.height)
     for index, sample in enumerate(glyph.samples):
-        raster[(index % glyph.height) * glyph.width + index // glyph.height] = sample
-    return raster
+        raster[(index % glyph.height) * glyph.width + index // glyph.height] = sample * 17
+    return bytes(raster)
 
 
 def _metrics(glyph: Glyph) -> dict[str, int]:
@@ -540,17 +540,17 @@ class PgfWriterReaderRoundTripTests(unittest.TestCase):
             self.assertEqual(fields[:2], ["draw", str(glyph.code)])
             self.assertEqual(int(fields[2]), glyph.width)
             self.assertEqual(int(fields[3]), glyph.height)
-            self.assertEqual(list(bytes.fromhex(fields[4])), _raster(glyph))
+            self.assertEqual(bytes.fromhex(fields[4]), _format2_raster(glyph))
 
         absent = records[-2].split(" ")
         self.assertEqual(absent[:3], ["char", str(ABSENT_CODE), "0"])
         self.assertEqual(bytes.fromhex(absent[3]), bytes(0x3C))
         self.assertEqual(records[-1], f"draw {ABSENT_CODE} none")
 
-    def test_reader_drawn_samples_match_the_writer_input_bit_for_bit(self):
+    def test_reader_draws_the_expanded_writer_samples(self):
         glyph = Glyph(code=0x4E, width=4, height=4, samples=(15, 15, 0, 0, 15, 7, 7, 0, 0, 15, 0, 0, 1, 1, 1, 1))
         lines = self._read_back((glyph,), [0x4E])
-        self.assertEqual(list(bytes.fromhex(lines[3].split(" ")[4])), _raster(glyph))
+        self.assertEqual(bytes.fromhex(lines[3].split(" ")[4]), _format2_raster(glyph))
 
     def test_a_second_run_reads_back_identically(self):
         codes = [glyph.code for glyph in GLYPHS]
@@ -581,7 +581,7 @@ class PgfWriterReaderRoundTripTests(unittest.TestCase):
             glyph = present[code]
             self.assertEqual(char_line[2], "1", f"U+{code:04X} presence")
             self.assertEqual(draw_line[2:4], [str(glyph.width), str(glyph.height)])
-            self.assertEqual(list(bytes.fromhex(draw_line[4])), _raster(glyph))
+            self.assertEqual(bytes.fromhex(draw_line[4]), _format2_raster(glyph))
 
 
 if __name__ == "__main__":

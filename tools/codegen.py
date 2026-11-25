@@ -2254,8 +2254,11 @@ def _effect_sync(addr, w, options, delay_branch_pc):
 
 
 def _effect_div(addr, w, options, delay_branch_pc):
+    # INT_MIN / -1 and a zero divisor are tested before C's / and %, which are undefined for
+    # both. The PSP leaves LO 0x80000000 and HI 0 for the overflow (pspautotests
+    # tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7, recorded on a PSP; #3031).
     a, b = rs(w), rt(w)
-    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0xFFFFFFFFu;} "
+    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0u;} "
             "else if (_b!=0){s->lo=(uint32_t)(_a/_b);s->hi=(uint32_t)(_a%%_b);} else {s->lo=_a<0?1u:0xFFFFFFFFu;s->hi=(uint32_t)_a;} }") % (R(a), R(b)), None, 0
 
 
@@ -3293,8 +3296,11 @@ def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
     si = vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     cond = w & 0xF
+    # Each lane result must be 0 or 1 before it is shifted into CC: glibc's isinf() returns -1
+    # for -inf, which set every bit above the lane (pspautotests e37443a6
+    # tests/cpu/vfpu/specials.expected, recorded on a PSP, reads EI 0x1c for (NaN, -NaN, inf, -inf)).
     _C = {0: "0", 1: "_x==_y", 2: "_x<_y", 3: "_x<=_y", 4: "1", 5: "_x!=_y",
-          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "isnan(_x)", 10: "isinf(_x)",
+          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "(isnan(_x)!=0)", 10: "(isinf(_x)!=0)",
           11: "(isnan(_x)||isinf(_x))", 12: "_x!=0.0f", 13: "!isnan(_x)",
           14: "!isinf(_x)", 15: "!(isnan(_x)||isinf(_x))"}[cond]
     body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
