@@ -3640,6 +3640,15 @@ static void test_memstick_save_planner(const char *base) {
 }
 
 static int memstick_journal_probe(const char *phase, const char *saves) {
+    if (!strcmp(phase, "bring-in-resume")) {
+        NkMemstickPlanUnit offer;
+        assert(nk_memstick_savedata_bring_in_offer(saves, "TEST00001", &offer) ==
+               NK_MEMSTICK_COLLISION_COPIED);
+        assert(!strcmp(offer.name, "A-BOTH") && offer.decision == NK_MEMSTICK_PLAN_KEEP);
+        assert(nk_memstick_savedata_bring_in(saves, "TEST00001", &offer) ==
+               NK_MEMSTICK_COLLISION_COPIED);
+        return 0;
+    }
     NkMemstickPaths paths;
     assert(nk_memstick_layout_paths(saves, &paths));
     NkFileLock lock;
@@ -3826,6 +3835,168 @@ static void test_memstick_journal_restart(const char *base) {
  * and its layout record <saves>/nakagawa-saves.json is schema_version 1, with a newer one refused
  * by name (SAVES_LAYOUT_NEWER) and a damaged or unreadable one kept, never replaced. Synthetic
  * folders only. */
+static void memstick_bring_test_write(const char *root, const char *side, const char *name,
+                                      const char *data, const char *metadata) {
+    char relative[NK_MAX_PATH], folder[NK_MAX_PATH], file[NK_MAX_PATH];
+    int length = snprintf(relative, sizeof(relative), "%s/PSP/SAVEDATA/%s", side, name);
+    assert(length > 0 && (size_t)length < sizeof(relative));
+    memstick_fixture_path(folder, root, relative);
+    assert(nk_platform_mkdir_p(folder));
+    memstick_fixture_path(file, folder, "DATA.BIN");
+    write_file_utf8(file, data);
+    memstick_fixture_path(file, folder, "PARAM.SFO");
+    write_file_utf8(file, metadata);
+}
+
+typedef struct {
+    char first[NK_MAX_PATH];
+    size_t count;
+} BringInReceipts;
+
+static bool memstick_bring_test_receipt(const char *name, bool is_dir, void *opaque) {
+    BringInReceipts *receipts = opaque;
+    if (!is_dir && strlen(name) == 69u && !strcmp(name + 64u, ".json")) {
+        if (!receipts->count) memcpy(receipts->first, name, 70u);
+        ++receipts->count;
+    }
+    return true;
+}
+
+static void test_memstick_bring_in(const char *base) {
+    puts("[LAUNCH_TEST] READY Memory Stick Bring In preserves active progress and resumes");
+    char root[NK_MAX_PATH], path[NK_MAX_PATH], journal[NK_MAX_PATH], receipt[NK_MAX_PATH];
+    char kept[NK_MAX_PATH], bucket[NK_MAX_PATH], relative[NK_MAX_PATH];
+    NkMemstickPaths paths;
+    NkMemstickLayout layout;
+    NkFileLock lock;
+    NkMemstickPlanUnit offer, stale;
+    const char *slot = "TEST00001";
+    memstick_fixture_path(root, base, "memstick-bring-in");
+    assert(nk_memstick_layout_paths(root, &paths));
+    memstick_bring_test_write(root, slot, "A-BOTH", "A000", "AM00");
+    memstick_bring_test_write(root, slot, "B-OLD", "B000", "BM00");
+    memstick_bring_test_write(root, slot, "C-SHARED", "C000", "CM00");
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    assert(nk_memstick_layout_init(&layout, NK_MEMSTICK_STATE_MOVING, "test"));
+    assert(nk_memstick_layout_write(root, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) ==
+           NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED);
+    const NkMemstickPlanInput input = {slot, slot};
+    NkMemstickSavePlan plan;
+    assert(nk_memstick_plan_savedata(root, &input, 1u, &plan));
+    assert(nk_memstick_savedata_move_begin(root, &plan) == NK_MEMSTICK_COLLISION_COPIED);
+    bool complete = false;
+    assert(nk_memstick_savedata_move_resume(root, 0u, &complete) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(complete);
+    nk_memstick_save_plan_free(&plan);
+    /* Set up the fixture's READY stick. Promotion is a separate operation. */
+    assert(nk_rename_noreplace_utf8(paths.staging, paths.stick) == 0);
+    layout.state = NK_MEMSTICK_STATE_READY;
+    assert(nk_memstick_layout_put_source(&layout, slot, NK_MEMSTICK_SOURCE_MOVED,
+                                         ".nakagawa-migration/psp-savedata/plan.json", NULL,
+                                         NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    assert(nk_memstick_layout_write(root, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&layout);
+    nk_platform_file_lock_release(&lock);
+    char *ready = read_text_file(paths.record);
+    assert(ready);
+
+    memstick_bring_test_write(root, NK_MEMSTICK_STICK_NAME, "C-SHARED", "CNEW", "CM02");
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!offer.name[0]);  /* shared-only progress is no offer */
+    memstick_fixture_path(path, root, "TEST00001/PSP/SAVEDATA/B-OLD/DATA.BIN");
+    memstick_write_aged_file(path, "B000", 1700000000u);
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!offer.name[0]);  /* a timestamp-only legacy edit is no offer */
+
+    memstick_bring_test_write(root, NK_MEMSTICK_STICK_NAME, "A-BOTH", "ANEW", "AM02");
+    memstick_bring_test_write(root, slot, "A-BOTH", "AOLD", "AM01");
+    memstick_bring_test_write(root, slot, "B-OLD", "BOLD", "BM01");
+    memstick_bring_test_write(paths.kept_copies, slot, "A-BOTH", "prior kept", "prior metadata");
+    memstick_fixture_path(journal, paths.migration, "bring-in/test00001");
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &stale) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(stale.name, "A-BOTH") && stale.decision == NK_MEMSTICK_PLAN_KEEP);
+    assert(nk_platform_path_missing(journal));
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    assert(nk_memstick_savedata_bring_in(root, slot, &stale) == NK_MEMSTICK_COLLISION_STICK_IN_USE);
+    nk_platform_file_lock_release(&lock);
+    assert(nk_platform_path_missing(journal));
+    memstick_bring_test_write(root, slot, "A-BOTH", "ALTR", "AM01");
+    assert(nk_memstick_savedata_bring_in(root, slot, &stale) == NK_MEMSTICK_COLLISION_SOURCE_CHANGING);
+    assert(nk_platform_path_missing(journal));
+    memstick_bring_test_write(root, slot, "A-BOTH", "AOLD", "AM01");
+    assert(nk_memstick_savedata_bring_in(root, slot, &stale) == NK_MEMSTICK_COLLISION_COPIED);
+
+    BringInReceipts found = {0};
+    assert(nk_platform_list_dir(journal, memstick_bring_test_receipt, &found));
+    assert(found.count == 1u);
+    memstick_fixture_path(receipt, journal, found.first);
+    char *completed = read_text_file(receipt);
+    assert(completed && strstr(completed, "\"unit\":\"A-BOTH\""));
+    memstick_fixture_path(bucket, paths.kept_copies, "TEST00001/Bring In");
+    int length = snprintf(relative, sizeof(relative), "%.64s/PSP/SAVEDATA/A-BOTH", found.first);
+    assert(length > 0 && (size_t)length < sizeof(relative));
+    memstick_fixture_path(kept, bucket, relative);
+    memstick_fixture_path(path, kept, "DATA.BIN");
+    assert_file_text(path, "AOLD");
+    memstick_fixture_path(path, kept, "PARAM.SFO");
+    assert_file_text(path, "AM01");
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/A-BOTH/DATA.BIN");
+    assert_file_text(path, "ANEW");
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/A-BOTH/PARAM.SFO");
+    assert_file_text(path, "AM02");
+    memstick_fixture_path(path, paths.kept_copies, "TEST00001/PSP/SAVEDATA/A-BOTH/DATA.BIN");
+    assert_file_text(path, "prior kept");
+    memstick_fixture_path(path, root, "TEST00001/PSP/SAVEDATA/A-BOTH/DATA.BIN");
+    assert_file_text(path, "AOLD");
+
+    /* Model a process exit after whole-unit publication and before the receipt.
+       The next process must verify the retained output before recording completion. */
+    assert(nk_remove_utf8(receipt) == 0);
+    memstick_fixture_path(path, kept, "PARAM.SFO");
+    write_file_utf8(path, "BAD!");
+    assert(nk_memstick_savedata_bring_in(root, slot, &stale) ==
+           NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT);
+    assert(nk_platform_path_missing(receipt));
+    write_file_utf8(path, "AM01");
+    /* The retained output, once published, can prove the prior version even
+       if the older player has edited its source again. */
+    memstick_bring_test_write(root, slot, "A-BOTH", "AEXT", "AM03");
+    memstick_start_journal_probe(root, "bring-in-resume", 0);
+    assert_file_text(receipt, completed);
+    memstick_bring_test_write(root, slot, "A-BOTH", "AOLD", "AM01");
+    assert(nk_memstick_savedata_bring_in(root, slot, &stale) == NK_MEMSTICK_COLLISION_COPIED);
+    assert_file_text(receipt, completed);
+    free(completed);
+    memset(&found, 0, sizeof(found));
+    assert(nk_platform_list_dir(journal, memstick_bring_test_receipt, &found) && found.count == 1u);
+
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(offer.name, "B-OLD") && offer.decision == NK_MEMSTICK_PLAN_KEEP);
+    assert(nk_memstick_savedata_bring_in(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/B-OLD/DATA.BIN");
+    assert_file_text(path, "B000");
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/C-SHARED/DATA.BIN");
+    assert_file_text(path, "CNEW");
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!offer.name[0]);
+    memstick_bring_test_write(root, slot, "D-NEW", "DOLD", "DM01");
+    memstick_bring_test_write(root, slot, "E-SAME", "ESAM", "EM00");
+    memstick_bring_test_write(root, NK_MEMSTICK_STICK_NAME, "e-same", "ESAM", "EM00");
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(offer.name, "D-NEW") && offer.decision == NK_MEMSTICK_PLAN_STAGE);
+    assert(nk_memstick_savedata_bring_in(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/D-NEW/DATA.BIN");
+    assert_file_text(path, "DOLD");
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(offer.name, "E-SAME") && offer.decision == NK_MEMSTICK_PLAN_DEDUPLICATE);
+    assert(nk_memstick_savedata_bring_in(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!offer.name[0]);
+    assert_file_text(paths.record, ready);
+    free(ready);
+}
+
 static void test_memstick_layout(const char *base, char sep) {
     printf("[LAUNCH_TEST] Shared Memory Stick layout and record\n");
     fflush(stdout);
@@ -4317,6 +4488,7 @@ int main(int argc, char **argv) {
 #endif
     test_memstick_save_planner(base);
     test_memstick_journal_restart(base);
+    test_memstick_bring_in(base);
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);

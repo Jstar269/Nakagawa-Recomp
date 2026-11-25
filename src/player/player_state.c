@@ -8742,6 +8742,31 @@ const char *player_app_saves_blocker(const PlayerApp *app, int game_index) {
     return NULL;
 }
 
+NkMemstickCollisionResult player_app_bring_in_offer(const PlayerApp *app, int game_index,
+                                                    NkMemstickPlanUnit *offer) {
+    if (!offer) return NK_MEMSTICK_COLLISION_INVALID;
+    memset(offer, 0, sizeof(*offer));
+    char root[NK_MAX_PATH];
+    if (!app || game_index < 0 || game_index >= app->game_count ||
+        !player_removal_disc_id_ok(app->games[game_index].disc_id))
+        return NK_MEMSTICK_COLLISION_INVALID;
+    if (!nk_platform_get_path(NK_PATH_SAVES, root, sizeof(root)))
+        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    return nk_memstick_savedata_bring_in_offer(root, app->games[game_index].disc_id, offer);
+}
+
+NkMemstickCollisionResult player_app_bring_in(const PlayerApp *app, int game_index,
+                                              const NkMemstickPlanUnit *offer) {
+    if (!app || game_index < 0 || game_index >= app->game_count ||
+        !player_removal_disc_id_ok(app->games[game_index].disc_id))
+        return NK_MEMSTICK_COLLISION_INVALID;
+    if (app->is_game_running || app->launch_pending) return NK_MEMSTICK_COLLISION_STICK_IN_USE;
+    char root[NK_MAX_PATH];
+    if (!nk_platform_get_path(NK_PATH_SAVES, root, sizeof(root)))
+        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    return nk_memstick_savedata_bring_in(root, app->games[game_index].disc_id, offer);
+}
+
 void player_app_save_stamp_now(char *out, size_t out_size) {
     time_t now = time(NULL);
     struct tm *local = localtime(&now);
