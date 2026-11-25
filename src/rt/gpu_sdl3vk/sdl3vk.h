@@ -272,13 +272,15 @@ int  sdl3vk_wait_image(void *vk_image);
 
 /* 1 once the renderer has latched a terminal state: the device was lost, or a presentation
  * recovery sequence itself failed. Presentation is refused from then on, and a capture
- * armed for a refused present resolves as failed. */
+ * armed for a refused present resolves as failed. A lost window surface is not terminal: it is
+ * replaced (#360), and only a replacement that fails in the foreground is. */
 int  sdl3vk_renderer_terminal(void);
 
 /* A guest present's result when the presentation engine cannot take a frame now: every
  * swapchain image, or the present frame it would reuse, is still held by the display. The frame
- * is not shown and nothing failed; the window keeps the last frame it has. Returned only while
- * sdl3vk_set_present_nowait(1) is in force. */
+ * is not shown and nothing failed; the window keeps the last frame it has. Returned while
+ * sdl3vk_set_present_nowait(1) is in force, and by any present while the window has no surface
+ * (on Android, while the app is in the background; #360). */
 #define SDL3VK_PRESENT_DISPLAY_BUSY 2
 
 /* 1: a game-frame present (sdl3vk_present_rgba/_ex, sdl3vk_present_image/_ex,

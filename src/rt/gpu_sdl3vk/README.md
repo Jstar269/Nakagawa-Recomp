@@ -313,8 +313,20 @@ go on decides the transition:
   fails before it is enqueued: `recover_unenqueued_present` waits for the frame and replaces its
   semaphore, and the swapchain is rebuilt, which hands back the image the present still held.
   The next present tries again.
+- A lost window surface (`VK_ERROR_SURFACE_LOST_KHR` from an acquire or a present, or SDL's
+  background events: Android destroys the window's surface in the background) is replaced
+  (#360): once the queue is idle the swapchain and the `VkSurfaceKHR` are destroyed, a new
+  surface is made for the same window with `SDL_Vulkan_CreateSurface`, its present support is
+  checked, and a swapchain is built on it. The device and everything made on it stay. The
+  present that met the loss returns -1 and the next one is shown. While the app is in the
+  background (`SDL_EVENT_WILL_ENTER_BACKGROUND` or `SDL_EVENT_DID_ENTER_BACKGROUND` until
+  `SDL_EVENT_DID_ENTER_FOREGROUND`), or on Android while SDL holds no native window, a present
+  returns `SDL3VK_PRESENT_DISPLAY_BUSY` and shutdown prints how many did. A new surface that
+  cannot be made, or cannot be presented to, with the window in the foreground is terminal, as
+  is a swapchain that cannot be made on it for a window with pixels. The pause overlay replaces
+  the surface the same way and asks for its image to be composed again (2).
 - The renderer turns terminal (`sdl3vk_renderer_terminal()`; every later present returns -1 at
-  once) when the device or surface is lost, a fence wait fails (the frame's work may still run),
+  once) when the device is lost, a fence wait fails (the frame's work may still run),
   or any step between a successful acquire and the submit fails (the image stays acquired and its
   semaphore stays to be signalled, and neither can be handed back without a present). It also
   turns terminal when the swapchain cannot be rebuilt: the queue-idle wait fails,
@@ -339,6 +351,15 @@ validation layer on, and expects no leaked object and no validation error from e
 - a failure at each checked present step, through a one-shot present-step fault seam, and the
   two faults above the renderer goes on from (a capture buffer that cannot be made, a suboptimal
   present whose rebuild finds a minimized window).
+
+`sdl3vk_surface_selftest` (also inside `gpu-capture-selftest`) checks the window-surface cases
+with the validation layer on: a surface lost at the acquire and at the present, twice each in
+one session; SDL's background and foreground events, and a loss while the platform has no window
+surface (a seam), each twice; the pause overlay meeting a loss; and the terminal cases (a new
+surface that cannot be made or presented to, a device lost at the acquire or the present), each
+with one line. The `surface-lost` leg of `gpu-capture-selftest` checks that a present that met
+the loss is not shown, the renderer is not terminal and the next present is shown. These run on
+desktop drivers; they do not show what an Android device does.
 
 ## Render scale and render targets read as textures (#2052)
 
