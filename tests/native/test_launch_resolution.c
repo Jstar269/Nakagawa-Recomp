@@ -4005,7 +4005,9 @@ static void test_memstick_bring_in_supersedes_unpublished(const char *base) {
     NkMemstickPaths paths;
     NkMemstickLayout layout;
     NkMemstickPlanUnit obsolete, offer;
-    memstick_fixture_path(root, base, "memstick-bring-in-unpublished");
+    /* The retained generation adds a 64-character component. Keep the
+       synthetic path within the test reader's Windows CRT limit. */
+    memstick_fixture_path(root, base, "ms-retry");
     assert(nk_memstick_layout_paths(root, &paths));
     memstick_bring_test_write(root, slot, "A-OLDER", "OLD1", "META1");
     memstick_bring_test_write(root, slot, "Z-NEXT", "NEXT", "MNEXT");
