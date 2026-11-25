@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -538,8 +541,11 @@ class ShowcasePrebuiltPrxTests(unittest.TestCase):
     def test_build_from_prebuilt_prxs_needs_no_pspdev(self) -> None:
         packaged: list[list[str]] = []
 
-        def fake_package(command: list[str], **_: object) -> subprocess.CompletedProcess:
+        environments: list[dict[str, str]] = []
+
+        def fake_package(command: list[str], **options: object) -> subprocess.CompletedProcess:
             packaged.append(command)
+            environments.append(options["env"])  # type: ignore[arg-type]
             out = Path(command[command.index("--output-dir") + 1])
             (out / "package.json").write_text(
                 '{"format": "nakagawa-aot-package", "executable": {"path": "demo.exe"}}',
@@ -564,6 +570,8 @@ class ShowcasePrebuiltPrxTests(unittest.TestCase):
                     showcase.main(["build", "--prebuilt-prx-dir", str(prebuilt)]), 0)
             self.assertEqual(entry.call_count, len(showcase.DEMOS))
             self.assertEqual(len(packaged), len(showcase.DEMOS))
+            for environment in environments:
+                self.assertEqual(environment["RUNTIME_RUNPATH_ORIGIN"], "../../..")
             for demo, command in zip(showcase.DEMOS, packaged, strict=True):
                 staged = (root / "showcase" / str(demo["id"]) / "psp-build" /
                           f"{demo['target']}.prx")
@@ -601,6 +609,154 @@ class ShowcasePrebuiltPrxTests(unittest.TestCase):
             self.assertEqual(showcase.main(["build"]), 0)
             self.assertEqual(showcase.main(["build", "--prebuilt-prx-dir", "prx"]), 0)
         self.assertEqual(build.call_args_list, [mock.call(None), mock.call(Path("prx"))])
+
+
+ON_LINUX = sys.platform.startswith("linux")
+HAS_GCC = shutil.which("gcc") is not None
+
+
+def _link_probe(directory: Path, name: str, *flags: str) -> Path:
+    """A tiny executable linked with `flags`, so its loader records are a real link's."""
+    source = directory / f"{name}.c"
+    source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    target = directory / name
+    subprocess.run(["gcc", str(source), "-o", str(target), *flags], check=True,
+                   capture_output=True)
+    return target
+
+
+@unittest.skipUnless(ON_LINUX and HAS_GCC, "ELF run paths are a Linux link-time property")
+class LinuxRunPathAuditTests(unittest.TestCase):
+    """The audit that keeps a shipped Linux executable from naming the builder's folders (#306)."""
+
+    def test_an_absolute_run_path_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            probe = _link_probe(Path(temp), "absolute", "-Wl,-rpath,/opt/builder/lib")
+            needed, entries = showcase.elf_run_paths(probe)
+            self.assertIn("libc.so.6", needed)
+            self.assertEqual(entries, ["/opt/builder/lib"])
+            problems = showcase.audit_run_paths([probe])
+            self.assertEqual(len(problems), 1)
+            self.assertIn("/opt/builder/lib", problems[0])
+
+    def test_an_old_style_absolute_rpath_is_reported_too(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            probe = _link_probe(Path(temp), "rpath", "-Wl,--disable-new-dtags",
+                                "-Wl,-rpath,/opt/builder/lib")
+            self.assertEqual(showcase.elf_run_paths(probe)[1], ["/opt/builder/lib"])
+            self.assertEqual(len(showcase.audit_run_paths([probe])), 1)
+
+    def test_origin_relative_and_empty_run_paths_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            relative = _link_probe(directory, "relative", "-Wl,-rpath,$ORIGIN/../..")
+            beside = _link_probe(directory, "beside", "-Wl,-rpath,$ORIGIN")
+            bare = _link_probe(directory, "bare")
+            self.assertEqual(showcase.elf_run_paths(relative)[1], ["$ORIGIN/../.."])
+            self.assertEqual(showcase.audit_run_paths([relative, beside, bare]), [])
+
+    def test_a_run_path_relative_to_the_working_directory_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            probe = _link_probe(Path(temp), "cwd", "-Wl,-rpath,lib")
+            self.assertEqual(len(showcase.audit_run_paths([probe])), 1)
+
+    def test_a_file_that_is_not_an_elf_object_is_not_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            text = Path(temp) / "package.json"
+            text.write_text("{}\n", encoding="utf-8")
+            self.assertIsNone(showcase.elf_run_paths(text))
+            self.assertEqual(showcase.audit_run_paths([text]), [])
+
+    def test_a_library_beside_the_program_is_found_from_a_moved_folder(self) -> None:
+        """An $ORIGIN run path finds the library with no ldconfig entry and no wrapper."""
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "libnkprobe.c").write_text("int nk_probe(void) { return 7; }\n",
+                                                    encoding="utf-8")
+            install = directory / "install"
+            (install / "bin").mkdir(parents=True)
+            subprocess.run(["gcc", "-shared", "-fPIC", "-Wl,-soname,libnkprobe.so.0",
+                            str(directory / "libnkprobe.c"), "-o",
+                            str(install / "bin" / "libnkprobe.so.0")],
+                           check=True, capture_output=True)
+            (directory / "main.c").write_text(
+                "int nk_probe(void);\nint main(void) { return nk_probe() == 7 ? 0 : 1; }\n",
+                encoding="utf-8")
+            subprocess.run(["gcc", str(directory / "main.c"), "-o", str(install / "bin" / "probe"),
+                            "-L", str(install / "bin"), "-l:libnkprobe.so.0",
+                            "-Wl,-rpath,$ORIGIN"], check=True, capture_output=True)
+            moved = directory / "moved" / "elsewhere"
+            moved.parent.mkdir()
+            shutil.move(str(install), str(moved))
+            run = subprocess.run([str(moved / "bin" / "probe")], check=False,
+                                 env={"PATH": os.environ.get("PATH", "")},
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(showcase.audit_run_paths([moved / "bin" / "probe"]), [])
+
+
+def _make_dry_run(*arguments: str) -> str:
+    result = subprocess.run(["make", "-n", "-B", *arguments], cwd=ROOT, check=False,
+                            capture_output=True, text=True)
+    return result.stdout.replace("\\\n", " ") + result.stderr
+
+
+def _has_system_sdl3() -> bool:
+    if not (ON_LINUX and shutil.which("make") and shutil.which("pkg-config")):
+        return False
+    return subprocess.run(["pkg-config", "--exists", "sdl3"], check=False,
+                          capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(_has_system_sdl3(), "needs make and a system SDL3")
+class LinuxLinkLineTests(unittest.TestCase):
+    """The link lines write a relative run path and never a developer folder (#306)."""
+
+    def test_the_makefile_player_runs_from_the_folder_it_is_installed_in(self) -> None:
+        output = _make_dry_run("player", "CC=gcc", f"PYTHON={sys.executable}")
+        links = [line for line in output.splitlines()
+                 if " -o build/nakagawa_player" in line and "-lSDL3" in line]
+        self.assertEqual(len(links), 1, output[-2000:])
+        self.assertIn("-Wl,-rpath,'$ORIGIN'", links[0])
+        self.assertNotRegex(links[0], r"-rpath,'?/")
+
+    def test_the_title_runtime_link_takes_a_relative_run_path_from_the_caller(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build = (Path(temp) / "build").as_posix()
+            common = ["compile", "CC=gcc", f"PYTHON={sys.executable}", "GAME_NAME=probe",
+                      f"GAME_ELF={temp}/probe.prx", f"BUILD_DIR={build}"]
+            marker = f"-o {build}/probe "
+            links = [line for line in _make_dry_run(*common, "RUNTIME_RUNPATH_ORIGIN=../../..")
+                     .splitlines() if marker in line]
+            self.assertEqual(len(links), 1)
+            self.assertIn("-Wl,-rpath,'$ORIGIN/../../..'", links[0])
+            plain = [line for line in _make_dry_run(*common).splitlines() if marker in line]
+            self.assertEqual(len(plain), 1)
+            self.assertNotIn("-rpath", plain[0],
+                             "no caller, no run path: a title build is unchanged")
+
+    @unittest.skipUnless(shutil.which("cmake") and shutil.which("ninja"), "needs cmake and ninja")
+    def test_the_cmake_player_has_only_an_origin_relative_run_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            build = Path(temp) / "cmake"
+            configured = subprocess.run(
+                ["cmake", "-S", str(ROOT), "-B", str(build), "-G", "Ninja", "-DBUILD_PLAYER=ON",
+                 "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_COMPILER=gcc"],
+                check=False, capture_output=True, text=True)
+            self.assertEqual(configured.returncode, 0,
+                             configured.stdout[-1500:] + configured.stderr[-1500:])
+            commands = subprocess.run(
+                ["ninja", "-C", str(build), "-t", "commands", "nakagawa_player"],
+                check=False, capture_output=True, text=True)
+            links = [line for line in commands.stdout.splitlines()
+                     if " -o nakagawa_player" in line and " -lm" in line]
+            self.assertEqual(len(links), 1, commands.stdout[-1500:])
+            # Ninja prints the entry quoted for the shell: -Wl,-rpath,"\$ORIGIN".
+            self.assertRegex(links[0], r"""-Wl,-rpath,["']?\\?\$ORIGIN["']?(\s|$)""")
+            self.assertEqual(len(re.findall(r"-Wl,-rpath", links[0])), 1)
+            self.assertNotRegex(links[0], r"""-Wl,-rpath,["']?/""")
+
+
 
 
 if __name__ == "__main__":

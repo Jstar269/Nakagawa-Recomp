@@ -1036,6 +1036,42 @@ if(BUILD_PLAYER)
         target_link_libraries(nakagawa_player PRIVATE SDL3_ttf::SDL3_ttf)
     endif()
 
+    # Linux run path (#306). By default CMake writes the folder of every imported shared
+    # library into the build-tree executable (RUNPATH /usr/local/lib for a system SDL3), a
+    # folder of this machine that a copy of the player on another machine does not have. The
+    # player instead looks beside itself, in the install's bin/ folder, where the staged SDL3
+    # libraries sit the way the DLLs do on Windows; a system SDL3 is still found through the
+    # loader's own search, so a developer build runs from its build folder as before.
+    # NK_PLAYER_EXTRA_RUNPATH appends one folder for a developer whose SDL3 sits outside the
+    # loader's search (such a build is not relocatable, and the run-path audit names it). A
+    # SDL3 built inside this build tree (NK_BOOTSTRAP_SDL3) keeps CMake's own build run path.
+    set(NK_PLAYER_EXTRA_RUNPATH "" CACHE STRING
+        "Linux only: an absolute folder added to the player's run path after $ORIGIN (not relocatable)")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+        set(nk_player_sdl3 "${NK_UI_SDL3_LINK}")
+        if(nk_player_sdl3)
+            get_target_property(nk_player_sdl3_imported ${nk_player_sdl3} IMPORTED)
+        endif()
+        if(nk_player_sdl3 AND nk_player_sdl3_imported)
+            set(nk_player_runpath "$ORIGIN")
+            if(NK_PLAYER_EXTRA_RUNPATH)
+                string(APPEND nk_player_runpath ";${NK_PLAYER_EXTRA_RUNPATH}")
+            endif()
+            set_target_properties(nakagawa_player PROPERTIES
+                BUILD_WITH_INSTALL_RPATH ON
+                INSTALL_RPATH "${nk_player_runpath}")
+            # The audit that holds this: no absolute or working-directory run path in the
+            # executable that ships (tests/fixtures/showcase/showcase.py audit-run-paths).
+            find_package(Python3 QUIET COMPONENTS Interpreter)
+            if(Python3_FOUND AND NOT NK_PLAYER_EXTRA_RUNPATH)
+                add_test(NAME player_run_path_audit
+                    COMMAND "${Python3_EXECUTABLE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/showcase/showcase.py"
+                        audit-run-paths "$<TARGET_FILE:nakagawa_player>")
+            endif()
+        endif()
+    endif()
+
     if(WIN32)
         # GUI subsystem, so a double-click opens no console window (see the Makefile PLAYER_GUI_LDFLAGS note)
         set_target_properties(nakagawa_player PROPERTIES WIN32_EXECUTABLE TRUE)

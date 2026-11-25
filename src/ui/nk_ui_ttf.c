@@ -562,10 +562,20 @@ static SDL_SharedObject *nk_ui_ttf_load_object(const char *candidate) {
 #endif
 
 #if defined(NK_UI_TTF_SONAME)
-/* Elsewhere one default, the library's soname, found by the dynamic linker's own search. */
+/* Elsewhere the library's soname, found by the dynamic linker's own search. The file
+   beside this executable comes first, as on Windows: an install carries SDL3_ttf in
+   its bin/ folder, and a run path in the executable cannot reach it, because SDL3's
+   dlopen searches the run path of SDL3 itself, not the program's. A copy that is not there
+   falls through to the system's. */
 static size_t nk_ui_ttf_default_paths(char out[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_PATH_MAX]) {
-    snprintf(out[0], NK_UI_TTF_PATH_MAX, "%s", NK_UI_TTF_SONAME);
-    return 1u;
+    size_t n = 0;
+    const char *base = SDL_GetBasePath();
+    if (base != NULL && base[0] != '\0') {
+        int written = snprintf(out[n], NK_UI_TTF_PATH_MAX, "%s%s", base, NK_UI_TTF_SONAME);
+        if (written > 0 && (size_t)written < NK_UI_TTF_PATH_MAX) ++n;
+    }
+    snprintf(out[n], NK_UI_TTF_PATH_MAX, "%s", NK_UI_TTF_SONAME);
+    return n + 1u;
 }
 
 static SDL_SharedObject *nk_ui_ttf_load_object(const char *candidate) {

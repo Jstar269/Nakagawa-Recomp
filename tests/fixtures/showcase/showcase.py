@@ -52,6 +52,12 @@ SCREENSHOT_ROOT = BUILD_ROOT / "screenshots"
 HEADLESS_CAPTURE_WINDOW = (60, 71)
 SECTOR = 2048
 PSP_PRX_ELF_TYPE = 0xFFA0
+# Where a demo's executable looks for the SDL3 libraries on Linux, relative to its own
+# folder. The install holds `<player folder>/demos/packages/<disc id>/<executable>` (the
+# layout player_app_discover_showcase reads), and the player folder holds the libraries
+# beside the player, so three folders up is that folder. Read by the Makefile as
+# RUNTIME_RUNPATH_ORIGIN; nothing else about a build changes with it.
+RUNTIME_RUNPATH_ORIGIN = "../../.."
 
 # The first-frame checkpoint is guest progress: the first SR_GESTAT window whose
 # counters show the demo's own drawing ("frame_counters" below), at whatever vblank
@@ -109,6 +115,89 @@ DEMOS = (
 
 class ShowcaseError(RuntimeError):
     """An explicit failure in the optional showcase build route."""
+
+
+# ELF loader records, read without a toolchain so the audit runs wherever the build did.
+_PT_LOAD, _PT_DYNAMIC = 1, 2
+_DT_NEEDED, _DT_STRTAB, _DT_RPATH, _DT_RUNPATH = 1, 5, 15, 29
+
+
+def elf_run_paths(path: Path) -> tuple[list[str], list[str]] | None:
+    """The libraries an ELF object needs and the folders it searches for them.
+
+    Returns (DT_NEEDED names, entries of DT_RUNPATH and DT_RPATH), or None for a file that
+    is not a little-endian ELF object. A static executable or relocatable object has no
+    dynamic section and returns two empty lists.
+    """
+    with path.open("rb") as stream:
+        head = stream.read(20)
+        if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] != 1 or head[4] not in (1, 2):
+            return None
+        stream.seek(0)
+        data = stream.read()
+    wide = data[4] == 2
+    if wide:
+        phoff, = struct.unpack_from("<Q", data, 0x20)
+        phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+    else:
+        phoff, = struct.unpack_from("<I", data, 0x1C)
+        phentsize, phnum = struct.unpack_from("<HH", data, 0x2A)
+    loads: list[tuple[int, int, int]] = []
+    dynamic: tuple[int, int] | None = None
+    for index in range(phnum):
+        base = phoff + index * phentsize
+        if wide:
+            kind, _, offset, vaddr, _, filesz, _, _ = struct.unpack_from("<IIQQQQQQ", data, base)
+        else:
+            kind, offset, vaddr, _, filesz, _, _, _ = struct.unpack_from("<IIIIIIII", data, base)
+        if kind == _PT_LOAD:
+            loads.append((vaddr, offset, filesz))
+        elif kind == _PT_DYNAMIC:
+            dynamic = (offset, filesz)
+    if dynamic is None:
+        return [], []
+    entry_size = 16 if wide else 8
+    entries: list[tuple[int, int]] = []
+    for position in range(dynamic[0], dynamic[0] + dynamic[1], entry_size):
+        tag, value = struct.unpack_from("<qQ" if wide else "<iI", data, position)
+        if tag == 0:
+            break
+        entries.append((tag, value))
+    strtab = next((value for tag, value in entries if tag == _DT_STRTAB), None)
+    if strtab is None:
+        return [], []
+    table = next((offset + (strtab - vaddr) for vaddr, offset, filesz in loads
+                  if vaddr <= strtab < vaddr + filesz), None)
+    if table is None:
+        raise ShowcaseError(f"{path}: the dynamic string table lies outside every loaded segment")
+
+    def text(offset: int) -> str:
+        end = data.index(b"\0", table + offset)
+        return data[table + offset:end].decode("utf-8", errors="replace")
+
+    needed = [text(value) for tag, value in entries if tag == _DT_NEEDED]
+    folders = [folder for tag, value in entries if tag in (_DT_RUNPATH, _DT_RPATH)
+               for folder in text(value).split(":")]
+    return needed, folders
+
+
+def audit_run_paths(paths: list[Path]) -> list[str]:
+    """Name every run path entry of the given ELF files that is not relative to the file.
+
+    A shipped executable finds the libraries beside it through `$ORIGIN`; an entry that is
+    an absolute folder names the machine that linked it (a developer's `/usr/local/lib`),
+    and a bare relative entry is resolved against the caller's working directory. Files
+    that are not ELF objects are skipped.
+    """
+    problems = []
+    for path in paths:
+        records = elf_run_paths(path)
+        if records is None:
+            continue
+        for folder in records[1]:
+            if not (folder in ("$ORIGIN", "${ORIGIN}") or folder.startswith(("$ORIGIN/", "${ORIGIN}/"))):
+                problems.append(f"{path}: run path entry '{folder}' is not relative to $ORIGIN")
+    return problems
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -593,7 +682,10 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
         str(ROOT / str(demo["manifest"])), "--package", "--public-safe",
         "--game-elf", str(prx), "--output-dir", str(package_stage),
     ]
-    result = subprocess.run(command, cwd=ROOT, check=False)
+    # The runtime looks for the SDL3 libraries beside the player it ships under (Linux; the
+    # Makefile ignores the setting elsewhere), never in a folder of the building machine.
+    env = {**os.environ, "RUNTIME_RUNPATH_ORIGIN": RUNTIME_RUNPATH_ORIGIN}
+    result = subprocess.run(command, cwd=ROOT, env=env, check=False)
     if result.returncode:
         raise ShowcaseError(f"analyze/codegen/package failed for {title_id} (exit {result.returncode})")
     package_meta = json.loads((package_stage / "package.json").read_text(encoding="utf-8"))
@@ -1252,7 +1344,10 @@ def smoke_all() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action",
-                        choices=("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke"))
+                        choices=("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke",
+                                 "audit-run-paths"))
+    parser.add_argument("files", nargs="*", type=Path,
+                        help="audit-run-paths: the ELF files whose run paths are audited")
     parser.add_argument("--out-dir", type=Path,
                         help="stage-iso: directory that receives TEST00007.iso; "
                              "build-prx: directory that receives each demo's PRX and "
@@ -1263,6 +1358,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.prebuilt_prx_dir is not None and args.action != "build":
         parser.error("--prebuilt-prx-dir applies only to build")
+    if args.files and args.action != "audit-run-paths":
+        parser.error("files apply only to audit-run-paths")
+    if args.action == "audit-run-paths" and not args.files:
+        parser.error("audit-run-paths requires at least one file")
     try:
         if args.action == "build":
             build_all(args.prebuilt_prx_dir)
@@ -1274,6 +1373,13 @@ def main(argv: list[str] | None = None) -> int:
             smoke_all()
         elif args.action == "loadexec-smoke":
             loadexec_smoke()
+        elif args.action == "audit-run-paths":
+            problems = audit_run_paths(args.files)
+            for problem in problems:
+                print(f"SHOWCASE_AUDIT: {problem}", file=sys.stderr)
+            if problems:
+                raise ShowcaseError(f"{len(problems)} run path or build path finding(s)")
+            print(f"SHOWCASE_AUDIT: ok ({args.action})")
         else:
             if args.out_dir is None:
                 parser.error("stage-iso requires --out-dir")
