@@ -379,9 +379,11 @@ int  sdl3vk_input_claimed(void);
 int  sdl3vk_overlay_extent(int *w, int *h, int *rgba);
 /* Shows the overlay image. px (w*h pixels of `pitch` bytes per row, at the current extent)
  * replaces the uploaded image; NULL shows the last one again. These presents are not game
- * frames: no frame capture, perf count or HUD. Returns 1 when presented, 2 when the extent
- * changed and the image must be composed again, 0 when the window was closed and -1 on a
- * presentation failure. */
+ * frames: no frame capture, perf count or HUD. Returns 1 when presented; 2 when the image must be
+ * composed again (the extent changed, or a lost window surface was replaced with a new swapchain,
+ * #360); 0 when the window was closed; -1 when nothing was shown: a presentation failure, or no
+ * window surface now (the app in the background), which is not one. sdl3vk_renderer_terminal()
+ * tells a failure the renderer cannot go on from. */
 int  sdl3vk_present_overlay(const void *px, int pitch);
 /* Frees the overlay image when the pause ends. */
 void sdl3vk_overlay_release(void);

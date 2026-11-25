@@ -1936,6 +1936,7 @@ static int sdl3vk_surface_selftest(void) {
             const uint64_t busy_n = sdl3vk_present_busy_count() - busy0;
             const int held_terminal = sdl3vk_renderer_terminal();
             const uint64_t held_surfaces = s_surface_gen - surf0;
+            const int held_marked = s_surface_withheld;   /* the line marking the start was printed */
             if (c == 0) {
                 pushed &= surface_test_push(SDL_EVENT_WILL_ENTER_FOREGROUND) &&
                           surface_test_push(SDL_EVENT_DID_ENTER_FOREGROUND);
@@ -1950,16 +1951,19 @@ static int sdl3vk_surface_selftest(void) {
             const uint64_t want_busy = c == 0 ? 4u : 3u;
             if (!warm || !pushed || !reached || got != want_got || !busy || busy_n != want_busy ||
                 held_terminal || held_surfaces != 0 || back != 1 || surfaces != 1 || chains == 0 ||
-                !after || sdl3vk_renderer_terminal() || s_terminal_lines != 0) {
+                !after || sdl3vk_renderer_terminal() || s_terminal_lines != 0 || !held_marked ||
+                s_surface_withheld) {
                 fprintf(stderr, "surface: '%s' (round %d): warm=%d pushed=%d reached=%d first "
                                 "present=%d (want %d) later presents not shown=%d, %llu counted "
                                 "(want %llu) terminal=%d surfaces made with none %llu (want 0) "
                                 "present on return=%d (want 1) surfaces replaced %llu (want 1) "
-                                "swapchains made %llu (want >0) later shown=%d terminal lines %u\n",
+                                "swapchains made %llu (want >0) later shown=%d terminal lines %u "
+                                "held back marked %d then %d (want 1 then 0)\n",
                         name, rep + 1, warm, pushed, reached, got, want_got, busy,
                         (unsigned long long)busy_n, (unsigned long long)want_busy, held_terminal,
                         (unsigned long long)held_surfaces, back, (unsigned long long)surfaces,
-                        (unsigned long long)chains, after, s_terminal_lines);
+                        (unsigned long long)chains, after, s_terminal_lines, held_marked,
+                        s_surface_withheld);
                 ok = 0;
             }
         }
@@ -1985,6 +1989,7 @@ static int sdl3vk_surface_selftest(void) {
         { "new surface cannot be presented to", 0, 1, 0, VK_ERROR_SURFACE_LOST_KHR },
         { "device lost at the acquire",         0, 0, 0, VK_ERROR_DEVICE_LOST },
         { "device lost at the present",         0, 0, 1, VK_ERROR_DEVICE_LOST },
+        { "new surface cannot be made after a lost present", 1, 0, 1, VK_ERROR_SURFACE_LOST_KHR },
     };
     for (size_t i = 0; ok && i < sizeof neg / sizeof neg[0]; i++) {
         if (!sdl3vk_init("Nakagawa GPU surface selftest")) {
@@ -2029,50 +2034,107 @@ static int sdl3vk_surface_selftest(void) {
         cases++;
     }
 
-    /* (d) The pause overlay meets the same loss: it is told to compose its image again for the
-     * new swapchain, and shows it. */
-    if (ok) {
+    /* (d) The pause overlay meets the same loss at its acquire or its present: it is told to
+     * compose its image again for the new swapchain, and shows it; when the new surface cannot be
+     * made it is terminal with one line. */
+    for (int c = 0; c < 4; c++) {
+        const int at_present = c & 1, create_fault = c >> 1;
+        const char *name = c == 0 ? "pause overlay, lost at the acquire"
+                         : c == 1 ? "pause overlay, lost at the present"
+                         : c == 2 ? "pause overlay, lost at the acquire, new surface cannot be made"
+                                  : "pause overlay, lost at the present, new surface cannot be made";
         if (!sdl3vk_init("Nakagawa GPU surface selftest")) {
-            fprintf(stderr, "surface: init before the pause overlay case failed\n");
+            fprintf(stderr, "surface: init before '%s' failed\n", name);
             ok = 0;
-        } else {
-            const int verr0 = sdl3vk_validation_error_count();
-            const int warm = surface_test_warm(px);
-            int ow = 0, oh = 0, orgba = 0, ow2 = 0, oh2 = 0;
-            int shown = 0, lost = 0, reached = 0, again = 0, terminal = 1;
-            uint64_t surfaces = 0;
-            uint32_t *opx = NULL;
-            if (sdl3vk_overlay_extent(&ow, &oh, &orgba) &&
-                (opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u)) != NULL) {
-                shown = sdl3vk_present_overlay(opx, ow * 4);
-                const uint64_t surf0 = s_surface_gen;
-                s_pstep_fault = PSTEP_ACQUIRE;
-                s_pstep_fault_result = VK_ERROR_SURFACE_LOST_KHR;
-                lost = sdl3vk_present_overlay(NULL, 0);
-                reached = s_pstep_fault == PSTEP_NONE;
-                s_pstep_fault = PSTEP_NONE;
-                terminal = sdl3vk_renderer_terminal();
-                surfaces = s_surface_gen - surf0;
-                if (sdl3vk_overlay_extent(&ow2, &oh2, &orgba) && ow2 == ow && oh2 == oh)
-                    again = sdl3vk_present_overlay(opx, ow * 4);
-            }
-            free(opx);
-            sdl3vk_overlay_release();
-            const int verrors = sdl3vk_validation_error_count() - verr0;
-            sdl3vk_shutdown();
-            const int live = lifecycle_live_objects();
-            if (!warm || shown != 1 || !reached || lost != 2 || terminal || surfaces != 1 ||
-                again != 1 || verrors != 0 || live != 0) {
-                fprintf(stderr, "surface: pause overlay: warm=%d shown=%d reached=%d present on the "
-                                "loss=%d (want 2) terminal=%d surfaces replaced %llu (want 1) "
-                                "%dx%d then %dx%d, shown again=%d, %d validation error(s), %d "
-                                "object(s) alive after shutdown\n", warm, shown, reached, lost,
-                        terminal, (unsigned long long)surfaces, ow, oh, ow2, oh2, again, verrors,
-                        live);
-                ok = 0;
-            }
-            cases++;
+            break;
         }
+        const int verr0 = sdl3vk_validation_error_count();
+        const int warm = surface_test_warm(px);
+        int ow = 0, oh = 0, orgba = 0, ow2 = 0, oh2 = 0;
+        int shown = 0, lost = 0, reached = 0, again = 0, terminal = 1;
+        unsigned lines = 0;
+        uint64_t surfaces = 0;
+        uint32_t *opx = NULL;
+        if (sdl3vk_overlay_extent(&ow, &oh, &orgba) &&
+            (opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u)) != NULL) {
+            shown = sdl3vk_present_overlay(opx, ow * 4);
+            const uint64_t surf0 = s_surface_gen;
+            s_surface_create_fault = create_fault;
+            s_pstep_fault = at_present ? PSTEP_PRESENT : PSTEP_ACQUIRE;
+            s_pstep_fault_result = VK_ERROR_SURFACE_LOST_KHR;
+            lost = sdl3vk_present_overlay(NULL, 0);
+            reached = s_pstep_fault == PSTEP_NONE && s_surface_create_fault == 0;
+            s_pstep_fault = PSTEP_NONE;
+            s_surface_create_fault = 0;
+            terminal = sdl3vk_renderer_terminal();
+            lines = s_terminal_lines;
+            surfaces = s_surface_gen - surf0;
+            if (sdl3vk_overlay_extent(&ow2, &oh2, &orgba) && ow2 == ow && oh2 == oh)
+                again = sdl3vk_present_overlay(opx, ow * 4);
+            else if (create_fault)
+                again = sdl3vk_present_overlay(opx, ow * 4);   /* refused: -1 */
+        }
+        free(opx);
+        sdl3vk_overlay_release();
+        const int verrors = sdl3vk_validation_error_count() - verr0;
+        sdl3vk_shutdown();
+        const int live = lifecycle_live_objects();
+        const int want_lost = create_fault ? -1 : 2, want_again = create_fault ? -1 : 1;
+        if (!warm || shown != 1 || !reached || lost != want_lost || terminal != create_fault ||
+            lines != (unsigned)create_fault || surfaces != (uint64_t)!create_fault ||
+            again != want_again || verrors != 0 || live != 0) {
+            fprintf(stderr, "surface: '%s': warm=%d shown=%d reached=%d present on the loss=%d "
+                            "(want %d) terminal=%d in %u line(s) (want %d) surfaces replaced %llu "
+                            "(want %d) %dx%d then %dx%d, next present=%d (want %d), %d validation "
+                            "error(s), %d object(s) alive after shutdown\n", name, warm, shown,
+                    reached, lost, want_lost, terminal, lines, create_fault,
+                    (unsigned long long)surfaces, !create_fault, ow, oh, ow2, oh2, again,
+                    want_again, verrors, live);
+            ok = 0;
+        }
+        cases++;
+    }
+
+    /* (e) The surface is lost while the swapchain is rebuilt after a suboptimal present (a
+     * rotation or fold as Home destroys the window): at the capabilities query or at
+     * vkCreateSwapchainKHR. The suboptimal frame was shown; the renderer is not terminal, and the
+     * next present replaces the surface and is shown. */
+    for (int c = 0; c < 2; c++) {
+        const char *name = c == 0 ? "surface lost at the rebuild's capabilities query"
+                                  : "surface lost at the rebuild's vkCreateSwapchainKHR";
+        if (!sdl3vk_init("Nakagawa GPU surface selftest")) {
+            fprintf(stderr, "surface: init before '%s' failed\n", name);
+            ok = 0;
+            break;
+        }
+        const int verr0 = sdl3vk_validation_error_count();
+        const int warm = surface_test_warm(px);
+        const uint64_t surf0 = s_surface_gen;
+        s_pstep_fault = PSTEP_PRESENT;
+        s_pstep_fault_result = VK_SUBOPTIMAL_KHR;
+        s_swap_surface_lost_fault = c == 0 ? SWAP_LOST_CAPS : SWAP_LOST_CREATE;
+        const int got = sdl3vk_present_rgba(px);
+        const int reached = s_pstep_fault == PSTEP_NONE && s_swap_surface_lost_fault == SWAP_LOST_NONE;
+        s_pstep_fault = PSTEP_NONE;
+        s_swap_surface_lost_fault = SWAP_LOST_NONE;
+        const int terminal = sdl3vk_renderer_terminal();
+        const unsigned lines = s_terminal_lines;
+        const int next = sdl3vk_present_rgba(px);
+        const uint64_t surfaces = s_surface_gen - surf0;
+        const int after = surface_test_warm(px);
+        const int verrors = sdl3vk_validation_error_count() - verr0;
+        sdl3vk_shutdown();
+        const int live = lifecycle_live_objects();
+        if (!warm || !reached || got != 1 || terminal || lines != 0 || next != 1 || surfaces != 1 ||
+            !after || verrors != 0 || live != 0) {
+            fprintf(stderr, "surface: '%s': warm=%d reached=%d suboptimal present=%d (want 1) "
+                            "terminal=%d in %u line(s) (want 0) next present=%d (want 1) surfaces "
+                            "replaced %llu (want 1) later shown=%d, %d validation error(s), %d "
+                            "object(s) alive after shutdown\n", name, warm, reached, got, terminal,
+                    lines, next, (unsigned long long)surfaces, after, verrors, live);
+            ok = 0;
+        }
+        cases++;
     }
 
     if (keep) vkDestroyInstance(keep, NULL);
