@@ -3043,7 +3043,7 @@ bool player_app_boot_event_is_window_ready(const char *line) {
                     strstr(line, "BOOT_EVENT phase=first_frame") != NULL);
 }
 
-static void player_monitor_stalled_game_events(PlayerApp *app);
+static void player_read_boot_events(PlayerApp *app, bool live);
 
 bool player_app_child_window_ready(PlayerApp *app) {
     if (!app || app->child_window_ready || !app->boot_event_file_path[0]) {
@@ -3052,7 +3052,7 @@ bool player_app_child_window_ready(PlayerApp *app) {
     /* The runtime's own output shares the session file and can come first, so
        the marker is looked for in every line the incremental reader takes, not
        only in the file's first few kilobytes (audit 2026-11-17). */
-    player_monitor_stalled_game_events(app);
+    player_read_boot_events(app, true);
     return app->child_window_ready;
 }
 
@@ -3116,6 +3116,7 @@ static bool player_monitor_game_start(PlayerApp *app, uint64_t now_ms) {
     printf("[PLAYER] Game process %d wrote no boot event in %llu ms; stopping it\n",
            app->launch_session.process.process_id, (unsigned long long)elapsed_ms);
     nk_launch_stop(&app->launch_session);
+    player_read_boot_events(app, false);
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
@@ -7309,6 +7310,7 @@ void player_app_stop_game(PlayerApp *app) {
     }
     printf("[PLAYER] Stopping active game session...\n");
     nk_launch_stop(&app->launch_session);
+    player_read_boot_events(app, false);
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
@@ -7361,6 +7363,7 @@ void player_app_stop_stalled_game(PlayerApp *app) {
 
     printf("[PLAYER] Stopping stalled game session...\n");
     nk_launch_stop(&app->launch_session);
+    player_read_boot_events(app, false);
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
@@ -7817,8 +7820,13 @@ static void player_consume_stall_event_line(PlayerApp *app, const char *line) {
 
 /* Runtime stderr is appended to this session file. Read only complete lines
  * added since the previous frame, instead of rescanning the growing log. */
-static void player_monitor_stalled_game_events(PlayerApp *app) {
+static void player_read_boot_events(PlayerApp *app, bool live) {
     if (!app || !app->boot_event_file_path[0]) return;
+    /* On stop, drain only the file attached to the child that just ended.
+       Its renderer facts remain useful on the game's Picture card. */
+    if (!live && strcmp(app->boot_event_file_path, app->launch_session.boot_event_file_path) != 0) {
+        return;
+    }
     FILE *events = nk_fopen_utf8(app->boot_event_file_path, "rb");
     if (!events) return;
     /* 64-bit offsets: a long run's session file passes 2 GiB, beyond a Windows
@@ -7852,9 +7860,9 @@ static void player_monitor_stalled_game_events(PlayerApp *app) {
         if (ch == '\n') {
             if (!overflow) {
                 line[used] = '\0';
-                player_consume_stall_event_line(app, line);
+                if (live) player_consume_stall_event_line(app, line);
                 player_app_consume_render_path_line(app, line);
-                if (player_app_boot_event_is_window_ready(line)) {
+                if (live && player_app_boot_event_is_window_ready(line)) {
                     app->child_window_ready = true;
                 }
             }
@@ -7874,13 +7882,15 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
     if (app->launch_time_ms == 0) {
         app->launch_time_ms = now_ms;
     }
-    player_monitor_stalled_game_events(app);
+    player_read_boot_events(app, true);
     if (nk_launch_is_running(&app->launch_session)) {
         return player_monitor_game_start(app, now_ms);
     }
     uint64_t elapsed_ms = now_ms >= app->launch_time_ms
         ? (now_ms - app->launch_time_ms) : 0;
     int code = nk_launch_wait(&app->launch_session, 0);
+    /* The child could append its last event after the live read took its snapshot. */
+    player_read_boot_events(app, false);
     char stopped_boundary[96] = "";
     unsigned int stopped_issue = 0;
     bool has_semantic_stop = player_read_semantic_stop(
