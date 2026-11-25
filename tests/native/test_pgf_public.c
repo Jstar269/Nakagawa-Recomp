@@ -1715,6 +1715,18 @@ static int test_format2_window(const PGF *pgf, int32_t x, int32_t y, int left, i
 
     if (end_column > (int)TEST_F2_WIDTH) end_column = (int)TEST_F2_WIDTH;
     memset(buffer, TEST_F2_SENTINEL, TEST_F2_WIDTH * TEST_F2_HEIGHT + TEST_F2_GUARD);
+    /* The recorded format-2 ordinary glyph captures used cleared destination buffers
+       (PGF_SPEC.md 3.10), so the draw starts from zero inside the expected clipped
+       footprint: the visible rows of [top, top + rows) by the columns
+       [first_column, end_column). Every byte outside it, and the guard bytes, keep the
+       sentinel. */
+    for (wy = 0; wy < (int)TEST_F2_HEIGHT; ++wy) {
+        int source_row = wy - top;
+        if (source_row < 0 || source_row >= (int)rows) continue;
+        for (wx = first_column; wx < end_column; ++wx) {
+            buffer[(unsigned)wy * TEST_F2_WIDTH + (unsigned)wx] = 0u;
+        }
+    }
     test_reset_dirty();
     test_set_image(2u, x, y, (uint16_t)TEST_F2_WIDTH, (uint16_t)TEST_F2_HEIGHT,
                    (uint16_t)TEST_F2_WIDTH, TEST_BUFFER_ADDR);
@@ -1806,6 +1818,7 @@ static void test_format2_coverage_and_footprint(void) {
         unsigned written = 16u + (fx != 0u ? 1u : 0u);
         unsigned column;
         memset(buffer, TEST_F2_SENTINEL, 40u);
+        memset(buffer, 0, written);
         test_reset_dirty();
         test_set_image(2u, ramp_x[pass], ramp_y[pass], 18u, 2u, 18u, TEST_BUFFER_ADDR);
         CHECK(pgf_draw_glyph_by_id(pgf, 0, TEST_IMAGE_ADDR));
