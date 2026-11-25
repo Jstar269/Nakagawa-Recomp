@@ -1624,7 +1624,7 @@
     "classification": "dedicated",
     "handler": "h_LockMutexCB",
     "name": "sceKernelLockMutexCB",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x5c37c0ae": {
     "classification": "dedicated",

@@ -1899,6 +1899,14 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "measured cases cover finite timeout, priority inheritance, and the listed interrupt-context refusals; full attribute/recursion ranges, negative counts, multi-waiter priority ordering, and invalid timeout-pointer precedence are not measured",
     },
+    "h_LockMutexCB": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-MUTEX-001: mutex-interrupt-context)",
+            "tests/native/hle_thread_selftest.c:test_lock_mutex_cb_refused_in_vblank_subintr",
+        ],
+        "limitation": "this status covers one cell only: LockMutexCB with count 1 and no timeout on an unlocked mutex, called from a VBLANK sub-interrupt handler, returns 0x80020064 (ILLEGAL_CONTEXT) without blocking the handler; PSP-MUTEX-001 recorded that in 20 of 20 trials on one PSP-3000 (system software 6.61) in one acceptance-eligible launch of the probe built from ec5dd563, and the selftest runs the same six-call trial through the production sub-interrupt delivery; in the separate mutex-timeout-quanta case, the probe calls LockMutexCB on a held mutex with a 250 us timeout, discards the return code, and records the timeout word and elapsed time in slots 13 and 14. The public summary does not qualify timeout behavior for that call. Thread-context acquisition, recursion, bad counts, contention, wake outcomes and callback delivery remain outside this review; the mutex state after the refusal is a runtime check, not a measured cell (#2807)",
+    },
     "h_NotifyCallback": {
         "status": "partial",
         "evidence": [

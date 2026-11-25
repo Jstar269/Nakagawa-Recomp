@@ -52,10 +52,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 396 | 408 |
+| `partial` | 397 | 409 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 234 | 239 |
+| `unreviewed` | 233 | 238 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -72,7 +72,7 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | `sceHprm` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceImpose` | 0 | 0 | 0 | 0 | 2 | 2 | 2 |
 | `sceIo` | 2 | 28 | 0 | 0 | 4 | 34 | 34 |
-| `sceKernel` | 3 | 145 | 0 | 0 | 43 | 191 | 209 |
+| `sceKernel` | 3 | 146 | 0 | 0 | 42 | 191 | 209 |
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
@@ -89,7 +89,7 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **396** | **1** | **3** | **234** | **648** | **678** |
+| **Total** | **14** | **397** | **1** | **3** | **233** | **648** | **678** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -875,6 +875,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 - **`h_LockMutex`** (`sceKernel`): `sceKernelLockMutex` (0xb011b11f)
   - Limitation: measured cases cover finite timeout, priority inheritance, and the listed interrupt-context refusals; full attribute/recursion ranges, negative counts, multi-waiter priority ordering, and invalid timeout-pointer precedence are not measured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-MUTEX-001: mutex-timeout-quanta, mutex-priority-inheritance, and accepted interrupt-context cell)
+- **`h_LockMutexCB`** (`sceKernel`): `sceKernelLockMutexCB` (0x5bf4dd27)
+  - Limitation: this status covers one cell only: LockMutexCB with count 1 and no timeout on an unlocked mutex, called from a VBLANK sub-interrupt handler, returns 0x80020064 (ILLEGAL_CONTEXT) without blocking the handler; PSP-MUTEX-001 recorded that in 20 of 20 trials on one PSP-3000 (system software 6.61) in one acceptance-eligible launch of the probe built from ec5dd563, and the selftest runs the same six-call trial through the production sub-interrupt delivery; in the separate mutex-timeout-quanta case, the probe calls LockMutexCB on a held mutex with a 250 us timeout, discards the return code, and records the timeout word and elapsed time in slots 13 and 14. The public summary does not qualify timeout behavior for that call. Thread-context acquisition, recursion, bad counts, contention, wake outcomes and callback delivery remain outside this review; the mutex state after the refusal is a runtime check, not a measured cell (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-MUTEX-001: mutex-interrupt-context)
+  - Evidence: tests/native/hle_thread_selftest.c:test_lock_mutex_cb_refused_in_vblank_subintr
 - **`h_MaxFreeMemSize`** (`sceKernel`): `sceKernelMaxFreeMemSize` (0xa291f107)
   - Limitation: the result is the larger of the span below the lowest live thread stack and the biggest freed block; only the unchanged-after-stack-free case is measured, so the absolute value at boot, the kernel's block-header and alignment accounting, and the value with several free blocks are not measured (#341)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-MODULE-START-001: after the module_start thread's 0x40000-byte stack is freed, sceKernelMaxFreeMemSize does not change, because the stack of the thread module_start created sits directly below the freed range)
