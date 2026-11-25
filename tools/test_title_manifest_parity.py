@@ -25,6 +25,8 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+import enhancement_package
+from nk_core import package_cache
 import scratch_dir
 import title_manifest
 import test_public_title_isolation
@@ -82,6 +84,95 @@ class TitleManifestParityTests(unittest.TestCase):
     def tearDownClass(cls):
         if cls._temp_dir is not None:
             cls._temp_dir.cleanup()
+
+    def test_ace_declaration_fingerprint_formats(self) -> None:
+        declaration_source = {
+            "schema_version": 1,
+            "id": "fixture-60hz",
+            "target_title_id": "synthetic-allegrex-v1",
+            "display_name": "Caf\u00e9 \U0001f600",
+            "version": "1.0.0",
+            "category": "timing_frame_presentation",
+            "game_version": "1.00",
+            "executable_sha256": "a" * 64,
+            "capabilities": ["count_x2"],
+            "rng_policy": {"mode": "subtick_30hz", "reason": 'quote=" slash=/ backslash=\\u0000'},
+            "sites": [{
+                "id": "F_STORE", "function": "synth_fn", "insn_offset": 4,
+                "stock_digest": enhancement_package.compute_stock_words_digest([0xE4820000]),
+                "transform": "count_x2", "stock_values": [-2, 1.25, 5e-5, -0.0],
+            }],
+            "experimental": False,
+        }
+        compact = json.dumps(declaration_source, separators=(",", ":")).replace("slash=/", r"slash=\/")
+        formatted = (
+            json.dumps(declaration_source, ensure_ascii=False, sort_keys=True, indent=2)
+            .replace("1.25,", "1.2500e0,").replace("5e-05,", "0.00005,").replace("-0.0", "-0e0")
+            .replace("\n", "\r\n") + "\r\n"
+        )
+        expected = "f3bb15e705ca183403bda5e069d16e2a2d4ca6944e3354ff9a5f72c3b12cbed9"
+        variants = (
+            (compact, expected),
+            (formatted, expected),
+            *((compact.replace("1.25", "1.25" + "0" * zeros), expected)
+              for zeros in (59, 60, 70)),
+            (compact.replace("1.25", "1.26" + "0" * 70),
+             "46aebfe1f40d196b80541caded736de5db49e6da69801871854b9949ebf3640c"),
+            (formatted.replace('"insn_offset": 4', '"insn_offset": 8'),
+             "182a475ef66da3c9ccbe6b8f840ac08e66b112f4741794d73774188b43e54804"),
+            (formatted.replace("1.2500e0", "1.2600e0"),
+             "46aebfe1f40d196b80541caded736de5db49e6da69801871854b9949ebf3640c"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            declaration = Path(tmpdir) / "ace.json"
+            cmd = [str(self.native_exe), "--ace-declaration-fingerprint",
+                   str(declaration), "fixture-60hz", "synthetic-allegrex-v1"]
+            for source, expected_digest in variants:
+                with self.subTest(digest=expected_digest):
+                    declaration.write_bytes(source.encode("utf-8"))
+                    options = package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(declaration)})
+                    self.assertEqual(options["enhancement_declaration_sha256_v1"], expected_digest)
+                    native = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    self.assertEqual((native.returncode, native.stdout.strip()), (0, expected_digest), native.stderr)
+            for bad in (
+                compact.replace(r'Caf\u00e9', r'Cafe\u0000'),
+                compact.replace('"schema_version":1', '"schema_version":1,"schema_version":1'),
+                compact.replace("-2,1.25", "9223372036854775808,1.25"),
+                compact.replace("5e-05", "1e400"),
+            ):
+                with self.subTest(refused=bad):
+                    declaration.write_bytes(bad.encode("utf-8"))
+                    with self.assertRaises(ValueError):
+                        parsed = enhancement_package.load_package(declaration, reject_duplicate_keys=True)
+                        package_cache.enhancement_declaration_fingerprint(parsed)
+                    native = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    self.assertEqual((native.returncode, native.stdout.strip()), (1, "DECLARATION_REFUSED"),
+                                     native.stderr)
+
+            sidecar = declaration.with_suffix(".symbols.json")
+            map_cmd = [cmd[0], "--ace-declaration-symbol-map", *cmd[2:]]
+            options_env = {"ENHANCEMENT_PACKAGE": str(declaration)}
+            declaration.write_text(compact, encoding="utf-8")
+            sidecar.write_bytes(b'{"synth_fn":"0x08804000"}')
+            options = package_cache.enhancement_package_options(options_env)
+            map_digest = package_cache.sha256_file(sidecar)
+            native = subprocess.run(map_cmd, capture_output=True, text=True, timeout=10)
+            self.assertEqual((native.returncode, native.stdout.strip()), (0, map_digest), native.stderr)
+            self.assertEqual(options["enhancement_symbol_map_sha256"], map_digest)
+
+            published = json.loads(compact)
+            del published["sites"][0]["stock_values"]
+            published.update(published_package=enhancement_package.PUBLISHED_FORMAT_VERSION,
+                             disc_id="TEST00001", disc_version="1.00",
+                             digest_scheme=enhancement_package.PUBLISHED_DIGEST_SCHEME,
+                             site_map={"synth_fn": "0x08804000"})
+            declaration.write_text(json.dumps(published), encoding="utf-8")
+            options = package_cache.enhancement_package_options(options_env)
+            self.assertNotIn("enhancement_symbol_map_sha256", options)
+            sidecar.write_bytes(b'{"synth_fn":"0x08804004"}')
+            self.assertEqual(package_cache.enhancement_package_options(options_env), options)
+            native = subprocess.run(map_cmd, capture_output=True, text=True, timeout=10)
+            self.assertEqual((native.returncode, native.stdout.strip()), (0, ""), native.stderr)
 
     def _run_native(self, manifest_path: Path, allow_override: bool = False) -> tuple[bool, str]:
         cmd = [str(self.native_exe), "--check", str(manifest_path)]

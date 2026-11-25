@@ -13,6 +13,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 from typing import Any, Iterable, Iterator, Mapping, TypedDict
@@ -1321,7 +1322,7 @@ def _package_option_value(arguments: str, option: str) -> str | None:
     return None
 
 
-def _locate_enhancement_package(
+def _locate_make_codegen_input(
     environment: Mapping[str, str], variable: str, option: str
 ) -> tuple[str, str] | None:
     value = environment.get(variable, "").strip()
@@ -1349,10 +1350,59 @@ def ambient_enhancement_package(environment: Mapping[str, str] | None = None) ->
     env = os.environ if environment is None else environment
     for variable, option in (("ENHANCEMENT_PACKAGE", "--enhancement-package"),
                              ("ENHANCEMENT_CODE_HOOK_PACKAGE", "--code-hook-package")):
-        location = _locate_enhancement_package(env, variable, option)
+        location = _locate_make_codegen_input(env, variable, option)
         if location is not None:
             return location[0]
     return None
+
+
+def enhancement_declaration_fingerprint(declaration: Mapping[str, Any]) -> str:
+    """Hash the selected source JSON in the format shared with nk_title_manifest.c.
+
+    Each value has a type tag. Lengths and counts are unsigned little-endian
+    64-bit words. Strings contain decoded UTF-8, objects sort their keys in UTF-8
+    order, and arrays retain their order. Integer and real tokens use signed
+    64-bit and IEEE binary64 payloads, respectively.
+    """
+    digest = hashlib.sha256(b"nakagawa-ace-declaration-v1\0")
+
+    def add(value: Any) -> None:
+        if value is None:
+            digest.update(b"n")
+        elif isinstance(value, bool):
+            digest.update(b"t" if value else b"f")
+        elif isinstance(value, str):
+            if "\0" in value:
+                raise ValueError("declaration string contains NUL")
+            utf8 = value.encode("utf-8")
+            digest.update(b"s" + struct.pack("<Q", len(utf8)))
+            digest.update(utf8)
+        elif isinstance(value, int):
+            if not -(1 << 63) <= value < (1 << 63):
+                raise ValueError("declaration integer exceeds signed 64-bit range")
+            digest.update(b"i" + struct.pack("<q", value))
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("declaration real number must be finite")
+            digest.update(b"d" + struct.pack("<d", value))
+        elif isinstance(value, list):
+            digest.update(b"a" + struct.pack("<Q", len(value)))
+            for item in value:
+                add(item)
+        elif isinstance(value, Mapping):
+            digest.update(b"o" + struct.pack("<Q", len(value)))
+            for key in sorted(value):
+                add(key)
+                add(value[key])
+        else:
+            raise ValueError("declaration contains an unsupported JSON value")
+
+    add(declaration)
+    return digest.hexdigest()
+
+
+def explicit_symbol_map_enabled(environment: Mapping[str, str]) -> bool:
+    return _locate_make_codegen_input(environment, "SYMBOL_MAP", "--symbol-map") is not None
 
 
 def enhancement_package_options(environment: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -1362,12 +1412,12 @@ def enhancement_package_options(environment: Mapping[str, str] | None = None) ->
     `CODEGEN_USER_ARGS`, returns `{}` so
     authentic mode's `codegen_options_sha256` and `aot.digest` remain byte-identical.
     When an enhancement package is active, validates and hashes the package (and any
-    sibling `.symbols.json` map) and returns the explicit AOT instrumentation epoch
+    effective sibling `.symbols.json` map) and returns the explicit AOT instrumentation epoch
     and digests so enhanced builds get a distinct cache key and fail closed if the
     package file is unreadable or invalid.
     """
     env = os.environ if environment is None else environment
-    package_location = _locate_enhancement_package(
+    package_location = _locate_make_codegen_input(
         env, "ENHANCEMENT_PACKAGE", "--enhancement-package"
     )
     pkg_raw = package_location[1] if package_location else ""
@@ -1377,33 +1427,44 @@ def enhancement_package_options(environment: Mapping[str, str] | None = None) ->
 
     pkg_path = Path(pkg_raw)
     try:
-        pkg_data = enhancement_package.load_and_validate_package(pkg_path)
+        declaration = enhancement_package.load_package(pkg_path, reject_duplicate_keys=True)
+        declaration_fingerprint = enhancement_declaration_fingerprint(declaration)
+        pkg_data = enhancement_package.validate_package(declaration)
     except (OSError, ValueError) as exc:
         raise PackageCacheError(f"enhancement package is invalid or unreadable: {exc}") from exc
     result: dict[str, Any] = {
         "enhancement_package_epoch": AOT_ENHANCEMENT_PACKAGE_EPOCH,
         "enhancement_package_id": pkg_data["id"],
         "enhancement_package_sha256": enhancement_package.compute_package_digest(pkg_data),
+        "enhancement_declaration_sha256_v1": declaration_fingerprint,
     }
+    # Published declarations resolve through their own site map. An explicit guest
+    # symbol map also takes precedence over adjacent files for private declarations.
+    explicit_map = explicit_symbol_map_enabled(env)
+    if explicit_map:
+        result["enhancement_explicit_symbol_map"] = True
     sidecar = pkg_path.with_suffix(".symbols.json")
-    if sidecar.is_file():
+    if not explicit_map and not enhancement_package.is_published_package(pkg_data) and sidecar.is_file():
         result["enhancement_symbol_map_sha256"] = sha256_file(sidecar)
     # The code-hook package applied beside it (contract section 9.9), named only when there is one,
     # so the key of a build without one is unchanged.
-    hook_location = _locate_enhancement_package(
+    hook_location = _locate_make_codegen_input(
         env, "ENHANCEMENT_CODE_HOOK_PACKAGE", "--code-hook-package"
     )
     hook_raw = hook_location[1] if hook_location else ""
     if hook_raw:
         hook_path = Path(hook_raw)
         try:
-            hook_data = enhancement_package.load_and_validate_package(hook_path)
+            hook_declaration = enhancement_package.load_package(hook_path, reject_duplicate_keys=True)
+            hook_fingerprint = enhancement_declaration_fingerprint(hook_declaration)
+            hook_data = enhancement_package.validate_package(hook_declaration)
         except (OSError, ValueError) as exc:
             raise PackageCacheError(f"code-hook package is invalid or unreadable: {exc}") from exc
         result["code_hook_package_id"] = hook_data["id"]
         result["code_hook_package_sha256"] = enhancement_package.compute_package_digest(hook_data)
+        result["code_hook_declaration_sha256_v1"] = hook_fingerprint
         hook_sidecar = hook_path.with_suffix(".symbols.json")
-        if hook_sidecar.is_file():
+        if not explicit_map and not enhancement_package.is_published_package(hook_data) and hook_sidecar.is_file():
             result["code_hook_symbol_map_sha256"] = sha256_file(hook_sidecar)
     return result
 

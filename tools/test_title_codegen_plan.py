@@ -29,6 +29,49 @@ import nk_cli
 from nk_core import package_cache
 
 
+class AceDeclarationSnapshotTests(unittest.TestCase):
+    def test_ace_declarations_and_sidecars_are_snapshotted_for_codegen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "staged-inputs"
+            snapshot_names = set()
+            for label in ("enhancement package", "code-hook package"):
+                source_dir = root / label.replace(" ", "-")
+                source_dir.mkdir()
+                source = source_dir / "ace.json"
+                source.write_bytes(b'{"id":"selected"}')
+                sidecar = source.with_suffix(".symbols.json")
+                sidecar.write_bytes(b'{"public_fixture":"original"}')
+                snapshot = title_codegen_plan._stage_ace_declaration(source, stage, label)
+                self.assertNotEqual(snapshot, source)
+                self.assertEqual(snapshot.parent, stage)
+                snapshot_names.add(snapshot.name)
+                source.write_bytes(b'{"id":"edited"}')
+                sidecar.write_bytes(b'{"public_fixture":"edited"}')
+                self.assertEqual(snapshot.read_bytes(), b'{"id":"selected"}')
+                self.assertEqual(snapshot.with_suffix(".symbols.json").read_bytes(),
+                                 b'{"public_fixture":"original"}')
+            self.assertEqual(len(snapshot_names), 2)
+
+    def test_ignored_adjacent_maps_are_not_read_or_copied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "ace.json"
+            source.with_suffix(".symbols.json").write_bytes(b"ignored input")
+            for name, declaration, read_map in (
+                ("published", '{"published_package":1}', True),
+                ("explicit", '{"id":"private"}', False),
+            ):
+                with self.subTest(name=name):
+                    source.write_text(declaration, encoding="utf-8")
+                    with mock.patch.object(title_codegen_plan.shutil, "copyfile",
+                                           wraps=title_codegen_plan.shutil.copyfile) as copy:
+                        staged = title_codegen_plan._stage_ace_declaration(
+                            source, root / "stage", name, read_symbol_map=read_map)
+                    copy.assert_called_once_with(source, staged)
+                    self.assertFalse(staged.with_suffix(".symbols.json").exists())
+
+
 class TitleCodegenPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.hst_path = ROOT / "assets" / "titles" / "hst-ucus98701.json"

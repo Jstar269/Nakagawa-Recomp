@@ -2649,6 +2649,7 @@ typedef struct {
     char prior_identity[65];
     char package_identity[65];
     char reason[2048];
+    NkLaunchEnhancementSources enhancement_sources;
     NkRuntimePackageInfo package_info;
     GameRecord game;
     NkRuntimePackageStatus status;
@@ -2733,8 +2734,8 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
     }
 
     char before_identity[65] = "";
-    bool before_valid = root && nk_launch_runtime_package_cache_identity(
-        root, &job->game, before_identity);
+    bool before_valid = root && nk_launch_runtime_package_cache_identity_for_launch(
+        root, &job->game, &job->enhancement_sources, before_identity);
     if (!job->force && job->prior_status_valid && job->prior_identity_valid &&
         before_valid && strcmp(before_identity, job->prior_identity) == 0) {
         job->status_unchanged = true;
@@ -2743,7 +2744,8 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
                  before_identity);
     } else if (root) {
         job->status = player_runtime_package_status_check(
-            root, &job->game, &job->package_info, job->reason, sizeof(job->reason));
+            root, &job->game, &job->enhancement_sources, &job->package_info,
+            job->reason, sizeof(job->reason));
         job->runtime_available = player_runtime_available(job->status, &job->game, root);
     } else {
         job->status = NK_RUNTIME_PACKAGE_MISSING;
@@ -2768,14 +2770,15 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
 
     if (!job->status_unchanged) {
         char after_identity[65] = "";
-        bool after_valid = root && nk_launch_runtime_package_cache_identity(
-            root, &job->game, after_identity);
+        bool after_valid = root && nk_launch_runtime_package_cache_identity_for_launch(
+            root, &job->game, &job->enhancement_sources, after_identity);
         job->identity_valid = after_valid;
+        job->identity_changed_during_validation =
+            (before_valid && after_valid && strcmp(before_identity, after_identity) != 0) ||
+            (job->game.enhancement_package_id[0] && before_valid != after_valid);
         if (after_valid) {
             snprintf(job->package_identity, sizeof(job->package_identity), "%s",
                      after_identity);
-            job->identity_changed_during_validation = before_valid &&
-                strcmp(before_identity, after_identity) != 0;
         }
     }
     SDL_Event event;
@@ -2883,6 +2886,9 @@ static bool player_package_status_start_next(
     job->cache_generation = app->runtime_package_cache_generation;
     job->force = force_requested[index];
     job->game = app->games[index];
+    if (job->game.enhancement_package_id[0]) {
+        player_app_enhancement_sources(app, &job->enhancement_sources);
+    }
     if (build_check_pending && *build_check_pending &&
         build_check_disc_id &&
         strcmp(build_check_disc_id, job->game.disc_id) == 0 &&

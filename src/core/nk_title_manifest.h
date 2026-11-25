@@ -32,6 +32,8 @@ extern "C" {
 #ifndef NK_TITLE_MANIFEST_MAX_EXECUTABLE_BYTES
 #define NK_TITLE_MANIFEST_MAX_EXECUTABLE_BYTES (512u * 1024u * 1024u)
 #endif
+/* Shared by declaration selection and the independent launch check. */
+#define NK_ACE_DECLARATION_MAX_BYTES (8u * 1024u * 1024u)
 #define NK_MANIFEST_LIMIT_CLASS "PRODUCT_SECURITY_POLICY"
 #define NK_MANIFEST_MAX_JSON_DEPTH 16
 /* Highest schema emitted; v2 packages remain readable for existing installs. */
@@ -55,6 +57,11 @@ typedef enum {
 } NkRuntimePackageStatus;
 
 typedef struct {
+    char fingerprint[65];
+    char symbol_map_sha256[65];
+} NkEnhancementDeclarationIdentity;
+
+typedef struct {
     char package_root[NK_MAX_PATH];
     char executable_path[NK_MAX_PATH];
     char image_path[NK_MAX_PATH];
@@ -66,6 +73,9 @@ typedef struct {
     char runtime_source_commit[41];
     char runtime_source_origin[16];
     char runtime_source_reason[128];
+    NkEnhancementDeclarationIdentity enhancement_declaration;
+    NkEnhancementDeclarationIdentity code_hook_declaration;
+    bool enhancement_explicit_symbol_map;
 } NkRuntimePackageInfo;
 
 /* Parse and validate a manifest from a memory buffer.
@@ -218,6 +228,18 @@ bool nk_title_manifest_experimental_profile_executable(
  * accepts it: ^[a-z0-9][a-z0-9._-]{0,63}$. Such an id is one path component
  * that cannot climb out of the packages folder. */
 bool nk_title_manifest_enhancement_id_valid(const char *id);
+
+/* Resolve a live declaration from the user's enhancements folder, then the
+ * shipped enhancements folder. The filename derives from the normalized disc ID. */
+bool nk_title_manifest_enhancement_declaration_path(
+    const char *user_root, const char *shipped_root, const char *disc_id,
+    bool code_hook, char *out, size_t out_size, bool *out_shipped);
+
+/* Fingerprint the selected source object and, when used, its adjacent symbol map.
+ * Published declarations resolve against their own site map. */
+bool nk_title_manifest_enhancement_declaration_identity(
+    const char *path, const char *id, const char *title_id, bool read_symbol_map,
+    NkEnhancementDeclarationIdentity *out);
 
 /* True when `variant` names an enhanced build: an enhancement package id, or
  * <timing id>+<code-hook id> (docs/ENHANCEMENT_CONTRACT.md section 9.9), two

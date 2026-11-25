@@ -1306,15 +1306,16 @@ def _require_file(path: Path, label: str) -> None:
         raise PackageRouteError("PACKAGE_INPUT_MISSING", f"{label} is not a file")
 
 
-def _stage_for_make(path: Path, stage_dir: Path, label: str) -> Path:
+def _stage_for_make(path: Path, stage_dir: Path, label: str, *, snapshot: bool = False) -> Path:
     """Return a Make-safe path to the same bytes.
 
     User inputs commonly live under paths with spaces (for example a Windows
     profile directory). The Make recipes cannot quote them, so such an input
     is copied into the untracked package directory instead of being refused.
     Content hashes are unchanged, so the package contract stays deterministic.
+    A snapshot also protects inputs used by both the cache key and the build.
     """
-    if not _make_unsafe(path.as_posix()):
+    if not snapshot and not _make_unsafe(path.as_posix()):
         return path
     _require_file(path, label)
     name = re.sub(r"[^A-Za-z0-9._-]", "_", path.name) or "input"
@@ -1322,6 +1323,24 @@ def _stage_for_make(path: Path, stage_dir: Path, label: str) -> Path:
     stage_dir.mkdir(parents=True, exist_ok=True)
     staged = stage_dir / f"{prefix}_{name}"
     shutil.copyfile(path, staged)
+    return staged
+
+
+def _stage_ace_declaration(
+    path: Path, stage_dir: Path, label: str, *, read_symbol_map: bool = True
+) -> Path:
+    path = _absolute_path(path, label, make_safe=False)
+    staged = _stage_for_make(path, stage_dir, label, snapshot=True)
+    sidecar = path.with_suffix(".symbols.json")
+    if read_symbol_map and sidecar.is_file():
+        import enhancement_package
+
+        try:
+            source = enhancement_package.load_package(staged, reject_duplicate_keys=True)
+        except (OSError, ValueError) as exc:
+            raise PackageRouteError("PACKAGE_INVALID_ENHANCEMENT", str(exc)) from exc
+        if not enhancement_package.is_published_package(source):
+            shutil.copyfile(sidecar, staged.with_suffix(".symbols.json"))
     return staged
 
 
@@ -2284,34 +2303,17 @@ def build_package(
         game_elf = _stage_for_make(game_elf, stage_dir, "executable ELF")
         if psp_header is not None:
             psp_header = _stage_for_make(psp_header, stage_dir, "PSP header")
+        read_symbol_map = not package_cache.explicit_symbol_map_enabled(os.environ)
         if enhancement_package_path is not None:
-            enhancement_package_path = _absolute_path(
-                enhancement_package_path, "enhancement-package", make_safe=False
+            enhancement_package_path = _stage_ace_declaration(
+                enhancement_package_path, stage_dir, "enhancement package",
+                read_symbol_map=read_symbol_map,
             )
-            _require_file(enhancement_package_path, "enhancement package")
-            sidecar_src = enhancement_package_path.with_suffix(".symbols.json")
-            enhancement_package_path = _stage_for_make(
-                enhancement_package_path, stage_dir, "enhancement package"
-            )
-            if sidecar_src.is_file() and enhancement_package_path.parent == stage_dir:
-                shutil.copyfile(
-                    sidecar_src, enhancement_package_path.with_suffix(".symbols.json")
-                )
         if code_hook_package_path is not None:
-            # Staged the same way, under a name of its own so it never overwrites the first.
-            code_hook_package_path = _absolute_path(
-                code_hook_package_path, "code-hook-package", make_safe=False
+            code_hook_package_path = _stage_ace_declaration(
+                code_hook_package_path, stage_dir, "code-hook package",
+                read_symbol_map=read_symbol_map,
             )
-            _require_file(code_hook_package_path, "code-hook package")
-            hook_sidecar = code_hook_package_path.with_suffix(".symbols.json")
-            if _make_unsafe(code_hook_package_path.as_posix()):
-                staged_hook = stage_dir / "code-hook" / (
-                    re.sub(r"[^A-Za-z0-9._-]", "_", code_hook_package_path.name) or "input")
-                staged_hook.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(code_hook_package_path, staged_hook)
-                if hook_sidecar.is_file():
-                    shutil.copyfile(hook_sidecar, staged_hook.with_suffix(".symbols.json"))
-                code_hook_package_path = staged_hook
         if module_dir is not None and _make_unsafe(module_dir.as_posix()):
             staged_modules = stage_dir / "modules"
             for module in _selected_guest_modules(normalized, selected_optional):

@@ -385,6 +385,15 @@ compatibility is never treated as compatible. The decision record names every
 changed component (`aot:executable_sha256`, `native:compiler_identity`, and so
 on) for the CLI, player preflight, and Doctor.
 
+The enhanced build records the selected Ace declaration source fingerprint in codegen options as
+`enhancement_declaration_sha256_v1`, with `code_hook_declaration_sha256_v1` when it also uses a companion hook
+declaration. These fingerprints cover the parsed source objects before the builder adds defaults.
+The encoding sorts object keys, retains array order, and hashes decoded UTF-8 and typed numeric
+values. The existing adjacent symbol-map digests accompany the fingerprints when code generation
+uses those files. The launcher reads the current inputs after package validation, including on an integrity-cache hit. The library status key includes the live values,
+and the launch session checks them again before spawning. An enhanced package with a missing or
+mismatched fingerprint is stale and can be rebuilt from the library.
+
 The private cache root is `<user data>/cache/packages/<DISC_ID>/`, never the
 repository. Runtime packages are written to a content-addressed entry below that
 root, assembled in a staging directory, and promoted with a directory rename.
