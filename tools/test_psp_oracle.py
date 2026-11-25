@@ -1326,7 +1326,7 @@ class GeCorpusGateTests(unittest.TestCase):
                           binary=MEASURED_SHA, commit=MEASURED_COMMIT)
         raw += row("input", 0, protocol.ge_solid_triangle_input_words())
         raw += row("guard", 0, (480, 272, 0x200000, 2))
-        raw += row("draw", 0, (4, 0, 0))
+        raw += row("draw", 0, (4, 0, 0, 0))
         raw += row("restore", 0, (0, 0))
         for y in range(16):
             raw += row(f"r{y}", y, frame[y * 16:(y + 1) * 16])
@@ -1348,6 +1348,7 @@ class GeCorpusGateTests(unittest.TestCase):
              "0x00000000", "digest differs"),
             ("guard", "out3", "0x00000002", "0x00000001", "guard"),
             ("draw", "out2", "0x00000000", "0x00000001", "must be done"),
+            ("draw", "out3", "0x00000000", "0x00000001", "initial framebuffer"),
             ("restore", "out0", "0x00000000", "0x00000001", "restoration failed"),
             ("r15", "result", "0x0000000f", "0x0000000e", "invalid result"),
         ):

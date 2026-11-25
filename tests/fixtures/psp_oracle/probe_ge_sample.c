@@ -5272,6 +5272,9 @@ static int hle_run(void)
         hle_step("ge-context-save-refused");
         return 0;
     }
+    /* The list is now finalized. Flush cached writes before saving and
+       clearing the uncached target, so a cached alias cannot undo the clear. */
+    sceKernelDcacheWritebackAll();
     volatile uint32_t *const framebuffer = (volatile uint32_t *)(uintptr_t)(base | 0x40000000u);
     for (unsigned i = 0; i < SOLID_WORDS; i++) s_solid_save[i] = framebuffer[i];
     s_solid_restore_pending = 1;
@@ -5282,9 +5285,11 @@ static int hle_run(void)
     }
     for (unsigned i = 0; i < SOLID_WORDS; i++) framebuffer[i] = 0;
     __asm__ volatile("sync" ::: "memory");
-    sceKernelDcacheWritebackAll();
-    int qid = sceGeListEnQueue(s_solid_list, NULL, -1, NULL);
-    uint32_t draw[3] = {(uint32_t)qid, UINT32_MAX, UINT32_MAX};
+    uint32_t initial_nonzero = 0;
+    for (unsigned i = 0; i < SOLID_WORDS; i++) initial_nonzero += framebuffer[i] != 0;
+    int qid = -1;
+    if (initial_nonzero == 0) qid = sceGeListEnQueue(s_solid_list, NULL, -1, NULL);
+    uint32_t draw[4] = {(uint32_t)qid, UINT32_MAX, UINT32_MAX, initial_nonzero};
     int finished = qid >= 0 && solid_wait_draw(qid, draw);
     if (finished) {
         __asm__ volatile("sync" ::: "memory");
@@ -5304,7 +5309,7 @@ static int hle_run(void)
         if (restore[0] == 0 && restore[1] == 0) s_solid_restore_pending = 0;
     }
     hle_record(HLE_CAMPAIGN_ID "-draw", finished ? "PASS" : qid < 0 ? "FAIL" : "TIMEOUT",
-               0, draw, 3);
+               0, draw, 4);
     hle_record(HLE_CAMPAIGN_ID "-restore", s_solid_restore_pending ? "FAIL" : "PASS", 0, restore, 2);
     if (!finished || s_solid_restore_pending) return 0;
     for (unsigned y = 0; y < SOLID_SIDE; y++) {

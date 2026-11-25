@@ -3193,7 +3193,7 @@ _register_campaign_probe(
 _register_campaign_probe(
     GE_SOLID_TRIANGLE_CASE, GE_SOLID_TRIANGLE_TEST,
     ((f"{GE_SOLID_TRIANGLE_CASE}-input", 16), (f"{GE_SOLID_TRIANGLE_CASE}-guard", 4),
-     (f"{GE_SOLID_TRIANGLE_CASE}-draw", 3), (f"{GE_SOLID_TRIANGLE_CASE}-restore", 2),
+     (f"{GE_SOLID_TRIANGLE_CASE}-draw", 4), (f"{GE_SOLID_TRIANGLE_CASE}-restore", 2),
      *((f"{GE_SOLID_TRIANGLE_CASE}-r{row}", 16) for row in range(16))),
 )
 
@@ -3216,7 +3216,9 @@ def ge_solid_triangle_readback(sequence: SequenceReport) -> bytes:
         raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: declaration or GE prestate digest differs")
     if record("guard", 4) != (480, 272, 0x200000, 2):
         raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: scanout guard was not satisfied")
-    qid, list_state, draw_state = record("draw", 3)
+    qid, list_state, draw_state, initial_nonzero = record("draw", 4)
+    if initial_nonzero != 0:
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: initial framebuffer was not zero")
     if qid >= 0x80000000 or list_state != 0 or draw_state != 0:
         raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: list and GE must be done")
     if record("restore", 2) != (0, 0):
