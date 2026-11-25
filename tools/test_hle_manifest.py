@@ -704,51 +704,6 @@ class LiveManifestTests(unittest.TestCase):
             digest = hashlib.sha1(name.encode("ascii")).digest()
             self.assertEqual(int.from_bytes(digest[:4], "little"), nid)
 
-    def test_msg_dialog_get_status_is_partial_on_its_one_measured_cell(self) -> None:
-        """#2807: sceUtilityMsgDialogGetStatus is reviewed for the no-InitStart cell of PSP-HLE-UTILITY-NONE-001 only."""
-        nid, handler = 0x9A1C91D7, "h_MsgDialogStatus"
-        cell = "test_msg_dialog_status_with_no_dialog_started"
-        registration = self.regs[nid]
-        self.assertEqual(registration["name"], "sceUtilityMsgDialogGetStatus")
-        self.assertEqual(registration["handler"], handler)
-        self.assertEqual(registration["classification"], "dedicated")
-        self.assertEqual(registration["status"], "partial")
-        evidence = meta.HANDLER_EVIDENCE[handler]
-        self.assertEqual(
-            evidence,
-            [
-                "docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)",
-                f"tests/native/hle_thread_selftest.c:{cell}",
-            ],
-        )
-        self._assert_cited_cells_are_manifest_cells(evidence)
-        # The limitation names the one cell, its single launch and context, and what stays unmeasured.
-        limitation = meta.HANDLER_LIMITATIONS[handler]
-        for needle in (
-            "one cell only", "no InitStart", "0x80110005", "one launch from the XMB context",
-            "synthetic reset", "nothing after an InitStart", "game context", "unmeasured",
-            "separate handlers", "not reviewed here",
-        ):
-            self.assertIn(needle, limitation)
-        # The cell enters the NID through sr_syscall itself. Cut from the selftest with the one
-        # constant it names, it is a dispatch of this NID and of no other, and it starts no dialog.
-        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
-        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(source))
-        define = _matched(
-            re.search(r"^#define NID_MSG_DIALOG_STATUS[ \t]+0x9a1c91d7u$", source, re.MULTILINE)
-        ).group(0)
-        body = _matched(
-            re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
-        ).group(0)
-        self.assertEqual(hle_manifest.selftest_dispatched_nids(f"{define}\n{body}"), {nid})
-        self.assertIn("sr_hle_init();", body)
-        self.assertNotIn("_INIT", body)
-        for needle in ("== 0x80110005u", "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog", "XMB context"):
-            self.assertIn(needle, body)
-        # The record's other message-dialog calls did not ride along with this status.
-        for sibling in ("h_MsgDialogUpdate", "h_MsgDialogShutdown"):
-            self.assertNotIn(sibling, meta.HANDLER_METADATA)
-
     def test_lock_mutex_cb_is_partial_on_its_one_measured_cell(self) -> None:
         """#2807: sceKernelLockMutexCB is reviewed for the mutex-interrupt-context cell of PSP-MUTEX-001 only."""
         nid, handler = 0x5BF4DD27, "h_LockMutexCB"
@@ -1349,10 +1304,31 @@ class LiveManifestTests(unittest.TestCase):
                 line = next(l for l in source.splitlines() if f'0x{nid:08X}: {{"name"' in l)
                 self.assertRegex(line, r"# h_\w+: \S")
 
-    def test_utility_none_netconf_gamedata_sharing_are_partial_on_their_measured_sequence(self) -> None:
-        """#2807: netconf, gamedata install and game sharing GetStatus, Update and ShutdownStart are
-        reviewed for the no-InitStart sequence of PSP-HLE-UTILITY-NONE-001 only."""
+    def test_utility_none_dialogs_are_partial_on_their_measured_sequence(self) -> None:
+        """#2807: savedata, message dialog, netconf, gamedata install and game sharing GetStatus,
+        Update and ShutdownStart are reviewed for the no-InitStart sequence of
+        PSP-HLE-UTILITY-NONE-001 only."""
         kinds = {
+            "utility-none-savedata": (
+                "test_savedata_calls_with_no_dialog_started",
+                {
+                    0x8874DBE0: ("sceUtilitySavedataGetStatus", "h_DlgGetStatus", "NID_SAVEDATA_DIALOG_STATUS"),
+                    0xD4B95FFB: ("sceUtilitySavedataUpdate", "h_SavedataUpdate", "NID_SAVEDATA_DIALOG_UPDATE"),
+                    0x9790B33C: (
+                        "sceUtilitySavedataShutdownStart", "h_DlgShutdown", "NID_SAVEDATA_DIALOG_SHUTDOWN"
+                    ),
+                },
+            ),
+            "utility-none-msgdialog": (
+                "test_msg_dialog_calls_with_no_dialog_started",
+                {
+                    0x9A1C91D7: ("sceUtilityMsgDialogGetStatus", "h_MsgDialogStatus", "NID_MSG_DIALOG_STATUS"),
+                    0x95FC253B: ("sceUtilityMsgDialogUpdate", "h_MsgDialogUpdate", "NID_MSG_DIALOG_UPDATE"),
+                    0x67AF3428: (
+                        "sceUtilityMsgDialogShutdownStart", "h_MsgDialogShutdown", "NID_MSG_DIALOG_SHUTDOWN"
+                    ),
+                },
+            ),
             "utility-none-netconf": (
                 "test_netconf_calls_with_no_dialog_started",
                 {
@@ -1392,6 +1368,19 @@ class LiveManifestTests(unittest.TestCase):
                 },
             ),
         }
+        # The five kinds are every dialog cell of the record, and the metadata loop names the same
+        # cells and handlers.
+        record = next(
+            row
+            for row in json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))["tests"]
+            if row["id"] == "PSP-HLE-UTILITY-NONE-001"
+        )
+        self.assertEqual(set(kinds), set(record["evidence_cases"]) - {"hle-utility-none-done"})
+        self.assertEqual(
+            {(oracle_cell, cell, *(handler for _, handler, _ in handlers.values()))
+             for oracle_cell, (cell, handlers) in kinds.items()},
+            {(oracle_cell, cell, *rest) for _, oracle_cell, cell, *rest in meta._UTILITY_NONE_KINDS},
+        )
         source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
         dispatched = hle_manifest.selftest_dispatched_nids(source)
         for oracle_cell, (cell, handlers) in kinds.items():
@@ -1406,6 +1395,11 @@ class LiveManifestTests(unittest.TestCase):
                     self.assertEqual(registration["handler"], handler)
                     self.assertEqual(registration["classification"], "dedicated")
                     self.assertEqual(registration["status"], "partial")
+                    # Metadata is per handler: each one here serves this NID and no other, so the
+                    # review of its one measured NID covers every registration it has.
+                    self.assertEqual(
+                        [n for n, r in self.regs.items() if r["handler"] == handler], [nid]
+                    )
                     evidence = meta.HANDLER_EVIDENCE[handler]
                     self.assertEqual(
                         evidence,

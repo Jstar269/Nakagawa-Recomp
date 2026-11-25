@@ -15655,35 +15655,6 @@ static void test_storage_dialog_parameter_sizes(void) {
     }
 }
 
-/* sceUtilityMsgDialogGetStatus (0x9a1c91d7) with no utility dialog started: one measured cell, on
- * its own (#2807). PSP-HLE-UTILITY-NONE-001 (docs/HARDWARE_ORACLE.md, cell utility-none-msgdialog:
- * a PSP-3000 on system software 6.61, one launch from the XMB context, boot 115, 2026-11-04)
- * records 0x80110005 (WRONG_TYPE) for each GetStatus of the message dialog in a process that
- * calls no InitStart.
- *
- * What stands for that state here: sr_hle_init() registers the production handler, and
- * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog. That is the state
- * the runtime starts a program in (the slot's initial value, and the one the LoadExec guest reset
- * restores through the same utility_dialogs_reset_locked). The NID is dispatched here directly
- * through sr_syscall, with no InitStart, Update or ShutdownStart before it.
- *
- * What this cell does not show. The reset is synthetic: the measured process was freshly
- * launched, not one whose earlier dialogs were forgotten, so nothing here says a PSP answers
- * WRONG_TYPE again after a dialog was used. Every status after an InitStart (1, 2, 3, 4 and the 0
- * after use) is outside the record, and so is a process in the game context, which is how the
- * runtime starts its programs: the record is one launch from the XMB. The record's Update(1) and
- * ShutdownStart results, and the other dialog kinds, belong to other handlers and are asserted
- * together in test_utility_dialog_single_slot below. */
-static void test_msg_dialog_status_with_no_dialog_started(void) {
-    CpuState cpu;
-    sr_hle_init();
-    sr_hle_test_osk_slot_reset();
-    memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
-           "sceUtilityMsgDialogGetStatus with no InitStart returns 0x80110005 (WRONG_TYPE): "
-           "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog, one launch from the XMB context");
-}
-
 static void test_utility_dialog_single_slot(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilitySavedata", NID_SAVEDATA_DIALOG_INIT, NID_SAVEDATA_DIALOG_UPDATE,
@@ -18164,18 +18135,20 @@ static void test_utility_dialog_wrong_states_unmeasured_types(void) {
     }
 }
 
-/* Netconf, gamedata install and game sharing with no utility dialog started: the measured
- * sequence of PSP-HLE-UTILITY-NONE-001, one kind per cell (#2807). The record
- * (docs/HARDWARE_ORACLE.md, cells utility-none-netconf, utility-none-gamedata and
- * utility-none-sharing: a PSP-3000 on system software 6.61, one launch from the XMB context, boot
- * 115, 2026-11-04) calls GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart
- * and GetStatus of each kind, in that order, in a process that calls no InitStart, and every one of
- * the seven calls answers 0x80110005 (WRONG_TYPE). Each cell makes the same seven calls in the same
- * order, back to back as the probe does, each one entering its NID directly through sr_syscall.
+/* Savedata, the message dialog, netconf, gamedata install and game sharing with no utility dialog
+ * started: the measured sequence of PSP-HLE-UTILITY-NONE-001, one kind per cell (#2807). The record
+ * (docs/HARDWARE_ORACLE.md, cells utility-none-savedata, utility-none-msgdialog,
+ * utility-none-netconf, utility-none-gamedata and utility-none-sharing: a PSP-3000 on system
+ * software 6.61, one launch from the XMB context, boot 115, 2026-11-04) calls GetStatus, Update(1),
+ * GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus of each kind, in that order, in a
+ * process that calls no InitStart, and every one of the seven calls answers 0x80110005
+ * (WRONG_TYPE). Each cell makes the same seven calls in the same order, back to back as the probe
+ * does, each one entering its NID directly through sr_syscall.
  *
  * What stands for that state here: sr_hle_init() registers the production handlers, and
- * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog, the state the
- * runtime starts a program in. No InitStart is called.
+ * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog. That is the state
+ * the runtime starts a program in (the slot's initial value, and the one the LoadExec guest reset
+ * restores through the same utility_dialogs_reset_locked). No InitStart is called.
  *
  * What these cells do not show. The reset is synthetic: the measured process was freshly launched,
  * not one whose earlier dialogs were forgotten, so nothing here says a PSP answers WRONG_TYPE again
@@ -18184,6 +18157,69 @@ static void test_utility_dialog_wrong_states_unmeasured_types(void) {
  * context, which is how the runtime starts its programs, and every call while another kind holds
  * the slot. Those cells are test_utility_dialog_single_slot's and
  * test_utility_dialog_wrong_states_unmeasured_types', and are not reviewed by these. */
+static void test_savedata_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-savedata, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_UPDATE) == 0x80110005u,
+           "savedata call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "savedata call 4, ShutdownStart with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "savedata call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_msg_dialog_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_UPDATE) == 0x80110005u,
+           "message dialog call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_SHUTDOWN) == 0x80110005u,
+           "message dialog call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_SHUTDOWN) == 0x80110005u,
+           "message dialog call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
 static void test_netconf_calls_with_no_dialog_started(void) {
     CpuState cpu;
     sr_hle_init();
@@ -70139,7 +70175,6 @@ static int hle_selftest_main(int argc, char **argv) {
     test_osk_keyboard_keeps_guest_time_running();
     test_storage_dialog_parameter_sizes();
     test_netconf_parameter_sizes();
-    test_msg_dialog_status_with_no_dialog_started();
     test_utility_dialog_single_slot();
     test_utility_dialog_refused_cancel();
     test_utility_dialog_status_sequence();
@@ -70161,6 +70196,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_utility_dialog_measured_states();
     test_osk_nested_ranges();
     test_utility_dialog_wrong_states_unmeasured_types();
+    test_savedata_calls_with_no_dialog_started();
+    test_msg_dialog_calls_with_no_dialog_started();
     test_netconf_calls_with_no_dialog_started();
     test_gamedata_install_calls_with_no_dialog_started();
     test_game_sharing_calls_with_no_dialog_started();
