@@ -663,10 +663,12 @@ class AndroidTitleLibraryTests(unittest.TestCase):
         cls.lib = cls.work / "app" / "lib" / "arm64"
         cls.files = cls.work / "data" / "files"
         cls.outside = cls.work / "outside"
-        for folder in (cls.lib / "sub", cls.files / "Nakagawa" / "packages" / "ULUS00000", cls.outside):
+        for folder in (cls.lib / "sub", cls.files / "Nakagawa" / "packages" / "ULUS00000", cls.outside,
+                       cls.files / "demos" / "packages" / "TEST00007"):
             folder.mkdir(parents=True)
         for path in (cls.lib / "libnk_title_demo.so", cls.lib / "sub" / "libnested.so",
                      cls.files / "Nakagawa" / "packages" / "ULUS00000" / "libULUS00000.so",
+                     cls.files / "demos" / "packages" / "TEST00007" / "libshowcase-scene.so",
                      cls.files / "notes.txt", cls.outside / "libother.so"):
             path.write_bytes(b"\x7fELF")
         (cls.files / "dir.so").mkdir()
@@ -700,6 +702,13 @@ class AndroidTitleLibraryTests(unittest.TestCase):
         self.assertEqual(self._resolve(built.as_posix()), [f"{self._abs(built)}|"])
         if self.links:
             self.assertEqual(self._resolve((self.files / "inside.so").as_posix()), [f"{self._abs(built)}|"])
+
+    def test_a_bundled_demo_loads_by_the_path_the_launcher_validated(self) -> None:
+        """An nk.demos package is unpacked to <files>/demos/packages/<disc>/ and Play names its
+        library by that absolute path (the validated package's executable), as for a package
+        the player built (#360)."""
+        demo = self.files / "demos" / "packages" / "TEST00007" / "libshowcase-scene.so"
+        self.assertEqual(self._resolve(demo.as_posix()), [f"{self._abs(demo)}|"])
 
     def test_every_other_name_is_refused(self) -> None:
         refused = [
@@ -810,6 +819,94 @@ class AndroidTitleLibraryTests(unittest.TestCase):
         self.assertIn("showBundledFilesFailure(", created)
         strings = (ANDROID / "app" / "src" / "main" / "res" / "values" / "strings.xml").read_text(encoding="utf-8")
         self.assertRegex(strings, r'<string name="bundled_files_failed">[^<]*%1\$s')
+
+
+class AndroidBundledDemoTests(unittest.TestCase):
+    """The showcase demos reach the Android launcher's library by the desktop route (#360):
+    nk.demos bundles a whole `showcase.py build --target android` demos folder as demos/, the
+    first start unpacks it into the files folder, which is SDL_GetBasePath() there, and the
+    launcher's own showcase discovery validates each package exactly as on the desktop. nk.titles
+    keeps the debug route, named by the catalogue's title id. Gradle is not run here (hosted CI
+    builds the launcher-only APK); these pin what the build files and the documented commands
+    say to one another."""
+
+    gradle = (ANDROID / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+    cmake = (ANDROID / "app" / "CMakeLists.txt").read_text(encoding="utf-8")
+    docs = (ROOT / "docs" / "ANDROID_DEVELOPMENT.md").read_text(encoding="utf-8")
+
+    def _demos(self) -> tuple[dict[str, object], ...]:
+        sys.path.insert(0, str(ROOT / "tests" / "fixtures" / "showcase"))
+        try:
+            import showcase  # noqa: PLC0415
+        finally:
+            sys.path.remove(str(ROOT / "tests" / "fixtures" / "showcase"))
+        return showcase.DEMOS
+
+    def test_nk_titles_is_named_by_the_id_the_package_records(self) -> None:
+        """F1: a showcase package records the catalogue id (showcase-scene-v1) while its files
+        carry the game's name (showcase-scene_image.bin, showcase-scene_recomp.c). nk.titles
+        takes the recorded id, finds the image beside the recorded executable, and names the
+        library and the staged files by the id, so the documented commands work as written."""
+        parse = self.gradle[self.gradle.index("val titles: List<BundledTitle>"):]
+        parse = parse[:parse.index("\n    }\n")]
+        self.assertIn("require(recorded == id)", parse)
+        self.assertIn('val image = File(dir, "${stem}_image.bin")', parse)
+        self.assertNotIn("${id}_image.bin", parse)
+        self.assertIn('rename { "${title.id}_image.bin" }', self.gradle)
+        self.assertIn('"nk_title_${it.id}"', self.gradle)
+        self.assertIn('"${it.id}=${it.codeName}=${it.dir.invariantSeparatorsPath}"', self.gradle)
+        self.assertIn('nk_add_title_runtime(${target} "${package_dir}" "${code_name}")', self.cmake)
+        self.assertIn('set(target "nk_title_${title_id}")', self.cmake)
+
+        demos = {str(demo["id"]): str(demo["disc_id"]) for demo in self._demos()}
+        titles = re.findall(r'-Pnk\.titles=([^"\s]+)', self.docs)
+        self.assertTrue(titles, "the documentation shows the nk.titles command")
+        for value in titles:
+            for entry in value.split(";"):
+                title_id, package = entry.split("=", 1)
+                self.assertIn(title_id, demos, entry)
+                self.assertTrue(package.endswith(f"packages/{demos[title_id]}"), entry)
+        starts = re.findall(
+            r"--es library nk_title_(\S+) \\\n\s+--esa args \"--image,<app files>/titles/"
+            r"([^/]+)/([^,]+)_image\.bin", self.docs)
+        self.assertTrue(starts, "the documentation shows the debug am start command")
+        for library, title, image_title in starts:
+            self.assertEqual((library, title, image_title), (library, library, library))
+            self.assertIn(library, demos)
+
+    def test_nk_demos_bundles_the_desktop_demos_layout_whole(self) -> None:
+        self.assertIn('findProperty("nk.demos")', self.gradle)
+        self.assertIn('demos?.let { root -> from(root) { into("app/demos") } }', self.gradle)
+        parse = self.gradle[self.gradle.index("val demos: File? ="):]
+        parse = parse[:parse.index("\nval nativeTargets")]
+        # One package per ABI, and these are arm64 builds.
+        self.assertIn('require(abis == listOf("arm64-v8a"))', parse)
+        # A desktop package, or a library for another ABI, is refused by name before any task.
+        self.assertIn('executable.startsWith("lib") && executable.endsWith(".so")', parse)
+        self.assertIn("elfMachine(File(dir, executable)) == 183", parse)
+        self.assertIn('File(root, "images/${dir.name}.iso").isFile', parse)
+
+    def test_every_file_a_package_lists_reaches_the_apk(self) -> None:
+        """aapt leaves out names starting with "." or folders starting with "_" by default; a
+        demo package lists .game-inputs and other dot files, so the pattern keeps them."""
+        match = re.search(r'ignoreAssetsPattern = "([^"]*)"', self.gradle)
+        self.assertIsNotNone(match, "build.gradle.kts sets the asset pattern")
+        assert match is not None
+        rules = match.group(1).split(":")
+        self.assertNotIn(".*", rules)
+        self.assertNotIn("<dir>_*", rules)
+        self.assertTrue(all(rule.startswith("!") for rule in rules), rules)
+
+    def test_the_unpacked_demos_are_where_the_launcher_looks(self) -> None:
+        java = ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" / "nakagawa"
+        host = (java / "NakagawaHost.java").read_text(encoding="utf-8")
+        # assets/app/<child> goes to <files>/<child>, which is the working directory and so
+        # SDL_GetBasePath() ("./") for the player.
+        self.assertIn('copyAssetTree(context.getAssets(), "app/" + child, new File(app, child));', host)
+        main = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn("player_app_discover_showcase(&run->app, executable_directory);", main)
+        state = (ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
+        self.assertIn('"%sdemos", executable_directory);', state)
 
 
 def cast_str(value: str | None) -> str:
