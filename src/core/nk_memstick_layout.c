@@ -2143,6 +2143,45 @@ static NkMemstickCollisionResult bring_new_offer(const NkMemstickPaths *paths,
     return result;
 }
 
+/* A read-only lookup can name a missing subtree without creating its parents.
+ * Present components are still resolved with the same case and link checks. */
+static bool bring_child(const char *parent, const char *name, bool create, char out[NK_MAX_PATH]) {
+    if (!create && nk_platform_path_missing(parent)) return layout_join(parent, name, out);
+    return unit_directory(parent, name, create, out);
+}
+
+static bool bring_target_parent(const NkMemstickPaths *paths, const NkMemstickPlanUnit *unit,
+                                bool create, char out[NK_MAX_PATH]) {
+    const char *store = paths->stick;
+    char generation[NK_MAX_PATH], psp[NK_MAX_PATH];
+    if (unit->decision == NK_MEMSTICK_PLAN_KEEP) {
+        char slot[NK_MAX_PATH], kept[NK_MAX_PATH], key[65];
+        bring_generation(unit, key);
+        if (create) {
+            if (!unit_ensure_layout_directory(paths->saves, paths->kept_copies)) return false;
+        } else if (!nk_platform_path_missing(paths->kept_copies) &&
+                   !unit_plain_directory(paths->kept_copies)) {
+            return false;
+        }
+        if (!bring_child(paths->kept_copies, unit->slot, create, slot) ||
+            !bring_child(slot, BRING_IN_KEPT, create, kept) ||
+            !bring_child(kept, key, create, generation)) return false;
+        store = generation;
+    }
+    return bring_child(store, "PSP", create, psp) && bring_child(psp, "SAVEDATA", create, out);
+}
+
+/* Never discard an intent if its target still exists or cannot be inspected.
+ * Confirmation verifies that output. When the target is definitely absent,
+ * the old intent can proceed only if its original source is still available. */
+static bool bring_can_resume(const NkMemstickPaths *paths, const NkMemstickPlanUnit *pending) {
+    char parent[NK_MAX_PATH], target[NK_MAX_PATH], source[NK_MAX_PATH];
+    if (!bring_target_parent(paths, pending, false, parent) ||
+        !bring_child(parent, pending->name, false, target) || !nk_platform_path_missing(target))
+        return true;
+    return plan_source_matches(paths, pending, source);
+}
+
 NkMemstickCollisionResult nk_memstick_savedata_bring_in_offer(const char *saves_root,
                                                              const char *slot,
                                                              NkMemstickPlanUnit *unit) {
@@ -2178,9 +2217,14 @@ NkMemstickCollisionResult nk_memstick_savedata_bring_in_offer(const char *saves_
                     if (current.decision != NK_MEMSTICK_PLAN_DEDUPLICATE)
                         pending.decision = current.decision;
                 }
-                if (result == NK_MEMSTICK_COLLISION_COPIED) *unit = pending;
-                nk_memstick_layout_free(&layout);
-                return result;
+                if (result != NK_MEMSTICK_COLLISION_COPIED ||
+                    bring_can_resume(&paths, &pending)) {
+                    if (result == NK_MEMSTICK_COLLISION_COPIED) *unit = pending;
+                    nk_memstick_layout_free(&layout);
+                    return result;
+                }
+                /* No output and no matching source survive. The regular scan
+                   can offer the current version. Only Confirm replaces intent. */
             }
         }
     }
@@ -2193,20 +2237,9 @@ NkMemstickCollisionResult nk_memstick_savedata_bring_in_offer(const char *saves_
 static NkMemstickCollisionResult bring_publish(const NkMemstickPaths *paths,
                                                const NkMemstickPlanUnit *unit) {
     char parent[NK_MAX_PATH], target[NK_MAX_PATH], from[NK_MAX_PATH];
-    if (unit->decision == NK_MEMSTICK_PLAN_KEEP) {
-        char slot[NK_MAX_PATH], kept[NK_MAX_PATH], generation[NK_MAX_PATH], key[65];
-        bring_generation(unit, key);
-        if (!unit_ensure_layout_directory(paths->saves, paths->kept_copies) ||
-            !unit_directory(paths->kept_copies, unit->slot, true, slot) ||
-            !unit_directory(slot, BRING_IN_KEPT, true, kept) ||
-            !unit_directory(kept, key, true, generation) ||
-            !unit_savedata_directory(generation, true, parent))
-            return NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT;
-    } else if (!unit_savedata_directory(paths->stick, unit->decision == NK_MEMSTICK_PLAN_STAGE,
-                                        parent)) {
-        return NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT;
-    }
-    if (!unit_directory(parent, unit->name, false, target))
+    bool create = unit->decision != NK_MEMSTICK_PLAN_DEDUPLICATE;
+    if (!bring_target_parent(paths, unit, create, parent) ||
+        !bring_child(parent, unit->name, false, target))
         return NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT;
     if (unit->decision == NK_MEMSTICK_PLAN_DEDUPLICATE)
         return unit_matches(target, unit->digest) ? NK_MEMSTICK_COLLISION_COPIED

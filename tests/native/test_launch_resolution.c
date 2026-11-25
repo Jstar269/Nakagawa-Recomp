@@ -3997,6 +3997,68 @@ static void test_memstick_bring_in(const char *base) {
     free(ready);
 }
 
+static void test_memstick_bring_in_supersedes_unpublished(const char *base) {
+    puts("[LAUNCH_TEST] Bring In supersedes an unpublished version after the legacy source changes");
+    char root[NK_MAX_PATH], journal[NK_MAX_PATH], receipt[NK_MAX_PATH], path[NK_MAX_PATH];
+    char keep_root[NK_MAX_PATH], relative[NK_MAX_PATH];
+    const char *slot = "TEST00002";
+    NkMemstickPaths paths;
+    NkMemstickLayout layout;
+    NkMemstickPlanUnit obsolete, offer;
+    memstick_fixture_path(root, base, "memstick-bring-in-unpublished");
+    assert(nk_memstick_layout_paths(root, &paths));
+    memstick_bring_test_write(root, slot, "A-OLDER", "OLD1", "META1");
+    memstick_bring_test_write(root, slot, "Z-NEXT", "NEXT", "MNEXT");
+    memstick_bring_test_write(root, NK_MEMSTICK_STICK_NAME, "A-OLDER", "LIVE", "MLIVE");
+    assert(nk_memstick_layout_init(&layout, NK_MEMSTICK_STATE_READY, "test"));
+    assert(nk_memstick_layout_write(root, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&layout);
+    write_file_utf8(paths.kept_copies, "occupied fixture path");
+
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &obsolete) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(obsolete.name, "A-OLDER") && obsolete.decision == NK_MEMSTICK_PLAN_KEEP);
+    assert(nk_memstick_savedata_bring_in(root, slot, &obsolete) ==
+           NK_MEMSTICK_COLLISION_DESTINATION_CONFLICT);
+    memstick_fixture_path(journal, paths.migration, "bring-in/test00002");
+    memstick_fixture_path(path, journal, "intent.json");
+    char *first = read_text_file(path);
+    assert(first);
+    BringInReceipts found = {0};
+    assert(nk_platform_list_dir(journal, memstick_bring_test_receipt, &found) && !found.count);
+    assert_file_text(paths.kept_copies, "occupied fixture path");
+
+    assert(nk_remove_utf8(paths.kept_copies) == 0);
+    memstick_bring_test_write(root, slot, "A-OLDER", "OLD2", "META2");
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(offer.name, obsolete.name) && offer.decision == NK_MEMSTICK_PLAN_KEEP);
+    assert(memcmp(offer.digest, obsolete.digest, sizeof(offer.digest)) != 0);
+    assert_file_text(path, first);
+    assert(nk_platform_path_missing(paths.kept_copies));
+    assert(nk_memstick_savedata_bring_in(root, slot, &obsolete) ==
+           NK_MEMSTICK_COLLISION_SOURCE_CHANGING);
+    assert_file_text(path, first);
+    assert(nk_memstick_savedata_bring_in(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    char *second = read_text_file(path);
+    assert(second && strcmp(first, second) != 0);
+    free(first);
+    assert(nk_platform_list_dir(journal, memstick_bring_test_receipt, &found) && found.count == 1u);
+    memstick_fixture_path(receipt, journal, found.first);
+    assert_file_text(receipt, second);
+    free(second);
+    memstick_fixture_path(keep_root, paths.kept_copies, "TEST00002/Bring In");
+    int length = snprintf(relative, sizeof(relative), "%.64s/PSP/SAVEDATA/A-OLDER/PARAM.SFO",
+                          found.first);
+    assert(length > 0 && (size_t)length < sizeof(relative));
+    memstick_fixture_path(path, keep_root, relative);
+    assert_file_text(path, "META2");
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/A-OLDER/DATA.BIN");
+    assert_file_text(path, "LIVE");
+    memstick_fixture_path(path, root, "TEST00002/PSP/SAVEDATA/A-OLDER/DATA.BIN");
+    assert_file_text(path, "OLD2");
+    assert(nk_memstick_savedata_bring_in_offer(root, slot, &offer) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(offer.name, "Z-NEXT") && offer.decision == NK_MEMSTICK_PLAN_STAGE);
+}
+
 static void test_memstick_layout(const char *base, char sep) {
     printf("[LAUNCH_TEST] Shared Memory Stick layout and record\n");
     fflush(stdout);
@@ -4489,6 +4551,7 @@ int main(int argc, char **argv) {
     test_memstick_save_planner(base);
     test_memstick_journal_restart(base);
     test_memstick_bring_in(base);
+    test_memstick_bring_in_supersedes_unpublished(base);
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);
