@@ -28722,6 +28722,40 @@ static void test_b23_second_round(void) {
         s_cur = -1;
     }
 
+    /* ---- CancelSema with a negative count other than -1 restores init -- */
+    /* pspautotests tests/threads/semaphores/cancel.expected (reference output): "Negative
+     * -3: OK" and the following refer reads cur=0 on a semaphore created with init 0, so
+     * any negative count, not only -1, restores the initial count; it is never stored as
+     * the count. The init-2 leg follows PPSSPP (hrydgard/ppsspp
+     * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelSemaphore.cpp,
+     * sceKernelCancelSema: newCount < 0 restores initCount), consistent with the measured
+     * -1 rule above. */
+    {
+        static const int inits[2] = {0, 2};
+        for (int k = 0; k < 2; k++) {
+            reset_fixture();
+            sr_hle_init();
+            TCB *main_t = fixture_thread(0x1e1u, TH_RUNNING, 32);
+            s_cur = (int)(main_t - s_tcb);
+            main_t->started = 1;
+            uint32_t sema = wsv_create(inits[k], 3);
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = sema; cpu.r[5] = 1u;
+            (void)sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA);
+            MEM_W32(WCR_NUMWAIT, 0xFFFFFFFFu);
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = sema; cpu.r[5] = 0xFFFFFFFDu; cpu.r[6] = WCR_NUMWAIT;
+            snprintf(msg, sizeof msg, "CancelSema(-3) with init %d succeeds", inits[k]);
+            expect(sr_syscall(&cpu, NID_WCR_CANCEL_SEMA) == 0u, msg);
+            snprintf(msg, sizeof msg, "CancelSema(-3) with init %d restores the initial count "
+                                      "(count %d)", inits[k], wsv_count(sema));
+            expect(wsv_count(sema) == inits[k], msg);
+            expect(MEM_R32(WCR_NUMWAIT) == 0u, "CancelSema(-3) reports no waiter");
+            wsv_delete(sema);
+            s_cur = -1;
+        }
+    }
+
     /* ---- DeleteSema with a waiter: delete 0, waiter WAIT_DELETE --------- */
     {
         reset_fixture();

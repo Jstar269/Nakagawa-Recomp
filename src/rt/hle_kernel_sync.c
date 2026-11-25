@@ -2113,8 +2113,13 @@ static uint32_t h_CancelSema(CpuState *s) {
     if (hle_log_on())
         fprintf(stderr, "HLE: CancelSema uid=0x%x newCount=%d (from 0x%x)\n", A0, new_count, sched_current_uid());
     int waiters = sched_count_waiters(A0);
-    /* Measured (PSP-B2-01): -1 restores the create-time initial count. */
-    m->count = (new_count == -1) ? m->initc : new_count;
+    /* Measured (PSP-B2-01): -1 restores the create-time initial count. Every other
+     * negative count does too, and is never stored as the count: pspautotests
+     * tests/threads/semaphores/cancel.expected (reference output) reads cur=0 after
+     * "Negative -3" on a semaphore created with init 0, and PPSSPP (hrydgard/ppsspp
+     * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelSemaphore.cpp,
+     * sceKernelCancelSema) restores initCount for any newCount < 0. */
+    m->count = (new_count < 0) ? m->initc : new_count;
     /* The third argument is a2 (AGENTS.md section 7: arguments 1-4 are a0-a3). */
     uint32_t nump = A2;
     if (nump && sr_guest_span_writable(nump, 4u)) MEM_W32(nump, (uint32_t)waiters);
