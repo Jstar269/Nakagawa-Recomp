@@ -12134,11 +12134,15 @@ static void d12_match_cb_fn(CpuState *cpu) {
     cpu->r[2] = 0u;
 }
 
+/* The guest asks for the unsolicited packet with one byte on the trigger socket. The peer answers
+ * with one byte, and only after the whole packet has gone onto the lobby socket. */
+enum { D122_TRIG_REQUEST = 'T', D122_TRIG_ACK = 'A' };
+
 typedef struct {
     adh_p2_sock_t lsn;
     adh_p2_sock_t trig_lsn;
     volatile int stop;
-    volatile int sent_unsolicited;
+    atomic_int sent_unsolicited; /* 1 once the whole SCAN_COMPLETE is on the lobby socket */
     atomic_int stage; /* ADH_P2_PEER_* */
 } D122TcpServer;
 
@@ -12169,10 +12173,15 @@ static void *d122_tcp_server_thread(void *arg) {
                     adh_p2_sock_t trig = accept(srv->trig_lsn, NULL, NULL);
                     if (trig != ADH_P2_BAD_SOCK) {
                         const uint8_t scan_done = 5u; /* NK_LOBBY_SCAN_COMPLETE */
-                        const uint8_t ack = 'A';
-                        (void)adh_p2_send_all(lobby, &scan_done, 1u);
-                        srv->sent_unsolicited = 1;
-                        (void)adh_p2_send_all(trig, &ack, 1u);
+                        const uint8_t ack = D122_TRIG_ACK;
+                        uint8_t req = 0u;
+                        /* Without the request, or with a packet that did not go out whole, nothing
+                         * is counted or acknowledged: the guest reads the end of the socket. */
+                        if (adh_p2_recv_exact(trig, &req, 1u) == 0 && req == D122_TRIG_REQUEST &&
+                            adh_p2_send_all(lobby, &scan_done, 1u) == 0) {
+                            atomic_store(&srv->sent_unsolicited, 1);
+                            (void)adh_p2_send_all(trig, &ack, 1u);
+                        }
                         adh_p2_close_sock(trig);
                     }
                     uint8_t drain[16];
@@ -12221,7 +12230,10 @@ static void d122_main_fn(CpuState *cpu) {
         (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
         return;
     }
-    /* Poke trigger socket so server immediately sends unsolicited SCAN_COMPLETE while in state 1. */
+    /* Ask on the trigger socket for the unsolicited SCAN_COMPLETE while in state 1. The server
+     * acknowledges only after the whole packet is on the lobby socket. */
+    int trig_connect = -1, trig_send = -1, trig_recv = -1;
+    uint8_t trig_ack = 0u;
     adh_p2_sock_t poke = socket(AF_INET, SOCK_STREAM, 0);
     if (poke != ADH_P2_BAD_SOCK) {
         struct sockaddr_in ta;
@@ -12229,11 +12241,27 @@ static void d122_main_fn(CpuState *cpu) {
         ta.sin_family = AF_INET;
         ta.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         ta.sin_port = htons(s_d122_trig_port);
-        if (connect(poke, (struct sockaddr *)&ta, sizeof(ta)) == 0) {
-            uint8_t ack = 0u;
-            (void)adh_p2_recv_exact(poke, &ack, 1u);
+        trig_connect = connect(poke, (struct sockaddr *)&ta, sizeof(ta));
+        if (trig_connect == 0) {
+            const uint8_t req = D122_TRIG_REQUEST;
+            trig_send = adh_p2_send_all(poke, &req, 1u);
+            if (trig_send == 0) trig_recv = adh_p2_recv_exact(poke, &trig_ack, 1u);
         }
         adh_p2_close_sock(poke);
+    }
+    const int sent_unsolicited = atomic_load(&s_d122_srv->sent_unsolicited);
+    const bool triggered = trig_connect == 0 && trig_send == 0 && trig_recv == 0 &&
+                           trig_ack == D122_TRIG_ACK && sent_unsolicited == 1;
+    snprintf(d122_msg, sizeof(d122_msg),
+             "d12.2: fixture peer took the trigger and sent the whole SCAN_COMPLETE "
+             "(connect=%d send=%d recv=%d ack=0x%02x sent=%d)",
+             trig_connect, trig_send, trig_recv, trig_ack, sent_unsolicited);
+    expect(triggered, d122_msg);
+    if (!triggered) {
+        /* An unchanged guest says nothing about a packet that was not sent: leave it unjudged. */
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
     }
     for (int w = 0; w < 20; w++) {
         cpu->r[4] = 20000u;
@@ -12243,7 +12271,7 @@ static void d122_main_fn(CpuState *cpu) {
     snprintf(d122_msg, sizeof(d122_msg),
              "d12.2: unsolicited SCAN_COMPLETE while in group keeps state 1 and fires no event "
              "(state=%u events=%u)", adh_state(), s_adh_events);
-    expect(s_d122_srv->sent_unsolicited == 1 && adh_state() == 1u && s_adh_events == 1u, d122_msg);
+    expect(adh_state() == 1u && s_adh_events == 1u, d122_msg);
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
            "d12.2: teardown");
@@ -13543,9 +13571,14 @@ static void d3_main_fn(CpuState *cpu) {
            adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
            adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
            adh(ADH_NID_CREATE, adh_name(0, "D3MID01"), 0u, 0u) == 0u, "d3.2: Create");
-    if (mr_wait_join_answered(cpu, s_d3_srv, d32_joins, "d3.2")) adh_p2_wait_state(cpu, 1u, 1u);
-    const bool d32_in_group = adh_state() == 1u && s_adh_events == 1u;
-    expect(d32_in_group, "d3.2: in group D3MID01");
+    const bool d32_answered = mr_wait_join_answered(cpu, s_d3_srv, d32_joins, "d3.2");
+    if (d32_answered) adh_p2_wait_state(cpu, 1u, 1u);
+    const bool d32_in_group = d32_answered && adh_state() == 1u && s_adh_events == 1u &&
+                              ADH_AT(0).event == 1 && ADH_AT(0).error == 0u;
+    snprintf(msg, sizeof(msg), "d3.2: in group D3MID01 (state=%u events=%u ev=%d err=0x%08x)",
+             adh_state(), s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u);
+    expect(d32_in_group, msg);
     if (d32_in_group && mr_drop_lobby_mid_session(cpu, s_d3_srv, "d3.2")) {
         for (int w = 0; w < 100 && s_adh_events < 2u; w++) d3_step(cpu);
         snprintf(msg, sizeof(msg),
@@ -13724,9 +13757,17 @@ static void off_main_fn(CpuState *cpu) {
            adh(ADH_NID_CREATE, adh_name(0, "OFFGRP1"), 0u, 0u) == 0u, "off: Create");
     const bool answered = mr_wait_join_answered(cpu, s_off_srv, joins, "off");
     if (answered) adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u && s_adh_events == 1u && off_active_peers() == 1,
-           "off: in group OFFGRP1 with the lobby connected");
-    if (!answered) {
+    const bool connected = answered && adh_state() == 1u && s_adh_events == 1u &&
+                           ADH_AT(0).event == 1 && ADH_AT(0).error == 0u;
+    const int peers = connected ? off_active_peers() : -1;
+    const bool in_group = connected && peers == 1;
+    snprintf(msg, sizeof(msg),
+             "off: in group OFFGRP1 with the lobby connected "
+             "(answered=%d state=%u events=%u ev=%d err=0x%08x peers=%d)",
+             (int)answered, adh_state(), s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, peers);
+    expect(in_group, msg);
+    if (!in_group) {
         /* Turning Online play off is checked from a connected group only. */
         (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
         (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
