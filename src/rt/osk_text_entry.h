@@ -14,8 +14,9 @@
  *     returns SR_OSK_TEXT_PENDING without waiting for it. While it is open it returns
  *     SR_OSK_TEXT_PENDING (the arguments are not read again). Once the person answered it
  *     returns 1 (confirmed; `out` holds the text, at most cap - 1 units and a terminator) or
- *     0 (cancelled, or the host UI failed; `out` is untouched), and the next call opens a
- *     new request. The caller asks for one field at a time, in order.
+ *     0 (cancelled, or the Windows host UI failed; `out` is untouched), or
+ *     SR_OSK_TEXT_UNAVAILABLE (no live host can present this field). The caller asks
+ *     for one field at a time, in order.
  *
  *   sr_osk_text_entry_abandon()
  *     The keyboard no longer wants the open request (the title shut it down or started a
@@ -34,8 +35,8 @@
  *   - the offscreen presenter (SR_VIDEO=offscreen): nobody. Headless bring-up has no person
  *     and opens no window, so the request stays pending and the keyboard stays open, as on a
  *     PSP nobody is typing at; an automated route answers it with SR_OSK_SCRIPT/SR_OSK_TEXT.
- *   - a host without a native input box and without the overlay: the field is answered
- *     cancelled at once, the runtime's existing no-dialog result.
+ *   - a host without a native input box and without the overlay: no host answer is
+ *     available. The HLE stops by name before completing or writing the field.
  */
 #ifndef SR_OSK_TEXT_ENTRY_H
 #define SR_OSK_TEXT_ENTRY_H
@@ -44,6 +45,7 @@
 #include <wchar.h>
 
 #define SR_OSK_TEXT_PENDING (-1)
+#define SR_OSK_TEXT_UNAVAILABLE (-2)
 
 int sr_osk_text_entry_poll(const wchar_t *desc, const wchar_t *initial, wchar_t *out, int cap,
                            uint32_t input_type);
@@ -63,7 +65,7 @@ void sr_replay_osk_abandon(void (*live_abandon)(void));
 
 /* The native input box (src/rt/osk_win.c): blocks the calling thread until the person
  * confirms (1, text in out) or cancels (0). On Windows only the text-entry worker may call
- * it; hosts without a native box answer cancelled at once, so they call it directly. */
+ * it; hosts without a native box report SR_OSK_TEXT_UNAVAILABLE without waiting. */
 int sr_osk_input(const wchar_t *desc, const wchar_t *initial, wchar_t *out, int cap);
 
 #endif /* SR_OSK_TEXT_ENTRY_H */

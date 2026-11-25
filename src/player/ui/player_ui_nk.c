@@ -375,11 +375,13 @@ struct PlayerUiNk {
 /* The clip reader: PSP_GAME/SND0.AT3 from the user's disc image, read into memory
    only (player_ui_snd0.h); a disc without one is silent. */
 static PlayerUiSnd0ReadResult player_ui_read_snd0(const char *iso_path, uint8_t **bytes,
-                                                  size_t *size, void *user) {
+                                                  size_t *size, void *user,
+                                                  bool (*cancel)(void *), void *cancel_user) {
     NkIconStatus status;
     (void)user;
     status = nk_iso_read_bounded_entry(iso_path, PLAYER_UI_SND0_PATH,
-                                       PLAYER_UI_SND0_MAX_FILE_BYTES, bytes, size);
+                                       PLAYER_UI_SND0_MAX_FILE_BYTES, bytes, size,
+                                       cancel, cancel_user);
     if (status == NK_ICON_OK) return PLAYER_UI_SND0_READ_OK;
     return status == NK_ICON_ERR_MISSING || status == NK_ICON_ERR_INVALID_PARAM
                ? PLAYER_UI_SND0_READ_MISSING

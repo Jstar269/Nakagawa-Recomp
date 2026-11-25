@@ -4258,6 +4258,13 @@ static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *
     return NULL;
 }
 
+static void player_report_acceptance_runtime_unavailable(const PlayerApp *app) {
+    if (app->headless_accept_presented_frames > 0u) {
+        fprintf(stderr,
+                "[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable\n");
+    }
+}
+
 /* PLAY for one library entry from the command line, shared by --launch-index
  * and `--launch-now --headless-launch`: the launcher's own player_app_launch_game,
  * then a wait for the child. A headless run is bounded by the timeout above. */
@@ -4270,6 +4277,9 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
             : app->last_error.boundary_text[0] ? app->last_error.boundary_text
                                                : app->last_error.message;
         fprintf(stderr, "[PLAYER] %s failed: %s\n", route, reason);
+        if (strcmp(app->last_error.error_code, "RUNTIME_PACKAGE_NOT_READY") == 0) {
+            player_report_acceptance_runtime_unavailable(app);
+        }
         return 4;
     }
     printf("[PLAYER] Launch argv contains --gui: %s\n",
@@ -7075,10 +7085,7 @@ static int player_command_line_launch(PlayerRun *run) {
                 fprintf(stderr, "[PLAYER] Launch index %d has no prepared runtime; PLAY NOW is unavailable.\n",
                         run->launch_index);
             }
-            if (app->headless_accept_presented_frames > 0u) {
-                fprintf(stderr,
-                        "[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable\n");
-            }
+            player_report_acceptance_runtime_unavailable(app);
             if (run->launch_title) {
                 char message[320];
                 (void)snprintf(message, sizeof(message),
