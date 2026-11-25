@@ -866,8 +866,9 @@ class AndroidBundledDemoTests(unittest.TestCase):
                 title_id, package = entry.split("=", 1)
                 self.assertIn(title_id, demos, entry)
                 self.assertTrue(package.endswith(f"packages/{demos[title_id]}"), entry)
+        # \x5c is the shell's line-continuation backslash (spelled so it is not read as a UNC path).
         starts = re.findall(
-            r"--es library nk_title_(\S+) \\\n\s+--esa args \"--image,<app files>/titles/"
+            r"--es library nk_title_(\S+) \x5c\n\s+--esa args \"--image,<app files>/titles/"
             r"([^/]+)/([^,]+)_image\.bin", self.docs)
         self.assertTrue(starts, "the documentation shows the debug am start command")
         for library, title, image_title in starts:
