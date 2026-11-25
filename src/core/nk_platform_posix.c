@@ -2093,8 +2093,10 @@ NkHostKind nk_platform_host_kind(void) {
 #endif
 }
 
-bool nk_platform_linux_steam_find_root(char *root, size_t root_cap) {
-    char home[NK_MAX_PATH], first_root[NK_MAX_PATH] = "";
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap,
+                                      bool (*has_accounts)(const char *)) {
+    char home[NK_MAX_PATH];
+    unsigned best_rank = 0u;
     static const char *const suffixes[] = {"/.local/share/Steam", "/.steam/steam"};
     if (!root || root_cap == 0u) return false;
     root[0] = '\0';
@@ -2103,20 +2105,21 @@ bool nk_platform_linux_steam_find_root(char *root, size_t root_cap) {
     for (size_t i = 0u; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
         char candidate[NK_MAX_PATH], userdata[NK_MAX_PATH];
         int n = snprintf(candidate, sizeof(candidate), "%s%s", home, suffixes[i]);
-        if (n < 0 || (size_t)n >= sizeof(candidate) || !nk_platform_dir_exists(candidate)) continue;
-        if (first_root[0] == '\0') memcpy(first_root, candidate, (size_t)n + 1u);
+        if (n < 0 || (size_t)n >= sizeof(candidate) || (size_t)n >= root_cap ||
+            !nk_platform_dir_exists(candidate)) continue;
+        size_t candidate_length = (size_t)n;
+        unsigned rank = 1u;
         n = snprintf(userdata, sizeof(userdata), "%s/userdata", candidate);
-        if (n < 0 || (size_t)n >= sizeof(userdata) || !nk_platform_dir_exists(userdata)) continue;
-        n = snprintf(root, root_cap, "%s", candidate);
-        if (n >= 0 && (size_t)n < root_cap) return true;
-        root[0] = '\0';
+        if (n >= 0 && (size_t)n < sizeof(userdata) && nk_platform_dir_exists(userdata)) {
+            rank = has_accounts(candidate) ? 3u : 2u;
+        }
+        if (rank > best_rank) {
+            memcpy(root, candidate, candidate_length + 1u);
+            best_rank = rank;
+            if (rank == 3u) break;
+        }
     }
-    if (first_root[0] != '\0') {
-        int n = snprintf(root, root_cap, "%s", first_root);
-        if (n >= 0 && (size_t)n < root_cap) return true;
-    }
-    root[0] = '\0';
-    return false;
+    return best_rank != 0u;
 }
 
 bool nk_platform_linux_steam_client_running(void) {
