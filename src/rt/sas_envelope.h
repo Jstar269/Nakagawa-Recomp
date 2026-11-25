@@ -45,11 +45,13 @@
  * PSP measurement settles it. The height read back is also clamped at 0 from
  * below (PPSSPP clamps only the top), so a decay step that overshoots zero
  * never reads as a negative height.
- * Modified for this project (2026-11-25, #2807): the decay ends at the first
- * step that brings the height to the sustain level or below it, where PPSSPP
- * ends it only below the level. That is what PSP-SAS-002 measures: from the
- * top, in linear steps of 0x00100000, a sustain level of 0x30000000 and one of
- * 0x30080000 both stop the decay at 0x30000000 (docs/HARDWARE_ORACLE.md).
+ * Modified for this project (2026-11-25, #2807): a linear decay ends at the
+ * first step that brings the height to the sustain level or below it, where
+ * PPSSPP ends it only below the level. That is what PSP-SAS-002 measures: from
+ * the top, in linear steps of 0x00100000, a sustain level of 0x30000000 and one
+ * of 0x30080000 both stop the decay at 0x30000000 (docs/HARDWARE_ORACLE.md).
+ * The exponential and DIRECT decays keep PPSSPP's rule (only below the level),
+ * because no PSP row measures them at the level.
  * The rate formulas and curves are PPSSPP's model, not PSP measurements.
  */
 #ifndef NK_RT_SAS_ENVELOPE_H
@@ -227,8 +229,11 @@ static inline void sas_envelope_step(SasEnvelope *e) {
         break;
     case SAS_ENV_DECAY:
         sas_envelope_walk(e, e->decay_type, e->decay_rate);
-        /* At or below the level, and the height is kept, not raised to it (PSP-SAS-002). */
-        if (e->height <= e->sustain_level) sas_envelope_set_state(e, SAS_ENV_SUSTAIN);
+        /* A linear decay ends at or below the level, keeping its height (PSP-SAS-002); the
+         * other decay curves end only below it, as in PPSSPP (unmeasured at the level). */
+        if (e->decay_type == SAS_CURVE_LINEAR_DECREASE ? e->height <= e->sustain_level
+                                                       : e->height < e->sustain_level)
+            sas_envelope_set_state(e, SAS_ENV_SUSTAIN);
         break;
     case SAS_ENV_SUSTAIN:
         sas_envelope_walk(e, e->sustain_type, e->sustain_rate);

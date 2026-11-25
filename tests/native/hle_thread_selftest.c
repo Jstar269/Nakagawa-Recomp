@@ -46603,10 +46603,11 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
     expect(sas_env_cell_grain(&cpu, core, out) == 0x3FB79F36u,
            "exponential decay of rate 0x12345 for 255 samples below the top");
 
-    /* A linear decay that lands exactly on the sustain level ends there: the switch is height <=
-     * level, so 0x20000000 is held. PPSSPP's model switched only below the level and held
-     * 0x1FF00000; PSP-SAS-002 measures the PSP stopping on the level (its bound runs, at 0x30000000;
-     * test_sas_adsr_psp_sas_002_curve_runs). */
+    /* A linear decay that lands exactly on the sustain level ends there: for the linear decay the
+     * switch is height <= level, so 0x20000000 is held. PPSSPP's model switched only below the level
+     * and held 0x1FF00000; PSP-SAS-002 measures the PSP stopping a linear decay on the level (its
+     * bound runs, at 0x30000000; test_sas_adsr_psp_sas_002_curve_runs). The exponential and DIRECT
+     * decays keep PPSSPP's below-the-level switch (test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule). */
     sas_env_cell_begin(&cpu, core, pcm, 256u);
     expect(sas_env_cell_call(&cpu, rates, core, 7, 0x40000000u, 0x00100000u, 0, 0) == 0,
            "ADSR: attack, decay 0x100000, sustain held");
@@ -46720,7 +46721,10 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
  * - pair p8's height reaches 0 at grain 585.
  *
  * PPSSPP's model holds 0x2ff00000 in the bound run, because its decay leaves for the sustain only below
- * the level; sas_envelope.h ends the decay at the level, as the record shows.
+ * the level; sas_envelope.h ends a linear decay at the level, as the record shows. bound pins that
+ * equality, and bound-half, whose step overshoots the level, is the control that passes either way.
+ * Both runs use the linear decay, so the record says nothing about the exponential or DIRECT decay at
+ * the level; those keep PPSSPP's rule (test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule).
  *
  * Published values this runtime does not reproduce. The cells print each as a named KNOWN DEVIATION line
  * and do not assert it:
@@ -47130,6 +47134,62 @@ static void test_sas_adsr_psp_sas_002_curve_runs(void) {
         printf("sas-adsr: KNOWN DEVIATION expatk height at grain 0 got=0x%08x want=0x%08x "
                "(PSP-SAS-002 sas-adsr-expatk-h00 out0; no key-on delay, #1296)\n",
                (unsigned)runs[0].heights[0], (unsigned)SAS_ADSR_EXPATK_GRAIN0);
+}
+
+/* Controls for the decay curves PSP-SAS-002 does not measure at the sustain level (#2807). The record's
+ * bound runs pin the linear decay ending at the level; these two pin that the exponential and DIRECT
+ * decays keep PPSSPP's rule of ending only below it. This is PPSSPP-derived behaviour kept, not
+ * PSP-measured. Each uses the probe's core and voice, a one-step linear attack (0x40000000) and
+ * sustain level 0x30000000, and reads the height after the first two grains of 256.
+ * - Exponential decay, rate 0x40000000, zero-rate linear sustain. The first decay step gives
+ *   0x40000000 - (0x40000000 + 3) / 4 = 0x30000000, exactly the level, so the decay steps again:
+ *   0x30000000 + ((0x10000000 * 0x40000000) >> 32) - 0x10000000 = 0x24000000, below the level, which
+ *   the sustain then holds. Ending at the level would hold 0x30000000.
+ * - DIRECT decay with rate 0x30000000, the level, and a linear sustain of 0x00100000 per step. DIRECT
+ *   sets the height to 0x30000000 on every step and never goes below the level, so the envelope stays
+ *   in the decay at 0x30000000. Ending at the level would start the sustain and read
+ *   0x30000000 - 254 * 0x00100000 = 0x20200000 after the first grain. */
+#define SAS_ADSR_CURVE_LINEAR_INC  0u   /* __sceSasSetADSRmode curve numbers (PspSasADSRCurveModes) */
+#define SAS_ADSR_CURVE_LINEAR_DEC  1u
+#define SAS_ADSR_CURVE_EXP_DEC     3u
+#define SAS_ADSR_CURVE_DIRECT      5u
+#define SAS_ADSR_CONTROL_LEVEL     0x30000000u
+#define SAS_ADSR_CONTROL_EXP_HELD  0x24000000u
+static void test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule(void) {
+    CpuState cpu;
+    static const struct {
+        uint32_t decay_curve, decay_rate, sustain_rate, held;
+        const char *what;
+    } controls[] = {
+        {SAS_ADSR_CURVE_EXP_DEC, 0x40000000u, 0u, SAS_ADSR_CONTROL_EXP_HELD,
+         "exponential decay 0x40000000 that lands on sustain level 0x30000000 steps once more and holds "
+         "0x24000000 (PPSSPP-derived, not PSP-measured)"},
+        {SAS_ADSR_CURVE_DIRECT, SAS_ADSR_CONTROL_LEVEL, 0x00100000u, SAS_ADSR_CONTROL_LEVEL,
+         "DIRECT decay at the sustain level stays in the decay at 0x30000000; the falling sustain never "
+         "starts (PPSSPP-derived, not PSP-measured)"},
+    };
+    sas_adsr_cell_begin(&cpu);
+    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
+        uint32_t words[3];
+        sas_adsr_voice(&cpu, 256u, words);
+        const uint32_t mode = sas_adsr_set_mode(&cpu, SAS_ADSR_EVERYTHING, SAS_ADSR_CURVE_LINEAR_INC,
+                                                controls[i].decay_curve, SAS_ADSR_CURVE_LINEAR_DEC,
+                                                SAS_ADSR_CURVE_LINEAR_DEC);
+        const uint32_t rates = sas_adsr_set_rates(&cpu, SAS_ADSR_EVERYTHING, 0x40000000u, controls[i].decay_rate,
+                                                  controls[i].sustain_rate, 0x00040000u);
+        const uint32_t level = sas_adsr_set_level(&cpu, SAS_ADSR_CONTROL_LEVEL);
+        const uint32_t key_on = sas_adsr_key_on(&cpu);
+        expect(words[0] == 0u && words[1] == 0u && words[2] == 0u && mode == 0u && rates == 0u &&
+                   level == 0u && key_on == 0u,
+               "decay control: the core, voice and envelope set up");
+        uint32_t heights[2];
+        for (int g = 0; g < 2; g++) {
+            cpu.r[4] = SAS_ADSR_CORE; cpu.r[5] = SAS_ADSR_OUT;
+            (void)sr_syscall(&cpu, NID_SAS_CORE);
+            heights[g] = sas_adsr_height(&cpu);
+        }
+        expect(heights[0] == controls[i].held && heights[1] == controls[i].held, controls[i].what);
+    }
 }
 
 static void test_sas_reinit_is_a_fresh_init(void) {
@@ -70389,6 +70449,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_simple_adsr_psp_sas_002_pairs();
     test_sas_adsr_mode_psp_sas_002_table();
     test_sas_adsr_psp_sas_002_curve_runs();
+    test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule();
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();

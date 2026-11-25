@@ -820,7 +820,8 @@ class LiveManifestTests(unittest.TestCase):
             ),
             0x5F9529F6: (
                 "__sceSasSetSL", "h_SasSetSL", "NID_SAS_ADSR_SET_SL", "sas_adsr_set_level",
-                ("0x20000000", "0x30000000", "0x30080000", "at or below the level", "0x2ff00000"),
+                ("0x20000000", "0x30000000", "0x30080000", "a linear decay ends at the first step at or below the level",
+                 "the exponential and DIRECT decays keep PPSSPP's rule", "0x2ff00000"),
             ),
         }
         record = next(
