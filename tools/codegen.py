@@ -2279,8 +2279,11 @@ def _effect_sync(addr, w, options, delay_branch_pc):
 
 
 def _effect_div(addr, w, options, delay_branch_pc):
+    # INT_MIN / -1 and a zero divisor are tested before C's / and %, which are undefined for
+    # both. The PSP leaves LO 0x80000000 and HI 0 for the overflow (pspautotests
+    # tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7, recorded on a PSP; #3031).
     a, b = rs(w), rt(w)
-    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0xFFFFFFFFu;} "
+    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0u;} "
             "else if (_b!=0){s->lo=(uint32_t)(_a/_b);s->hi=(uint32_t)(_a%%_b);} else {s->lo=_a<0?1u:0xFFFFFFFFu;s->hi=(uint32_t)_a;} }") % (R(a), R(b)), None, 0
 
 
