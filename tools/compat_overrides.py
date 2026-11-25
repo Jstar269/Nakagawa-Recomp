@@ -243,19 +243,14 @@ CODEGEN_CUSTOM_STUBS: list[dict[str, Any]] = [
 # and stay inventoried here so the remaining manual analyzer seeds can be
 # audited and eventually retired without conflating host entries with source
 # functions.
+#
+# The six callable rows (0x0005a648, 0x00042998, 0x0003db3c, 0x000e1724, 0x000e3b24 and
+# 0x00014430, each an "address-taken-tiny-leaf") are retired under #363 (2026-11-24): the
+# analyzer finds a leaf entered only through a pointer on its own, so --profile=hst seeds
+# no callable entry and the role comes from the image, as under every other profile
+# (tools/test_codegen_profile_isolation.py RetiredCallableSeedTests).  The three resume
+# rows stay until there is evidence about whether the title reaches them at run time.
 HST_ENTRY_ROLES = [
-    dict(address=0x0005A648, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x00042998, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x0003DB3C, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x000E1724, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x000E3B24, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x00014430, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
     dict(address=0x000310B0, role="resume", owner=0x00030FDC,
          provenance="private-elf-verified", test="tools/test_codegen_entry_semantics.py"),
     dict(address=0x00021C78, role="resume", owner=0x00021AC0,

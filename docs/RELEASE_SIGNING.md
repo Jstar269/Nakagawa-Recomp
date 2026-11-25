@@ -143,8 +143,10 @@ player hides a demo whose file no longer matches.
 are unsigned. A signature changes a file's SHA-256, so `gh attestation verify` passes on the unsigned file and
 fails on the signed one. Re-keying `bin/runtime-manifest.json` (below) changes a third attested file the same
 way. The tool therefore writes `signing-record.json` at the package root: the unsigned and the signed SHA-256
-of each signed file, the attested and the refreshed SHA-256 of the runtime manifest, and the signer. A
-downloader checks the attestations on the unsigned bundle, which the maintainer keeps with the release
+of each signed file, the attested and the refreshed SHA-256 of the runtime manifest, and the signer. For an older
+attested bundle with no original runtime manifest, the original inventory digest is explicitly `null`.
+Keep the complete verified pre-sign bundle to substantiate that absence and the original executable hashes.
+A downloader checks the attestations on the unsigned bundle, which the maintainer keeps with the release
 records (a workflow artifact expires after 90 days), and matches its hashes to the record. The release notes
 say so.
 
@@ -159,13 +161,15 @@ say so.
 A certificate file (`.pfx`) is imported into the store as non-exportable first. The script does not take
 passwords.
 
-**Steps.** Run these on the signing machine, after the binaries are copied into the staged folder and before
-`generate_sbom.py` and `stage_install.py --portable-zip` in
-[`PREVIEW_RELEASE.md`](PREVIEW_RELEASE.md#recreate-the-package), so that the SBOMs, `bin/runtime-manifest.json`
-and `SHA256SUMS.txt` describe the signed bytes:
+**Steps.** On the signing machine, make a copy of the verified attested bundle outside the release layouts.
+Set `$ApprovedBundle` to that copy and sign it before assembling either layout in
+[the portable release recipe](PREVIEW_RELEASE.md#recreate-the-package). Both layouts, their SBOMs and
+checksums, and the content audit then use the same verified signed bytes. The ZIP includes the approved
+`signing-record.json` at its root. The audit checks its recorded final hashes against the two signed
+executables and refreshed runtime manifest.
 
 ```powershell
-pwsh tools/sign_release_binaries.ps1 -Stage $Stage -Thumbprint <certificate SHA-1 thumbprint> `
+pwsh tools/sign_release_binaries.ps1 -Stage $ApprovedBundle -Thumbprint <certificate SHA-1 thumbprint> `
     -TimestampUrl <RFC 3161 timestamp service URL>
 ```
 
