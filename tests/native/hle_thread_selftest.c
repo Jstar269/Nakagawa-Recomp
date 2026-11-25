@@ -13920,16 +13920,33 @@ static bool d9_fast_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ct
     return true;
 }
 
+enum { D9_SLOW_HELD, D9_SLOW_RELEASED, D9_SLOW_ACKNOWLEDGED, D9_SLOW_TIMED_OUT };
+
+/* A resolver detached during cleanup can outlive the guest fixture frame. */
+static atomic_uint s_d9_slow_calls;
+static atomic_int s_d9_slow_gate;
+
 static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
-    (void)host;
-    int *calls = (int *)ctx;
-    if (calls) (*calls)++;
+    (void)host; (void)ctx;
+    if (atomic_fetch_add(&s_d9_slow_calls, 1u) != 0u) return false;
+    const uint64_t deadline = sr_host_monotonic_ms() + 3000u;
+    while (atomic_load(&s_d9_slow_gate) == D9_SLOW_HELD) {
+        if (sr_host_monotonic_ms() >= deadline) {
+            int held = D9_SLOW_HELD;
+            /* If Init joins the unfinished worker, let the fixture report failure. */
+            if (atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_TIMED_OUT))
+                return false;
+            break;
+        }
 #ifdef _WIN32
-    Sleep(150u);
+        Sleep(1u);
 #else
-    adh_p2_usleep(150000);
+        adh_p2_usleep(1000u);
 #endif
+    }
+    if (atomic_load(&s_d9_slow_gate) != D9_SLOW_RELEASED) return false;
     out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
+    atomic_store(&s_d9_slow_gate, D9_SLOW_ACKNOWLEDGED);
     return true;
 }
 
@@ -14009,19 +14026,24 @@ static void d89_main_fn(CpuState *cpu) {
            "d9: wrote D9PLAYER overlay");
     sysreg_restart();
 
-    /* D9: 150ms slow DNS must not block sceNetAdhocctlInit on the guest thread. */
-    int resolve_calls = 0;
-    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, &resolve_calls);
+    /* D9: the successful resolver stays unfinished until Init and Create have returned. */
+    atomic_store(&s_d9_slow_calls, 0u);
+    atomic_store(&s_d9_slow_gate, D9_SLOW_HELD);
+    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, NULL);
     const uint64_t t0 = sr_host_monotonic_ms();
     const uint32_t d9_init_rc = adh_init(0x2000u, 0x30u, ADH_ID);
     const uint64_t elapsed = sr_host_monotonic_ms() - t0;
+    const bool create_queued = d9_init_rc == 0u &&
+                               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+                               adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u;
+    /* Release on a failed setup too, without overwriting the watchdog state. */
+    int held = D9_SLOW_HELD;
+    const bool released = atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_RELEASED);
     snprintf(msg, sizeof(msg),
-             "d9: sceNetAdhocctlInit does not block on slow DNS (rc=0x%08x elapsed=%llu ms calls=%d)",
-             d9_init_rc, (unsigned long long)elapsed, resolve_calls);
-    expect(d9_init_rc == 0u && elapsed < 50u, msg);
-    expect(adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
-           adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u,
-           "d9: Create queues while DNS resolves");
+             "d9: Init and Create return before the resolver watchdog (rc=0x%08x elapsed=%llu ms calls=%u gate=%d)",
+             d9_init_rc, (unsigned long long)elapsed, atomic_load(&s_d9_slow_calls), held);
+    expect(d9_init_rc == 0u && released, msg);
+    expect(create_queued, "d9: Create queues while DNS resolves");
     for (int w = 0; w < 120 && (adh_state() != 1u || s_adh_events == 0u); w++) {
 #ifdef _WIN32
         Sleep(5u);
@@ -14031,8 +14053,11 @@ static void d89_main_fn(CpuState *cpu) {
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
     }
-    expect(adh_state() == 1u && s_adh_events == 1u && resolve_calls == 1,
-           "d9: async DNS resolved once and Create connected cleanly");
+    expect(atomic_load(&s_d9_slow_gate) == D9_SLOW_ACKNOWLEDGED,
+           "d9: successful DNS fixture acknowledges release after Create");
+    expect(adh_state() == 1u && s_adh_events == 1u && ADH_AT(0).event == 1 && ADH_AT(0).error == 0u &&
+               atomic_load(&s_d9_slow_calls) == 1u,
+           "d9: async DNS resolved once and Create delivered the CONNECT callback");
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d9: Term");
 
     /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error(). */
