@@ -358,6 +358,12 @@ void fpl_remove_waiter(FplPool *p, uint32_t thread_uid) {
     }
 }
 
+static int fpl_waiter_queued(const FplPool *p, uint32_t thread_uid) {
+    for (int i = 0; i < p->nwaiters; i++)
+        if (p->waiters[i].thread_uid == thread_uid) return 1;
+    return 0;
+}
+
 /* Appends the thread at the tail; a thread already queued keeps its one entry. 0 when full. */
 static int fpl_enqueue_waiter(FplPool *p, uint32_t thread_uid) {
     for (int i = 0; i < p->nwaiters; i++)
@@ -518,6 +524,20 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
             p = fpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
             sched_vtime_refresh();
+            /* A FreeFpl made while the callbacks ran picked this thread and dequeued it, but its
+             * wake found the thread running, not parked: take the freed block now, or go back to
+             * the head of the queue, rather than park with no entry for any FreeFpl to wake. */
+            if (!fpl_waiter_queued(p, cur_thid)) {
+                if (fpl_try_allocate_internal(p, &addr) == 0) {
+                    if (out) MEM_W32(out, addr);
+                    if (has_timeout) {
+                        uint64_t now = sched_vtime_us();
+                        MEM_W32(toptr, now < end_time ? (uint32_t)(end_time - now) : 0u);
+                    }
+                    return 0;
+                }
+                fpl_requeue_waiter_head(p, cur_thid);
+            }
             continue;
         }
 
@@ -776,6 +796,12 @@ void vpl_remove_waiter(VplPool *p, uint32_t thread_uid) {
     }
 }
 
+static int vpl_waiter_queued(const VplPool *p, uint32_t thread_uid) {
+    for (int i = 0; i < p->nwaiters; i++)
+        if (p->waiters[i].thread_uid == thread_uid) return 1;
+    return 0;
+}
+
 /* Same contracts as fpl_enqueue_waiter() and fpl_wait_ended(). */
 static int vpl_enqueue_waiter(VplPool *p, uint32_t thread_uid, uint32_t size) {
     for (int i = 0; i < p->nwaiters; i++)
@@ -907,6 +933,19 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
             p = vpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
             sched_vtime_refresh();
+            /* As in allocate_fpl_common: a FreeVpl made during the callbacks dequeued this
+             * thread with a wake it could not receive. */
+            if (!vpl_waiter_queued(p, cur_thid)) {
+                if (vpl_try_allocate_internal(p, request, &addr) == 0) {
+                    if (out) MEM_W32(out, addr);
+                    if (has_timeout) {
+                        uint64_t now = sched_vtime_us();
+                        MEM_W32(toptr, now < end_time ? (uint32_t)(end_time - now) : 0u);
+                    }
+                    return 0;
+                }
+                vpl_requeue_waiter_head(p, cur_thid, request);
+            }
             continue;
         }
 

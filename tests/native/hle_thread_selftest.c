@@ -54310,6 +54310,85 @@ static void test_kernel_nested_mutex(void) {
     test_kernel_nested_mutex_case(0x0200u, 4); /* child release, parent reblocks */
 }
 
+/* A pool CB waiter that runs a callback while it waits, whose body frees the block the waiter
+ * is queued for. FreeFpl / FreeVpl dequeue the first waiter and wake it; the waiter is running
+ * its callback, not parked, so the wake finds no one. After the callback the waiter must take
+ * the freed block (it was the one chosen for it) rather than park again with no queue entry and
+ * a free block nobody will ever hand it. Code-derived: the pool's own FreeFpl/FreeVpl hand-off
+ * contract and fpl_requeue_waiter_head's comment; PSP callback-wait policy is not measured here. */
+static uint32_t s_pool_cb_free_nid, s_pool_cb_free_pool, s_pool_cb_free_addr;
+static uint32_t s_pool_cb_free_result;
+static int s_pool_cb_free_ran;
+static void pool_cb_free_callback(void) {
+    CpuState cpu = {0};
+    cpu.r[4] = s_pool_cb_free_pool;
+    cpu.r[5] = s_pool_cb_free_addr;
+    s_pool_cb_free_result = sr_syscall(&cpu, s_pool_cb_free_nid);
+    s_pool_cb_free_ran = 1;
+}
+
+static void test_pool_cb_waiter_takes_block_freed_by_its_callback(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int vpl = 0; vpl < 2; ++vpl) {
+        const char *what = vpl ? "VPL" : "FPL";
+        char msg[192];
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *owner = fixture_thread(0x6a10u + (uint32_t)vpl * 4u, TH_RUNNING, 32);
+        TCB *thread = fixture_thread(0x6a11u + (uint32_t)vpl * 4u, TH_READY, 40);
+        owner->started = thread->started = 1;
+        s_cur = (int)(owner - s_tcb);
+        const uint32_t held_out = 0x00271040u, wait_out = 0x00271044u;
+        uint32_t pool = vpl ? selftest_vpl_create(0x100u) : selftest_fpl_create(64u, 1u);
+        expect(pool != 0u && pool < 0x80000000u, "pool CB free: the pool is created");
+        uint32_t rc = vpl ? selftest_vpl_try_allocate(pool, 0xc0u, held_out)
+                          : selftest_fpl_try_allocate(pool, held_out);
+        expect(rc == 0u, "pool CB free: the owner takes the pool's only block");
+        const uint32_t held = MEM_R32(held_out);
+
+        SelftestPoolWaiterCtx w; memset(&w, 0, sizeof w);
+        w.uid = thread->uid; w.tcb = thread; w.pool_uid = pool; w.outptr = wait_out;
+        w.req_size = 0xc0u; w.is_cb = 1;
+        MEM_W32(wait_out, 0xfeedfaceu);
+        thread->coro = sr_coro_create(vpl ? selftest_vpl_waiter_fiber_body
+                                          : selftest_fpl_waiter_fiber_body, &w, (size_t)4 << 20);
+        expect(thread->coro != NULL, "pool CB free: the waiter coroutine is created");
+        if (!thread->coro) return;
+        kernel_nested_resume(thread);
+        snprintf(msg, sizeof msg, "pool CB free: the %s CB waiter blocks on the empty pool", what);
+        expect(!w.returned && thread->state == TH_WAIT_OBJ && thread->wait_obj == pool, msg);
+
+        s_oracle_mode = 1;
+        s_kernel_nested_callback = pool_cb_free_callback;
+        s_pool_cb_free_nid = vpl ? NID_VPL_FREE : NID_FPL_FREE;
+        s_pool_cb_free_pool = pool;
+        s_pool_cb_free_addr = held;
+        s_pool_cb_free_ran = 0;
+        s_pool_cb_free_result = 0xffffffffu;
+        s_cur = (int)(thread - s_tcb);
+        uint32_t callback = issue339_create_pending_callback();
+        kernel_nested_resume(thread);
+        expect(s_pool_cb_free_ran && s_pool_cb_free_result == 0u,
+               "pool CB free: the waiter's callback frees the held block");
+        snprintf(msg, sizeof msg,
+                 "pool CB free: the %s CB waiter returns 0 with the block its callback freed", what);
+        expect(w.returned && w.ret == 0u && MEM_R32(wait_out) == held, msg);
+        if (!w.returned)
+            fprintf(stderr, "pool CB free: %s waiter state=%d wait_obj=0x%x out=0x%08x\n", what,
+                    (int)thread->state, thread->wait_obj, MEM_R32(wait_out));
+
+        CpuState cpu = {0}; cpu.r[4] = callback;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_CALLBACK);
+        s_kernel_nested_callback = NULL;
+        s_oracle_mode = 0;
+        if (thread->coro) { sr_coro_destroy(thread->coro); thread->coro = NULL; }
+        s_cur = (int)(owner - s_tcb);
+        (void)(vpl ? selftest_vpl_delete(pool) : selftest_fpl_delete(pool));
+        s_cur = -1;
+    }
+}
+
 static void test_psp_mutex(void) {
     reset_fixture();
     sr_hle_init();
@@ -69983,6 +70062,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_highmem_pool();
     test_psp_measured_safe_scalar_tls_20261117();
     test_vpl_blocking_waits();
+    test_pool_cb_waiter_takes_block_freed_by_its_callback();
     test_fpl_create_size_product_does_not_wrap();
     test_pool_released_waiter_leaves_queue();
     test_pool_uids_come_from_the_shared_pool();
