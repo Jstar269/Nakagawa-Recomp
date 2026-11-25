@@ -3261,11 +3261,24 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
     handler = _VFPU_COP2_MOVE_FORMS.get(sub)
     if handler is None:
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
-    if sub == 7 and imm == 131:
-        # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
-        # (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
-        return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
+    if sub == 7 and imm >= 128 and imm - 128 in _VFPU_MTVC_KEPT:
+        keep, fixed = _VFPU_MTVC_KEPT[imm - 128]
+        value = f"{R(rt(w))} & 0x{keep:x}u"
+        return (f"{dst} = ({value}) | 0x{fixed:08x}u;" if fixed else f"{dst} = {value};"), None, 0
     return handler(w, src, dst)
+
+
+# What mtvc stores in a VFPU control register: (bits kept from the written word, bits that
+# always read set). VFPU_CC keeps bits 0..5 (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue
+# #326, probe case vfpu-cc-cmov: mtvc then mfvc read back written & 0x3f in every cell). The
+# S/T/D prefixes keep bits 0..19, 0..19 and 0..11 (pspautotests e37443a6
+# tests/cpu/vfpu/prefix_ctrl.expected, recorded on a PSP: 0xffffffff reads back 000fffff,
+# 000fffff, 00000fff; 0xfff00000, 0xfff00000, 0xffffff00 read 0, 0, 00000f00). RCX0-7 keep
+# bits 0..19 and read 0x3f8 above them (pspautotests e37443a6 tests/cpu/vfpu/vrnd.expected,
+# recorded on a PSP: 00000001 reads 3f800001, ffffffff reads 3f8fffff, 12345678 reads
+# 3f845678). Controls 4-7 have no recorded write and store the word as written.
+_VFPU_MTVC_KEPT = {0: (0xFFFFF, 0), 1: (0xFFFFF, 0), 2: (0xFFF, 0), 3: (0x3F, 0),
+                   **{ctrl: (0xFFFFF, 0x3F800000) for ctrl in range(8, 16)}}
 
 
 def _vfpu_cop2_mfv(w, src, dst):
