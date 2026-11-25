@@ -59407,6 +59407,7 @@ static void selfstop_zero_result_stop_fn(CpuState *s) {
 }
 
 static void test_self_stop_unload_measured_forms(void) {
+    extern void sr_hle_test_partition_reset(void);
     const char *path = HLE_BUILD_ROOT "/hle_lifecycle_self_stop.prx";
     const uint32_t entry = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
     const uint32_t address_nid = 0xd8b73127u, export_pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_PATCH_OFF_A_1;
@@ -59431,6 +59432,8 @@ static void test_self_stop_unload_measured_forms(void) {
         sr_hle_init();
         sr_test_guest_fn_reset();
         sr_hle_test_module_reset();
+        /* A refusal deliberately leaves its fixed-address partition block allocated. */
+        sr_hle_test_partition_reset();
 
         uint32_t uid = sr_hle_test_load_prx_image(path, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
                                                   LIFECYCLE_PATCH_OFF_A_1);
@@ -59491,6 +59494,7 @@ static void test_self_stop_unload_measured_forms(void) {
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
 }
 
 static void test_host_skipped_start_stop_unload_reload(void) {
