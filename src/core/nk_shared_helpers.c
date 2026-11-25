@@ -322,44 +322,44 @@ static void boot_event_write_line(FILE *stream, const char *format, uint64_t tim
     }
 }
 
+static FILE *open_boot_event_file(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    /* The player hands this per-user cache path over in a Unicode environment; the narrow
+       getenv/fopen pair would re-read it in the ANSI code page and lose any character outside
+       it, so the variable is read and opened wide. */
+    const wchar_t *path = _wgetenv(L"SR_BOOT_EVENT_FILE");
+    return path && *path ? _wfopen(path, L"ab") : NULL;
+#else
+    const char *path = getenv("SR_BOOT_EVENT_FILE");
+    return path && *path ? fopen(path, "ab") : NULL;
+#endif
+}
+
 void nk_shared_boot_event_vwrite(FILE *stderr_stream, uint64_t timestamp_ns,
                                  const char *format,
                                  va_list args) {
     if (!stderr_stream) stderr_stream = stderr;
     boot_event_write_line(stderr_stream, format, timestamp_ns, args);
     fflush(stderr_stream);
-
-#if defined(_WIN32) || defined(_WIN64)
-    /* The player hands this per-user cache path over in a Unicode environment; the narrow
-       getenv/fopen pair would re-read it in the ANSI code page and lose any character outside
-       it, so the variable is read and opened wide. */
-    const wchar_t *path = _wgetenv(L"SR_BOOT_EVENT_FILE");
-    if (!path || !*path) return;
-    FILE *file = _wfopen(path, L"ab");
-#else
-    const char *path = getenv("SR_BOOT_EVENT_FILE");
-    if (!path || !*path) return;
-    FILE *file = fopen(path, "ab");
-#endif
+    FILE *file = open_boot_event_file();
     if (!file) return;
     boot_event_write_line(file, format, timestamp_ns, args);
     fclose(file);
 }
 
-static void write_timing_boot_event(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    nk_shared_boot_event_vwrite(stderr, 0, format, args);
-    va_end(args);
-}
-
 void nk_shared_timing_run_observed(bool timing, const char *disc_id, const char *disc_version,
                                    const char *executable_sha256, const char *declaration_id,
                                    const char *declaration_sha256, const char *symbol_map_sha256) {
-    write_timing_boot_event("BOOT_EVENT phase=timing_package mode=%s disc_id=%s disc_version=%s "
-                            "executable_sha256=%s declaration_id=%s declaration_sha256=%s symbol_map_sha256=%s",
-                            timing ? "timing" : "stock", disc_id, disc_version, executable_sha256,
-                            declaration_id, declaration_sha256, symbol_map_sha256);
+    /* The player already routes stderr to the boot file. Write this record once
+       so it remains distinguishable from multiple launches in the same file. */
+    FILE *file = open_boot_event_file();
+    FILE *stream = file ? file : stderr;
+    fprintf(stream, "BOOT_EVENT phase=timing_package mode=%s disc_id=%s disc_version=%s "
+                    "executable_sha256=%s declaration_id=%s declaration_sha256=%s symbol_map_sha256=%s\n",
+            timing ? "timing" : "stock", disc_id, disc_version, executable_sha256,
+            declaration_id, declaration_sha256, symbol_map_sha256);
+    if (file) fclose(file);
+    else fflush(stream);
 }
 
 static const char *const k_render_fallback_names[NK_RENDER_FALLBACK_COUNT] = {

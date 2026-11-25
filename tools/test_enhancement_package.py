@@ -972,14 +972,44 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 self.assertEqual(compiler.returncode, 0, compiler.stderr)
                 return exe
 
-            def observe(exe, name, setting):
+            def append_capture(path):
+                if os.name != "nt":
+                    return path.open("ab")
+                import ctypes
+                import msvcrt
+                from ctypes import wintypes
+
+                # Match the player's native append-only handle. Python's CRT append
+                # mode alone does not transfer its seek-to-end policy to the child.
+                create = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+                create.restype = wintypes.HANDLE
+                create.argtypes = (
+                    wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+                )
+                append_access = 0x4 | 0x00100000  # FILE_APPEND_DATA | SYNCHRONIZE
+                share_all = 7  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                handle = create(str(path), append_access, share_all, None, 4, 0x80, None)
+                if handle == ctypes.c_void_p(-1).value:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                return os.fdopen(msvcrt.open_osfhandle(handle, os.O_BINARY), "wb", buffering=0)
+
+            def observe(exe, name, setting, *, shared_sink=False, boot_file=True):
                 event_file = root / f"{name}.events"
-                env = {**os.environ, "SR_EXPERIMENTAL_60HZ": setting, "SR_BOOT_EVENT_FILE": str(event_file)}
-                run = _run([str(exe)], env=env, check=True, capture_output=True, text=True)
-                if not event_file.exists():
-                    # The legacy generated registration writes its ordinary stderr
-                    # progress, but has no timing observation to send to the boot file.
-                    event_file.write_text(run.stderr, encoding="utf-8")
+                env = {**os.environ, "SR_EXPERIMENTAL_60HZ": setting}
+                env.pop("SR_BOOT_EVENT_FILE", None)
+                if boot_file:
+                    env["SR_BOOT_EVENT_FILE"] = str(event_file)
+                if shared_sink:
+                    # Normal launch gives both child streams and SR_BOOT_EVENT_FILE the same
+                    # append destination. Read the exact resulting run log.
+                    with append_capture(event_file) as output:
+                        _run([str(exe)], env=env, check=True, stdout=output, stderr=output)
+                else:
+                    run = _run([str(exe)], env=env, check=True, capture_output=True, text=True)
+                    if not event_file.exists():
+                        # Older generated startup sent progress to stderr, but no timing event.
+                        event_file.write_text(run.stderr, encoding="utf-8")
                 result = _run([
                     sys.executable, "-B", str(ROOT / "tools/enhancement_package.py"),
                     "--inspect-timing-run", str(event_file),
@@ -1002,6 +1032,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             inactive = observe(timed, "timed-off", "0")
             active = observe(timed, "timed-on", "1")
             self.assertEqual(inactive, dict(active, mode="stock"))
+            self.assertEqual(observe(stock, "stock-shared", "1", shared_sink=True), stock_identity)
+            self.assertEqual(observe(timed, "timed-shared", "1", shared_sink=True), active)
+            self.assertEqual(observe(timed, "timed-stderr", "1", boot_file=False), active)
             self.assertEqual(active, {
                 **stock_identity, "mode": "timing", "declaration_id": package["id"],
                 "declaration_sha256": enhancement_package.compute_package_digest(validate_package(package)),
@@ -1023,6 +1056,8 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 ("two launches", event_text * 2),
                 ("truncated record", event_text + "BOOT_EVENT phase=timing_package"),
                 ("program replaced", event_text + "BOOT_EVENT phase=loadexec_restart\n"),
+                ("retained tail", "[nakagawa] the first 32 bytes of this run were cut; "
+                                  "the last 16777216 bytes are kept\n" + event_text),
             ):
                 with self.subTest(name=name):
                     ambiguous = root / "ambiguous.events"

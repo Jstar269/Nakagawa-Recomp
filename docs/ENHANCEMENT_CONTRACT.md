@@ -386,13 +386,13 @@ Every frame-rate rescale package declares `rng_policy`. Under `rescale_probabili
 4. Run the built executable with `SR_EXPERIMENTAL_60HZ=1` for 60 Hz logic, or without it for the authentic 30 Hz game. The player selects the package from the title's setting (section 9.1, item 2). A title has an enhancement package when `<user data>/enhancements/<disc_id>-60hz.json` (lowercase disc ID), or when that file does not exist the shipped `assets/enhancements/<disc_id>-60hz.json` of the source tree beside the player (the tree it finds `tools/nk_cli.py` in), parses, its `id` matches `^[a-z0-9][a-z0-9._-]{0,63}$` and its `target_title_id` is the title's own; the player reads only those fields and `experimental` (section 9.10), and never forms a path from an id that fails the pattern. With the setting on, the player validates and launches `packages/<disc_id>-enhanced-<pkg_id>` with the same manifest, ABI and identity checks as the authentic package, and the package must record that enhancement package id in its codegen options; the authentic folder must record none. Each package has its own status: when the enhanced package is missing or stale, the title's primary action builds it (`build-package --experimental-60hz`) and nothing launches the authentic package in its place. When the setting is on but the enhancement package is gone, the title neither builds nor plays until it is turned off or the package is restored.
 
 To inspect the timing inputs observed by one native run, use
-`python tools/enhancement_package.py --inspect-timing-run <run-log>` with that run's local boot log.
+`python tools/enhancement_package.py --inspect-timing-run <run-log>` with the saved log for a fresh run.
 A new package build with a verified disc revision records its generated startup mode (`stock` or
 `timing`), disc revision and executable digest. A timing-capable build also records its compiled
 declaration ID and digest and the adjacent symbol map digest when it used that map, even if its
 timing switch was off. The observation comes from the executing runtime after registration. A
-missing, ambiguous or superseded observation, including an older package with no startup record,
-reports `unavailable`. The output identifies local timing inputs. Measurements of gameplay speed
+missing, ambiguous or superseded observation reports `unavailable`. This includes older packages
+without the startup record, logs that combine several runs, and retained tail-only logs. The output identifies local timing inputs. Measurements of gameplay speed
 and tests of peer interoperability are separate. [Timing identity tracking](https://github.com/Jstar269/Nakagawa-Recomp/issues/3034)
 
 ### 9.5. Update Boundary: Gating Counts Logic Updates

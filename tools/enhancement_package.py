@@ -5101,6 +5101,10 @@ def inspect_timing_run(path: Path) -> dict[str, Any]:
         for raw in log:
             if raw.startswith("BOOT_EVENT phase=loadexec_restart"):
                 return unavailable
+            # The player's kept-log marker says earlier program replacements
+            # or timing records may have been removed from this file.
+            if raw.startswith("[nakagawa] the first ") and " bytes of this run were cut;" in raw:
+                return unavailable
             if not raw.startswith(_TIMING_RUN_PREFIX):
                 continue
             match = _TIMING_RUN_PATTERN.fullmatch(raw.rstrip("\r\n"))
