@@ -52,10 +52,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 396 | 408 |
+| `partial` | 399 | 411 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 234 | 239 |
+| `unreviewed` | 231 | 236 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -83,13 +83,13 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | `scePsmf` | 0 | 4 | 0 | 0 | 14 | 18 | 18 |
 | `sceReg` | 0 | 15 | 0 | 0 | 0 | 15 | 15 |
 | `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
-| `sceSas` | 0 | 0 | 0 | 1 | 27 | 28 | 32 |
+| `sceSas` | 0 | 3 | 0 | 1 | 24 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
 | `sceUtility` | 0 | 11 | 0 | 0 | 26 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **396** | **1** | **3** | **234** | **648** | **678** |
+| **Total** | **14** | **399** | **1** | **3** | **231** | **648** | **678** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1564,6 +1564,21 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)
   - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
+- **`h_SasSetADSR`** (`sceSas`): `__sceSasSetADSR` (0x019b25eb)
+  - Limitation: this status covers the measured cells only: in PSP-SAS-002 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 06a6c942c) __sceSasSetADSR with mask 0xf on voice 0 before KeyOn returns 0 for the table baseline (attack 0x00400000, decay 0x00100000, sustain 0x00004000, release 0x00040000) in all 32 rows of sas-adsr-m00-calls..sas-adsr-m31-calls, and for the rates of the expatk and expatk-g64 runs (0x00020000, 0x00100000, 0, 0x00040000) and of the bound and bound-half runs (0x00400000, 0x00100000, 0, 0x00100000); the selftest replays those calls and asserts those words, and in the bound runs the rates act as linear steps: the attack reaches the top within one grain and the decay holds 0x30000000 from grain 2 to grain 15; the refusals (a mask above 0xf, a negative rate) and other masks are unmeasured, and the absolute heights after KeyOn are not claimed, since the one the record publishes (expatk, 0x00a76d9d) moves with the key-on delay this runtime does not model (#1296); they are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
+- **`h_SasSetADSRmode`** (`sceSas`): `__sceSasSetADSRmode` (0x9ec3676a)
+  - Limitation: this status covers the measured cells only: PSP-SAS-002 is one acceptance-eligible launch on a PSP-3000 (system software 6.61, game context) of the probe built from 06a6c942c, 696 records all PASS, and it calls __sceSasSetADSRmode on voice 0 of one core before KeyOn, in its 32-row table after the baseline curves 0/1/1/1 (sas-adsr-m00-calls..sas-adsr-m31-calls and their heights) and in the expatk, expatk-g64, bound and bound-half runs; the selftest replays those calls and asserts the measured words: 0 for attack curves 0, 2 and 4, decay and release curves 1, 3 and 5 and sustain curves 0 to 5 under mask 0xf and under each single-phase mask, 0x80420013 for attack 1, 3 or 5, decay or release 0, 2 or 4, sustain 6 and all four at 5, the baseline's heights after every refusal, mask 1 returning 0 without checking the curves it leaves out, the top bit ignored (0, and the heights of the same curve without it), and a release-only mask leaving the heights before KeyOff alone; the absolute height a curve gives is not claimed: the exponent attack reads 0x00a76d9d at grain 0 of the expatk run on the PSP and 0x00bf40cd here, which is this runtime's curve after 256 steps instead of 224, because the runtime has no key-on delay (#1296); masks above 0xf, a bad core or voice index, other voices and calls while a voice sounds are unmeasured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
+- **`h_SasSetSL`** (`sceSas`): `__sceSasSetSL` (0x5f9529f6)
+  - Limitation: this status covers the measured cells only: in PSP-SAS-002 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 06a6c942c) __sceSasSetSL on voice 0 before KeyOn returns 0 for the level 0x20000000 (all 32 rows of sas-adsr-m00-calls..sas-adsr-m31-calls and the expatk runs), 0x30000000 (bound) and 0x30080000 (bound-half); the selftest replays those calls and asserts those words, and that in both bound runs a linear decay of 0x00100000 per step from the top stops at 0x30000000, so the decay ends at the first step at or below the level and keeps that height (sas_envelope.h ended it only below the level and held 0x2ff00000 until #2807); other levels, the refusal of a negative level or one above 0x40000000, and the level's effect under the other decay curves are unmeasured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
 - **`h_UmdActivate`** (`sceUmd`): `sceUmdActivate` (0xc6183d47)
   - Limitation: the callback argument follows PPSSPP (0x22 when no compiled SDK version is set, 0x32 otherwise) and is host-selftested, not hardware measured; the activation result and argument checks are not hardware measured either
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_unregister_callback

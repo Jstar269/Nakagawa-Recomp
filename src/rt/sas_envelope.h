@@ -45,6 +45,11 @@
  * PSP measurement settles it. The height read back is also clamped at 0 from
  * below (PPSSPP clamps only the top), so a decay step that overshoots zero
  * never reads as a negative height.
+ * Modified for this project (2026-11-25, #2807): the decay ends at the first
+ * step that brings the height to the sustain level or below it, where PPSSPP
+ * ends it only below the level. That is what PSP-SAS-002 measures: from the
+ * top, in linear steps of 0x00100000, a sustain level of 0x30000000 and one of
+ * 0x30080000 both stop the decay at 0x30000000 (docs/HARDWARE_ORACLE.md).
  * The rate formulas and curves are PPSSPP's model, not PSP measurements.
  */
 #ifndef NK_RT_SAS_ENVELOPE_H
@@ -222,7 +227,8 @@ static inline void sas_envelope_step(SasEnvelope *e) {
         break;
     case SAS_ENV_DECAY:
         sas_envelope_walk(e, e->decay_type, e->decay_rate);
-        if (e->height < e->sustain_level) sas_envelope_set_state(e, SAS_ENV_SUSTAIN);
+        /* At or below the level, and the height is kept, not raised to it (PSP-SAS-002). */
+        if (e->height <= e->sustain_level) sas_envelope_set_state(e, SAS_ENV_SUSTAIN);
         break;
     case SAS_ENV_SUSTAIN:
         sas_envelope_walk(e, e->sustain_type, e->sustain_rate);
