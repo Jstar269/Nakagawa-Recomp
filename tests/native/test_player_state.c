@@ -14674,6 +14674,41 @@ static void test_live_ace_declarations(void) {
         root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
     assert(strstr(reason, "selected Ace symbol map changed"));
 
+    /* An explicit build-time map has its own digest. An unused adjacent map
+       must not make that package stale, even after the launch was prepared. */
+    NkEnhancementDeclarationIdentity explicit_declaration;
+    assert(nk_title_manifest_enhancement_declaration_identity(
+        user_declaration, timing, title, false, &explicit_declaration));
+    char explicit_options[640], map_option[128] = "";
+    for (int has_digest = 0; has_digest <= 1; has_digest++) {
+        if (has_digest)
+            snprintf(map_option, sizeof(map_option),
+                     "\"enhancement_explicit_symbol_map_sha256\":\"%s\",", FIXTURE_SHA256);
+        int length = snprintf(explicit_options, sizeof(explicit_options),
+            "{\"enhancement_declaration_sha256_v1\":\"%s\","
+            "\"enhancement_explicit_symbol_map\":true,%s"
+            "\"enhancement_package_epoch\":\"aot-enhancement-package-v1\","
+            "\"enhancement_package_id\":\"%s\",\"enhancement_package_sha256\":\"%064d\"}",
+            explicit_declaration.fingerprint, map_option, timing, 0);
+        assert(length > 0 && (size_t)length < sizeof(explicit_options));
+        g_fixture_codegen_options_written = explicit_options;
+        g_fixture_codegen_options_canonical = explicit_options;
+        write_runtime_package_fixture_variant(
+            root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL,
+            source_media, 0, false, timing, timing);
+        g_fixture_codegen_options_written = NULL;
+        g_fixture_codegen_options_canonical = NULL;
+        status = nk_launch_validate_runtime_package_for_launch(
+            root, &game, &sources, &info, reason, sizeof(reason));
+        assert(status == (has_digest ? NK_RUNTIME_PACKAGE_OK : NK_RUNTIME_PACKAGE_STALE));
+    }
+    write_text_file(sidecar, map_a);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_b);
+    assert(nk_launch_start(&prepared) == NK_ERROR_PROCESS_SPAWN);
+    assert(!prepared.is_running);
+    assert(remove(sidecar) == 0);
+
     snprintf(game.enhancement_package_id, sizeof(game.enhancement_package_id), "%s", combined);
     snprintf(sidecar, sizeof(sidecar), "%s/enhancements/test00001-cull.symbols.json", root);
     write_text_file(sidecar, map_a);

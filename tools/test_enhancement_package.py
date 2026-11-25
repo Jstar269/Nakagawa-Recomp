@@ -3107,16 +3107,77 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         enabled = package_cache.enhancement_package_options(environment)
         self.assertIn("enhancement_symbol_map_sha256", enabled)
         self.assertIn("code_hook_symbol_map_sha256", enabled)
+        guest_map = self.root / "guest-symbols.json"
+        guest_map.write_text('{"synth_site": "0x00001204"}', encoding="utf-8")
+        map_sha = package_cache.sha256_file(guest_map)
+        make_path = guest_map.as_posix().replace(" ", "\\ ")
         for explicit in (
-            {"SYMBOL_MAP": "guest-symbols.json"},
-            {"MAKEFLAGS": "SYMBOL_MAP=guest-symbols.json"},
-            {"CODEGEN_USER_ARGS": "--symbol-map guest-symbols.json"},
+            {"SYMBOL_MAP": guest_map.as_posix()},
+            {"SYMBOL_MAP": "ignored.json", "MAKEFLAGS": f"SYMBOL_MAP={make_path}"},
+            {"MAKEFLAGS": "SYMBOL_MAP=ignored.json",
+             "CODEGEN_USER_ARGS": f'--symbol-map=ignored.json --symbol-map "{guest_map.as_posix()}"'},
+            {"CODEGEN_USER_ARGS": "--symbol-map=ignored.json", "MAKEFLAGS":
+             f"CODEGEN_USER_ARGS=--symbol-map\\ {make_path}"},
         ):
             with self.subTest(explicit=explicit):
                 used = package_cache.enhancement_package_options(environment | explicit)
                 self.assertIs(used["enhancement_explicit_symbol_map"], True)
+                self.assertEqual(used["enhancement_explicit_symbol_map_sha256"], map_sha)
                 self.assertNotIn("enhancement_symbol_map_sha256", used)
                 self.assertNotIn("code_hook_symbol_map_sha256", used)
+
+    def test_explicit_map_bytes_change_cli_and_planner_aot_keys(self) -> None:
+        from types import SimpleNamespace
+
+        import codegen
+        import nk_cli
+        import title_codegen_plan
+        from nk_core import package_cache
+
+        declaration = self._write_pkg("timing.json")
+        package = enhancement_package.load_and_validate_package(declaration)
+        symbol = package["sites"][0]["function"]
+        guest_map = self.root / "explicit.map"
+        environment = {"SYMBOL_MAP": str(guest_map), "ENHANCEMENT_PACKAGE": str(declaration)}
+        base = 0x08810000
+        manifest = {"executable": {"base": base, "entry": base}}
+        plan = {
+            "environment": {"GAME_BASE": f"0x{base:08x}", "GAME_ENTRY": f"0x{base:08x}",
+                            "TITLE_EXTRA_SPANS": ""},
+            "codegen_profile": "none",
+        }
+
+        def aot_digest(options: dict[str, Any]) -> str:
+            result = package_cache.build_cache_key(
+                input_hashes={"manifest": {"sha256": "a" * 64},
+                              "executable": {"sha256": "b" * 64}, "modules": []},
+                codegen_options=options, analyzer_sha256="synthetic-analyzer",
+                codegen_sha256="synthetic-codegen", compiler="synthetic-compiler",
+                target="synthetic-target", runtime_source_digest="synthetic-runtime",
+            )["aot"]["digest"]
+            assert isinstance(result, str)
+            return result
+
+        def keys(address: int) -> tuple[str, str, str]:
+            guest_map.write_text(f"{symbol} = 0x{address:08x};\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, environment, clear=True):
+                cli = nk_cli._package_codegen_options(manifest, environment)
+                planner = title_codegen_plan._cache_codegen_options(
+                    plan, selected_optional=set(), funcs_per_chunk=2000,
+                    enhancement_package_path=declaration,
+                )
+            _, resolved = codegen._package_symbol_map(
+                SimpleNamespace(sec=lambda _: None), package, declaration,
+                codegen.load_symbol_map(guest_map), guest_map, None, None, None,
+            )
+            self.assertEqual(resolved[symbol], address)
+            stock = nk_cli._package_codegen_options(manifest, {"SYMBOL_MAP": str(guest_map)})
+            return aot_digest(cli), aot_digest(planner), aot_digest(stock)
+
+        before, after = keys(base), keys(base + 0x40)
+        self.assertNotEqual(before[0], after[0])
+        self.assertNotEqual(before[1], after[1])
+        self.assertEqual(before[2], after[2])
 
     def test_an_inherited_code_hook_package_is_ambient(self) -> None:
         from nk_core import package_cache

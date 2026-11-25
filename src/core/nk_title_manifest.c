@@ -5799,9 +5799,10 @@ static bool package_validate_variant(const JsonNode *package,
     const JsonNode *symbol_map = obj_get(options, "enhancement_symbol_map_sha256");
     const JsonNode *hook_symbol_map = obj_get(options, "code_hook_symbol_map_sha256");
     const JsonNode *explicit_symbol_map = obj_get(options, "enhancement_explicit_symbol_map");
+    const JsonNode *explicit_map_digest = obj_get(options, "enhancement_explicit_symbol_map_sha256");
     if (!enhancement_package_id || !enhancement_package_id[0]) {
         if (recorded || recorded_hook || declaration || hook_declaration ||
-            symbol_map || hook_symbol_map || explicit_symbol_map ||
+            symbol_map || hook_symbol_map || explicit_symbol_map || explicit_map_digest ||
             obj_get(options, "enhancement_package_epoch")) {
             snprintf(error, error_size,
                      "The package in the authentic package folder is an enhanced build.");
@@ -5829,7 +5830,10 @@ static bool package_validate_variant(const JsonNode *package,
                  enhancement_package_id);
         return false;
     }
+    const char *map_digest = NULL;
     if ((!plus && (hook_declaration || hook_symbol_map)) ||
+        ((explicit_symbol_map != NULL) != (explicit_map_digest != NULL)) ||
+        (explicit_map_digest && !package_sha256(explicit_map_digest, &map_digest)) ||
         (explicit_symbol_map && (explicit_symbol_map->type != JSON_BOOL ||
                                  !explicit_symbol_map->u.bool_val || symbol_map || hook_symbol_map)) ||
         !package_optional_digest(declaration, info->enhancement_declaration.fingerprint) ||

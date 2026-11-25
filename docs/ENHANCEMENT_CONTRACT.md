@@ -324,9 +324,11 @@ leave the fingerprint unchanged, including equivalent spellings of JSON real num
 player's declaration size limit. A declaration with the same ID and different contents requires
 a rebuild. The build also snapshots and records the byte digest of any adjacent symbol map it
 uses. Adding, removing or changing that map requires a rebuild. Published declarations resolve
-against their own site map, and an explicitly configured guest symbol map takes precedence over
-adjacent files for private declarations. An older enhanced package that lacks the fingerprint
-needs one rebuild to record it.
+against their own site map. An explicit guest symbol map takes precedence over adjacent files for
+private declarations. The builder snapshots its bytes and records their digest in the enhanced AOT
+key. The installed package records that build input by digest, and launch continues to check the
+selected declaration files without reading unused adjacent maps. An older enhanced package that
+lacks the declaration identity needs one rebuild to record it.
 Authentic packages have no declaration fingerprint requirement.
 
 ### 9.2. Site Transforms

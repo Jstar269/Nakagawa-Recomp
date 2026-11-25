@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -1401,18 +1402,55 @@ def enhancement_declaration_fingerprint(declaration: Mapping[str, Any]) -> str:
     return digest.hexdigest()
 
 
-def explicit_symbol_map_enabled(environment: Mapping[str, str]) -> bool:
-    return _locate_make_codegen_input(environment, "SYMBOL_MAP", "--symbol-map") is not None
+def _package_make_variable(environment: Mapping[str, str], name: str) -> str:
+    """A command-line Make assignment overrides the inherited environment."""
+    prefix = f"{name}="
+    assignments = re.findall(r"(?:\\\s|[^\s])+", environment.get("MAKEFLAGS", ""))
+    for token in reversed(assignments):
+        if token.startswith(prefix):
+            return re.sub(r"\\(\s)", r"\1", token[len(prefix):])
+    return environment.get(name, "")
 
 
-def enhancement_package_options(environment: Mapping[str, str] | None = None) -> dict[str, Any]:
+def package_codegen_user_args(environment: Mapping[str, str]) -> str:
+    return _package_make_variable(environment, "CODEGEN_USER_ARGS")
+
+
+def explicit_symbol_map_path(environment: Mapping[str, str]) -> Path | None:
+    """Select the same map as the Make recipe and its final codegen arguments."""
+    value = _package_make_variable(environment, "SYMBOL_MAP").strip()
+    arguments = package_codegen_user_args(environment)
+    if "--symbol-map" in arguments:
+        lexer = shlex.shlex(arguments, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        if os.name == "nt":
+            lexer.escape = ""
+        try:
+            tokens = list(lexer)
+            for index, token in enumerate(tokens):
+                if token == "--symbol-map":
+                    value = tokens[index + 1]
+                elif token.startswith("--symbol-map="):
+                    value = token.split("=", 1)[1]
+        except (IndexError, ValueError) as exc:
+            raise PackageCacheError("invalid explicit --symbol-map option") from exc
+    if not value:
+        return None
+    # The planner runs Make in the repository, even when invoked from elsewhere.
+    return Path(__file__).resolve().parents[2] / value
+
+
+def enhancement_package_options(
+    environment: Mapping[str, str] | None = None, *, staged_symbol_map: Path | None = None
+) -> dict[str, Any]:
     """Return AOT cache-key options for an active enhancement package, or empty dict when off.
 
     When no enhancement package is active in the environment, `MAKEFLAGS`, or
     `CODEGEN_USER_ARGS`, returns `{}` so
     authentic mode's `codegen_options_sha256` and `aot.digest` remain byte-identical.
-    When an enhancement package is active, validates and hashes the package (and any
-    effective sibling `.symbols.json` map) and returns the explicit AOT instrumentation epoch
+    When an enhancement package is active, validates and hashes the package and any
+    effective symbol map, and returns the explicit AOT instrumentation epoch
     and digests so enhanced builds get a distinct cache key and fail closed if the
     package file is unreadable or invalid.
     """
@@ -1440,9 +1478,13 @@ def enhancement_package_options(environment: Mapping[str, str] | None = None) ->
     }
     # Published declarations resolve through their own site map. An explicit guest
     # symbol map also takes precedence over adjacent files for private declarations.
-    explicit_map = explicit_symbol_map_enabled(env)
-    if explicit_map:
+    explicit_map = staged_symbol_map or explicit_symbol_map_path(env)
+    if explicit_map is not None:
         result["enhancement_explicit_symbol_map"] = True
+        try:
+            result["enhancement_explicit_symbol_map_sha256"] = sha256_file(explicit_map)
+        except OSError as exc:
+            raise PackageCacheError(f"explicit enhancement symbol map is unreadable: {exc}") from exc
     sidecar = pkg_path.with_suffix(".symbols.json")
     if not explicit_map and not enhancement_package.is_published_package(pkg_data) and sidecar.is_file():
         result["enhancement_symbol_map_sha256"] = sha256_file(sidecar)

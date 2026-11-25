@@ -410,11 +410,13 @@ def _make_build_targets(*, native_only: bool, aot_stage: bool = False) -> tuple[
 
 
 def _make_build_command(
-    make_executable: str, target: str, *, jobs: int, dry_run: bool = False
+    make_executable: str, target: str, *, jobs: int, dry_run: bool = False,
+    make_overrides: tuple[str, ...] = (),
 ) -> list[str]:
     command = [make_executable, "--no-print-directory", f"-j{jobs}"]
     if dry_run:
         command.append("-n")
+    command.extend(make_overrides)
     command.append(target)
     return command
 
@@ -719,15 +721,16 @@ def _run_compile_phase(
     library_cache: Any = None,
     cwd: Path = ROOT,
     plan: PackageBuildPlan | None = None,
+    make_overrides: tuple[str, ...] = (),
 ) -> int:
     """Run ``make compile``, reusing cached objects and counting the ones it compiles."""
     from nk_core import package_cache
 
-    command = _make_build_command(make_executable, "compile", jobs=jobs)
+    command = _make_build_command(make_executable, "compile", jobs=jobs, make_overrides=make_overrides)
     if object_cache is not None:
         # Generated headers first, so every object can be keyed before Make compiles it.
         prepared = subprocess.run(
-            _make_build_command(make_executable, "compile-inputs", jobs=jobs),
+            _make_build_command(make_executable, "compile-inputs", jobs=jobs, make_overrides=make_overrides),
             cwd=cwd,
             env=env,
             check=False,
@@ -735,7 +738,7 @@ def _run_compile_phase(
         if prepared.returncode != 0:
             return prepared.returncode
     planned = subprocess.run(
-        _make_build_command(make_executable, "compile", jobs=jobs, dry_run=True),
+        _make_build_command(make_executable, "compile", jobs=jobs, dry_run=True, make_overrides=make_overrides),
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -1818,6 +1821,7 @@ def _cache_codegen_options(
     funcs_per_chunk: int,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
+    staged_symbol_map: Path | None = None,
 ) -> dict[str, Any]:
     from nk_core import package_cache
 
@@ -1847,7 +1851,10 @@ def _cache_codegen_options(
         env_for_enh["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
     if code_hook_package_path is not None:
         env_for_enh["ENHANCEMENT_CODE_HOOK_PACKAGE"] = str(code_hook_package_path)
-    options.update(package_cache.enhancement_package_options(env_for_enh))
+    enhancement = package_cache.enhancement_package_options(env_for_enh, staged_symbol_map=staged_symbol_map)
+    if "enhancement_explicit_symbol_map" in enhancement:
+        options["codegen_user_args"] = package_cache.package_codegen_user_args(env_for_enh)
+    options.update(enhancement)
     # Named only for the LLVM IR backend (#330), so C-backend keys are unchanged.
     options.update(package_cache.llvm_backend_options(os.environ, repository_root=ROOT))
     return options
@@ -2076,6 +2083,7 @@ def _cache_key_for_build(
     compiler_name: str,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
+    staged_symbol_map: Path | None = None,
 ) -> tuple[PackageCacheKey, dict[str, Any], dict[str, str]]:
     # Imported lazily: planning (--manager-plan) must not depend on the package cache.
     if TYPE_CHECKING:
@@ -2089,6 +2097,7 @@ def _cache_key_for_build(
         funcs_per_chunk=funcs_per_chunk,
         enhancement_package_path=enhancement_package_path,
         code_hook_package_path=code_hook_package_path,
+        staged_symbol_map=staged_symbol_map,
     )
     tool_digests = {
         "planner": package_cache.sha256_file(ROOT / "tools" / "title_codegen_plan.py"),
@@ -2289,6 +2298,9 @@ def build_package(
     else:
         build_workspace = output_dir
 
+    ace_stage_dir: Path | None = None
+    staged_symbol_map: Path | None = None
+    user_codegen_args = os.environ.get("CODEGEN_USER_ARGS", "")
     try:
         stage_dir = build_workspace / "staged-inputs"
         manifest_path = _absolute_path(manifest_path, "manifest path", make_safe=False)
@@ -2303,17 +2315,29 @@ def build_package(
         game_elf = _stage_for_make(game_elf, stage_dir, "executable ELF")
         if psp_header is not None:
             psp_header = _stage_for_make(psp_header, stage_dir, "PSP header")
-        read_symbol_map = not package_cache.explicit_symbol_map_enabled(os.environ)
         if enhancement_package_path is not None:
+            try:
+                explicit_symbol_map = package_cache.explicit_symbol_map_path(os.environ)
+            except package_cache.PackageCacheError as exc:
+                raise PackageRouteError("PACKAGE_INVALID_ENHANCEMENT", str(exc)) from exc
+            # The working package can be reused. Its previous sidecars must not
+            # become inputs to this build, and promotion must not copy these inputs.
+            build_workspace.parent.mkdir(parents=True, exist_ok=True)
+            ace_stage_dir = Path(tempfile.mkdtemp(prefix=".ace-", dir=build_workspace.parent))
+            if explicit_symbol_map is not None:
+                staged_symbol_map = _stage_for_make(
+                    explicit_symbol_map, ace_stage_dir, "explicit symbol map", snapshot=True,
+                )
+                user_codegen_args = package_cache.package_codegen_user_args(os.environ)
             enhancement_package_path = _stage_ace_declaration(
-                enhancement_package_path, stage_dir, "enhancement package",
-                read_symbol_map=read_symbol_map,
+                enhancement_package_path, ace_stage_dir, "enhancement package",
+                read_symbol_map=explicit_symbol_map is None,
             )
-        if code_hook_package_path is not None:
-            code_hook_package_path = _stage_ace_declaration(
-                code_hook_package_path, stage_dir, "code-hook package",
-                read_symbol_map=read_symbol_map,
-            )
+            if code_hook_package_path is not None:
+                code_hook_package_path = _stage_ace_declaration(
+                    code_hook_package_path, ace_stage_dir, "code-hook package",
+                    read_symbol_map=explicit_symbol_map is None,
+                )
         if module_dir is not None and _make_unsafe(module_dir.as_posix()):
             staged_modules = stage_dir / "modules"
             for module in _selected_guest_modules(normalized, selected_optional):
@@ -2489,6 +2513,7 @@ def build_package(
                 compiler_name=cc_name,
                 enhancement_package_path=enhancement_package_path,
                 code_hook_package_path=code_hook_package_path,
+                staged_symbol_map=staged_symbol_map,
             )
         except package_cache.PackageCacheError as exc:
             raise PackageRouteError("PACKAGE_INVALID_ENHANCEMENT", str(exc)) from exc
@@ -2553,7 +2578,7 @@ def build_package(
                 if plan["codegen_profile"] != "none"
                 else ""
             ),
-            "CODEGEN_USER_ARGS": os.environ.get("CODEGEN_USER_ARGS", ""),
+            "CODEGEN_USER_ARGS": user_codegen_args,
             "LINK_MAP": link_map.as_posix(),
             "PUBLIC_SAFE": "1",
             "NK_AOT_PREGENERATED": "1" if pregenerated else "0",
@@ -2579,6 +2604,15 @@ def build_package(
         library_cache = _object_cache_from_environment(
             build_environment, package_cache.SHARED_LIBRARY_CACHE_DIR_ENV
         )
+        make_overrides: tuple[str, ...] = ()
+        if staged_symbol_map is not None:
+            snapshot = staged_symbol_map.as_posix()
+            # Use the final argument string after the package has added its own options.
+            # The final codegen option and Make's prerequisite name the same snapshot.
+            codegen_args = f"{build_environment['CODEGEN_USER_ARGS']} --symbol-map={snapshot}".strip()
+            build_environment["CODEGEN_USER_ARGS"] = codegen_args
+            build_environment["SYMBOL_MAP"] = snapshot
+            make_overrides = (f"SYMBOL_MAP={snapshot}", f"CODEGEN_USER_ARGS={codegen_args}")
         for make_target in _make_build_targets(native_only=pregenerated, aot_stage=aot_stage):
             jobs = build_jobs
             job_plan = jobs_plan
@@ -2596,7 +2630,9 @@ def build_package(
                 if jobs != build_jobs or job_plan.memory_short:
                     print(f"PACKAGE_BUILD_JOBS: {jobs} for compile, largest unit {largest} bytes "
                           f"({job_plan.reason}; limit: {job_plan.limit})", flush=True)
-            command = _make_build_command(make_executable, make_target, jobs=jobs)
+            command = _make_build_command(
+                make_executable, make_target, jobs=jobs, make_overrides=make_overrides,
+            )
             try:
                 if make_target == "compile" and (progress_file is not None or object_cache is not None):
                     returncode = _run_compile_phase(
@@ -2608,6 +2644,7 @@ def build_package(
                         library_cache=library_cache,
                         build_dir=build_workspace.as_posix(),
                         plan=job_plan,
+                        make_overrides=make_overrides,
                     )
                 else:
                     returncode = subprocess.run(
@@ -2802,6 +2839,8 @@ def build_package(
             _promote_package(build_workspace, output_dir)
         return package
     finally:
+        if ace_stage_dir is not None:
+            shutil.rmtree(ace_stage_dir, ignore_errors=True)
         if build_workspace != output_dir and build_workspace.exists():
             shutil.rmtree(build_workspace, ignore_errors=True)
 
