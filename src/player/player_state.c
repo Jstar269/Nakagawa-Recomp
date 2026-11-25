@@ -8039,8 +8039,9 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
             player_app_package_build_preflight_blocker(app, game_index);
         if (blocker) {
             player_app_set_build_error(app, "preflight", blocker->message, "");
-            snprintf(app->last_error.message, sizeof(app->last_error.message), "%s",
-                     player_preflight_plain_message(blocker));
+            nk_shared_text_copy(app->last_error.message, sizeof(app->last_error.message),
+                                player_preflight_plain_message(blocker),
+                                NK_SHARED_TEXT_COPY_TRUNCATE);
         }
         return false;
     }
@@ -11780,11 +11781,15 @@ static bool player_assign_module_host_names(NkIsoReader *reader,
             if (player_name_equals_ignore_case(modules[j].name, module->name)) {
                 *duplicate = true;
                 if (boundary_message && boundary_message_size) {
-                    snprintf(boundary_message, boundary_message_size,
-                             "DUPLICATE_DISC_MODULE_BASENAME: module host name "
-                             "%.200s stands for both %.900s and %.900s; their "
-                             "copies would share one file in the per-title folder.",
+                    static const char format[] =
+                        "DUPLICATE_DISC_MODULE_BASENAME: module host name "
+                        "%.200s stands for both %.900s and %.900s; their "
+                        "copies would share one file in the per-title folder.";
+                    char diagnostic[sizeof(format) + 200 + 900 + 900];
+                    snprintf(diagnostic, sizeof(diagnostic), format,
                              module->name, modules[j].rel_path, module->rel_path);
+                    nk_shared_text_copy(boundary_message, boundary_message_size, diagnostic,
+                                        NK_SHARED_TEXT_COPY_TRUNCATE);
                 }
                 return false;
             }
@@ -14492,8 +14497,11 @@ static bool player_steam_join_rel(char *out, size_t cap, const char *root, const
 static void player_steam_note_skip(char *note, size_t cap, const char *label, const char *why) {
     size_t used = strlen(note);
     if (used >= cap) return;
-    (void)snprintf(note + used, cap - used, "%s%s%s%s", used > 0u ? "; " : "", label,
-                   label[0] != '\0' ? " " : "", why);
+    const char *parts[] = {used > 0u ? "; " : "", label, label[0] != '\0' ? " " : "", why};
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]) && used + 1u < cap; ++i) {
+        nk_shared_text_copy(note + used, cap - used, parts[i], NK_SHARED_TEXT_COPY_TRUNCATE);
+        used += strlen(note + used);
+    }
 }
 
 /* Reads up to NK_STEAM_GRID_MAX_BYTES from the first local PNG under `root` that exists. The

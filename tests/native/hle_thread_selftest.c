@@ -5040,6 +5040,87 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     nk_remove_utf8(host);   /* only a runtime that wrongly created it leaves one */
 }
 
+/* sceIoIoctl (0x63632449) on a disc0: file: the io-seek-umd-* cells of PSP-HLE-IO-SEEK-001
+ * (#2807). The record (docs/HARDWARE_ORACLE.md, case hle-io-seek: a PSP-3000, system software
+ * 6.6.0 as reported by pspver, boot 156, XMB context, one acceptance-eligible launch of the probe
+ * built from 59520eb0, 2026-11-08) opens disc0:/UMD_DATA.BIN read-only and takes its size from
+ * sceIoLseek(fd, 0, SEEK_END). For the targets -1, the size and the size + 1, each from a position
+ * of 8 (sceIoLseek SEEK_SET 8), it makes the ioctl seek 0x01010005 with a 16-byte record (the
+ * offset, a reserved word of 0, SEEK_SET) and no output, then the position query 0x01020004 with
+ * no input and an 8-byte output preset to a sentinel. The seek returned 0x80010005, 0 and
+ * 0x80010005 (range-checked at the size, inclusive), and every position query returned 0 and
+ * wrote only the low out word.
+ *
+ * Here the production path makes the same calls in the same order on the selftest's synthetic
+ * disc, whose UMD_DATA.BIN is 2048 bytes, each through sr_syscall. The probe also records the
+ * low out word and the SEEK_CUR position, but the public summary publishes neither value, so the
+ * positions below (8 after a refused seek, the size after the accepted one) are runtime checks,
+ * not measured cells. The Memory Stick commands of the same record are the io-seek-ms-ioctl-*
+ * part of test_io_memory_stick_cells_through_syscall. */
+#define NID_IO_IOCTL_DISC0       0x63632449u
+#define IOCTL_DISC0_SEEK         0x01010005u
+#define IOCTL_DISC0_GETPOS       0x01020004u
+#define IOCTL_DISC0_PRE          8u
+#define IOCTL_DISC0_SENTINEL     0xa5a5a5a5u
+#define IOCTL_DISC0_OUT_OF_RANGE 0x80010005u
+
+static void test_io_ioctl_disc0_seek_range_and_position(void) {
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    s_umd_io_synthetic_enabled = 1;
+    const uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, "disc0:/UMD_DATA.BIN", 0x0001u);  /* RDONLY */
+    uint32_t high = 0xdeadbeefu;
+    const uint32_t size = fd >= 3u && fd < 64u ? ms_cell_seek64(fd, 0, 2u, &high) : 0u;
+    expect(fd >= 3u && fd < 64u && size == 2048u && high == 0u,
+           "disc0 ioctl: disc0:/UMD_DATA.BIN opens read-only and SEEK_END gives its size");
+    if (fd < 3u || fd >= 64u) {
+        s_umd_io_synthetic_enabled = 0;
+        return;
+    }
+    static const struct {
+        int64_t target;
+        uint32_t seek_result;
+        const char *what;
+    } rows[] = {
+        {-1, IOCTL_DISC0_OUT_OF_RANGE,
+         "io-seek-umd-ioctl-neg1: the ioctl seek to -1 returns 0x80010005"},
+        {2048, 0u, "io-seek-umd-ioctl-size: the ioctl seek to the size returns 0"},
+        {2049, IOCTL_DISC0_OUT_OF_RANGE,
+         "io-seek-umd-ioctl-size1: the ioctl seek to the size + 1 returns 0x80010005"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        CpuState cpu;
+        expect(ms_cell_seek64(fd, IOCTL_DISC0_PRE, 0u, &high) == IOCTL_DISC0_PRE && high == 0u,
+               "disc0 ioctl: each row starts from a position of 8");
+        MEM_W32(MS_CELL_IOCTL_IN, (uint32_t)((uint64_t)rows[i].target & 0xffffffffu));
+        MEM_W32(MS_CELL_IOCTL_IN + 4u, (uint32_t)((uint64_t)rows[i].target >> 32));
+        MEM_W32(MS_CELL_IOCTL_IN + 8u, 0u);    /* reserved */
+        MEM_W32(MS_CELL_IOCTL_IN + 12u, 0u);   /* SEEK_SET */
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = fd; cpu.r[5] = IOCTL_DISC0_SEEK; cpu.r[6] = MS_CELL_IOCTL_IN; cpu.r[7] = 16u;
+        cpu.r[8] = 0u; cpu.r[9] = 0u;
+        const uint32_t seek = sr_syscall(&cpu, NID_IO_IOCTL_DISC0);
+        expect(seek == rows[i].seek_result, rows[i].what);
+
+        MEM_W32(MS_CELL_IOCTL_OUT, IOCTL_DISC0_SENTINEL);
+        MEM_W32(MS_CELL_IOCTL_OUT + 4u, IOCTL_DISC0_SENTINEL);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = fd; cpu.r[5] = IOCTL_DISC0_GETPOS; cpu.r[6] = 0u; cpu.r[7] = 0u;
+        cpu.r[8] = MS_CELL_IOCTL_OUT; cpu.r[9] = 8u;
+        const uint32_t getpos = sr_syscall(&cpu, NID_IO_IOCTL_DISC0);
+        expect(getpos == 0u && MEM_R32(MS_CELL_IOCTL_OUT + 4u) == IOCTL_DISC0_SENTINEL,
+               "disc0 ioctl: the position query returns 0 and writes only the low out word "
+               "(PSP-HLE-IO-SEEK-001 io-seek-umd-*)");
+        const uint32_t position = rows[i].seek_result == 0u ? 2048u : IOCTL_DISC0_PRE;
+        expect(MEM_R32(MS_CELL_IOCTL_OUT) == position &&
+                   ms_cell_seek64(fd, 0, 1u, &high) == position && high == 0u,
+               "disc0 ioctl: the low out word and SEEK_CUR read the position: 8 after a refused "
+               "seek, the size after the accepted one (runtime check, not a published value)");
+    }
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u, "disc0 ioctl: the disc0: file closes");
+    s_umd_io_synthetic_enabled = 0;
+}
+
 /* sceIoAssign / sceIoUnassign through the production syscall path. WipEout Pure's Memory
  * Stick insert handler assigns "fatms0:" to "msstor0p1:" through "fatms0:" read/write, and
  * its eject handler unassigns it; before these handlers both NIDs were unregistered and the
@@ -6101,6 +6182,7 @@ static void test_fd_namespace(void) {
     test_io_async_and_path_imports();
     test_io_assign_through_syscall();
     test_io_memory_stick_cells_through_syscall();
+    test_io_ioctl_disc0_seek_range_and_position();
     test_io_open_async_notifies_later_callback();
     test_io_enhancement_data_file();
     test_data_guest_key_keeps_sjis_pairs();
@@ -8497,6 +8579,39 @@ static void test_console_profile_identity(void) {
                MEM_R32(tail) == 0x5a5a5a5au,
            "outputs that end past guest memory answer ILLEGAL_ADDR and write nothing");
 
+    sysreg_scratch_clean();   /* the process-wide scratch overlay main() set stays selected */
+    sysreg_restart();
+}
+
+/* sceWlanGetSwitchState (0xd7763699) and sceWlanDevIsPowerOn (0x93440b11), the one handler
+ * h_WlanOn: the wlan-state cell of PSP-KERNEL-SEM-001 (#2807). The record (docs/HARDWARE_ORACLE.md,
+ * case kernel-semantics: a PSP-3000 on system software 6.61 with ARK-5.1.0, PSPLink 3.2.1, boot 84,
+ * game context, one acceptance-eligible launch of the probe built from 0c3cf0da, 2026-10-31) calls
+ * sceWlanGetSwitchState and then sceWlanDevIsPowerOn, neither with an argument, and records both
+ * results: each answered 1 with the console's WLAN switch on.
+ *
+ * Here the production path makes the same two calls in the same order through sr_syscall, with no
+ * registry overlay present, so the console profile is the default one, whose switch is on. The
+ * answer with the switch off is not in the record: the runtime takes it from the profile's
+ * "wlan_switch" setting for both calls (test_console_profile_identity), unmeasured. */
+#define NID_WLAN_GET_SWITCH_STATE 0xd7763699u
+#define NID_WLAN_DEV_IS_POWER_ON  0x93440b11u
+
+static void test_wlan_state_with_the_switch_on(void) {
+    reset_fixture();
+    sr_hle_init();
+    sysreg_scratch_clean();
+    sysreg_env(SYSREG_SCRATCH_FILE);
+    sysreg_restart();
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    const uint32_t switch_state = sr_syscall(&cpu, NID_WLAN_GET_SWITCH_STATE);
+    memset(&cpu, 0, sizeof(cpu));
+    const uint32_t power_on = sr_syscall(&cpu, NID_WLAN_DEV_IS_POWER_ON);
+    expect(switch_state == 1u,
+           "wlan-state: sceWlanGetSwitchState() returns 1 with the switch on (PSP-KERNEL-SEM-001)");
+    expect(power_on == 1u,
+           "wlan-state: sceWlanDevIsPowerOn() then returns 1 with the switch on (PSP-KERNEL-SEM-001)");
     sysreg_scratch_clean();   /* the process-wide scratch overlay main() set stays selected */
     sysreg_restart();
 }
@@ -15703,35 +15818,6 @@ static void test_storage_dialog_parameter_sizes(void) {
     }
 }
 
-/* sceUtilityMsgDialogGetStatus (0x9a1c91d7) with no utility dialog started: one measured cell, on
- * its own (#2807). PSP-HLE-UTILITY-NONE-001 (docs/HARDWARE_ORACLE.md, cell utility-none-msgdialog:
- * a PSP-3000 on system software 6.61, one launch from the XMB context, boot 115, 2026-11-04)
- * records 0x80110005 (WRONG_TYPE) for each GetStatus of the message dialog in a process that
- * calls no InitStart.
- *
- * What stands for that state here: sr_hle_init() registers the production handler, and
- * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog. That is the state
- * the runtime starts a program in (the slot's initial value, and the one the LoadExec guest reset
- * restores through the same utility_dialogs_reset_locked). The NID is dispatched here directly
- * through sr_syscall, with no InitStart, Update or ShutdownStart before it.
- *
- * What this cell does not show. The reset is synthetic: the measured process was freshly
- * launched, not one whose earlier dialogs were forgotten, so nothing here says a PSP answers
- * WRONG_TYPE again after a dialog was used. Every status after an InitStart (1, 2, 3, 4 and the 0
- * after use) is outside the record, and so is a process in the game context, which is how the
- * runtime starts its programs: the record is one launch from the XMB. The record's Update(1) and
- * ShutdownStart results, and the other dialog kinds, belong to other handlers and are asserted
- * together in test_utility_dialog_single_slot below. */
-static void test_msg_dialog_status_with_no_dialog_started(void) {
-    CpuState cpu;
-    sr_hle_init();
-    sr_hle_test_osk_slot_reset();
-    memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
-           "sceUtilityMsgDialogGetStatus with no InitStart returns 0x80110005 (WRONG_TYPE): "
-           "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog, one launch from the XMB context");
-}
-
 static void test_utility_dialog_single_slot(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilitySavedata", NID_SAVEDATA_DIALOG_INIT, NID_SAVEDATA_DIALOG_UPDATE,
@@ -18212,18 +18298,20 @@ static void test_utility_dialog_wrong_states_unmeasured_types(void) {
     }
 }
 
-/* Netconf, gamedata install and game sharing with no utility dialog started: the measured
- * sequence of PSP-HLE-UTILITY-NONE-001, one kind per cell (#2807). The record
- * (docs/HARDWARE_ORACLE.md, cells utility-none-netconf, utility-none-gamedata and
- * utility-none-sharing: a PSP-3000 on system software 6.61, one launch from the XMB context, boot
- * 115, 2026-11-04) calls GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart
- * and GetStatus of each kind, in that order, in a process that calls no InitStart, and every one of
- * the seven calls answers 0x80110005 (WRONG_TYPE). Each cell makes the same seven calls in the same
- * order, back to back as the probe does, each one entering its NID directly through sr_syscall.
+/* Savedata, the message dialog, netconf, gamedata install and game sharing with no utility dialog
+ * started: the measured sequence of PSP-HLE-UTILITY-NONE-001, one kind per cell (#2807). The record
+ * (docs/HARDWARE_ORACLE.md, cells utility-none-savedata, utility-none-msgdialog,
+ * utility-none-netconf, utility-none-gamedata and utility-none-sharing: a PSP-3000 on system
+ * software 6.61, one launch from the XMB context, boot 115, 2026-11-04) calls GetStatus, Update(1),
+ * GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus of each kind, in that order, in a
+ * process that calls no InitStart, and every one of the seven calls answers 0x80110005
+ * (WRONG_TYPE). Each cell makes the same seven calls in the same order, back to back as the probe
+ * does, each one entering its NID directly through sr_syscall.
  *
  * What stands for that state here: sr_hle_init() registers the production handlers, and
- * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog, the state the
- * runtime starts a program in. No InitStart is called.
+ * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog. That is the state
+ * the runtime starts a program in (the slot's initial value, and the one the LoadExec guest reset
+ * restores through the same utility_dialogs_reset_locked). No InitStart is called.
  *
  * What these cells do not show. The reset is synthetic: the measured process was freshly launched,
  * not one whose earlier dialogs were forgotten, so nothing here says a PSP answers WRONG_TYPE again
@@ -18232,6 +18320,69 @@ static void test_utility_dialog_wrong_states_unmeasured_types(void) {
  * context, which is how the runtime starts its programs, and every call while another kind holds
  * the slot. Those cells are test_utility_dialog_single_slot's and
  * test_utility_dialog_wrong_states_unmeasured_types', and are not reviewed by these. */
+static void test_savedata_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-savedata, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_UPDATE) == 0x80110005u,
+           "savedata call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "savedata call 4, ShutdownStart with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "savedata call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_msg_dialog_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_UPDATE) == 0x80110005u,
+           "message dialog call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_SHUTDOWN) == 0x80110005u,
+           "message dialog call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_SHUTDOWN) == 0x80110005u,
+           "message dialog call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
 static void test_netconf_calls_with_no_dialog_started(void) {
     CpuState cpu;
     sr_hle_init();
@@ -41793,6 +41944,42 @@ static void test_dcache_maintenance_notifies_renderer(void) {
     ge_set_gpu_hooks(NULL);
 }
 
+/* sceKernelDcacheWritebackAll (0x79d1c3fa): the cache-wball cell of PSP-CACHE-001 (#2807). The
+ * record (docs/HARDWARE_ORACLE.md, case cache-alias: a PSP-3000 on system software 6.61 with
+ * ARK-5.1.0, PSPLink 3.2.1; the 2026-10-10 campaign launch of f6ccfb33 and the acceptance-eligible
+ * 2026-10-15 requalification launch of f2d6c91a, all five records identical) stores 0xDEADBEEF
+ * through the cached address of the second word of a 64-byte-aligned buffer, calls
+ * sceKernelDcacheWritebackAll(), discarding its result, and reads the same word through the
+ * uncached alias (the address with 0x40000000 set): the record passes only when that read is
+ * 0xDEADBEEF, and it passed in both launches. The probe went on to its next record, so the call
+ * returned to it.
+ *
+ * Here the production path makes the same store, call and read, the call through sr_syscall.
+ * Guest RAM is one coherent array in this runtime, so the alias reads the stored word whatever
+ * the handler does; what this cell can catch in the handler is a call that does not come back
+ * (a named stop). The 0 the handler returns is not asserted: the probe discards it. */
+#define NID_DCACHE_WRITEBACK_ALL   0x79d1c3fau
+#define DCACHE_WBALL_BUFFER        0x08abd000u   /* 64-byte aligned, as the probe's buffer */
+#define DCACHE_WBALL_UNCACHED_BIT  0x40000000u
+#define DCACHE_WBALL_WORD          0xdeadbeefu
+
+static void test_dcache_writeback_all_cached_store_reaches_the_uncached_alias(void) {
+    reset_fixture();
+    sr_hle_init();
+    MEM_W32(DCACHE_WBALL_BUFFER, 0u);
+    MEM_W32(DCACHE_WBALL_BUFFER + 4u, 0u);
+    MEM_W32(DCACHE_WBALL_BUFFER + 4u, DCACHE_WBALL_WORD);   /* c_ptr[1] = 0xDEADBEEF */
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)sr_syscall(&cpu, NID_DCACHE_WRITEBACK_ALL);
+    expect(sr_hle_test_unmodelled_stops() == stops,
+           "cache-wball: sceKernelDcacheWritebackAll() returns to its caller with no named stop");
+    expect(MEM_R32((DCACHE_WBALL_BUFFER + 4u) | DCACHE_WBALL_UNCACHED_BIT) == DCACHE_WBALL_WORD,
+           "cache-wball: after the write-back the uncached alias reads the word stored through the "
+           "cached address, 0xDEADBEEF (PSP-CACHE-001)");
+}
+
 /* Instruction-cache maintenance (#1979). The three Icache NIDs are registered in production
  * and in this harness (hle_register_icache_handlers); each is entered here through
  * sr_syscall with a literal NID. The cells pin what the handlers do today: a normal range,
@@ -51981,8 +52168,13 @@ static uint32_t selftest_tlspl_refer(uint32_t uid, uint32_t info) {
     return sr_syscall(&cpu, NID_TLSPL_REFER);
 }
 
+/* sceKernelGetTlsAddr through sr_syscall with its named NID, the form the manifest's dispatch
+ * detector credits (#2807). */
 static uint32_t selftest_tlspl_get_addr(uint32_t uid) {
-    return selftest_tlspl_simple(uid, NID_TLSPL_GET_ADDR);
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid;
+    return sr_syscall(&cpu, NID_TLSPL_GET_ADDR);
 }
 
 /* w-hle-b: pspautotests tests/threads/tls/{create,delete,free,refer}.expected and
@@ -70120,6 +70312,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sysreg_virtual_registry();
     test_sysreg_overlay_follows_user_data_root();
     test_console_profile_identity();
+    test_wlan_state_with_the_switch_on();
     test_console_profile_identity_is_deterministic_under_the_deterministic_clock();
     test_sysreg_write_model();
     test_sysparam_nickname_string();
@@ -70187,7 +70380,6 @@ static int hle_selftest_main(int argc, char **argv) {
     test_osk_keyboard_keeps_guest_time_running();
     test_storage_dialog_parameter_sizes();
     test_netconf_parameter_sizes();
-    test_msg_dialog_status_with_no_dialog_started();
     test_utility_dialog_single_slot();
     test_utility_dialog_refused_cancel();
     test_utility_dialog_status_sequence();
@@ -70209,6 +70401,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_utility_dialog_measured_states();
     test_osk_nested_ranges();
     test_utility_dialog_wrong_states_unmeasured_types();
+    test_savedata_calls_with_no_dialog_started();
+    test_msg_dialog_calls_with_no_dialog_started();
     test_netconf_calls_with_no_dialog_started();
     test_gamedata_install_calls_with_no_dialog_started();
     test_game_sharing_calls_with_no_dialog_started();
@@ -70294,6 +70488,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_reads_vram_under_the_status_word();
     test_ge_texture_decode_notes_the_capture();
     test_dcache_maintenance_notifies_renderer();
+    test_dcache_writeback_all_cached_store_reaches_the_uncached_alias();
     test_icache_maintenance_returns_zero_for_every_range();
     test_exit_game_ignores_argument_registers(argc > 0 ? argv[0] : NULL);
     test_bulk_guest_span_atomicity();
