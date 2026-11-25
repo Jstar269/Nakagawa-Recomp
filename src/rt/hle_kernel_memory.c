@@ -979,7 +979,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
                         uint64_t now = sched_vtime_us();
                         MEM_W32(toptr, now < end_time ? (uint32_t)(end_time - now) : 0u);
                     }
-                    return 0;
+                    return vpl_wait_served(p, uid);
                 }
                 vpl_requeue_waiter_head(p, cur_thid, request);
             }
