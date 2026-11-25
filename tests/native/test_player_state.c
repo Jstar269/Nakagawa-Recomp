@@ -4011,6 +4011,8 @@ static void test_error_cards_are_plain(void) {
                   "video playback") == 0);
     assert(strcmp(player_runtime_stop_feature("unsupported-import-sceutilitysavedatainitstart"),
                   "a system dialog") == 0);
+    assert(strcmp(player_runtime_stop_feature("osk-host-unavailable"),
+                  "the on-screen keyboard") == 0);
     assert(strcmp(player_runtime_stop_feature("unsupported-interpreter-form"),
                   "a processor feature") == 0);
     assert(strcmp(player_runtime_stop_feature("host-fiber-stack-exhausted"),
