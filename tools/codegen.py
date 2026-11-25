@@ -3293,8 +3293,11 @@ def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
     si = vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     cond = w & 0xF
+    # Each lane result must be 0 or 1 before it is shifted into CC: glibc's isinf() returns -1
+    # for -inf, which set every bit above the lane (pspautotests e37443a6
+    # tests/cpu/vfpu/specials.expected, recorded on a PSP, reads EI 0x1c for (NaN, -NaN, inf, -inf)).
     _C = {0: "0", 1: "_x==_y", 2: "_x<_y", 3: "_x<=_y", 4: "1", 5: "_x!=_y",
-          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "isnan(_x)", 10: "isinf(_x)",
+          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "(isnan(_x)!=0)", 10: "(isinf(_x)!=0)",
           11: "(isnan(_x)||isinf(_x))", 12: "_x!=0.0f", 13: "!isnan(_x)",
           14: "!isinf(_x)", 15: "!(isnan(_x)||isinf(_x))"}[cond]
     body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
