@@ -1081,6 +1081,15 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "description": "Returns the byte length through a guest NUL terminator within readable memory.",
     },
+    "h_SysclibSnprintf": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_sysclib_snprintf",
+            "uofw/uofw f7b0623168842f02cddbdbf9437ac0c2380c51c8 src/kd/sysmem/sysclib.c prnt/snprintf",
+            "hrydgard/ppsspp cdf563b85c42c275ec2835a0883f48d63a9c9406 Core/HLE/sceKernelInterrupt.cpp sysclib_snprintf",
+        ],
+        "limitation": "positive-capacity truncation and the full count are reference-derived, not PSP-measured; handles bounded literal text and one-word integer, character and string fields with space padding and bounded string precision; zero capacity, unreadable arguments, and other format forms stop by name (#341)",
+    },
     "h_ReferThreadStatus": {
         "status": "partial",
         "limitation": "run clocks use host scheduler time and preemption/release counters are modeled rather than PSP-measured (#311)",
@@ -3576,6 +3585,7 @@ SUBSYSTEM_BY_PREFIX = {
     "memset": "kernel_utils",
     "newlibModuleStreamWrite": "kernel_utils",
     "printf": "kernel_utils",
+    "snprintf": "kernel_utils",
     "sceKernelGetGPI": "kernel_utils",
     "sceKernelMemcpy": "kernel_utils",
     "sceKernelMemset": "kernel_utils",

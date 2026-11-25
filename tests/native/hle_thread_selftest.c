@@ -30734,6 +30734,7 @@ static void test_wait_thread_end_cb_execution(void) {
 #define NID_SCE_KERNEL_MEMCPY 0x1839852au
 #define NID_SYSLIB_MEMSET 0x10f3bb61u
 #define NID_SYSLIB_STRLEN 0x52df196cu
+#define NID_SYSLIB_SNPRINTF 0xc2145e80u
 /* PSP DMAC error classes, measured on hardware (see test_dmac_semantics). */
 #define SCE_DMAC_ILLEGAL_ADDR 0x80000103u
 #define SCE_DMAC_ILLEGAL_SIZE 0x80000104u
@@ -30785,6 +30786,109 @@ static void test_sysclib_memory_imports(void) {
     }
     expect(filled,
            "SysclibForKernel memset writes the complete validated guest span");
+}
+
+static uint32_t sysclib_snprintf(uint32_t dst, uint32_t size, uint32_t fmt) {
+    s_cpu->r[4] = dst;
+    s_cpu->r[5] = size;
+    s_cpu->r[6] = fmt;
+    return sr_syscall(s_cpu, NID_SYSLIB_SNPRINTF);
+}
+
+static void test_sysclib_snprintf(void) {
+    const uint32_t fmt = 0x08301000u, dst = 0x08302000u, str = 0x08303000u;
+    const uint32_t stack = 0x08304000u, last = 0x0bffffffu;
+    const uint32_t stopped = 0x80020002u;  /* selftest return for a named stop */
+    reset_fixture();
+    sr_hle_init();
+
+    uint8_t sentinel[64];
+    memset(sentinel, 0xa5, sizeof(sentinel));
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "mutex%d");
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 32u, fmt) == 6u,
+           "Sysclib snprintf dispatch reads its first variadic word from a3");
+    expect(memcmp(SR_HOST(dst), "mutex1", sizeof("mutex1")) == 0 &&
+               memcmp(SR_HOST(dst + 7u), sentinel + 7u, sizeof(sentinel) - 7u) == 0,
+           "Sysclib snprintf terminates the output and leaves later bytes alone");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 4u, fmt) == 6u &&
+               memcmp(SR_HOST(dst), "mut", sizeof("mut")) == 0 &&
+               memcmp(SR_HOST(dst + 4u), sentinel + 4u, sizeof(sentinel) - 4u) == 0,
+           "Sysclib snprintf truncation stores capacity-1 bytes and returns the full count");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 1u, fmt) == 6u && MEM_R8(dst) == 0u &&
+               memcmp(SR_HOST(dst + 1u), sentinel + 1u, sizeof(sentinel) - 1u) == 0,
+           "Sysclib snprintf capacity one stores only the terminator");
+
+    title_hle_write_cstr(fmt, "%-6.3s|%+4d|%X|%c|%u|%i|%%");
+    title_hle_write_cstr(str, "tennis");
+    const char expected[] = "ten   |  +7|2A|P|9|-4|%";
+    s_cpu->r[7] = str;
+    s_cpu->r[8] = 7u;
+    s_cpu->r[9] = 42u;
+    s_cpu->r[10] = 'P';
+    s_cpu->r[11] = 9u;
+    uint32_t original_sp = s_cpu->r[29];
+    s_cpu->r[29] = stack;
+    MEM_W32(stack, (uint32_t)-4);
+    expect(sysclib_snprintf(dst, (uint32_t)sizeof(expected), fmt) == sizeof(expected) - 1u &&
+               memcmp(SR_HOST(dst), expected, sizeof(expected)) == 0 &&
+               MEM_R8(dst + (uint32_t)sizeof(expected)) == 0xa5u,
+           "Sysclib snprintf formats bounded scalar fields and reads the sixth word at entry sp");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = str;
+    s_cpu->r[29] = last - 1u;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unreadable variadic spill before storing");
+    s_cpu->r[29] = original_sp;
+
+    title_hle_write_cstr(fmt, "");
+    expect(sysclib_snprintf(dst, 64u, fmt) == 0u && MEM_R8(dst) == 0u &&
+               MEM_R8(dst + 1u) == 0xa5u,
+           "Sysclib snprintf empty output stores one NUL and returns zero");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "literal");
+    expect(sysclib_snprintf(dst, 0u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses unmodeled zero capacity before storing");
+    MEM_W8(last, 0x5au);
+    expect(sysclib_snprintf(last, 2u, fmt) == stopped && MEM_R8(last) == 0x5au,
+           "Sysclib snprintf refuses a destination span that leaves guest memory");
+    expect(sysclib_snprintf(dst, 64u, last) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated format at the arena boundary");
+
+    title_hle_write_cstr(fmt, "prefix %s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated string without copying the prefix");
+    title_hle_write_cstr(fmt, "%.1s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 2u, fmt) == 1u &&
+               MEM_R8(dst) == 0x5au && MEM_R8(dst + 1u) == 0u,
+           "Sysclib snprintf string precision bounds the read at the last arena byte");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    const char *unsupported[] = {"prefix %p", "prefix %n", "%08d", "%*d", "%lld",
+                                 "%4097d", "%4096d+", "trailing %"};
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+        title_hle_write_cstr(fmt, unsupported[i]);
+        s_cpu->r[7] = str;
+        expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+                   memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0 &&
+                   memcmp(SR_HOST(str), "tennis", sizeof("tennis")) == 0,
+               "Sysclib snprintf refuses unsupported formats and bounds without guest writes");
+    }
 }
 
 static void test_refer_thread_status(void) {
@@ -69339,6 +69443,11 @@ static int hle_selftest_main(int argc, char **argv) {
         free(g_mem_base);
         return s_failures ? 1 : 0;
     }
+    if (argc > 1 && strcmp(argv[1], "--sysclib-snprintf") == 0) {
+        test_sysclib_snprintf();
+        fprintf(stderr, "sysclib-snprintf: %d checks, %d failures\n", s_checks, s_failures);
+        return s_failures != 0;
+    }
 
     if (argc > 1 && strcmp(argv[1], "--title-config") == 0) {
         test_title_config_hle_bindings();
@@ -69635,6 +69744,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_bulk_guest_span_atomicity();
     test_inline_stores_match_full_bodies();
     test_sysclib_memory_imports();
+    test_sysclib_snprintf();
     test_thread_stack_free_size_contract();
     test_check_thread_stack_contract();
     test_refer_thread_status();
