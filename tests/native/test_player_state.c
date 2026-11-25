@@ -21690,6 +21690,76 @@ int main(int argc, char **argv) {
             assert(!rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
         }
 
+        /* #2151: the final complete renderer record belongs to the latest run,
+           even when there is no further live poll after it was written. */
+        {
+            const char *disc = rep->games[0].disc_id;
+            const char *heading, *text;
+            char line[256], event[300], old_events[NK_MAX_PATH];
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
+            const NkRenderFallbackEvent points = {
+                NK_RENDER_EFFECT_POINT, 360u, 5000u, 20000u, 0u, 200u
+            };
+            const NkRenderFallbackEvent logic = {
+                NK_RENDER_EFFECT_LOGIC_OP, 360u, 5000u, 20000u, 0u, 200u
+            };
+
+            /* A child that exits before the poll still leaves its final record. */
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+            assert(player_app_launch_game(rep, 0));
+            assert(nk_launch_wait(&rep->launch_session, 10000) == 0);
+            assert(nk_render_path_event_format(&gpu_path, line, sizeof(line)) > 0);
+            snprintf(event, sizeof(event), "%s t_ns=80\n", line);
+            assert(append_runtime_event(rep->boot_event_file_path, event));
+            assert(nk_render_fallback_event_format(&points, line, sizeof(line)) > 0);
+            snprintf(event, sizeof(event), "%s t_ns=81\n", line);
+            assert(append_runtime_event(rep->boot_event_file_path, event));
+            snprintf(old_events, sizeof(old_events), "%s", rep->boot_event_file_path);
+            rep->launch_time_ms = 96000;
+            assert(player_app_monitor_game_session(rep, 96600) && !rep->is_game_running);
+            assert(player_app_render_notice(rep, disc, &heading, &text));
+            assert(strcmp(heading, "Partly drawn in software") == 0 && strstr(text, "points"));
+
+            /* An old event file with no active session cannot revise this card. */
+            assert(nk_render_fallback_event_format(&logic, line, sizeof(line)) > 0);
+            snprintf(event, sizeof(event), "%s t_ns=82\n", line);
+            assert(append_runtime_event(old_events, event));
+            player_app_stop_game(rep);
+            assert(!player_app_monitor_game_session(rep, 97000));
+            assert(player_app_render_notice(rep, disc, &heading, &text));
+            assert(rep->render_effects == (1u << NK_RENDER_EFFECT_POINT));
+            assert(nk_remove_utf8(old_events) == 0);
+            fprintf(stderr, "[PLAYER_STATE_TEST] final render events: natural exit and stale file PASS\n");
+
+            set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
+            assert(player_app_launch_game(rep, 0));
+            assert(nk_render_path_event_format(&gpu_path, line, sizeof(line)) > 0);
+            snprintf(event, sizeof(event), "%s t_ns=90\n", line);
+            assert(append_runtime_event(rep->boot_event_file_path, event));
+            assert(!player_app_monitor_game_session(rep, 97400));
+            assert(rep->render_path_known && rep->render_effects == 0u);
+            assert(!player_app_render_notice(rep, disc, &heading, &text));
+
+            assert(nk_render_fallback_event_format(&logic, line, sizeof(line)) > 0);
+            snprintf(event, sizeof(event), "%s t_ns=91\n", line);
+            assert(append_runtime_event(rep->boot_event_file_path, event));
+            assert(append_runtime_event(rep->boot_event_file_path,
+                "BOOT_EVENT phase=window_ready\n"
+                "BOOT_EVENT phase=stalled observation=dark_picture "
+                "dark_vblanks=1800 seconds=30 ready=2 delay=1 wait=4 spin=0\n"));
+            player_app_stop_game(rep);
+            set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+            assert(!rep->is_game_running && !rep->child_window_ready &&
+                   !rep->stalled_game_notice_visible);
+            assert_session_released(&rep->launch_session);
+            bool final_picture_notice = player_app_render_notice(rep, disc, &heading, &text);
+            assert(final_picture_notice);
+            assert(strcmp(heading, "Partly drawn in software") == 0 &&
+                   strstr(text, "logic operations") && !strstr(text, "points"));
+            assert(!player_app_render_notice(rep, rep->games[1].disc_id, &heading, &text));
+            fprintf(stderr, "[PLAYER_STATE_TEST] final render events: normal Stop Picture notice PASS\n");
+        }
+
         /* #308: a live synthetic runtime keeps flipping frames that show nothing.
            The dark-picture event raises the same notice at 30 seconds, worded for
            a black screen; a flip-watchdog resume does not clear it, a visible
