@@ -52,10 +52,10 @@ Semantic handler census: **647** handlers across **30** API families, covering *
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 394 | 406 |
+| `partial` | 403 | 415 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 235 | 240 |
+| `unreviewed` | 226 | 231 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -85,11 +85,11 @@ Semantic handler census: **647** handlers across **30** API families, covering *
 | `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
 | `sceSas` | 0 | 0 | 0 | 1 | 27 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
-| `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
+| `sceUtility` | 0 | 19 | 0 | 0 | 18 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **394** | **1** | **3** | **235** | **647** | **677** |
+| **Total** | **14** | **403** | **1** | **3** | **226** | **647** | **677** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1606,6 +1606,18 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Limitation: as sceUmdWaitDriveStat; the timeout rounding follows the recorded buckets, not a measured rule (#341)
   - Evidence: PSPAutotests tests/umd/api/api.expected (as sceUmdWaitDriveStat; a timeout of 0 waits until cancelled; timeouts of 5 to 200 us end after about 250 us with 0x800201A8)
   - Evidence: tests/native/hle_thread_selftest.c:test_wc_umd_wait_drive_stat
+- **`h_GamedataDialogShutdown`** (`sceUtility`): `sceUtilityGamedataInstallShutdownStart` (0x32e32dcb)
+  - Limitation: this gamedata install ShutdownStart covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its two calls in the sequence (after the second GetStatus, and again after the third) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-gamedata)
+  - Evidence: tests/native/hle_thread_selftest.c:test_gamedata_install_calls_with_no_dialog_started
+- **`h_GamedataDialogStatus`** (`sceUtility`): `sceUtilityGamedataInstallGetStatus` (0xb57e95d9)
+  - Limitation: this gamedata install GetStatus covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its four calls in the sequence (the first call, and the calls after Update(1), after the first ShutdownStart and after the second) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-gamedata)
+  - Evidence: tests/native/hle_thread_selftest.c:test_gamedata_install_calls_with_no_dialog_started
+- **`h_GamedataDialogUpdate`** (`sceUtility`): `sceUtilityGamedataInstallUpdate` (0x4aecd179)
+  - Limitation: this gamedata install Update covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its one call in the sequence, Update(1) after the first GetStatus, returns 0x80110005 (WRONG_TYPE); an Update with any other argument is not in the record; PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-gamedata)
+  - Evidence: tests/native/hle_thread_selftest.c:test_gamedata_install_calls_with_no_dialog_started
 - **`h_GetSystemParamInt`** (`sceUtility`): `sceUtilityGetSystemParamInt` (0xa5da2406)
   - Limitation: ids 2 to 10 return 0 and write a value and ids 0 and 64 return 0x80110103 with the output untouched, as measured; the seeded values are the oracle console's configured settings (WLAN_POWERSAVE is an unmeasured project default), not factory defaults; an invalid output pointer is not measured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-SYSPARAM-001: int-id-2..int-id-9, int-unknown-0, int-unknown-10, int-unknown-64)
@@ -1624,6 +1636,18 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_sequence
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_without_update
   - Evidence: PSPAutotests tests/utility/msgdialog/abort.expected (2ed7c9c5, recorded on a PSP): the return codes and status sequence before init, during init, while visible, after the next Update and through shutdown
+- **`h_NetDialogShutdown`** (`sceUtility`): `sceUtilityNetconfShutdownStart` (0xf88155f6)
+  - Limitation: this netconf ShutdownStart covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its two calls in the sequence (after the second GetStatus, and again after the third) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-netconf)
+  - Evidence: tests/native/hle_thread_selftest.c:test_netconf_calls_with_no_dialog_started
+- **`h_NetDialogStatus`** (`sceUtility`): `sceUtilityNetconfGetStatus` (0x6332aa39)
+  - Limitation: this netconf GetStatus covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its four calls in the sequence (the first call, and the calls after Update(1), after the first ShutdownStart and after the second) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-netconf)
+  - Evidence: tests/native/hle_thread_selftest.c:test_netconf_calls_with_no_dialog_started
+- **`h_NetDialogUpdate`** (`sceUtility`): `sceUtilityNetconfUpdate` (0x91e70e35)
+  - Limitation: this netconf Update covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its one call in the sequence, Update(1) after the first GetStatus, returns 0x80110005 (WRONG_TYPE); an Update with any other argument is not in the record; PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-netconf)
+  - Evidence: tests/native/hle_thread_selftest.c:test_netconf_calls_with_no_dialog_started
 - **`h_OskUpdate`** (`sceUtility`): `sceUtilityOskUpdate` (0x4b85c861)
   - Limitation: the return codes follow the measured states, and INIT ends on the vblank after InitStart (#1386); Update does not drive the keyboard, whose text is collected from GetStatus (#281), and Update in FINISHED returns 0, which is not measured (#341)
   - Evidence: #363 (PSP-3000 measurements, comments 6330742629 and 6331070692): WRONG_TYPE 0x80110005 before a keyboard starts; 0 in VISIBLE for speed 0 and 1; INVALID_STATUS 0x80110001 in INIT, QUIT and NONE after use
@@ -1633,6 +1657,18 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Limitation: always WRONG_TYPE: the runtime has no screenshot dialog, and its InitStart import is not registered
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
   - Evidence: PSPAutotests tests/utility/dialog/status.expected (1a9e6c31, recorded on a PSP): shot=WRONG_TYPE when no screenshot dialog was started
+- **`h_SharingDialogShutdown`** (`sceUtility`): `sceUtilityGameSharingShutdownStart` (0xefc6f80f)
+  - Limitation: this game sharing ShutdownStart covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its two calls in the sequence (after the second GetStatus, and again after the third) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-sharing)
+  - Evidence: tests/native/hle_thread_selftest.c:test_game_sharing_calls_with_no_dialog_started
+- **`h_SharingDialogStatus`** (`sceUtility`): `sceUtilityGameSharingGetStatus` (0x946963f3)
+  - Limitation: this game sharing GetStatus covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its four calls in the sequence (the first call, and the calls after Update(1), after the first ShutdownStart and after the second) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-sharing)
+  - Evidence: tests/native/hle_thread_selftest.c:test_game_sharing_calls_with_no_dialog_started
+- **`h_SharingDialogUpdate`** (`sceUtility`): `sceUtilityGameSharingUpdate` (0x7853182d)
+  - Limitation: this game sharing Update covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its one call in the sequence, Update(1) after the first GetStatus, returns 0x80110005 (WRONG_TYPE); an Update with any other argument is not in the record; PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-sharing)
+  - Evidence: tests/native/hle_thread_selftest.c:test_game_sharing_calls_with_no_dialog_started
 - **`h_UtilityLoadModule`** (`sceUtility`): `sceUtilityLoadModule` (0x2a2b3de0)
   - Limitation: records utility module state only; the user-partition memory a real module occupies is not reserved; IDs and dependencies follow PPSSPP, not measured on this project's PSP
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_av_module_state

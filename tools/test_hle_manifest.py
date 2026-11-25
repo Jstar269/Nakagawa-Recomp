@@ -1234,6 +1234,105 @@ class LiveManifestTests(unittest.TestCase):
                 line = next(l for l in source.splitlines() if f'0x{nid:08X}: {{"name"' in l)
                 self.assertRegex(line, r"# h_\w+: \S")
 
+    def test_utility_none_netconf_gamedata_sharing_are_partial_on_their_measured_sequence(self) -> None:
+        """#2807: netconf, gamedata install and game sharing GetStatus, Update and ShutdownStart are
+        reviewed for the no-InitStart sequence of PSP-HLE-UTILITY-NONE-001 only."""
+        kinds = {
+            "utility-none-netconf": (
+                "test_netconf_calls_with_no_dialog_started",
+                {
+                    0x6332AA39: ("sceUtilityNetconfGetStatus", "h_NetDialogStatus", "NID_NETCONF_DIALOG_STATUS"),
+                    0x91E70E35: ("sceUtilityNetconfUpdate", "h_NetDialogUpdate", "NID_NETCONF_DIALOG_UPDATE"),
+                    0xF88155F6: (
+                        "sceUtilityNetconfShutdownStart", "h_NetDialogShutdown", "NID_NETCONF_DIALOG_SHUTDOWN"
+                    ),
+                },
+            ),
+            "utility-none-gamedata": (
+                "test_gamedata_install_calls_with_no_dialog_started",
+                {
+                    0xB57E95D9: (
+                        "sceUtilityGamedataInstallGetStatus", "h_GamedataDialogStatus", "NID_GAMEDATA_DIALOG_STATUS"
+                    ),
+                    0x4AECD179: (
+                        "sceUtilityGamedataInstallUpdate", "h_GamedataDialogUpdate", "NID_GAMEDATA_DIALOG_UPDATE"
+                    ),
+                    0x32E32DCB: (
+                        "sceUtilityGamedataInstallShutdownStart",
+                        "h_GamedataDialogShutdown",
+                        "NID_GAMEDATA_DIALOG_SHUTDOWN",
+                    ),
+                },
+            ),
+            "utility-none-sharing": (
+                "test_game_sharing_calls_with_no_dialog_started",
+                {
+                    0x946963F3: (
+                        "sceUtilityGameSharingGetStatus", "h_SharingDialogStatus", "NID_SHARING_DIALOG_STATUS"
+                    ),
+                    0x7853182D: ("sceUtilityGameSharingUpdate", "h_SharingDialogUpdate", "NID_SHARING_DIALOG_UPDATE"),
+                    0xEFC6F80F: (
+                        "sceUtilityGameSharingShutdownStart", "h_SharingDialogShutdown", "NID_SHARING_DIALOG_SHUTDOWN"
+                    ),
+                },
+            ),
+        }
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        dispatched = hle_manifest.selftest_dispatched_nids(source)
+        for oracle_cell, (cell, handlers) in kinds.items():
+            body = _matched(
+                re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+            ).group(0)
+            defines = []
+            for nid, (name, handler, constant) in handlers.items():
+                with self.subTest(handler=handler):
+                    registration = self.regs[nid]
+                    self.assertEqual(registration["name"], name)
+                    self.assertEqual(registration["handler"], handler)
+                    self.assertEqual(registration["classification"], "dedicated")
+                    self.assertEqual(registration["status"], "partial")
+                    evidence = meta.HANDLER_EVIDENCE[handler]
+                    self.assertEqual(
+                        evidence,
+                        [
+                            f"docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: {oracle_cell})",
+                            f"tests/native/hle_thread_selftest.c:{cell}",
+                        ],
+                    )
+                    self._assert_cited_cells_are_manifest_cells(evidence)
+                    limitation = meta.HANDLER_LIMITATIONS[handler]
+                    for needle in (
+                        "one measured sequence only", "no InitStart", "0x80110005",
+                        "one launch from the XMB context", "synthetic reset", "nothing after an InitStart",
+                        "game context", "another dialog kind holds the slot", "unmeasured",
+                        "separate handlers", "not reviewed here",
+                    ):
+                        self.assertIn(needle, limitation)
+                    self.assertIn(nid, dispatched)
+                    defines.append(
+                        _matched(
+                            re.search(rf"^#define {constant}[ \t]+0x{nid:08x}u$", source, re.MULTILINE)
+                        ).group(0)
+                    )
+            with self.subTest(cell=cell):
+                # Cut from the selftest with its three constants, the cell dispatches its own kind's
+                # three NIDs and no other, starts no dialog, and asserts the measured sequence in order:
+                # GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart, GetStatus,
+                # each answering 0x80110005.
+                self.assertEqual(hle_manifest.selftest_dispatched_nids("\n".join([*defines, body])), set(handlers))
+                self.assertIn("sr_hle_init();", body)
+                self.assertNotIn("_INIT", body)
+                status, update, shutdown = (constant for _, _, constant in handlers.values())
+                calls = re.findall(r"sr_syscall\(&cpu, (NID_\w+)\) == (0x[0-9a-f]+u)", body)
+                self.assertEqual(
+                    calls,
+                    [(c, "0x80110005u") for c in (status, update, status, shutdown, status, shutdown, status)],
+                )
+                self.assertEqual(len(re.findall(r"sr_syscall\(", body)), 7)
+                self.assertIn(f"cpu.r[4] = 1u;\n    expect(sr_syscall(&cpu, {update})", body)
+                self.assertIn(f"PSP-HLE-UTILITY-NONE-001 {oracle_cell}", body)
+                self.assertIn("XMB context", body)
+
     def test_std_handle_imports_graduate_on_the_measured_handles(self) -> None:
         """#341: the three standard-handle imports leave the profile-zero list on PSP-HLE-STDIO-001."""
         batch = {
