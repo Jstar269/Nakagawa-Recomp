@@ -24,11 +24,11 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 180 | 88 |
+| `ppsspp-derived` | 181 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 300 | 183 |
-| `unverified` | 173 | 22 |
-| total | 717 | 367 |
+| `synthetic` | 301 | 183 |
+| `unverified` | 172 | 22 |
+| total | 718 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -511,7 +511,7 @@ a title that translates none has generated code unchanged.
 | `0x9944f31f` | `sceKernelSuspendThread` | kernel_thread | `unverified` | no recorded evidence |
 | `0x99560abe` | `sceNetAdhocctlGetAddrByName` | network | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x99944089` | `__sceSasSetVoice` | audio | `synthetic` | HLE selftest dispatch |
-| `0x9a1c91d7` | `sceUtilityMsgDialogGetStatus` | utility | `unverified` | no recorded evidence |
+| `0x9a1c91d7` | `sceUtilityMsgDialogGetStatus` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x9ac2eeac` | `sceNetAdhocPtpFlush` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x9ace131e` | `sceKernelSleepThread` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch; unlinked hardware note |
 | `0x9ae849a7` | `sceAtracGetRemainFrame` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
@@ -626,6 +626,7 @@ a title that translates none has generated code unchanged.
 | `0xc132e22f` | `sceMpegQueryMemSize` | mpeg | `ppsspp-derived` | handler comment names PPSSPP; sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0xc152080a` | `sceCtrlPeekBufferNegative` | input | `synthetic` | HLE selftest dispatch |
 | `0xc1734599` | `sceKernelReferLwMutexStatus` | kernel_sync | `unverified` | no recorded evidence |
+| `0xc2145e80` | `snprintf` | kernel_utils | `ppsspp-derived` | handler comment names PPSSPP |
 | `0xc2df770e` | `sceKernelIcacheInvalidateRange` | cache_dma | `synthetic` | HLE selftest dispatch |
 | `0xc41c2853` | `sceRtcGetTickResolution` | rtc | `unverified` | no recorded evidence |
 | `0xc45c99cc` | `sceMpegQueryUserdataEsSize` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c; registry notes name PPSSPP |

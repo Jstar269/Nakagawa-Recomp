@@ -94,6 +94,10 @@ def lui(rt, imm):
     return (0x0F << 26) | (rt << 16) | (imm & 0xFFFF)
 
 
+def ori(rt, rs, imm):
+    return (0x0D << 26) | (rs << 21) | (rt << 16) | (imm & 0xFFFF)
+
+
 def addu(rd, rs, rt):
     return (rs << 21) | (rt << 16) | (rd << 11) | 0x21
 
@@ -107,6 +111,9 @@ SP = 29
 RA = 31
 V0 = 2
 A0 = 4
+A1 = 5
+A2 = 6
+S0 = 16
 T9 = 25
 
 
@@ -858,6 +865,33 @@ class DirectJumpAuditTests(unittest.TestCase):
         self.assertEqual(rec_data.classification, efb.AMBIGUOUS)
         self.assertIn("address-taken evidence", rec_data.reason)
 
+    def test_address_taken_in_a_delay_slot_is_ambiguous(self):
+        """An `la` finished in a call's delay slot is address-taken evidence too.
+
+        It is how a compiler passes a callback: the high half ahead of the call, the
+        low half in its delay slot. The target stays a callable entry; only a low
+        half that comes after the slot leaves the one-way tail a resume.
+        """
+        (elf, ranges), starts, owner, resume = self._one_way_tail()
+        sink = 0x2010
+        for name, transfer in (("jal", jal(sink)), ("jalr", jalr(T9)), ("j", j(sink))):
+            with self.subTest(name):
+                words = dict(elf.words)
+                words.update(emit(
+                    0x2000, lui(A1, 0), transfer, addiu(A1, A1, resume), NOP, jr(RA), NOP,
+                ))
+                taken, taken_ranges = image(words)
+                record = efb.audit_direct_j_candidates(taken, starts, taken_ranges)[0]
+                self.assertEqual(record.addr, resume)
+                self.assertEqual(record.classification, efb.AMBIGUOUS)
+                self.assertIn("address-taken evidence (address-taken-constant)", record.reason)
+                self.assertEqual(efb.direct_j_resume_owners(taken, starts, taken_ranges), {})
+
+                words.update(emit(0x2008, NOP, addiu(A1, A1, resume)))
+                apart, apart_ranges = image(words)
+                self.assertEqual(
+                    efb.direct_j_resume_owners(apart, starts, apart_ranges), {resume: owner})
+
 
 class JumpRegionBoundaryTests(unittest.TestCase):
     def test_trace_edge_census_and_call_evidence_use_the_pc_plus_four_region(self):
@@ -1066,6 +1100,22 @@ class BranchEdgeCensusTests(unittest.TestCase):
         )
 
 
+def delay_slot_link_cases(base):
+    pc, target = base + 4, base + 0x18
+    return (
+        ("jal-ra", jal(target), RA, False),
+        ("jal-a1", jal(target), A1, True),
+        ("jalr-s0", jalr(T9, S0), S0, False),
+        ("jalr-zero", jalr(T9, 0), RA, True),
+        ("bgezal-taken", regimm_link(0x11, 0, pc, target), RA, False),
+        ("bltzal-untaken", regimm_link(0x10, 0, pc, target), RA, False),
+        ("bgezall-taken", regimm_link(0x13, 0, pc, target), RA, False),
+        ("bal-pc-read", regimm_link(0x11, 0, pc, pc + 8), RA, False),
+        ("bgez-no-link", regimm_link(0x01, 0, pc, target), RA, True),
+        ("bgezal-a1", regimm_link(0x11, 0, pc, target), A1, True),
+    )
+
+
 class CodePointerEvidenceTests(unittest.TestCase):
     """Each provenance kind must be reported apart from the others."""
 
@@ -1099,13 +1149,103 @@ class CodePointerEvidenceTests(unittest.TestCase):
         self.assertIn(base + 0x50, evidence["immediate"])
         self.assertNotIn(base + 0x40, evidence["immediate"])
 
-    def test_a_branch_between_the_halves_breaks_the_pair(self):
-        """The high half does not survive a control-flow edge."""
-        words = emit(
-            0x1000, lui(T9, 0), bne(A0, 0, 1), addiu(T9, T9, 0x1010), NOP, NOP
-        )
+    #: Every control transfer with a delay slot, by name: the calls, the jumps and the
+    #: branches, conditional, unconditional, likely and linking.
+    TRANSFERS = (
+        ("jal", jal(0x1020)),
+        ("jalr", jalr(T9)),
+        ("j", j(0x1020)),
+        ("jr", jr(T9)),
+        ("bne", bne(A0, 0, 5)),
+        ("b", b(5)),
+        ("bnel", bnel(A0, 0, 5)),
+        ("bgezal", bgezal(A0, 5)),
+    )
+
+    def immediate(self, *code):
+        """The `immediate` evidence of ``code`` at 0x1000, ahead of a leaf at 0x1020."""
+        words = {address: NOP for address in range(0x1000, 0x1020, 4)}
+        words.update(emit(0x1000, *code))
+        words.update(emit(0x1020, jr(RA), NOP))
         elf, ranges = image(words)
-        evidence = analyze.code_pointer_evidence(elf, ranges)
+        return analyze.code_pointer_evidence(elf, ranges)["immediate"]
+
+    def test_a_transfer_between_the_halves_breaks_the_pair(self):
+        """The high half does not survive a control-flow edge.
+
+        The delay slot still belongs to the run the transfer ends, so the pair is
+        broken only for a low half that comes after the slot.
+        """
+        for name, transfer in self.TRANSFERS:
+            with self.subTest(name):
+                self.assertEqual(
+                    self.immediate(lui(A1, 0), transfer, NOP, addiu(A1, A1, 0x1020)),
+                    frozenset(),
+                )
+
+    def test_la_low_half_in_a_delay_slot_is_immediate_evidence(self):
+        """`lui a1, hi; jal f; addiu a1, a1, lo` hands f a code pointer.
+
+        The slot executes before the transfer takes effect, so the `la` is complete
+        there, and the analyzer's sweep makes its target an entry on exactly this
+        evidence (`_seed_address_materializations`). The census used to drop its
+        high halves at the transfer, one word early, and so reported no evidence for
+        an entry the analyzer had made from it.
+        """
+        for name, transfer in self.TRANSFERS:
+            for low_name, low in (("addiu", addiu(A1, A1, 0x1020)),
+                                  ("ori", ori(A1, A1, 0x1020))):
+                with self.subTest(transfer=name, low=low_name):
+                    self.assertEqual(
+                        self.immediate(lui(A1, 0), transfer, low),
+                        frozenset({0x1020}),
+                    )
+
+    def test_immediate_evidence_respects_links_written_before_the_slot(self):
+        # The executable-looking 0x1020 comes from the old high half.
+        # A real link overwrites that half before the delayed add or OR.
+        for name, transfer, register, preserves_high in delay_slot_link_cases(0x1000):
+            for low in (addiu, ori):
+                with self.subTest(transfer=name, low=low.__name__):
+                    self.assertEqual(
+                        self.immediate(lui(register, 0), transfer, low(register, register, 0x1020)),
+                        frozenset({0x1020}) if preserves_high else frozenset(),
+                    )
+
+    def test_only_what_the_delay_slot_wrote_outlives_the_transfer(self):
+        for name, transfer in self.TRANSFERS:
+            with self.subTest(transfer=name, slot="lui"):
+                # A high half written in the slot pairs with a low half after it.
+                self.assertEqual(
+                    self.immediate(transfer, lui(S0, 0), addiu(S0, S0, 0x1020)),
+                    frozenset({0x1020}),
+                )
+            with self.subTest(transfer=name, slot="la"):
+                # The address the slot completed is the base of a chained `addiu`;
+                # the high half in a2, which the slot did not write, is gone.
+                self.assertEqual(
+                    self.immediate(
+                        lui(A1, 0), lui(A2, 0), transfer, addiu(A1, A1, 0x1000),
+                        addiu(A0, A1, 0x20), addiu(A2, A2, 0x1010),
+                    ),
+                    frozenset({0x1000, 0x1020}),
+                )
+
+    def test_a_transfer_in_a_delay_slot_has_no_slot_of_its_own(self):
+        """`jal; b; addiu`: the word after the first slot starts a new run."""
+        for name, transfer in self.TRANSFERS:
+            with self.subTest(name):
+                self.assertEqual(
+                    self.immediate(lui(A1, 0), jal(0x1020), transfer, addiu(A1, A1, 0x1020)),
+                    frozenset(),
+                )
+
+    def test_a_transfer_that_ends_its_range_has_no_delay_slot(self):
+        """The word after a range's last transfer is not that transfer's delay slot."""
+        words = emit(0x1000, lui(A1, 0), jal(0x2008))
+        words.update(emit(0x2000, addiu(A1, A1, 0x2008), NOP, jr(RA), NOP))
+        elf = WordImage(words)
+        evidence = analyze.code_pointer_evidence(elf, [(0x1000, 0x1008), (0x2000, 0x2010)])
         self.assertEqual(evidence["immediate"], frozenset())
 
     def test_code_pointer_in_a_data_section_is_data_evidence(self):
@@ -1156,6 +1296,20 @@ class AddressMaterializationTests(unittest.TestCase):
             materialized={},
         )
 
+    def test_a_link_destination_does_not_seed_an_entry_from_its_old_high_half(self):
+        base, leaf = self.BASE, self.BASE + 0x60
+        for name, transfer, register, preserves_high in delay_slot_link_cases(base):
+            for low in (addiu, ori):
+                with self.subTest(transfer=name, low=low.__name__):
+                    discovery = self.discovery({
+                        base: lui(register, base >> 16),
+                        base + 4: transfer,
+                        base + 8: low(register, register, leaf & 0xFFFF),
+                        leaf: jr(RA),
+                    })
+                    analyze._seed_address_materializations(discovery)
+                    self.assertEqual(leaf in discovery.hc, preserves_high)
+
     def test_chained_la_tracks_the_completed_value_not_the_stale_high_half(self):
         base = self.BASE
         discovery = self.discovery({
@@ -1180,6 +1334,20 @@ class AddressMaterializationTests(unittest.TestCase):
         analyze._seed_address_materializations(discovery)
 
         self.assertNotIn(base + 0x50, discovery.materialized)
+
+    def test_jalr_uses_the_table_target_before_replacing_its_link_register(self):
+        base, table, leaf = self.BASE, self.BASE + 0x80, self.BASE + 0x40
+        discovery = self.discovery({
+            base: lui(T9, base >> 16),
+            base + 4: lw(T9, T9, table & 0xFFFF),
+            base + 8: jalr(T9, T9),
+            leaf: jr(RA),
+            table: leaf,
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertIn(leaf, discovery.hc)
 
     def test_gas_switch_table_expansion_seeds_the_table_entries(self):
         # `lw v0, T(idx)` expands to lui at, %hi(T); addu at, at, idx; lw v0, %lo(T)(at):
@@ -1394,6 +1562,19 @@ class DirectBranchAuditTests(unittest.TestCase):
         words.update(emit(0x2000, lui(T9, 0), addiu(T9, T9, self.RESUME), NOP))
         candidate = self.assert_flips(words, "address-taken evidence")
         self.assertEqual(candidate.contradictions, ("address-taken-constant",))
+
+    def test_address_taken_in_a_delay_slot_leaves_the_candidate_ambiguous(self):
+        """B6. The `la` may finish in the delay slot of the call it is an argument of."""
+        words = self.base_words()
+        words.update(emit(
+            0x2000, lui(A1, 0), jal(0x2010), addiu(A1, A1, self.RESUME), NOP, jr(RA), NOP,
+        ))
+        candidate = self.assert_flips(words, "address-taken evidence")
+        self.assertEqual(candidate.contradictions, ("address-taken-constant",))
+        # One word later the pair is broken, and the join is the owner's resume again.
+        words.update(emit(0x2008, NOP, addiu(A1, A1, self.RESUME)))
+        _, _, records = self.audit(words)
+        self.assertEqual(self.only(records).classification, efb.CONTINUATION)
 
     def test_code_pointer_in_data_leaves_the_candidate_ambiguous(self):
         """B6. A jump table, vtable or callback array is the same problem.

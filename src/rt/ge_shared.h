@@ -774,6 +774,15 @@ void      ge_decode_tex_rgba(uint32_t *out);
  * (TEXMODE's multi-CLUT bit offsets the level's CLUT entries, #2031).
  * out must hold that level's (1 << tex_mip_wlog2) * (1 << tex_mip_hlog2) words. */
 void      ge_decode_tex_level_rgba(uint32_t level, uint32_t *out);
+typedef enum {
+    GE_CAPTURE_TEXTURE_INVALID,
+    GE_CAPTURE_TEXTURE_SPARSE,
+    GE_CAPTURE_TEXTURE_VRAM
+} GeCaptureTextureStorage;
+/* Classify the decoder's active footprint against the eager VRAM snapshot. */
+GeCaptureTextureStorage ge_capture_texture_storage(uint32_t level);
+/* Record the decoder's active reads from one retained sparse level. */
+int       ge_capture_note_texture_level(uint32_t level, const uint8_t *resident, uint32_t available);
 /* Decode one linear surface of guest memory to RGBA8 for the developer VRAM viewer (#314):
  * format 0-3 is a colour PSM (5650, 5551, 4444, 8888) expanded as the texture decoder does,
  * 11 is DEPTH16 shown as the VRAMDUMP decoder shows it. `stride` is in pixels. The whole
