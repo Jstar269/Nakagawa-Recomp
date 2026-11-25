@@ -58,23 +58,55 @@ repository's top-level CMake project and links each bundled title with `nk_add_t
 merges `android/app/src/debug/AndroidManifest.xml`, which lets `adb shell am start` open `TitleActivity` for
 device tests; a release build keeps that activity private.
 
-1. Build the showcase packages on the PC, outside the repository:
+1. Build the launcher-only APK once, for the SDL3 library the demo packages link against, and
+   take that library out of it:
+
+   ```bash
+   gradle -p android assembleDebug -Pnk.abis=arm64-v8a
+   python -c "import zipfile; zipfile.ZipFile('android/app/build/outputs/apk/debug/app-debug.apk').extract('lib/arm64-v8a/libSDL3.so', '<scratch>/sdl3')"
+   ```
+
+2. Build the showcase packages for Android on the PC, outside the repository. This is the
+   [package route for Android](#a-title-library-from-the-package-route): each demo's package
+   holds its own `lib<game>.so`.
 
    ```bash
    NK_SHOWCASE_BUILD_ROOT=<scratch>/showcase-build \
    NK_SHOWCASE_DEMO_ROOT=<scratch>/showcase-demo \
-   python tests/fixtures/showcase/showcase.py build
+   CC=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang \
+   ANDROID_SDL3_INCLUDE=build/android-deps/SDL/include \
+   ANDROID_SDL3_LIBDIR=<scratch>/sdl3/lib/arm64-v8a \
+   python tests/fixtures/showcase/showcase.py build --target android
    ```
 
-2. Build the APK with those packages bundled:
+   On Linux the NDK's folder is `linux-x86_64`. `build/android-deps` is where step 1 fetched
+   SDL3.
+
+3. Build the APK with the demos bundled:
 
    ```bash
-   gradle -p android assembleDebug \
+   gradle -p android assembleDebug -Pnk.abis=arm64-v8a -Pnk.demos=<scratch>/showcase-demo \
      "-Pnk.titles=showcase-scene-v1=<scratch>/showcase-demo/packages/TEST00007;showcase-breakout-v1=<scratch>/showcase-demo/packages/TEST00008"
    ```
 
-   The APK is `android/app/build/outputs/apk/debug/app-debug.apk`. `-Pnk.abis=arm64-v8a` builds
-   one ABI only. Without `nk.titles` the APK carries the launcher alone.
+   The APK is `android/app/build/outputs/apk/debug/app-debug.apk`. Without `nk.demos` and
+   `nk.titles` it carries the launcher alone.
+
+`nk.demos` bundles the whole demos folder as `demos/`, every file of each package as its
+`completion-manifest.json` lists it. The app unpacks it into its files folder on the first start
+after an install or update ([Storage](#storage)), which is where the launcher's showcase discovery
+looks on every host, so the launcher checks each package exactly as the desktop player does and
+leaves out, with the reason in its log, a demo whose package is incomplete or whose library does
+not match its record. Play starts the package's own `lib<game>.so` through `TitleActivity`. The
+packages are arm64-v8a builds: Gradle refuses `nk.demos` with any other `nk.abis`, and a package
+that is not an arm64 Android library. A second ABI would need a second set of packages, built
+with that ABI's Clang, and a way to choose between them on the device; neither exists.
+
+`nk.titles` is optional. It compiles each package's generated C into `libnk_title_<id>.so` in the
+APK's native library folder and bundles its image as `titles/<id>/<id>_image.bin`, for the debug
+route [below](#run-in-the-emulator); the launcher does not use it. Each `<id>` is the title id the
+package records (`package.json` `title.id`, the catalogue's), and Gradle refuses a package that
+records another.
 
 Hosted CI's Android launcher build job builds that launcher-only APK for arm64-v8a from a
 clean checkout, with the versions listed under [Prerequisites](#prerequisites), on every change
@@ -165,8 +197,8 @@ newer APK from another build, uninstall the old one first. Uninstalling deletes 
    developer, choose **More details** > **Install anyway**.
 4. Open **Nakagawa** from the app drawer.
 
-This build has no titles in it, and the launcher does not list bundled titles. It tests the
-launcher itself, and a log needs route B.
+This build has no titles in it, so its library is empty. It tests the launcher itself, and a log
+needs route B.
 
 ### Route B: install from the PC with adb
 
@@ -182,14 +214,18 @@ launcher itself, and a log needs route B.
    adb install -r android/app/build/outputs/apk/debug/app-debug.apk
    ```
 
-4. Start the launcher from the app drawer. Start a showcase demo with the `adb shell am start`
-   command under [Run in the emulator](#run-in-the-emulator). On a phone, `<app files>` is the
-   same `/data/user/0/io.github.jstar269.nakagawa/files`.
+4. Start the launcher from the app drawer. An APK built with `nk.demos` carries the showcase
+   demos where the library looks for them; whether a device lists them and starts them with
+   **Play** has not been checked yet ([Limits](#limits)). The `adb shell am start` command under
+   [Run in the emulator](#run-in-the-emulator) starts one directly. On a phone, `<app files>` is
+   the same `/data/user/0/io.github.jstar269.nakagawa/files`.
 
 ### What to try
 
 - **Launcher start.** It opens, draws the library screen and responds to touch or a gamepad.
-- **A showcase demo** (route B). It starts in landscape and animates, with sound.
+- **A showcase demo** (route B). The library lists both demos, and **Play** starts one in
+  landscape; it animates, with sound. If the library is empty, the log says why
+  (`Showcase <disc> (<id>) skipped: ...`).
 - **Rotate** the phone while the demo runs.
 - **Fold and unfold** while the demo runs. The screen size changes, so the presenter has to
   recreate its swapchain.
@@ -326,17 +362,24 @@ leave the folder, damaged headers and archives that end early.
 
 The player's data, settings, caches, logs and saves are in `Nakagawa/` in the app's private
 files folder (`NK_ANDROID_DATA_DIR`, set by the activities), the folder name every host uses. The files the APK bundles (`assets/`
-with the UI fonts, `titles/` with the bundled titles) are unpacked into the files folder itself
-on the first start after an install or update, and it is the working directory: SDL resolves a
-relative path against that folder, so `SDL_GetBasePath()` (`./` on Android) finds them.
+with the UI fonts, `demos/` with the showcase demos, `titles/` with the `nk.titles` images) are
+unpacked into the files folder itself on the first start after an install or update, and it is
+the working directory: SDL resolves a relative path against that folder, so `SDL_GetBasePath()`
+(`./` on Android) finds them, and the launcher finds `demos/` there as the desktop player finds
+it beside its program.
+
+The unpack replaces each bundled folder in turn and writes its stamp last, so an interrupted one
+is done again on the next start. It is not atomic: until then a demo package can be incomplete,
+or hold files from two builds. The launcher's check of each package (every file it lists, by
+digest) leaves such a package out of the library and logs which file did not match.
 
 ## Limits
 
 | Area | Status |
 | --- | --- |
-| Launcher library | The launcher does not list bundled titles; they start from `adb` (above). |
+| Launcher library | An APK built with `nk.demos` lists the showcase demos and Play starts them from the files folder, checked on the PC against the same packages; no device or emulator has run it yet. Other bundled titles (`nk.titles`) are not listed; they start from `adb` (above). |
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
-| Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Moving the package to the phone, and the launcher starting it, are not wired. |
+| Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Only the showcase demos reach the phone, inside the APK (`nk.demos`); copying another package to it is not wired. |
 | Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the default APK; `-Pnk.toolchain` bundles them for arm64-v8a, and nothing runs them yet. |
 | Lifecycle | Measured in the emulator: with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
