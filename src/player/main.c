@@ -7058,15 +7058,16 @@ static int player_command_line_launch(PlayerRun *run) {
             return 2;
         }
         app->selected_game_index = run->launch_index;
-        const GameRecord *launch_game = &app->games[run->launch_index];
+        GameRecord launch_game;
+        player_app_select_launch_game(app, &app->games[run->launch_index], &launch_game);
         /* Bundled demo entries are not loaded from library.json. */
         bool sample_entry = run->launch_index >= run->user_library_count;
         NkRuntimePackageStatus launch_status =
             player_app_validate_runtime_package(
-                app, launch_game, NULL, NULL, 0);
+                app, &launch_game, NULL, NULL, 0);
         /* The launch worker's own rule, under the root it validated the package in. */
-        if (!player_runtime_available(launch_status, launch_game,
-                                      player_app_package_root(app, launch_game))) {
+        if (!player_runtime_available(launch_status, &launch_game,
+                                      player_app_package_root(app, &launch_game))) {
             if (sample_entry) {
                 fprintf(stderr, "[PLAYER] Launch index %d is a bundled SAMPLE demo, not in "
                         "library.json, and has no prepared runtime; PLAY NOW is unavailable.\n",
@@ -7084,8 +7085,8 @@ static int player_command_line_launch(PlayerRun *run) {
                 (void)snprintf(message, sizeof(message),
                                "%s is not built for this PC yet. Open Nakagawa Recomp and "
                                "build it from its page, then start it from Steam again.",
-                               launch_game->title_name[0] ? launch_game->title_name
-                                                          : launch_game->disc_id);
+                               launch_game.title_name[0] ? launch_game.title_name
+                                                         : launch_game.disc_id);
                 player_launch_title_refused(run, message);
             }
             return 3;

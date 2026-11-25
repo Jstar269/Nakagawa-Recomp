@@ -9460,6 +9460,49 @@ class FirstRunRouteTests(unittest.TestCase):
                       authentic.stdout + authentic.stderr)
         self.assertNotEqual(authentic.returncode, 3, authentic.stdout + authentic.stderr)
 
+    def test_headless_acceptance_preflights_stock_with_ace_saved(self) -> None:
+        with tempfile.TemporaryDirectory(prefix=".acceptance-stock-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            iso = scratch / "display.iso"
+            eboot = build_plain_mips_elf()
+            create_test_iso_with_executables(iso, eboot, disc_id="TEST00006",
+                                             title="Synthetic Display Smoke")
+            user_root = scratch / "user-data"
+            (user_root / "config").mkdir(parents=True)
+            settings = user_root / "config" / "settings.json"
+            settings.write_text(json.dumps({
+                "schema_version": 2, "enhanced": {"default": "authentic"},
+                "title_play": {"TEST00006": {"mode": "ace"}},
+            }), encoding="utf-8")
+            saved_settings = settings.read_bytes()
+            runtime_root = scratch / "runtime"
+            enhancements = runtime_root / "enhancements"
+            enhancements.mkdir(parents=True)
+            (enhancements / "test00006-60hz.json").write_text(json.dumps({
+                "id": "fixture-60hz", "target_title_id": "display-smoke-v1",
+            }), encoding="utf-8")
+            synthetic_ready_package(runtime_root, eboot)
+            args = ["--empty", f"--user-data-root={user_root}", "--headless-launch"]
+            checkpoint = "--headless-accept-presented-frames=1"
+
+            # The package has the correct stock metadata and a non-runnable executable.
+            # The worker must prepare the session and try it before the route fails.
+            for route in ([f"--iso={iso}", "--launch-now"], ["--launch-index=0"]):
+                with self.subTest(route=route):
+                    completed = self.run_route(scratch, [*args, *route, checkpoint])
+                    output = completed.stdout + completed.stderr
+                    self.assertIn("Preparing launch session for TEST00006", output)
+                    self.assertIn("Spawning runtime:", output)
+                    self.assertIn("display-smoke-v1.exe", output)
+                    self.assertNotEqual(completed.returncode, 0, output)
+                    self.assertNotIn("HEADLESS_ACCEPTANCE status=PASS", output)
+                    self.assertEqual(settings.read_bytes(), saved_settings)
+
+            ordinary = self.run_route(scratch, [*args, "--launch-index=0"])
+            output = ordinary.stdout + ordinary.stderr
+            self.assertEqual(ordinary.returncode, 3, output)
+            self.assertNotIn("Preparing launch session", output)
+
     def test_launch_index_on_an_empty_library_fails_with_a_clear_message(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".first-run-empty-", dir=ROOT) as tmp:
             scratch = Path(tmp)
