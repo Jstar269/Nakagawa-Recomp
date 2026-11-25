@@ -165,9 +165,9 @@ static inline uint32_t sr_vfpu_rndf_step(uint32_t rcx[8], int two) {
 /* vh2f: one IEEE half to a float32 word. A half denormal becomes a zero of its sign;
  * exponent 31 keeps the 10-bit payload in the LOW mantissa bits (0x7c01 -> 0x7f800001,
  * 0x7e00 -> 0x7f800200), so infinities map to infinities; normals convert exactly.
- * vfim.s maps its immediate the same way (pspautotests e37443a6 tests/cpu/vfpu/vfim.expected,
- * recorded on a PSP, and PSP-VFPU-PREFIX-001), with its D prefix applied as PREFIX-001
- * measured it. */
+ * vfim.s uses the same mapping for its immediate. The raw words are pinned in pspautotests
+ * e37443a6 tests/cpu/vfpu/vfim.expected. PSP-VFPU-PREFIX-001 records the D-prefix behavior
+ * applied after conversion. */
 static inline uint32_t sr_vfpu_h2f(uint32_t h) {
     const uint32_t sign = (h & 0x8000u) << 16, e = (h >> 10) & 0x1fu, m = h & 0x3ffu;
     if (e == 0u) return sign;
@@ -1172,9 +1172,8 @@ static inline float sr_vfpu_sop(const float *fa, const float *fb, int n) {
     return out;
 }
 
-/* vadd, vsub, vmul, vscl and vdiv lane arithmetic as a PSP-3000 returned it (unrecorded PSP
- * read, 2026-11-08, issue #326; probe case vfpu-basic-arith, 20 operand classes, all 400
- * ordered pairs, .s/.p/.t/.q identical). C leaves the NaN that a NaN-producing operation
+/* vadd, vsub, vmul, vscl and vdiv lane arithmetic from PSP-VFPU-BASICARITH-001
+ * (PSP-3000, 2026-11-08, issue #326; 20 operand classes). C leaves the NaN that a NaN-producing operation
  * returns to the host, so the generated code and sr_vfpu_interp, each compiled on its own,
  * call these helpers for every lane operation. IEEE float32 with denormals flushed to a zero of
  * their sign on input. The output flush is measured only for vdiv (1 / 2^127 and 1 / FLT_MAX
@@ -1183,10 +1182,11 @@ static inline float sr_vfpu_sop(const float *fa, const float *fb, int n) {
  * is never an input payload: vadd and vsub give 0x7f800001 for a NaN operand or Inf - Inf,
  * and vmul, vscl and vdiv give 0x7f800001 with the sign bit XOR of the two operand signs
  * for a NaN operand, 0 * Inf, 0 / 0 or Inf / Inf. vdiv was measured at .s only; the other
- * widths use the same lane rule. vmscl and the three products of vcrs.t are vmul lanes
- * (PSP-VFPU-WIDEROPS-001: a NaN, an infinite and a denormal vcrs.t source gave 0x7f800001,
- * an infinity and 0; pspautotests e37443a6 tests/cpu/vfpu/nan_gen.expected, recorded on a
- * PSP: 0x7f800001 for each inf * 0 lane). */
+ * widths use the same lane rule. vmscl and the three products of vcrs.t use the vmul rule.
+ * PSP-VFPU-WIDEROPS-001 records a positive NaN, positive infinity and a denormal in the
+ * first vcrs.t source lane. pspautotests e37443a6 tests/cpu/vfpu/nan_gen.expected records
+ * 0x7f800001 for each +inf * +0 lane. XOR-sign NaNs outside those cases and output
+ * underflow for vcrs.t follow the vmul rule by extension. */
 static inline uint32_t sr_vfpu_bits(float x) {
     uint32_t u;
     memcpy(&u, &x, 4);

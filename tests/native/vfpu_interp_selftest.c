@@ -2688,35 +2688,43 @@ static int check_vmscl_measured(void) {
     return bad;
 }
 
-/* One cell of check_vocp_vcrs_measured or check_vfim_measured: n source lanes at the word's vs
- * (and vt, when tv is given) registers, every other register the probe's sentinel 0x7a5a5a5a,
- * then n result lanes at vd (vfim.s: the vt field) from the generated body and from
- * sr_vfpu_interp. */
+enum { MEASURED_NAN_SENTINEL = 0x7a5a5a5a };
+
+/* Compare the emitted body and interpreter independently with the probe's expected destination,
+ * unchanged register words outside that destination, and the consumed prefix state. */
 static int measured_nan_word_cell(const char *name, int n, const uint32_t *sv, const uint32_t *tv,
-                                  const uint32_t *want) {
+                                  const uint32_t *want, uint32_t dprefix) {
     const int c = find_overlap_diff_case(name);
     CHECK(c >= 0, "vocp/vcrs/vfim probe word is in the overlap-diff header");
     if (c < 0) return 1;
     const uint32_t w = overlap_diff_cases[c].w;
     const int vfim = (w >> 26) == 0x37u;
     uint8_t si[4], ti[4], di[4];
-    CpuState aot, interp;
+    CpuState aot;
     setup_identity_compute(&aot);
-    for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a5au;
+    aot.vfpuCtrl[3] = 0x3fu;
+    for (int i = 0; i < 128; i++) aot.vi[i] = MEASURED_NAN_SENTINEL;
     vreg_idx((int)(vfim ? (w >> 16) & 0x7fu : w & 0x7fu), n, di);
     vreg_idx((int)((w >> 8) & 0x7fu), n, si);
     vreg_idx((int)((w >> 16) & 0x7fu), n, ti);
     for (int k = 0; k < n && sv; k++) aot.vi[si[k]] = sv[k];
     for (int k = 0; k < n && tv; k++) aot.vi[ti[k]] = tv[k];
-    interp = aot;
+    CpuState expected = aot;
+    for (int k = 0; k < n; k++) expected.vi[di[k]] = want[k];
+    aot.vfpuCtrl[2] = dprefix;
+    CpuState interp = aot;
     overlap_diff_run_codegen(&aot, c);
     const int kind = sr_vfpu_interp(&interp, w);
-    int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
-    for (int k = 0; k < n; k++) ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+    const bool registers_ok = memcmp(aot.vi, expected.vi, sizeof(aot.vi)) == 0 &&
+                              memcmp(interp.vi, expected.vi, sizeof(interp.vi)) == 0;
+    const bool controls_ok = memcmp(aot.vfpuCtrl, expected.vfpuCtrl, sizeof(aot.vfpuCtrl)) == 0 &&
+                             memcmp(interp.vfpuCtrl, expected.vfpuCtrl, sizeof(interp.vfpuCtrl)) == 0;
+    const bool ok = kind == SR_VFPU_COMPUTE && registers_ok && controls_ok;
     g_checks++;
     if (!ok) {
         g_failures++;
-        fprintf(stderr, "FAIL: %s (kind=%d)", name, kind);
+        fprintf(stderr, "FAIL: %s (kind=%d dprefix=%03x registers_ok=%d controls_ok=%d)",
+                name, kind, dprefix, (int)registers_ok, (int)controls_ok);
         for (int k = 0; k < n; k++)
             fprintf(stderr, " | src=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x", sv ? sv[k] : w & 0xffffu,
                     want[k], aot.vi[di[k]], interp.vi[di[k]]);
@@ -2751,7 +2759,7 @@ static int check_vocp_vcrs_measured(void) {
     };
     /* vcrs.t (a1 b2, a2 b0, a0 b1). WIDEROPS-001: (1e8, 1, -1e8) x (0.75, 4, -1.5), then a0
      * replaced by 0x7fc00011, +inf and 0x00000001; nan_gen.expected: (inf, inf, inf) x 0;
-     * signed_zero.expected: the eight vector inputs with a zero lane. */
+     * signed_zero.expected: seven signed-zero cases and a finite control. */
     static const uint32_t crs[13][3][3] = {
         {{0x4cbebc20u, 0x3f800000u, 0xccbebc20u}, {0x3f400000u, 0x40800000u, 0xbfc00000u},
          {0xbfc00000u, 0xcc8f0d18u, 0x4dbebc20u}},
@@ -2781,17 +2789,15 @@ static int check_vocp_vcrs_measured(void) {
          {0x3f800000u, 0x3f800000u, 0xbf800000u}},
     };
     int bad = 0;
-    for (int i = 0; i < 20; i++) bad |= measured_nan_word_cell("wo-vocp-s", 1, &specials[i], NULL, &ocp[i]);
-    for (int i = 0; i < 20; i += 4) bad |= measured_nan_word_cell("wo-vocp-q", 4, &specials[i], NULL, &ocp[i]);
-    for (int i = 0; i < 2; i++) bad |= measured_nan_word_cell("wo-vocp-q", 4, ocp_q[i][0], NULL, ocp_q[i][1]);
-    for (int i = 0; i < 13; i++) bad |= measured_nan_word_cell("wo-vcrs-t", 3, crs[i][0], crs[i][1], crs[i][2]);
+    for (int i = 0; i < 20; i++) bad |= measured_nan_word_cell("wo-vocp-s", 1, &specials[i], NULL, &ocp[i], 0u);
+    for (int i = 0; i < 20; i += 4) bad |= measured_nan_word_cell("wo-vocp-q", 4, &specials[i], NULL, &ocp[i], 0u);
+    for (int i = 0; i < 2; i++) bad |= measured_nan_word_cell("wo-vocp-q", 4, ocp_q[i][0], NULL, ocp_q[i][1], 0u);
+    for (int i = 0; i < 13; i++) bad |= measured_nan_word_cell("wo-vcrs-t", 3, crs[i][0], crs[i][1], crs[i][2], 0u);
     return bad;
 }
 
-/* vfim.s with no pending prefix against the words a PSP returned: pspautotests e37443a6
- * tests/cpu/vfpu/vfim.expected (vfim.s S000, recorded on a PSP) and PSP-VFPU-PREFIX-001
- * (vfim.s S200, PSP-3000, 2026-11-10, issue #326). The half maps as vh2f maps it: a denormal to
- * a zero of its sign, and an exponent-31 half to sign | 0x7f800000 | its 10 mantissa bits. */
+/* Pinned pspautotests e37443a6 vfim.expected words for S000 and project PSP-VFPU-PREFIX-001
+ * PSP-3000 results for S200 with and without a pending D prefix. */
 static int check_vfim_measured(void) {
     /* The half and the word. */
     static const uint32_t fim_s000[14][2] = {
@@ -2808,12 +2814,24 @@ static int check_vfim_measured(void) {
     for (int i = 0; i < 14; i++) {
         char name[32];
         snprintf(name, sizeof(name), "vfim-s000-%04x", (unsigned)fim_s000[i][0]);
-        bad |= measured_nan_word_cell(name, 1, NULL, NULL, &fim_s000[i][1]);
+        bad |= measured_nan_word_cell(name, 1, NULL, NULL, &fim_s000[i][1], 0u);
     }
     for (int i = 0; i < 8; i++) {
         char name[32];
         snprintf(name, sizeof(name), "vfim-s200-%04x", (unsigned)fim_s200[i][0]);
-        bad |= measured_nan_word_cell(name, 1, NULL, NULL, &fim_s200[i][1]);
+        bad |= measured_nan_word_cell(name, 1, NULL, NULL, &fim_s200[i][1], 0u);
+    }
+    static const struct { uint32_t half, dprefix, want; } d_cells[] = {
+        {0xc000u, 0x001u, 0x00000000u}, {0x8000u, 0x001u, 0x00000000u},
+        {0x7c00u, 0x001u, 0x3f800000u}, {0x7bffu, 0x001u, 0x3f800000u},
+        {0x7c01u, 0x001u, 0x7f800001u}, {0xc000u, 0x003u, 0xbf800000u},
+        {0x8000u, 0x003u, 0x80000000u}, {0x7c01u, 0x003u, 0x7f800001u},
+        {0x3c00u, 0x100u, MEASURED_NAN_SENTINEL},
+    };
+    for (size_t i = 0; i < sizeof(d_cells) / sizeof(d_cells[0]); i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "vfim-s200-%04x", (unsigned)d_cells[i].half);
+        bad |= measured_nan_word_cell(name, 1, NULL, NULL, &d_cells[i].want, d_cells[i].dprefix);
     }
     return bad;
 }

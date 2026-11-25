@@ -498,8 +498,10 @@ int main(void) {{
                 self.assertIn("sr_vfpu_", effect)
                 if name in ("vadd.q", "vsub.t", "vdiv.p", "vmul.s", "vscl.q", "vcrs.t", "vmscl.t", "vmscl alias"):
                     # The PSP-3000 lane rule of the vfpu-basic-arith read (PSP-VFPU-BASICARITH-001, 2026-11-08);
-                    # a vcrs.t lane is a vmul lane (PSP-VFPU-WIDEROPS-001).
+                    # vcrs.t uses the measured vmul rule for each product.
                     self.assertRegex(effect, r"sr_vfpu_(add|sub|mul|div)\(")
+                if name == "vcrs.t":
+                    self.assertEqual(effect.count("sr_vfpu_mul("), 3)
                 if name in ("vdot.q", "vhdp.t", "vcrsp.t", "vqmul.q", "vmmul.t", "vtfm2.t"):
                     self.assertIn("sr_vfpu_sop(", effect)
                 self.assertIsNone(bare.search(effect), effect)

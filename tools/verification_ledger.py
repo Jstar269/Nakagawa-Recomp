@@ -197,7 +197,8 @@ VFPU_MEASURED_SELFTESTS = {
     },
     "vfpu-interp-selftest:check_vfim_measured": {
         "oracle_id": "PSP-VFPU-PREFIX-001",
-        "reason": "runs vfim.s of the eight measured halves through the AOT body and the interpreter",
+        "reason": "runs vfim.s of the eight measured halves and the recorded D-prefix mask and saturation "
+                  "cells through the AOT body and the interpreter",
     },
     "vfpu-interp-selftest:check_vf2i_measured_cells": {
         "oracle_id": "PSP-VFPU-CONVERT-001",

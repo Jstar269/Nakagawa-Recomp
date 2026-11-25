@@ -2777,7 +2777,7 @@ def _vfpu37_immediate_register(addr, w, options, delay_branch_pc):
     imm = w & 0xFFFF
     if (w >> 23) & 1:
         # vfim.s maps the half as vh2f does (sr_vfpu_h2f; pspautotests e37443a6
-        # tests/cpu/vfpu/vfim.expected, recorded on a PSP, and PSP-VFPU-PREFIX-001).
+        # tests/cpu/vfpu/vfim.expected and the PSP-VFPU-PREFIX-001 cells).
         bits = f"sr_vfpu_h2f(0x{imm:04x}u)"
     else:
         iv = imm - 0x10000 if imm & 0x8000 else imm

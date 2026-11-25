@@ -491,8 +491,9 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                               * S gains negate-all, T is forced to constant ONE (user T abs
                               * may swap the constant, negate still applies). A NaN lane
                               * gives 0x7f800001 whatever its sign and payload
-                              * (PSP-VFPU-WIDEROPS-001; pspautotests e37443a6
-                              * tests/cpu/vfpu/specials.expected, recorded on a PSP). */
+                              * in the .s/.q cells (PSP-VFPU-WIDEROPS-001; pspautotests
+                              * e37443a6 tests/cpu/vfpu/specials.expected). The .p/.t forms
+                              * reuse the lane rule. */
                 float sv[4], tv[4], d[4];
                 vreg_idx(vs, n, si);
                 sr_vread(sv, s, si, n, s->vfpuCtrl[0] | (0xFu << 16));
@@ -899,9 +900,8 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         static const int ss[4] = {1, 2, 0, 3}, ts[4] = {2, 0, 1, 3};
         float a[4], b[4], d[4];
         /* vcrs is the triple-vector form only. Reject reserved widths before
-         * reading sources; the lane permutation below uses all triple lanes. Each lane
-         * is a vmul lane (PSP-VFPU-WIDEROPS-001; pspautotests e37443a6
-         * tests/cpu/vfpu/nan_gen.expected, recorded on a PSP). */
+         * reading sources; the lane permutation below uses all triple lanes. Use the
+         * vmul rule for each product, with the evidence limits documented in recomp.h. */
         if (n != 3) return SR_VFPU_OTHER;
         vreg_idx(vd, n, di); vreg_idx(vs, n, si); vreg_idx(vt, n, ti);
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
