@@ -3072,6 +3072,13 @@ bool player_app_boot_event_is_window_ready(const char *line) {
 
 static void player_read_boot_events(PlayerApp *app, bool live);
 
+/* The runtime writes this at the first guest frame or the first GPU present
+   (src/rt/gui.c), after guest code has run; window_ready comes from gui_init
+   before the guest starts and proves no game ran. */
+static bool player_boot_event_is_first_frame(const char *line) {
+    return line && strstr(line, "BOOT_EVENT phase=first_frame") != NULL;
+}
+
 bool player_app_child_window_ready(PlayerApp *app) {
     if (!app || app->child_window_ready || !app->boot_event_file_path[0]) {
         return app && app->child_window_ready;
@@ -3147,6 +3154,7 @@ static bool player_monitor_game_start(PlayerApp *app, uint64_t now_ms) {
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
     char kept_log[NK_MAX_PATH] = "";
     if (app->boot_event_file_path[0]) {
         /* The run's output stays in the logs folder (#1303). */
@@ -6914,6 +6922,7 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     /* The boot-event marker and the input mapping are written here, on the
        thread that owns the app; the work only reads the resulting paths. */
     app->child_window_ready = false;
+    app->child_first_frame = false;
     app->launch_running_check_logged = false;
     app->child_boot_event_seen = false;
     app->child_boot_wait_noted = false;
@@ -7359,6 +7368,7 @@ void player_app_stop_game(PlayerApp *app) {
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
     player_clear_stalled_game_notice(app, true);
     if (app->boot_event_file_path[0]) {
         /* The run's output stays in the logs folder (#1303). */
@@ -7412,6 +7422,7 @@ void player_app_stop_stalled_game(PlayerApp *app) {
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
 
     char kept_log[NK_MAX_PATH] = "";
     if (app->boot_event_file_path[0]) {
@@ -7910,10 +7921,13 @@ static void player_read_boot_events(PlayerApp *app, bool live) {
                 line[used] = '\0';
                 if (live) player_consume_stall_event_line(app, line);
                 player_app_consume_render_path_line(app, line);
-                /* Also on the final drain: a child that opened its window and
-                   exited between two ticks still started. */
-                if (player_app_boot_event_is_window_ready(line)) {
+                if (live && player_app_boot_event_is_window_ready(line)) {
                     app->child_window_ready = true;
+                }
+                /* Also on the final drain: a child that presented its first
+                   frame and exited between two reads still ran the game. */
+                if (player_boot_event_is_first_frame(line)) {
+                    app->child_first_frame = true;
                 }
             }
             app->boot_event_read_offset = offset;
@@ -7927,12 +7941,19 @@ static void player_read_boot_events(PlayerApp *app, bool live) {
     fclose(events);
 }
 
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+void (*g_player_state_test_after_live_read)(PlayerApp *app) = NULL;
+#endif
+
 bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
     if (!app || !app->is_game_running) return false;
     if (app->launch_time_ms == 0) {
         app->launch_time_ms = now_ms;
     }
     player_read_boot_events(app, true);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+    if (g_player_state_test_after_live_read) g_player_state_test_after_live_read(app);
+#endif
     if (nk_launch_is_running(&app->launch_session)) {
         return player_monitor_game_start(app, now_ms);
     }
@@ -7946,11 +7967,11 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
     bool has_semantic_stop = player_read_semantic_stop(
         app->boot_event_file_path, stopped_boundary, sizeof(stopped_boundary),
         &stopped_issue);
-    /* A child that exits within 500 ms without ever opening its window closed
-       while starting. One that reached window_ready or first_frame did start:
-       a clean exit 0 is then a short but successful run (#306). A non-zero
-       exit stays premature however far it got. */
-    bool premature_exit = elapsed_ms < 500 && (code != 0 || !app->child_window_ready);
+    /* An exit inside 500 ms closed the game while it was starting when the
+       code is non-zero or the game never presented its first frame. A clean
+       exit 0 after the first frame is a short but successful run (#306).
+       window_ready alone is not that: it is written before guest code runs. */
+    bool premature_exit = elapsed_ms < 500 && (code != 0 || !app->child_first_frame);
     bool runtime_failed = premature_exit || code != 0 || has_semantic_stop;
     /* Restart game on the card relaunches this one. */
     char stopped_disc_id[sizeof(app->last_error.subject_disc_id)];
@@ -7966,6 +7987,7 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
        one job handle per finished game in the long-lived player (#511). */
     nk_launch_stop(&app->launch_session);
     app->child_window_ready = false;
+    app->child_first_frame = false;
     player_dev_log_add(app, "runtime", "game exited with code %d after %llu ms", code,
                        (unsigned long long)elapsed_ms);
     if (app->boot_event_file_path[0]) {

@@ -1935,9 +1935,10 @@ static int repeat_launch_child_mode(void) {
         if (fclose(events) != 0) ok = 0;
         if (!ok) return 6;
     }
-    const char *window_ready = getenv("NK_REPEAT_LAUNCH_WINDOW_READY");
+    const char *window_ready = getenv("NK_REPEAT_LAUNCH_BOOT_PHASE");
     if (window_ready && *window_ready && boot_event_path && *boot_event_path) {
-        /* The runtime's own report that its window opened (src/rt/gui.c). */
+        /* One boot event of the runtime's own form, such as window_ready or
+           first_frame (src/rt/gui.c). */
         FILE *events = fopen(boot_event_path, "ab");
         if (!events) return 6;
         ok = fprintf(events, "BOOT_EVENT phase=%s source=cpu\n", window_ready) >= 0;
@@ -2067,6 +2068,40 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
     assert_session_released(&app->launch_session);
     assert(app->last_error.error_code[0] == '\0');
     assert(app->active_view != VIEW_ERROR);
+}
+
+/* #306: launch the repeat-launch child with `exit_code`, after it writes the
+ * BOOT_EVENT phase `boot_phase` (empty: none), let it exit, and settle the session
+ * 82 ms in, from no error and the Library. `hook` (may be NULL) runs between the
+ * monitor's live read of the session file and its exit check. */
+static void short_exit_run(PlayerApp *app, const char *exit_code, const char *boot_phase,
+                           int expected_code, uint64_t launch_tick,
+                           void (*hook)(PlayerApp *)) {
+    memset(&app->last_error, 0, sizeof(app->last_error));
+    app->active_view = VIEW_LIBRARY;
+    set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", exit_code);
+    set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", boot_phase);
+    assert(player_app_launch_game(app, 0));
+    assert(app->is_game_running);
+    app->launch_time_ms = launch_tick;
+    assert(nk_launch_wait(&app->launch_session, 10000) == expected_code);
+    g_player_state_test_after_live_read = hook;
+    assert(player_app_monitor_game_session(app, launch_tick + 82u));
+    g_player_state_test_after_live_read = NULL;
+    assert(!app->is_game_running);
+    assert_session_released(&app->launch_session);
+}
+
+static void append_boot_event_to_session(PlayerApp *app, const char *line) {
+    assert(append_runtime_event(app->boot_event_file_path, line));
+}
+
+static void append_first_frame_after_live_read(PlayerApp *app) {
+    append_boot_event_to_session(app, "BOOT_EVENT phase=first_frame source=cpu\n");
+}
+
+static void append_window_ready_after_live_read(PlayerApp *app) {
+    append_boot_event_to_session(app, "BOOT_EVENT phase=window_ready backend=offscreen\n");
 }
 
 /* Catalog-epoch coherence probe (#670). Built only with the test seam macro,
@@ -21174,47 +21209,38 @@ int main(int argc, char **argv) {
         set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
         repeat_launch_and_settle(rep, 0, 6000, 6500, memstick1);
 
-        /* #306: a clean exit 0 inside 500 ms is a short successful run once
-           the runtime reported its window or first frame. Without that report,
-           or with a non-zero exit, the early exit stays RUNTIME_PREMATURE_EXIT. */
-        {
-            static const char *const reached[] = {"window_ready", "first_frame"};
-            for (size_t r = 0; r < sizeof(reached) / sizeof(reached[0]); r++) {
-                set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
-                set_environment_value("NK_REPEAT_LAUNCH_WINDOW_READY", reached[r]);
-                memset(&rep->last_error, 0, sizeof(rep->last_error));
-                assert(player_app_launch_game(rep, 0));
-                rep->launch_time_ms = 7000;
-                assert(nk_launch_wait(&rep->launch_session, 10000) == 0);
-                assert(player_app_monitor_game_session(rep, 7082));
-                assert(!rep->is_game_running);
-                assert_session_released(&rep->launch_session);
-                assert(rep->last_error.error_code[0] == '\0');
-                assert(rep->active_view != VIEW_ERROR);
-                assert(!rep->child_window_ready);
-            }
-            /* Non-zero exit after the window opened: still a failure. */
-            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
-            assert(player_app_launch_game(rep, 0));
-            rep->launch_time_ms = 7200;
-            assert(nk_launch_wait(&rep->launch_session, 10000) == 7);
-            assert(player_app_monitor_game_session(rep, 7282));
-            assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
-            assert(rep->active_view == VIEW_ERROR);
-            /* Exit 0 with no window report (never signalled): still premature. */
-            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
-            set_environment_value("NK_REPEAT_LAUNCH_WINDOW_READY", "");
-            assert(player_app_launch_game(rep, 0));
-            rep->launch_time_ms = 7400;
-            assert(nk_launch_wait(&rep->launch_session, 10000) == 0);
-            assert(player_app_monitor_game_session(rep, 7482));
-            assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
-            assert(rep->active_view == VIEW_ERROR);
-            /* A stale window report never carries over to the next launch. */
-            memset(&rep->last_error, 0, sizeof(rep->last_error));
-            rep->active_view = VIEW_LIBRARY;
-            repeat_launch_and_settle(rep, 0, 7600, 8100, memstick1);
-        }
+        /* #306: inside 500 ms a clean exit 0 is a short successful run only after
+           the runtime's first frame. window_ready alone (written before guest code
+           runs), no report, and a non-zero exit all stay RUNTIME_PREMATURE_EXIT.
+           Every case starts from no error and the Library, so none can pass on
+           what an earlier case left behind. */
+        short_exit_run(rep, "0", "first_frame", 0, 7000u, NULL);
+        assert(rep->last_error.error_code[0] == '\0');
+        assert(rep->active_view != VIEW_ERROR);
+        assert(!rep->child_first_frame);
+        /* Right after the success above, so a flag left by it would show here. */
+        short_exit_run(rep, "0", "", 0, 7200u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+        short_exit_run(rep, "0", "window_ready", 0, 7400u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+        short_exit_run(rep, "7", "first_frame", 7, 7600u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+        /* The child writes nothing; the first frame lands in the session file
+           between the tick's live read and its exit check, so only the final
+           drain can see it. */
+        short_exit_run(rep, "0", "", 0, 7800u, append_first_frame_after_live_read);
+        assert(rep->last_error.error_code[0] == '\0');
+        assert(rep->active_view != VIEW_ERROR);
+        /* The same seam appending only window_ready is still a premature exit. */
+        short_exit_run(rep, "0", "", 0, 8000u, append_window_ready_after_live_read);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+        set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", "");
+        memset(&rep->last_error, 0, sizeof(rep->last_error));
+        rep->active_view = VIEW_LIBRARY;
 
         /* Failure C: a longer-lived child exiting non-zero is classified as
            RUNTIME_ERROR_EXIT. */
