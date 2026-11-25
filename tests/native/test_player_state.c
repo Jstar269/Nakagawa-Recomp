@@ -163,13 +163,15 @@ static void write_iso_record(uint8_t *sector, size_t offset,
     memcpy(sector + offset + 33, name, name_size);
 }
 
-static void write_iso_with_fixture_eboot(const char *path) {
+static void write_iso_with_fixture_eboot(const char *path, const uint8_t *clip,
+                                         uint32_t clip_size, size_t clip_available) {
     enum { SECTOR_SIZE = 2048, ISO_SECTORS = 21 };
     static const uint8_t dot[] = {0};
     static const uint8_t dotdot[] = {1};
     static const uint8_t game[] = "PSP_GAME";
     static const uint8_t sysdir[] = "SYSDIR";
     static const uint8_t eboot[] = "EBOOT.BIN;1";
+    static const uint8_t snd0[] = "SND0.AT3;1";
     uint8_t image[ISO_SECTORS * SECTOR_SIZE];
     memset(image, 0, sizeof(image));
 
@@ -191,6 +193,9 @@ static void write_iso_with_fixture_eboot(const char *path) {
     write_iso_record(game_dir, 34, dotdot, sizeof(dotdot), 17, SECTOR_SIZE, true);
     write_iso_record(game_dir, 68, sysdir, sizeof(sysdir) - 1, 19,
                      SECTOR_SIZE, true);
+    if (clip_size != 0u)
+        write_iso_record(game_dir, 68u + game_dir[68], snd0, sizeof(snd0) - 1u,
+                         ISO_SECTORS, clip_size, false);
 
     uint8_t *sysdir_dir = image + 19 * SECTOR_SIZE;
     write_iso_record(sysdir_dir, 0, dot, sizeof(dot), 19, SECTOR_SIZE, true);
@@ -201,7 +206,54 @@ static void write_iso_with_fixture_eboot(const char *path) {
     FILE *file = fopen(path, "wb");
     assert(file != NULL);
     assert(fwrite(image, 1, sizeof(image), file) == sizeof(image));
+    if (clip_available != 0u)
+        assert(fwrite(clip, 1, clip_available, file) == clip_available);
     assert(fclose(file) == 0);
+}
+
+enum { TEST_SND0_CHUNK_BYTES = 64u * 1024u, TEST_SND0_BYTES = TEST_SND0_CHUNK_BYTES + 37u };
+
+typedef struct {
+    const char *path;
+    const uint8_t *clip;
+    unsigned checks;
+} TestSnd0Read;
+
+static bool cancel_snd0_after_first_chunk(void *user) {
+    TestSnd0Read *read = user;
+    ++read->checks;
+    if (read->checks == 3u) {
+        /* The reader has already opened the complete fixture and found the
+           entry. Leave only its first payload chunk readable. A bulk read
+           now fails before the callback can cancel at the next boundary. */
+        write_iso_with_fixture_eboot(read->path, read->clip, TEST_SND0_BYTES,
+                                     TEST_SND0_CHUNK_BYTES);
+    }
+    return read->checks >= 4u;
+}
+
+static void test_bounded_iso_snd0_cancel(const char *path) {
+    const char *entry = "PSP_GAME/SND0.AT3";
+    uint8_t *clip = malloc(TEST_SND0_BYTES);
+    assert(clip != NULL);
+    for (size_t i = 0; i < TEST_SND0_BYTES; ++i)
+        clip[i] = (uint8_t)(i ^ (i >> 16));
+    write_iso_with_fixture_eboot(path, clip, TEST_SND0_BYTES, TEST_SND0_BYTES);
+
+    uint8_t *data = NULL;
+    size_t size = 0;
+    assert(nk_iso_read_bounded_entry(path, entry, TEST_SND0_BYTES, &data, &size,
+                                     NULL, NULL) == NK_ICON_OK);
+    assert(size == TEST_SND0_BYTES && memcmp(data, clip, size) == 0);
+    free(data);
+
+    data = clip;
+    size = TEST_SND0_BYTES;
+    TestSnd0Read read = {path, clip, 0u};
+    assert(nk_iso_read_bounded_entry(path, entry, TEST_SND0_BYTES, &data, &size,
+                                     cancel_snd0_after_first_chunk, &read) == NK_ICON_ERR_CANCELLED);
+    assert(read.checks == 4u && data == NULL && size == 0u);
+    free(clip);
 }
 
 static void write_binary_file(const char *path, const unsigned char *bytes, size_t size) {
@@ -19608,6 +19660,10 @@ int main(int argc, char **argv) {
         printf("[PLAYER_STATE_TEST] Subtest 16: icon and image fallback logic\n");
         fflush(stdout);
 
+        char clip_iso[NATIVE_TEST_PATH_MAX + 32];
+        snprintf(clip_iso, sizeof(clip_iso), "%s/snd0-bounded.iso", native_test_get_root());
+        test_bounded_iso_snd0_cancel(clip_iso);
+
         uint32_t w = 0;
         uint32_t h = 0;
 
@@ -20604,7 +20660,7 @@ int main(int argc, char **argv) {
         snprintf(user_root, sizeof(user_root), "%s%cuser", scratch, sep);
         assert(nk_platform_mkdir_p(user_root));
         snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", scratch, sep);
-        write_iso_with_fixture_eboot(iso_path);
+        write_iso_with_fixture_eboot(iso_path, NULL, 0u, 0u);
         snprintf(report_path, sizeof(report_path), "%s%crepeat_report.txt",
                  scratch, sep);
         snprintf(git_before, sizeof(git_before), "%s%cgit_before.txt", scratch, sep);
