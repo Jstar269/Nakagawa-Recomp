@@ -26,8 +26,8 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 74 |
 | `ppsspp-derived` | 181 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 300 | 183 |
-| `unverified` | 173 | 22 |
+| `synthetic` | 301 | 183 |
+| `unverified` | 172 | 22 |
 | total | 718 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -511,7 +511,7 @@ a title that translates none has generated code unchanged.
 | `0x9944f31f` | `sceKernelSuspendThread` | kernel_thread | `unverified` | no recorded evidence |
 | `0x99560abe` | `sceNetAdhocctlGetAddrByName` | network | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x99944089` | `__sceSasSetVoice` | audio | `synthetic` | HLE selftest dispatch |
-| `0x9a1c91d7` | `sceUtilityMsgDialogGetStatus` | utility | `unverified` | no recorded evidence |
+| `0x9a1c91d7` | `sceUtilityMsgDialogGetStatus` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x9ac2eeac` | `sceNetAdhocPtpFlush` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x9ace131e` | `sceKernelSleepThread` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch; unlinked hardware note |
 | `0x9ae849a7` | `sceAtracGetRemainFrame` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
