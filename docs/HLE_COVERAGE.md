@@ -24,11 +24,11 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 180 | 88 |
+| `ppsspp-derived` | 181 | 88 |
 | `game-route` | 0 | 0 |
 | `synthetic` | 300 | 183 |
 | `unverified` | 173 | 22 |
-| total | 717 | 367 |
+| total | 718 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -626,6 +626,7 @@ a title that translates none has generated code unchanged.
 | `0xc132e22f` | `sceMpegQueryMemSize` | mpeg | `ppsspp-derived` | handler comment names PPSSPP; sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0xc152080a` | `sceCtrlPeekBufferNegative` | input | `synthetic` | HLE selftest dispatch |
 | `0xc1734599` | `sceKernelReferLwMutexStatus` | kernel_sync | `unverified` | no recorded evidence |
+| `0xc2145e80` | `snprintf` | kernel_utils | `ppsspp-derived` | handler comment names PPSSPP |
 | `0xc2df770e` | `sceKernelIcacheInvalidateRange` | cache_dma | `synthetic` | HLE selftest dispatch |
 | `0xc41c2853` | `sceRtcGetTickResolution` | rtc | `unverified` | no recorded evidence |
 | `0xc45c99cc` | `sceMpegQueryUserdataEsSize` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c; registry notes name PPSSPP |

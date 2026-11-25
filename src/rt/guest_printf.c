@@ -2,8 +2,8 @@
 // Copyright (C) 2026 the Nakagawa Recomp authors
 
 /* PSP-EABI printf-family formatter for HLE boundaries that take a guest format
- * string and variadic words (the kernel's printf import).  The text goes into
- * a bounded host buffer; the only guest store is `%n`'s count, through the
+ * string and variadic words. The text goes into a bounded host buffer; the
+ * permissive printf path's only guest store is `%n`'s count, through the
  * checked accessors.  A title's own sprintf is
  * guest code and runs as translated: the native sprintf entry that once stood
  * in for one title's formatter was retired under #363.
@@ -115,6 +115,21 @@ static uint32_t guest_printf_next_word(CpuState *s, uint32_t entry_sp,
     uint32_t in_regs = 12u - first_reg;
     return index < in_regs ? s->r[first_reg + index]
                            : MEM_R32(entry_sp + 4u * (index - in_regs));
+}
+
+static int gp_sysclib_next_word(CpuState *s, uint32_t entry_sp,
+                                uint32_t *argi, uint64_t *value) {
+    /* snprintf's first variadic word is $7. The first spill is at entry $sp. */
+    uint32_t index = (*argi)++;
+    if (index < 5u) {
+        *value = s->r[7u + index];
+        return 1;
+    }
+    uint32_t addr;
+    if (!entry_sp || !sr_size_add_ok(entry_sp, 4u * (index - 5u), &addr) ||
+        (addr & 3u) != 0u || !sr_inrange_n(addr, 4u)) return 0;
+    *value = MEM_R32(addr);
+    return 1;
 }
 
 /* A 64-bit argument starts at an even register (an even-odd pair); the stack
@@ -522,11 +537,28 @@ static int gp_is_known_conv(char c) {
     }
 }
 
+static int gp_sysclib_spec_supported(const gp_spec *sp) {
+    /* Pointer spelling, zero padding, integer precision and length modifiers
+     * can differ from the newlib formatter. Limit this path to the named subset. */
+    if (sp->alt || sp->zero) return 0;
+    switch (sp->conv) {
+    case 'd': case 'i':
+        return sp->precision < 0;
+    case 'u': case 'o': case 'x': case 'X': case 'c':
+        return sp->precision < 0 && !sp->plus && !sp->space;
+    case 's':
+        return !sp->plus && !sp->space;
+    default:
+        return 0;
+    }
+}
+
 /* ---------------------------------------------------------------- entry point */
 
 /* The formatter: `fmt` is the guest format string and
  * the variadic words start in register `first_reg`. */
-static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out) {
+static int gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out,
+                     int sysclib) {
     uint32_t argi = 0;
     uint32_t entry_sp = s->r[29];
 
@@ -552,6 +584,7 @@ static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out
         }
 
         if (MEM_R8(fmt) == '*') {
+            if (sysclib) return 0;
             fmt++;
             int32_t w = (int32_t)guest_printf_next_word(s, entry_sp, first_reg, &argi);
             /* A negative `*` width means the '-' flag with |width|. */
@@ -570,6 +603,7 @@ static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out
         if (MEM_R8(fmt) == '.') {
             fmt++;
             if (MEM_R8(fmt) == '*') {
+                if (sysclib) return 0;
                 fmt++;
                 int32_t p = (int32_t)guest_printf_next_word(s, entry_sp, first_reg, &argi);
                 /* A negative `*` precision is as if precision were omitted. */
@@ -583,12 +617,14 @@ static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out
             }
         }
 
+        if (sysclib && gp_is_len_char(MEM_R8(fmt))) return 0;
         gp_parse_len(&fmt, &sp);
 
         ch = MEM_R8(fmt);
-        if (ch == 0u) break;   /* truncated spec at end of format */
+        if (ch == 0u) return !sysclib;  /* truncated spec at end of format */
         fmt++;
         sp.conv = (char)ch;
+        if (sysclib && (!in_bounds || !gp_sysclib_spec_supported(&sp))) return 0;
 
         /* An unknown conversion emits its character and consumes nothing, so
          * every following conversion still receives its own argument. */
@@ -606,7 +642,9 @@ static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out
                           sp.conv == 'o' || sp.conv == 'x' || sp.conv == 'X');
         double dval = 0.0;
         uint64_t uval = 0;
-        if (wants_double) {
+        if (sysclib) {
+            if (!gp_sysclib_next_word(s, entry_sp, &argi, &uval)) return 0;
+        } else if (wants_double) {
             dval = guest_printf_next_double(s, entry_sp, first_reg, &argi);
         } else if (wants_quad) {
             uval = guest_printf_next_dword(s, entry_sp, first_reg, &argi);
@@ -669,7 +707,15 @@ static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out
             static const char null_text[] = "(null)";
             int valid = (p != 0u) && sr_inrange(p);
             int len = 0;
-            if (valid) {
+            if (sysclib) {
+                if (!valid) return 0;
+                if (sp.precision < 0) max = SR_SYSCLIB_SNPRINTF_LIMIT + 1u;
+                uint32_t readable = sr_guest_span_prefix(p, max);
+                while ((uint32_t)len < readable &&
+                       MEM_R8(p + (uint32_t)len) != 0u) len++;
+                if ((uint32_t)len == readable &&
+                    (sp.precision < 0 || readable < max)) return 0;
+            } else if (valid) {
                 while ((uint32_t)len < max && (uint32_t)len < GP_MAX_STRING &&
                        MEM_R8(p + (uint32_t)len) != 0u) {
                     len++;
@@ -723,13 +769,23 @@ static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out
         }
     }
 
+    return 1;
 }
 
 int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
                          char *buf, int cap) {
     gp_out out = { 0, buf, cap, 0 };
     if (!buf || cap <= 0) return 0;
-    gp_format(s, fmt, first_reg, &out);
+    gp_format(s, fmt, first_reg, &out, 0);
+    buf[out.host_len] = '\0';
+    return out.total;
+}
+
+int sr_guest_format_sysclib_snprintf(CpuState *s, uint32_t fmt, char *buf, int cap) {
+    gp_out out = { 0, buf, cap, 0 };
+    if (!buf || cap <= 0 || !gp_format(s, fmt, 7u, &out, 1) ||
+        out.total > SR_SYSCLIB_SNPRINTF_LIMIT)
+        return -1;
     buf[out.host_len] = '\0';
     return out.total;
 }
