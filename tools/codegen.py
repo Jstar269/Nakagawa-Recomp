@@ -2592,8 +2592,21 @@ _VFPU7_INTERP_ROUTED = {
     0x02: ("vrndf1", (2, 3, 4)),
     0x03: ("vrndf2", (2, 3, 4)),
     0x12: ("vf2h", (2, 4)),
-    0x19: ("vc2i", (1,)),
+    0x19: ("vc2i", (1, 4)),
 }
+
+
+def _byte_unpack_source_ok(w):
+    """vc2i and vuc2i read one source word at the size bits a PSP was recorded executing.
+
+    pspautotests e37443a6 tests/cpu/vfpu/convert.expected (recorded on a PSP) runs both as
+    the words 0xd0398081 and 0xd0388081, whose .q size bits name C010 and S000: the PSP widens
+    S000 as the .s forms do. A .q source field with the transpose or row-offset bit (bits 5-6)
+    names another word as a quad than as a single, so it, and the .p and .t size bits, stay
+    unsupported, as sr_vfpu_interp refuses them.
+    """
+    n = vec_size(w)
+    return n == 1 or (n == 4 and not (w >> 8) & 0x60)
 
 
 def _vrndi_single_stmt(addr, w):
@@ -2608,12 +2621,14 @@ def _vrndi_single_stmt(addr, w):
         addr, w, "vrndi.s", f"s->vi[{d0}]=sr_vfpu_rnd_step(&s->vfpuCtrl[8]);")
 
 def _vfpu_forms_stmt(addr, w, what, body):
-    """A PSP-VFPU-FORMS-001 form (issue #326) under identity prefixes.
+    """A form recorded under identity prefixes only (issue #326).
 
     vh2f.s/.p, vuc2i.s, vsocp.s/.p, vwbn.s and vrndf1.s/vrndf2.s were measured on a
-    PSP-3000 (2026-10-28) under identity S/T/D prefixes only; the rules are the recomp.h
-    helpers sr_vfpu_interp also calls. A pending prefix is unmeasured, so it stops the run
-    with no state change, as sr_vfpu_interp refuses it. None of these forms writes VFPU_CC.
+    PSP-3000 (2026-10-28, PSP-VFPU-FORMS-001), and vdet, vsbn.s and vuc2i with .q size bits
+    come from pspautotests e37443a6 words recorded on a PSP, all under identity S/T/D
+    prefixes only; the rules are the recomp.h helpers sr_vfpu_interp also calls. A pending
+    prefix is unrecorded, so it stops the run with no state change, as sr_vfpu_interp
+    refuses it. None of these forms writes VFPU_CC.
     """
     return ("{ if (s->vfpuCtrl[0]!=0xe4u || s->vfpuCtrl[1]!=0xe4u || s->vfpuCtrl[2]!=0u) { "
             f"s->pc={G(addr)}; "
@@ -2674,10 +2689,13 @@ def _vfpu_form_vus2i(addr, w):
 
 
 def _vfpu_form_vuc2i(addr, w):
+    if not _byte_unpack_source_ok(w):
+        return None
     vd, vs = w & 0x7F, (w >> 8) & 0x7F
     s0, di = vreg_indices(vs, 1)[0], vreg_indices(vd, 4)
     writes = " ".join(f"s->vi[{di[i]}]=sr_vfpu_uc2i(_s>>{8 * i});" for i in range(4))
-    return _vfpu_forms_stmt(addr, w, "vuc2i.s", f"uint32_t _s=s->vi[{s0}]; {writes}")
+    return _vfpu_forms_stmt(addr, w, f"vuc2i.{'sq'[vec_size(w) == 4]}",
+                            f"uint32_t _s=s->vi[{s0}]; {writes}")
 
 
 def _vfpu_form_vsocp(addr, w):
@@ -2695,7 +2713,7 @@ _VFPU_SPECIAL_FORM_TABLE: dict[tuple[int, int | None, int], Any] = {
     **{(jump, None, 1): _vfpu_form_vwbn for jump in range(24, 32)},
     (1, 2, 1): _vfpu_form_vrndf, (1, 3, 1): _vfpu_form_vrndf,
     (1, 19, 1): _vfpu_form_vh2f, (1, 19, 2): _vfpu_form_vh2f,
-    (1, 24, 1): _vfpu_form_vuc2i,
+    (1, 24, 1): _vfpu_form_vuc2i, (1, 24, 4): _vfpu_form_vuc2i,
     (1, 26, 1): _vfpu_form_vus2i, (1, 26, 2): _vfpu_form_vus2i, (1, 26, 3): _vfpu_form_vus2i,
     (2, 5, 1): _vfpu_form_vsocp, (2, 5, 2): _vfpu_form_vsocp,
 }
@@ -2716,6 +2734,10 @@ _VFPU9_INTERP_ROUTED = {
     0x07: ("vavg", (2, 3, 4)),
     0x0A: ("vsgn", (1, 2, 3, 4)),
     0x19: ("vt4444", (4,)),
+    # pspautotests e37443a6 colors.expected and overlap.expected (recorded on a PSP), identity
+    # prefixes only.
+    0x1A: ("vt5551", (4,)),
+    0x1B: ("vt5650", (4,)),
 }
 
 
@@ -2822,7 +2844,8 @@ def _vfpu4_effect(addr, w, options, delay_branch_pc):
     if forms is not None:
         return forms, None, 0
     routed = _VFPU7_INTERP_ROUTED.get(rt_selector) if jump == 0x01 else None
-    if routed is not None and vec_size(w) in routed[1]:
+    if (routed is not None and vec_size(w) in routed[1]
+            and (rt_selector != 0x19 or _byte_unpack_source_ok(w))):
         return _vfpu_interp_stmt(addr, w), None, 0
     handler = _VFPU4_JUMP_FORMS.get(jump)
     if handler is None:
@@ -2885,7 +2908,7 @@ def _vfpu4_vocp(addr, w, options, delay_branch_pc):
     routed = _VFPU9_INTERP_ROUTED.get(op9)
     if routed is not None and n in routed[1]:
         # Measured rules (forced vbfy prefixes, canonical NaN, denormal
-        # flush, sign-bit vsgn, vt4444 nibble packing) have one owner.
+        # flush, sign-bit vsgn, vt4444/vt5551/vt5650 packing) have one owner.
         return _vfpu_interp_stmt(addr, w), None, 0
     raise Unsupported(f"VFPU9 op 0x{op9:02x} at 0x{addr:08x}")
 
@@ -3533,6 +3556,37 @@ def _vfpu_dot_effect(addr, w, options, delay_branch_pc):
             + _nanv(addr, "vdot.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
             + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
     return "{ " + body + " }", None, 0
+def _vfpu_det_effect(addr, w, options, delay_branch_pc):
+    """vdet.p/.t/.q under identity prefixes: sr_vfpu_det (src/rt/recomp.h), as sr_vfpu_interp.
+
+    pspautotests e37443a6 records vdet.s once (+0), too little to fix a rule, so it stays
+    unsupported."""
+    n = vec_size(w)
+    if n == 1:
+        raise Unsupported(f"vdet size {n} at 0x{addr:08x}")
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    si, ti = vreg_indices(vs, n), vreg_indices(vt, n)
+    dst = vreg_indices(vd, 1)[0]
+    reads = ",".join(f"s->v[{i}]" for i in si), ",".join(f"s->v[{i}]" for i in ti)
+    body = (f"float _s[4]={{{reads[0]}}},_t[4]={{{reads[1]}}}; "
+            f"float _dd[1]={{sr_vfpu_det(_s,_t,{n})}};"
+            + _nanv(addr, "vdet", vd, "_dd", 1, "_s", n, "_t", n, options=options)
+            + f" s->v[{dst}]=_dd[0];")
+    return _vfpu_forms_stmt(addr, w, f"vdet.{'sptq'[n - 1]}", body), None, 0
+
+
+def _vfpu_sbn_effect(addr, w, options, delay_branch_pc):
+    """vsbn.s under identity prefixes: sr_vfpu_sbn (src/rt/recomp.h), as sr_vfpu_interp."""
+    n = vec_size(w)
+    if n != 1:
+        raise Unsupported(f"vsbn size {n} at 0x{addr:08x}")
+    d0 = vreg_indices(w & 0x7F, 1)[0]
+    s0 = vreg_indices((w >> 8) & 0x7F, 1)[0]
+    t0 = vreg_indices((w >> 16) & 0x7F, 1)[0]
+    return _vfpu_forms_stmt(addr, w, "vsbn.s",
+                            f"s->vi[{d0}]=sr_vfpu_sbn(s->vi[{s0}],s->vi[{t0}]);"), None, 0
+
+
 def _vfpu_horizontal_dot_effect(addr, w, options, delay_branch_pc):
     vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
     n = vec_size(w)
@@ -3666,11 +3720,13 @@ _VFPU_OPCODE_FORM_TABLE = {
     (0x3c, (7, 29)): _vfpu_rotation_effect,
     (0x18, 0): _vfpu_binary_arithmetic,
     (0x18, 1): _vfpu_binary_arithmetic,
+    (0x18, 2): _vfpu_sbn_effect,
     (0x18, 7): _vfpu_binary_arithmetic,
     (0x19, 0): _vfpu_binary_arithmetic,
     (0x19, 1): _vfpu_dot_effect,
     (0x19, 4): _vfpu_horizontal_dot_effect,
     (0x19, 5): _vfpu_cross_effect,
+    (0x19, 6): _vfpu_det_effect,
     (0x3c, (0, None)): _vfpu_matrix_multiply_effect,
     (0x3c, (1, None)): _vfpu_matrix_transform_effect,
     (0x3c, (2, None)): _vfpu_matrix_transform_effect,

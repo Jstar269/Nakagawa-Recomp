@@ -637,7 +637,7 @@ def generate_malformed_corpus() -> list[int]:
                 out.append(_malformed_vfpu12_5bit_field(size_code, 8, vs, vt))
     out.append(0x0000003F)
     out.append((0x01 << 26) | 0x000000)
-    out.append((0x18 << 26) | (2 << 23) | 0x0000)
+    out.append((0x18 << 26) | (3 << 23) | 0x0000)  # VFPU0 sub 3: no instruction (sub 2 is vsbn)
     out.append((0x3C << 26) | (6 << 23) | 0x8080)
     out = sorted(set(out))
     pos = set(generate_synthetic_corpus())

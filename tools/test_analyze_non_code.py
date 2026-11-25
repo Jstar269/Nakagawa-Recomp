@@ -39,7 +39,7 @@ BLOB_WORDS = 34000
 PROLOGUE = 0x27BDFFE0          # addiu sp, sp, -32
 RESERVED = 0x68000000          # opcode 0x1a: a reserved opcode
 JR_RA = 0x03E00008
-VSBN_S = 0x61394C10            # vsbn.s: valid; the emitter has no native form for it
+VSBZ_S = 0xD0364C10            # vsbz.s: valid; the emitter has no native form for it
 VTABLE = 0x08C10000            # 64 KiB aligned: the sweep's vtable rule reads `lui` alone
 JUMP_TABLE = 0x08C20000
 
@@ -65,8 +65,8 @@ def real_function(rng, call=None):
 
 def unsupported_function():
     """A real function reached only by a call: its `bne $a0, $zero` is not taken in any run, and the
-    `vsbn.s` it would reach is a valid instruction the emitter does not support."""
-    return [PROLOGUE, 0x14800004, 0, 0x8FBF001C, JR_RA, 0x27BD0020, VSBN_S, JR_RA, 0]
+    `vsbz.s` it would reach is a valid instruction the emitter does not support."""
+    return [PROLOGUE, 0x14800004, 0, 0x8FBF001C, JR_RA, 0x27BD0020, VSBZ_S, JR_RA, 0]
 
 
 class Overlay:
@@ -190,7 +190,7 @@ class ReservedEncodingTest(unittest.TestCase):
         for rt in (0x00, 0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13):
             self.assertIsNone(analyze.reserved_encoding((1 << 26) | (rt << 16)), hex(rt))
         # COP3 and jalx are named by the PSP toolchain's disassembler: never judged.
-        for word in (0x18000000, 0x4C000000, 0x74000000, VSBN_S, PROLOGUE, JR_RA):
+        for word in (0x18000000, 0x4C000000, 0x74000000, VSBZ_S, PROLOGUE, JR_RA):
             self.assertIsNone(analyze.reserved_encoding(word))
 
 
@@ -267,12 +267,12 @@ class NonCodeOverlayTest(unittest.TestCase):
         callee = self.overlay.unsupported
         self.assertIn(callee, self.entries(self.module))
         self.assertNotIn(callee, {a for a, *_ in self.module.non_code})
-        # The emitter hands vsbn.s to the VFPU interpreter at run time: the body is translated,
+        # The emitter hands vsbz.s to the VFPU interpreter at run time: the body is translated,
         # word for word as without the change.
         self.assertNotIn(callee, dict(self.module.stubbed))
         text = dict(zip((a for a, _ in self.module.functions), self.module.texts, strict=True))[callee]
         stock = dict(zip((a for a, _ in self.stock.functions), self.stock.texts, strict=True))[callee]
-        self.assertIn(f"sr_vfpu_interp(s,0x{VSBN_S:08x}u)", text)
+        self.assertIn(f"sr_vfpu_interp(s,0x{VSBZ_S:08x}u)", text)
         self.assertEqual(str(text), str(stock))
 
     def test_body_sizes_and_codegen_are_bounded_by_the_code(self):

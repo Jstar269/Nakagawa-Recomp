@@ -418,7 +418,7 @@ def _reason_template(exc: Exception) -> str:
 def _reason_kind(reason: str) -> str:
     if reason.startswith("VFPU4 identity "):
         return "public-instruction-form"
-    if reason.startswith("vcrs size") or reason.startswith("vqmul size") or "vcmov imm3" in reason:
+    if reason.startswith(("vcrs size", "vqmul size", "vdet size", "vsbn size")) or "vcmov imm3" in reason:
         return "operand-size-selector"
     if reason.startswith("cop2 sub"):
         return "operand-register" if re.search(r"sub (?:3|7) or register", reason) else "encoding"
@@ -613,15 +613,35 @@ def _differential_tests(record: Record, synthetic_words: set[int]) -> list[str]:
     if (record["opcode"] == 0x34 and ((word >> 16) & 0x3FF) == 0x21
             and record["vector_size"] == 1 and record["interpreter_supported"]):
         tests.append("vfpu-interp-selftest:check_vrndi_rule_cells")
-    # PSP-VFPU-FORMS-001 forms (issue #326): vh2f, vuc2i, vrndf1/vrndf2 (VFPU7), vsocp
-    # (VFPU9) and vwbn, at the widths both lanes accept: pinned to the measured words.
+    # PSP-VFPU-FORMS-001 forms (issue #326): vh2f, vuc2i.s, vrndf1/vrndf2 (VFPU7), vsocp
+    # (VFPU9) and vwbn, at the widths both lanes accept: pinned to the measured words. The
+    # vuc2i word with .q size bits has no PSP-3000 cell.
     if record["opcode"] == 0x34 and record["interpreter_supported"]:
         jump, sel = (word >> 21) & 0x1F, (word >> 16) & 0x1F
-        if jump >= 24 or (jump, sel) in {(1, 2), (1, 3), (1, 19), (1, 24), (2, 5)}:
+        if jump >= 24 or (jump, sel) in {(1, 2), (1, 3), (1, 19), (2, 5)} or (
+                (jump, sel) == (1, 24) and record["vector_size"] == 1):
             tests.append("vfpu-interp-selftest:check_vfpu_forms_measured")
     if record["interpreter_supported"]:
         tests.extend(_measured_selftests(word, int(str(record["opcode"])), record["vector_size"]))
+        tests.extend(_pspautotests_selftests(word, int(str(record["opcode"])), record["vector_size"]))
     return sorted(set(tests))
+
+
+def _pspautotests_selftests(word: int, op: int, size: object) -> list[str]:
+    """Selftests that pin a form to result words of pspautotests e37443a6 (recorded on a PSP,
+    not a docs/HARDWARE_ORACLE.md row, so tools/verification_ledger.py does not count them as
+    hardware-measured): vdet.p/.t/.q, vsbn.s, vt5551.q/vt5650.q and the vc2i/vuc2i words
+    with .q size bits."""
+    sub3, jump, sel = (word >> 23) & 7, (word >> 21) & 0x1F, (word >> 16) & 0x1F
+    if (op, sub3) == (0x19, 6) and size in {2, 3, 4}:
+        return ["vfpu-interp-selftest:check_pspautotests_vdet"]
+    if (op, sub3, size) == (0x18, 2, 1):
+        return ["vfpu-interp-selftest:check_pspautotests_vsbn"]
+    if op == 0x34 and jump == 2 and sel in {0x1A, 0x1B} and size == 4:
+        return ["vfpu-interp-selftest:check_pspautotests_vt5551_vt5650"]
+    if op == 0x34 and jump == 1 and sel in {24, 25} and size == 4:
+        return ["vfpu-interp-selftest:check_pspautotests_byte_unpack_sizes"]
+    return []
 
 
 #: The forms check_vfpu_wide_dot_measured replays (probe case vfpu-wide-dot-matrix,

@@ -224,6 +224,38 @@ class VfpuCoverageCensusTests(unittest.TestCase):
                 self.assertFalse(record["interpreter_supported"])
                 self.assertEqual(census.agreement_status(record), "agree-unsupported")
 
+    def test_pspautotests_recorded_forms_agree_in_both_lanes(self):
+        # pspautotests e37443a6 (recorded on a PSP): vdet.p/.t/.q, vsbn.s and vuc2i.q are
+        # direct in both lanes, vc2i.q and vt5551.q/vt5650.q route to sr_vfpu_interp, and
+        # each is credited to the selftest check that replays its recorded words. The
+        # unrecorded widths agree as unsupported.
+        direct = {0x67080480: "check_pspautotests_vdet", 0x67088400: "check_pspautotests_vdet",
+                  0x67088480: "check_pspautotests_vdet", 0x61040001: "check_pspautotests_vsbn",
+                  0xD0388081: "check_pspautotests_byte_unpack_sizes"}
+        routed = {0xD0398081: "check_pspautotests_byte_unpack_sizes",
+                  0xD05A8081: "check_pspautotests_vt5551_vt5650",
+                  0xD05B8081: "check_pspautotests_vt5551_vt5650"}
+        rejected = (0x67080400, 0x61040081, 0x61048081, 0xD0388001, 0xD038C081,
+                    0xD0398001, 0xD039A081, 0xD05A0080, 0xD05B8000)
+        records = {r["word"]: r for r in census.classify_words(
+            tuple(direct) + tuple(routed) + rejected)}
+        for words, status in ((direct, "agree-supported-direct"),
+                              (routed, "agree-supported-routed")):
+            for word, check in words.items():
+                with self.subTest(word=f"0x{word:08x}"):
+                    record = records[word]
+                    self.assertTrue(record["interpreter_supported"])
+                    self.assertEqual(census.agreement_status(record), status)
+                    self.assertIn(f"vfpu-interp-selftest:{check}",
+                                  census._differential_tests(record, set()))
+        for word in rejected:
+            with self.subTest(word=f"0x{word:08x}"):
+                record = records[word]
+                self.assertFalse(record["interpreter_supported"])
+                self.assertEqual(census.agreement_status(record), "agree-unsupported")
+                self.assertFalse([t for t in census._differential_tests(record, set())
+                                  if "pspautotests" in t])
+
     def test_reserved_vcmov_form_is_unmodeled_and_fail_closed(self):
         # vcmov lives in VFPU4 (jump 21); imm3 7 is the reserved selector.
         words = ((0x34 << 26) | (21 << 21) | (7 << 16),)

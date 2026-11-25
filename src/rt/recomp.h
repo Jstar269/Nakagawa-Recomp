@@ -231,6 +231,19 @@ static inline uint32_t sr_vfpu_wbn(uint32_t x, uint32_t e) {
     return (x & 0x80000000u) | ((e & 0xffu) << 23) | (sig & 0x7fffffu);
 }
 
+/* vsbn.s: x with its exponent field set to (127 + t) & 0xff, t the raw integer word of the
+ * second source, sign and mantissa kept; a word whose exponent field is 0 or 0xff passes
+ * unchanged. pspautotests e37443a6 tests/cpu/vfpu/vector.expected (recorded on a PSP): all 152
+ * checkVsbn words, 19 sources against t = 0, 8, 16, 32, -127, -128, 128 and 129, so 1.0 with
+ * t = -127 gives 0x00000000, with t = 128 gives 0x7f800000, and 1e-20 with t = 129 gives
+ * 0x003ce508. The pass-through cells are the zeros and infinities; no denormal or NaN source
+ * was recorded, and they take the same exponent-field test. */
+static inline uint32_t sr_vfpu_sbn(uint32_t x, uint32_t t) {
+    const uint32_t xe = (x >> 23) & 0xffu;
+    if (xe == 0u || xe == 0xffu) return x;
+    return (x & 0x807fffffu) | (((127u + t) & 0xffu) << 23);
+}
+
 /* vsocp: one operand x to the pair (sat0(1 - x), sat0(x)), sat0 clamping to [0, 1]
  * with +0 for anything at or below zero. A denormal operand counts as a zero of its
  * sign; a NaN operand writes the canonical 0x7f800001 to both lanes. */
@@ -1167,6 +1180,25 @@ static inline float sr_vfpu_sop(const float *fa, const float *fb, int n) {
     float out;
     memcpy(&out, &r, 4);
     return out;
+}
+
+/* vdet at .p/.t/.q: s.x * t.y - s.y * t.x, plus s.z * t.z and s.w * t.w at .t and .q, as one
+ * sum of products, T taken as (t.y, -t.x, t.z, t.w). pspautotests e37443a6 tests/cpu/vfpu
+ * (recorded on a PSP): vector.expected's 25 vdet_p rows (s = (1, 2), t = (-0.1, 1000) gives
+ * 1000.199951, 0x447a0ccc, where a rounded product and a rounded subtract give 0x447a0ccd),
+ * nan_gen.expected's 0x7f800001 for inf * 0 and inf - inf, signed_zero.expected's +0 for every
+ * zero sum and 0xc0000000 for 1 - 1, and undefined.expected's one .p, .t and .q word each.
+ * Only identity prefixes are modelled; prefix_lanes.expected shows constants in the lanes past
+ * .p joining the sum, which the callers refuse rather than model. */
+static inline float sr_vfpu_det(const float *fs, const float *ft, int n) {
+    float t[4];
+    uint32_t tx;
+    memcpy(&tx, &ft[0], 4);
+    tx ^= 0x80000000u;
+    t[0] = ft[1];
+    memcpy(&t[1], &tx, 4);
+    for (int i = 2; i < n; i++) t[i] = ft[i];
+    return sr_vfpu_sop(fs, t, n);
 }
 
 /* VFPU lane arithmetic with the NaN result fixed by rule (issue #326). C leaves the NaN

@@ -167,6 +167,17 @@ static uint32_t vt4444_pack(uint32_t x) {
          | (((x >> 20) & 0xfu) << 8) | (((x >> 28) & 0xfu) << 12);
 }
 
+/* vt5551 and vt5650 lane packing: the top 5 bits of bytes 0 and 2 and the top 5 (5551) or 6
+ * (5650) bits of byte 1, low byte lowest; 5551 adds the top bit of byte 3 as bit 15. */
+static uint32_t vt5551_pack(uint32_t x) {
+    return ((x >> 3) & 0x1fu) | (((x >> 11) & 0x1fu) << 5)
+         | (((x >> 19) & 0x1fu) << 10) | (((x >> 31) & 1u) << 15);
+}
+
+static uint32_t vt5650_pack(uint32_t x) {
+    return ((x >> 3) & 0x1fu) | (((x >> 10) & 0x3fu) << 5) | (((x >> 19) & 0x1fu) << 11);
+}
+
 /* vcst constant table, computed with the same float expressions as PPSSPP (MIPS.cpp).
  * Literal PSP/PPSSPP float32 results: host libm and extended precision must not change
  * vcst bit patterns across compilers. */
@@ -454,7 +465,9 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         /* PSP-VFPU-FORMS-001 (PSP-3000, 2026-10-28, issue #326): vh2f.s/.p, vuc2i.s,
          * vsocp.s/.p, vwbn.s and vrndf1.s/vrndf2.s, measured under identity prefixes
          * only. A pending S, T or D prefix, and every other width, fails closed with no
-         * state change. The rules are the recomp.h helpers the generated code also
+         * state change; the one other width taken is vuc2i with .q size bits, which
+         * pspautotests e37443a6 recorded on a PSP (see byte_unpack_q below). The rules
+         * are the recomp.h helpers the generated code also
          * calls; none of these forms writes VFPU_CC. */
         const int forms_identity = s->vfpuCtrl[0] == 0xe4u && s->vfpuCtrl[1] == 0xe4u &&
                                    s->vfpuCtrl[2] == 0u;
@@ -635,10 +648,35 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                     if (!((s->vfpuCtrl[2] >> (8 + j)) & 1u)) s->vi[di[j]] = d[j];
                 eat_prefix(s); return SR_VFPU_COMPUTE;
             }
+            if ((op9 == 0x1a || op9 == 0x1b) && n == 4 && forms_identity) {
+                /* vt5551.q (0x1a) / vt5650.q (0x1b): four colours to a pair, packed as
+                 * vt4444.q packs them. pspautotests e37443a6 tests/cpu/vfpu colors.expected
+                 * and overlap.expected (recorded on a PSP), identity prefixes only: the four
+                 * colours FFFF00FF, 801100FF, 7F5500FF and 00AA00FF give FC1F, 881F, 281F,
+                 * 541F (5551) and F81F, 101F, 501F, A81F (5650), and the in-place
+                 * C000, C000 form reads every source before writing. A pending prefix is
+                 * unrecorded and fails closed. */
+                uint32_t sv[4], d[2];
+                vreg_idx(vs, 4, si);
+                for (int i = 0; i < 4; i++) sv[i] = s->vi[si[i]];
+                for (int j = 0; j < 2; j++)
+                    d[j] = op9 == 0x1a ? vt5551_pack(sv[2 * j]) | (vt5551_pack(sv[2 * j + 1]) << 16)
+                                       : vt5650_pack(sv[2 * j]) | (vt5650_pack(sv[2 * j + 1]) << 16);
+                vreg_idx(vd, 2, di);
+                for (int j = 0; j < 2; j++) s->vi[di[j]] = d[j];
+                return SR_VFPU_COMPUTE;
+            }
             return SR_VFPU_OTHER;
         }
         if (sub21 == 1) {  /* VFPU7: integer expand/pack conversions */
             int idx7 = (w >> 16) & 0x1F;
+            /* vc2i and vuc2i with .q size bits: pspautotests e37443a6 tests/cpu/vfpu
+             * convert.expected (recorded on a PSP) runs the words 0xd0398081 and 0xd0388081
+             * (C010, S000), and the PSP widens the one word S000 as the .s forms do. A source
+             * field with bit 5 or 6 set names another word as a quad than as a single, so it
+             * stays unsupported, with the .p and .t size bits; tools/codegen.py
+             * _byte_unpack_source_ok is the same test. */
+            const int byte_unpack_q = n == 4 && !(vs & 0x60);
             if (idx7 == 27) {  /* vs2i: each 16-bit half of a lane widens to one 32-bit lane.
                                 * Output is double-width: .s -> pair, .p -> quad (PPSSPP
                                 * Int_Vx2i). Low half lands in the even lane's high bits. */
@@ -740,13 +778,15 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 for (int j = 0; j < n / 2; j++) s->vi[di[j]] = d[j];
                 eat_prefix(s); return SR_VFPU_COMPUTE;
             }
-            if (idx7 == 25 && n == 1 && (s->vfpuCtrl[0] == 0xe4u || s->vfpuCtrl[0] == 0xf00e4u) &&
+            if (idx7 == 25 && ((n == 1 && (s->vfpuCtrl[0] == 0xe4u || s->vfpuCtrl[0] == 0xf00e4u)) ||
+                               (byte_unpack_q && s->vfpuCtrl[0] == 0xe4u)) &&
                 s->vfpuCtrl[1] == 0xe4u && s->vfpuCtrl[2] == 0u) {
                 /* vc2i.s (PSP-VFPU-FORMS2-001): the four bytes of one word, low first, each
                  * to the top byte of a quad lane. Measured with no S prefix and with
                  * negate-all (0xf00e4), which flips the source sign bit first; a swizzled lane 0
                  * (wzyx reads lane 0 negated here, not +0) is not modelled and fails
-                 * closed, as do abs, constants and T or D prefixes. */
+                 * closed, as do abs, constants and T or D prefixes. The .q size bits read the
+                 * same one word, under identity prefixes only (byte_unpack_q above). */
                 vreg_idx(vs, 1, si); vreg_idx(vd, 4, di);
                 const uint32_t x = s->vi[si[0]] ^ (((s->vfpuCtrl[0] >> 16) & 1u) << 31);
                 for (int i = 0; i < 4; i++) s->vi[di[i]] = sr_vfpu_c2i(x >> (8 * i));
@@ -766,8 +806,9 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 for (int i = 0; i < 2 * n; i++) s->vi[di[i]] = d[i];
                 return SR_VFPU_COMPUTE;
             }
-            if (idx7 == 24 && n == 1 && forms_identity) {
-                /* vuc2i.s: the four bytes of one word, low first, to a quad. */
+            if (idx7 == 24 && (n == 1 || byte_unpack_q) && forms_identity) {
+                /* vuc2i.s: the four bytes of one word, low first, to a quad; the .q size
+                 * bits read the same one word (byte_unpack_q above). */
                 vreg_idx(vs, 1, si); vreg_idx(vd, 4, di);
                 const uint32_t x = s->vi[si[0]];
                 for (int i = 0; i < 4; i++) s->vi[di[i]] = sr_vfpu_uc2i(x >> (8 * i));
@@ -892,6 +933,32 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         dd[0] = sr_vfpu_sop(a, b, n);
         VFPU_NAN("vdot.s", dd, 1, a, n, b, n);
         sr_vwrite(s, dst, dd, 1, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
+    }
+    if (op == 0x19 && sub == 6) {  /* vdet .p/.t/.q */
+        /* sr_vfpu_det (recomp.h) under identity prefixes, as the generated code emits it;
+         * vdet.s and every pending prefix are unrecorded and fail closed. */
+        float a[4], b[4], dd[1];
+        uint8_t dst[1];
+        if (n == 1 || s->vfpuCtrl[0] != 0xe4u || s->vfpuCtrl[1] != 0xe4u || s->vfpuCtrl[2] != 0u)
+            return SR_VFPU_OTHER;
+        vreg_idx(vs, n, si); vreg_idx(vt, n, ti); vreg_idx(vd, 1, dst);
+        for (int i = 0; i < n; i++) {
+            a[i] = s->v[si[i]];
+            b[i] = s->v[ti[i]];
+        }
+        dd[0] = sr_vfpu_det(a, b, n);
+        VFPU_NAN("vdet", dd, 1, a, n, b, n);
+        s->v[dst[0]] = dd[0];
+        return SR_VFPU_COMPUTE;
+    }
+    if (op == 0x18 && sub == 2) {  /* vsbn.s */
+        /* sr_vfpu_sbn (recomp.h) under identity prefixes, as the generated code emits it;
+         * the other widths and every pending prefix are unrecorded and fail closed. */
+        if (n != 1 || s->vfpuCtrl[0] != 0xe4u || s->vfpuCtrl[1] != 0xe4u || s->vfpuCtrl[2] != 0u)
+            return SR_VFPU_OTHER;
+        vreg_idx(vd, 1, di); vreg_idx(vs, 1, si); vreg_idx(vt, 1, ti);
+        s->vi[di[0]] = sr_vfpu_sbn(s->vi[si[0]], s->vi[ti[0]]);
+        return SR_VFPU_COMPUTE;
     }
     if (op == 0x19 && sub == 4) {  /* vhdp */
         float a[4], b[4], dd[1];
