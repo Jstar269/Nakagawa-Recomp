@@ -153,6 +153,8 @@ static void copy_field(char *field, size_t field_size, const char *src) {
 }
 
 static char *read_text_file(const char *path);
+static void launch_join_path(char *out, size_t out_size, const char *dir,
+                             char sep, const char *name);
 
 static void assert_file_text(const char *path, const char *expected) {
     char *text = read_text_file(path);
@@ -1938,7 +1940,7 @@ static void test_null_root_probes_user_data_dir(const char *base, char sep,
     char runtime_dir[NK_MAX_PATH * 2];
     char exe[NK_MAX_PATH * 3];
     char img[NK_MAX_PATH * 3];
-    snprintf(user_root, sizeof(user_root), "%s%cnull_root_user_data", base, sep);
+    launch_join_path(user_root, sizeof(user_root), base, sep, "null_root_user_data");
     snprintf(runtime_dir, sizeof(runtime_dir), "%s%cbuild%c%s", user_root, sep, sep,
              title->game_name);
     assert(nk_platform_mkdir_p(runtime_dir));
