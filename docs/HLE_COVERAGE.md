@@ -26,8 +26,8 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 74 |
 | `ppsspp-derived` | 181 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 314 | 183 |
-| `unverified` | 159 | 22 |
+| `synthetic` | 319 | 183 |
+| `unverified` | 154 | 22 |
 | total | 718 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -376,7 +376,7 @@ a title that translates none has generated code unchanged.
 | `0x6652b8ca` | `sceKernelSetAlarm` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-TIMER-ORDER-001 |
 | `0x67179b1b` | `sceMpegAvcInitYCbCr` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x67585dfd` | `sceVaudioChRelease` | audio | `unverified` | no recorded evidence |
-| `0x67af3428` | `sceUtilityMsgDialogShutdownStart` | utility | `unverified` | no recorded evidence |
+| `0x67af3428` | `sceUtilityMsgDialogShutdownStart` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x67f17ed7` | `sceFontNewLib` | font | `ppsspp-derived` | handler comment names PPSSPP |
 | `0x682a619b` | `sceMpegInit` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x687660fa` | `sceCtrlGetIdleCancelThreshold` | input | `unverified` | no recorded evidence |
@@ -468,7 +468,7 @@ a title that translates none has generated code unchanged.
 | `0x87d4dd36` | `sceKernelCancelReceiveMbx` | kernel_sync | `synthetic` | HLE selftest dispatch |
 | `0x87d9223c` | `sceKernelCancelMutex` | kernel_sync | `synthetic` | HLE selftest dispatch |
 | `0x884c9f90` | `sceKernelTrySendMsgPipe` | kernel_sync | `synthetic` | HLE selftest dispatch; unlinked hardware note |
-| `0x8874dbe0` | `sceUtilitySavedataGetStatus` | utility | `unverified` | no recorded evidence |
+| `0x8874dbe0` | `sceUtilitySavedataGetStatus` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x8916c003` | `sceNetAdhocctlGetNameByAddr` | network | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x89360950` | `sceNetEtherNtostr` | network | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x8986295e` | `sceVaudioOutputBlocking` | audio | `unverified` | no recorded evidence |
@@ -501,10 +501,10 @@ a title that translates none has generated code unchanged.
 | `0x946963f3` | `sceUtilityGameSharingGetStatus` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x94aa61ee` | `sceKernelGetThreadCurrentPriority` | kernel_thread | `unverified` | no recorded evidence |
 | `0x95a84ee5` | `scePsmfPlayerStart` | mpeg | `synthetic` | HLE selftest dispatch |
-| `0x95fc253b` | `sceUtilityMsgDialogUpdate` | utility | `unverified` | no recorded evidence |
+| `0x95fc253b` | `sceUtilityMsgDialogUpdate` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x95fd0c2d` | `sceAudioChangeChannelConfig` | audio | `unverified` | no recorded evidence |
 | `0x977de386` | `sceKernelLoadModule` | kernel_module | `unverified` | no recorded evidence |
-| `0x9790b33c` | `sceUtilitySavedataShutdownStart` | utility | `unverified` | no recorded evidence |
+| `0x9790b33c` | `sceUtilitySavedataShutdownStart` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x980f4895` | `sceFontGetCharGlyphImage` | font | `synthetic` | HLE selftest dispatch |
 | `0x984c27e7` | `sceDisplayWaitVblankStart` | display | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0x98c204c8` | `sceNetAdhocGameModeUpdateMaster` | network | `synthetic` | HLE selftest dispatch |
@@ -665,7 +665,7 @@ a title that translates none has generated code unchanged.
 | `0xd2d615ef` | `sceKernelCancelVTimerHandler` | kernel_time | `unverified` | no recorded evidence |
 | `0xd3075926` | `scePowerIsLowBattery` | power | `unverified` | no recorded evidence; unlinked hardware note |
 | `0xd4475aa8` | `sceRegGetKeyInfo` | system | `synthetic` | HLE selftest dispatch |
-| `0xd4b95ffb` | `sceUtilitySavedataUpdate` | utility | `unverified` | no recorded evidence |
+| `0xd4b95ffb` | `sceUtilitySavedataUpdate` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd59ead2f` | `sceKernelWakeupThread` | kernel_thread | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd5a229c9` | `__sceSasRevEVOL` | audio | `unverified` | no recorded evidence |
 | `0xd5c28cc0` | `sceAtracEndEntry` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |

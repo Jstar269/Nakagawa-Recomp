@@ -1828,7 +1828,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogShutdown",
     "name": "sceUtilityMsgDialogShutdownStart",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x67f17ed7": {
     "classification": "dedicated",
@@ -2383,7 +2383,7 @@
     "classification": "dedicated",
     "handler": "h_DlgGetStatus",
     "name": "sceUtilitySavedataGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x8916c003": {
     "classification": "dedicated",
@@ -2583,7 +2583,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogUpdate",
     "name": "sceUtilityMsgDialogUpdate",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x95fd0c2d": {
     "classification": "dedicated",
@@ -2601,7 +2601,7 @@
     "classification": "dedicated",
     "handler": "h_DlgShutdown",
     "name": "sceUtilitySavedataShutdownStart",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x980f4895": {
     "classification": "dedicated",
@@ -3575,7 +3575,7 @@
     "classification": "dedicated",
     "handler": "h_SavedataUpdate",
     "name": "sceUtilitySavedataUpdate",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xd59ead2f": {
     "classification": "dedicated",
