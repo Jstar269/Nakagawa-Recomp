@@ -93,7 +93,7 @@ LIB_IOFILEMGR = "IoFileMgrForUser"
 
 # System-library export NIDs every PSP module publishes.
 NID_MODULE_START = 0xD632ACDB
-NID_MODULE_STOP = 0xCEE05613
+NID_MODULE_STOP = 0xCEE8593C
 NID_MODULE_INFO = 0xF01D73A7
 L5_PAYLOAD_NAME = "platform_ladder_l5.txt"
 L5_PAYLOAD_BYTES = b"Nakagawa platform ladder L5 source-owned payload\n"
