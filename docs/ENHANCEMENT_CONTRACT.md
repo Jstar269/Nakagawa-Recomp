@@ -400,6 +400,13 @@ Some frame-counted values are data, not instructions: tables in the executable's
 
 Both are covered by the package digest, so a change to either is a different enhanced build.
 
+A timing declaration can use `sites: []` when it has at least one `data_sites` entry and declares
+`rng_policy.mode: unmodified`. The mode means the package authors no RNG transform. It is available
+only without instruction rewrite sites. Real-time RNG behavior and physics still need measurement
+at the new rate. Such a package uses the same build and runtime opt-in. The `f32_x3` transform
+multiplies a finite `f32` element by three and rounds it to float32. A result outside the finite
+float32 range refuses the package. This transform is available only for initialised executable data sites.
+
 #### Load-time store sites
 
 Some titles parse a table from disc at load time and store each field into RAM with its own instruction. Rescaling that store makes every later reader see the rescaled value, once per load, and it stays correct when the title loads again, because each load scales the value being stored. The store is the anchor: declare it as a `swc1` site (`count_x2`, `step_x0.5` or `probability_per_update_x0.5`) or as a `sw` site (`count_x2`), and give it `stock_values`.

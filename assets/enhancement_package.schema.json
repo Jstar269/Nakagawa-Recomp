@@ -121,9 +121,10 @@
           "type": "string",
           "enum": [
             "rescale_probability",
-            "subtick_30hz"
+            "subtick_30hz",
+            "unmodified"
           ],
-          "description": "Per-update RNG handling mode at rescaled logic rates."
+          "description": "Per-update RNG handling mode. unmodified means the data-only package supplies no RNG transform."
         },
         "reason": {
           "type": "string",
@@ -134,7 +135,6 @@
     },
     "sites": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -414,6 +414,20 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "transform": { "const": "f32_x3" }
+              }
+            },
+            "then": {
+              "properties": {
+                "type": { "const": "f32" }
+              }
+            }
+          }
+        ],
         "required": [
           "id",
           "symbol",
@@ -472,7 +486,8 @@
               "probability_per_update_x0.5",
               "decay_k_to_1-sqrt(1-k)",
               "retention_m_to_sqrt(m)",
-              "accel_x0.25"
+              "accel_x0.25",
+              "f32_x3"
             ],
             "description": "Rescale applied to every element."
           }
@@ -754,6 +769,43 @@
       "description": "Published package only: each symbolic name the package uses and its address in the executable, as codegen loads it. It names every used symbol and no other. A name a code site, alternate, ace part site, update boundary or hook uses is 4-byte aligned; a name only data sites use is aligned to the largest element type among them."
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["sites"],
+        "properties": {
+          "sites": { "maxItems": 0 }
+        }
+      },
+      "then": {
+        "required": ["data_sites", "rng_policy"],
+        "properties": {
+          "category": { "const": "timing_frame_presentation" },
+          "rng_policy": {
+            "properties": { "mode": { "const": "unmodified" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["rng_policy"],
+        "properties": {
+          "rng_policy": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "unmodified" } }
+          }
+        }
+      },
+      "then": {
+        "required": ["sites", "data_sites"],
+        "properties": {
+          "category": { "const": "timing_frame_presentation" },
+          "sites": { "maxItems": 0 }
+        }
+      }
+    }
+  ],
   "dependentRequired": {
     "published_package": [
       "disc_id",

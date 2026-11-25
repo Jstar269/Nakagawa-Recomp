@@ -191,6 +191,7 @@ GUEST_WRITE_CAPABILITIES = {
 RNG_POLICY_MODES = frozenset({
     "rescale_probability",
     "subtick_30hz",
+    "unmodified",
 })
 
 ROOT_KEYS = frozenset({
@@ -271,6 +272,9 @@ DATA_TRANSFORMS = frozenset({
     "retention_m_to_sqrt(m)",
     "accel_x0.25",
 })
+
+# The explicit 3x scale applies only to f32 values in initialized executable data.
+DATA_SITE_TRANSFORMS = DATA_TRANSFORMS | {"f32_x3"}
 
 # A data file: a file the title reads from its disc, rewritten when it is opened.
 DATA_FILE_KEYS = frozenset({
@@ -671,8 +675,13 @@ def validate_package(data: Any) -> dict[str, Any]:
         sites = data["sites"]
         if not isinstance(sites, list):
             fail("sites", f"sites must be an array, got {type(sites).__name__}")
-        if len(sites) < 1:
+        if not sites and (code_hook or "data_sites" not in data):
             fail("sites", "sites array must contain at least 1 site")
+        if not code_hook:
+            if not sites and rng_mode != "unmodified":
+                fail("rng_policy.mode", "data-only timing packages must declare 'unmodified'")
+            if sites and rng_mode == "unmodified":
+                fail("rng_policy.mode", "'unmodified' is only for data-only timing packages")
         seen_site_ids: set[str] = set()
         seen_positions: set[tuple[str, int]] = set()
         for idx, site in enumerate(sites):
@@ -1182,7 +1191,7 @@ def _validate_data_sites(data_sites: Any) -> None:
         if not SYMBOL_RE.match(symbol):
             fail(f"{path}.symbol", f"data site symbol {symbol!r} does not match required pattern {SYMBOL_RE.pattern}")
         dtype = site["type"]
-        if dtype not in DATA_TYPES:
+        if not isinstance(dtype, str) or dtype not in DATA_TYPES:
             fail(f"{path}.type", f"Unknown data type {dtype!r}; must be one of {sorted(DATA_TYPES)}")
         size = DATA_TYPES[dtype][0]
         offset = _check_int(site["offset"], f"{path}.offset", 0, 1 << 20)
@@ -1192,9 +1201,12 @@ def _validate_data_sites(data_sites: Any) -> None:
         digest = site["stock_digest"]
         if not isinstance(digest, str) or not SHA256_HEX_RE.match(digest):
             fail(f"{path}.stock_digest", "stock_digest must be a 64-character lowercase hex SHA-256 digest")
-        if site["transform"] not in DATA_TRANSFORMS:
+        transform = site["transform"]
+        if not isinstance(transform, str) or transform not in DATA_SITE_TRANSFORMS:
             fail(f"{path}.transform",
-                 f"Transform {site['transform']!r} has no data rescale; must be one of {sorted(DATA_TRANSFORMS)}")
+                 f"Transform {transform!r} has no data rescale; must be one of {sorted(DATA_SITE_TRANSFORMS)}")
+        if transform == "f32_x3" and dtype != "f32":
+            fail(f"{path}.type", "f32_x3 requires type 'f32'")
         lo, hi = offset, offset + size * count
         for other_symbol, other_lo, other_hi in seen_spans:
             if other_symbol == symbol and lo < other_hi and other_lo < hi:
@@ -1681,11 +1693,11 @@ def elf_readers(elf: Any) -> tuple[ReadFn, ReadFn]:
         return out
 
     def read_data(vaddr: int, count: int) -> bytes | None:
-        rebase = elf.reloc.lo if elf.reloc is not None else 0
         for sec in elf.sections:
             if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 4:
                 continue
-            lo = sec["addr"] + rebase
+            # analyze.Elf already places section addresses in the same space as its reads.
+            lo = sec["addr"]
             if lo <= vaddr and vaddr + count <= lo + sec["size"]:
                 raw = elf.read_at_vaddr(vaddr, count)
                 return None if raw is None else bytes(raw)
@@ -3491,7 +3503,7 @@ def plan_data_value(transform: str, dtype: str, raw: bytes) -> bytes:
     if dtype == "f32":
         if not math.isfinite(value):
             raise ValueError(f"float {value!r} is not finite")
-        scaled = _scale_value(transform, value)
+        scaled = value * 3 if transform == "f32_x3" else _scale_value(transform, value)
         try:
             out = struct.pack(fmt, scaled)
         except OverflowError as exc:
