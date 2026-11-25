@@ -5561,6 +5561,17 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertEqual(request_urls(confirmed), [source_url, database_url])
             self.assertEqual(confirmed["cheat_db_bytes"], contents)
 
+            from_disk = self.next_ui_run(
+                "online-settings", open_page + (
+                    "PAD_DPAD_DOWN", "PAD_SOUTH", f"PICK_FILE={folder / 'database.db'}",
+                    "WAIT_VIEW=cheat_db_confirm,5000", "WAIT_LAID_OUT=5000",
+                    "PAD_DPAD_UP", "PAD_SOUTH",
+                ) + return_to_page,
+                env_extra=env,
+            )
+            self.assertEqual(request_urls(from_disk), [])
+            self.assertEqual(from_disk["cheat_db_bytes"], contents)
+
     # The next UI's controller page (player_ui_nk.h), as the frame line prints it.
     CONTROLLER_FOCUS = {
         "select": str(0x4600), "start": str(0x4601), "rtrigger": str(0x4607),
