@@ -24,10 +24,10 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 182 | 88 |
+| `ppsspp-derived` | 183 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 315 | 183 |
-| `unverified` | 159 | 22 |
+| `synthetic` | 320 | 183 |
+| `unverified` | 153 | 22 |
 | total | 720 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -366,7 +366,7 @@ a title that translates none has generated code unchanged.
 | `0x627b7d42` | `sceVideocodecGetSEI` | videocodec | `unverified` | no recorded evidence |
 | `0x627e6f3a` | `sceKernelReferSystemStatus` | kernel_thread | `hardware-measured` | PSP oracle PSP-HLE-KERNEL-STATUS-001 |
 | `0x6332aa39` | `sceUtilityNetconfGetStatus` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
-| `0x63632449` | `sceIoIoctl` | io | `synthetic` | HLE selftest dispatch |
+| `0x63632449` | `sceIoIoctl` | io | `ppsspp-derived` | registry notes name PPSSPP; unlinked hardware note |
 | `0x63f2889c` | `sceAudioOutput2ChangeLength` | audio | `unverified` | no recorded evidence |
 | `0x6402490b` | `sceNetAdhocctlDelHandler` | network | `synthetic` | HLE selftest dispatch |
 | `0x644395e2` | `sceKernelGetModuleIdList` | kernel_module | `synthetic` | HLE selftest dispatch |
@@ -377,7 +377,7 @@ a title that translates none has generated code unchanged.
 | `0x6652b8ca` | `sceKernelSetAlarm` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-TIMER-ORDER-001 |
 | `0x67179b1b` | `sceMpegAvcInitYCbCr` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x67585dfd` | `sceVaudioChRelease` | audio | `unverified` | no recorded evidence |
-| `0x67af3428` | `sceUtilityMsgDialogShutdownStart` | utility | `unverified` | no recorded evidence |
+| `0x67af3428` | `sceUtilityMsgDialogShutdownStart` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x67f17ed7` | `sceFontNewLib` | font | `ppsspp-derived` | handler comment names PPSSPP |
 | `0x682a619b` | `sceMpegInit` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x687660fa` | `sceCtrlGetIdleCancelThreshold` | input | `unverified` | no recorded evidence |
@@ -428,7 +428,7 @@ a title that translates none has generated code unchanged.
 | `0x7853182d` | `sceUtilityGameSharingUpdate` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x787d04d5` | `__sceSasSetPause` | audio | `unverified` | no recorded evidence |
 | `0x7945ecda` | `sceNetAdhocMatchingTerm` | network | `ppsspp-derived` | sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
-| `0x79d1c3fa` | `sceKernelDcacheWritebackAll` | cache_dma | `synthetic` | HLE selftest dispatch |
+| `0x79d1c3fa` | `sceKernelDcacheWritebackAll` | cache_dma | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x7a20e7af` | `sceAtracSetDataAndGetID` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x7a662d6b` | `sceNetAdhocPollSocket` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x7ac0321a` | `sceMpegBaseYCrCbCopy` | videocodec | `unverified` | no recorded evidence |
@@ -469,7 +469,7 @@ a title that translates none has generated code unchanged.
 | `0x87d4dd36` | `sceKernelCancelReceiveMbx` | kernel_sync | `synthetic` | HLE selftest dispatch |
 | `0x87d9223c` | `sceKernelCancelMutex` | kernel_sync | `synthetic` | HLE selftest dispatch |
 | `0x884c9f90` | `sceKernelTrySendMsgPipe` | kernel_sync | `synthetic` | HLE selftest dispatch; unlinked hardware note |
-| `0x8874dbe0` | `sceUtilitySavedataGetStatus` | utility | `unverified` | no recorded evidence |
+| `0x8874dbe0` | `sceUtilitySavedataGetStatus` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x8916c003` | `sceNetAdhocctlGetNameByAddr` | network | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x89360950` | `sceNetEtherNtostr` | network | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x8986295e` | `sceVaudioOutputBlocking` | audio | `unverified` | no recorded evidence |
@@ -496,16 +496,16 @@ a title that translates none has generated code unchanged.
 | `0x91e70e35` | `sceUtilityNetconfUpdate` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x920f104a` | `sceKernelIcacheInvalidateAll` | cache_dma | `synthetic` | HLE selftest dispatch |
 | `0x92e41280` | `sceRegOpenRegistry` | system | `synthetic` | HLE selftest dispatch |
-| `0x93440b11` | `sceWlanDevIsPowerOn` | network | `synthetic` | HLE selftest dispatch |
+| `0x93440b11` | `sceWlanDevIsPowerOn` | network | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x93ef3843` | `sceNetAdhocMatchingStart` | network | `ppsspp-derived` | sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x94416130` | `sceKernelGetThreadmanIdList` | kernel_thread | `unverified` | no recorded evidence; unlinked hardware note |
 | `0x946963f3` | `sceUtilityGameSharingGetStatus` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x94aa61ee` | `sceKernelGetThreadCurrentPriority` | kernel_thread | `unverified` | no recorded evidence |
 | `0x95a84ee5` | `scePsmfPlayerStart` | mpeg | `synthetic` | HLE selftest dispatch |
-| `0x95fc253b` | `sceUtilityMsgDialogUpdate` | utility | `unverified` | no recorded evidence |
+| `0x95fc253b` | `sceUtilityMsgDialogUpdate` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x95fd0c2d` | `sceAudioChangeChannelConfig` | audio | `unverified` | no recorded evidence |
 | `0x977de386` | `sceKernelLoadModule` | kernel_module | `unverified` | no recorded evidence |
-| `0x9790b33c` | `sceUtilitySavedataShutdownStart` | utility | `unverified` | no recorded evidence |
+| `0x9790b33c` | `sceUtilitySavedataShutdownStart` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x980f4895` | `sceFontGetCharGlyphImage` | font | `synthetic` | HLE selftest dispatch |
 | `0x984c27e7` | `sceDisplayWaitVblankStart` | display | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0x98c204c8` | `sceNetAdhocGameModeUpdateMaster` | network | `synthetic` | HLE selftest dispatch |
@@ -666,7 +666,7 @@ a title that translates none has generated code unchanged.
 | `0xd2d615ef` | `sceKernelCancelVTimerHandler` | kernel_time | `unverified` | no recorded evidence |
 | `0xd3075926` | `scePowerIsLowBattery` | power | `unverified` | no recorded evidence; unlinked hardware note |
 | `0xd4475aa8` | `sceRegGetKeyInfo` | system | `synthetic` | HLE selftest dispatch |
-| `0xd4b95ffb` | `sceUtilitySavedataUpdate` | utility | `unverified` | no recorded evidence |
+| `0xd4b95ffb` | `sceUtilitySavedataUpdate` | utility | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd59ead2f` | `sceKernelWakeupThread` | kernel_thread | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd5a229c9` | `__sceSasRevEVOL` | audio | `unverified` | no recorded evidence |
 | `0xd5c28cc0` | `sceAtracEndEntry` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
@@ -675,7 +675,7 @@ a title that translates none has generated code unchanged.
 | `0xd675ebb8` | `sceKernelSelfStopUnloadModule` | kernel_module | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd6a5f2f7` | `sceAtracGetMaxSample` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xd6da4ba1` | `sceKernelCreateSema` | kernel_sync | `synthetic` | HLE selftest dispatch; unlinked hardware note |
-| `0xd7763699` | `sceWlanGetSwitchState` | network | `synthetic` | HLE selftest dispatch |
+| `0xd7763699` | `sceWlanGetSwitchState` | network | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xd7a29f46` | `sceMpegRingbufferQueryMemSize` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0xd81957b7` | `sceUtilityScreenshotGetStatus` | utility | `synthetic` | HLE selftest dispatch |
 | `0xd8199e4c` | `sceKernelReferFplStatus` | kernel_memory | `hardware-measured` | PSP oracle PSP-HLE-KERNEL-STATUS-001 |
@@ -780,7 +780,7 @@ a title that translates none has generated code unchanged.
 | `0xf983b186` | `__sceSasRevVON` | audio | `unverified` | no recorded evidence |
 | `0xf9d8eb63` | `sceHttpsEnd` | network | `synthetic` | HLE selftest dispatch |
 | `0xfa324b4e` | `sceNetAdhocGameModeUpdateReplica` | network | `synthetic` | HLE selftest dispatch |
-| `0xfa835cde` | `sceKernelGetTlsAddr` | kernel_memory | `unverified` | no recorded evidence |
+| `0xfa835cde` | `sceKernelGetTlsAddr` | kernel_memory | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xfa8a5739` | `sceRegCloseRegistry` | system | `synthetic` | HLE selftest dispatch |
 | `0xfa97a599` | `scePowerVolatileMemTryLock` | power | `synthetic` | HLE selftest dispatch |
 | `0xfaa4f89b` | `sceAtracGetLoopStatus` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
