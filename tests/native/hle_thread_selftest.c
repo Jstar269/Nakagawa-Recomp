@@ -5393,6 +5393,50 @@ static void test_fd_namespace(void) {
         expect(sr_hle_test_io_close(&cpu) == 0u &&
                    fd_host_bytes_equal(flags_host, (const uint8_t *)"abcde", 5u),
                "APPEND without PSP_O_CREAT appends to the existing file");
+        /* The host stream of a PSP_O_APPEND descriptor writes at the end of the file whatever
+         * the position, so the descriptor's position and size must follow where the bytes went:
+         * the position is the file's end after the write (PPSSPP's sceIoWrite seeks an append
+         * descriptor to the end before each write, as POSIX O_APPEND does), and the bytes it
+         * wrote read back through it. */
+        {
+            fd_set_path(&cpu, path_addr, flags_guest);
+            cpu.r[5] = 0x0103u;   /* RDWR | APPEND */
+            uint32_t rw_append_fd = sr_hle_test_io_open(&cpu);
+            expect(rw_append_fd < 64u, "RDWR|APPEND opens the existing five-byte file");
+            fd_guest_copy(payload_addr, "fg", 2u);
+            fd_set_write(&cpu, rw_append_fd, payload_addr, 2u);
+            expect(sr_hle_test_io_write(&cpu) == 2u, "the read-write append descriptor takes bytes");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = 0u; cpu.r[6] = 1u;   /* SEEK_CUR */
+            uint32_t append_cur = sr_hle_test_io_lseek32(&cpu);
+            expect(append_cur == 7u,
+                   "after an append write the position is the end of the file it wrote at");
+            if (append_cur != 7u)
+                fprintf(stderr, "  append position after write: %u (want 7)\n", append_cur);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = 0u; cpu.r[6] = 2u;   /* SEEK_END */
+            uint32_t append_end = sr_hle_test_io_lseek32(&cpu);
+            expect(append_end == 7u, "an append write grows the size a seek to the end sees");
+            if (append_end != 7u)
+                fprintf(stderr, "  append SEEK_END after write: %u (want 7)\n", append_end);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = 5u; cpu.r[6] = 0u;   /* SEEK_SET 5 */
+            (void)sr_hle_test_io_lseek32(&cpu);
+            fd_guest_copy(payload_addr + 0x40u, "\0\0", 2u);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = payload_addr + 0x40u; cpu.r[6] = 2u;
+            uint32_t append_read = sr_hle_test_io_read(&cpu);
+            expect(append_read == 2u && MEM_R8(payload_addr + 0x40u) == 'f' &&
+                       MEM_R8(payload_addr + 0x41u) == 'g',
+                   "the bytes an append descriptor wrote read back through it");
+            if (append_read != 2u)
+                fprintf(stderr, "  append read-back: 0x%08x (want 2)\n", append_read);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd;
+            expect(sr_hle_test_io_close(&cpu) == 0u &&
+                       fd_host_bytes_equal(flags_host, (const uint8_t *)"abcdefg", 7u),
+                   "the read-write append descriptor appended at the end");
+        }
         fd_set_path(&cpu, path_addr, flags_guest);
         cpu.r[5] = 0x0402u;
         uint32_t trunc_fd = sr_hle_test_io_open(&cpu);

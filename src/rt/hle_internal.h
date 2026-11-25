@@ -770,6 +770,7 @@ typedef struct {
     uint32_t lba, size, off;
     int64_t async_res;
     int writable;
+    int append;                  /* 1 = opened with PSP_O_APPEND: every write lands at the end */
     uint8_t *truncated_bytes;    /* what PSP_O_TRUNC cut, for a later write past them */
     uint32_t truncated_size;
     int flash0;                  /* 1 = served by the read-only flash0: font device */

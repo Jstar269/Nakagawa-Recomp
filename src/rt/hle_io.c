@@ -377,7 +377,14 @@ uint32_t h_IoWrite(CpuState *s) {
     if (!f->writable && strchr(f->guest_path, ':') &&
         sr_ms0_classify(f->guest_path, NULL) == SR_MS0_OWNED)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
-    if (count > UINT32_MAX - f->off) {
+    /* A PSP_O_APPEND write lands at the end of the file, wherever the position was (the host
+     * stream is opened to append), so the descriptor's position and size follow it there:
+     * after the write the position is the new end and the bytes read back through the
+     * descriptor. PPSSPP's sceIoWrite seeks an append descriptor to its end before each write
+     * in the same way (PPSSPP-derived, not PSP-measured). A refused write moves nothing. */
+    uint32_t write_at = f->off;
+    if (f->append && !sr_stream_size_u32(f->host, &write_at)) return 0x80010005u;
+    if (count > UINT32_MAX - write_at) {
         /* A seek may leave the position anywhere in 32 bits; a write that would carry it
          * past them stops at the same boundary as such a seek (#1380). */
         static atomic_flag reported = ATOMIC_FLAG_INIT;
@@ -391,6 +398,7 @@ uint32_t h_IoWrite(CpuState *s) {
      * a byte past the arena reads back as zero, so the loop below would store zeros in the
      * file and report the full count. Any view will do, because the loop reads byte by byte. */
     if (count != 0u && !sr_inrange_n(src, count)) return 0x80010016u;
+    if (f->append) f->off = f->size = write_at;
     if (f->truncated_bytes && !io_restore_truncated_gap(f)) return 0x80010005u;
     if (io_host_seek(f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
     uint8_t tmp[4096]; uint32_t done = 0;
