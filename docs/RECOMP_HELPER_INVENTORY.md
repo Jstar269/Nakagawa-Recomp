@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **559** (declared in `recomp.h`: 474)
-- reach class: emitter-reached 89, production-runtime-only 427, selftest-only 0, address-only 8, none 35
-- provenance class of the home definition: declared-only 1, project_authored_attested 53, upstream_derived 505
+- helpers: **560** (declared in `recomp.h`: 475)
+- reach class: emitter-reached 89, production-runtime-only 428, selftest-only 0, address-only 8, none 35
+- provenance class of the home definition: declared-only 1, project_authored_attested 54, upstream_derived 505
 
 ## Helpers
 
@@ -344,6 +344,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_guest_copy_out` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_guest_fill` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_guest_format_host` | `rt/guest_printf.c` | yes | production-runtime-only | `rt/guest_printf.c`: project_authored_attested |
+| `sr_guest_format_sysclib_snprintf` | `rt/guest_printf.c` | yes | production-runtime-only | `rt/guest_printf.c`: project_authored_attested |
 | `sr_guest_host_run` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_guest_lane_refuse_import` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_guest_memmove` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |

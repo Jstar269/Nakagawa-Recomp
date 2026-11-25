@@ -132,6 +132,17 @@ int nk_render_path_event_format(const NkRenderPath *path, char *out, size_t out_
 /* Reads a line the runtime wrote with nk_render_path_event_format (a trailing " t_ns=" and line
  * end are allowed). False, with out untouched, for any other line or an unknown value. */
 bool nk_render_path_event_parse(const char *line, NkRenderPath *out);
+/* One requested FSR 1 pass could not be initialized. A supported pass that is
+ * idle for an equal-size frame has no refusal. The reasons are wire tokens. */
+typedef enum {
+    NK_FSR1_REFUSAL_NONE = 0,
+    NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE,
+    NK_FSR1_REFUSAL_STARTUP,
+} NkFsr1Refusal;
+
+const char *nk_fsr1_refusal_event(NkFsr1Refusal reason);
+NkFsr1Refusal nk_fsr1_refusal_event_parse(const char *line);
+
 
 /* What the GPU GE renderer, while it runs, hands to the software renderer instead of drawing it
  * (#2151), in the order of ge_gpu.h's GEGPU_FALLBACK_* reasons (ge_gpu.h checks that they
