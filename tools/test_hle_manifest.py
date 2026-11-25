@@ -819,6 +819,193 @@ class LiveManifestTests(unittest.TestCase):
         self.assertEqual(self.regs[0xF8170FBE]["handler"], "h_DeleteMutex")
         self.assertEqual(self.regs[0xF8170FBE]["status"], "unreviewed")
 
+    def test_measured_single_imports_are_partial_on_their_cells(self) -> None:
+        """#2807: four single handlers are reviewed on the cells a MEASURED record publishes a result for."""
+        records = {
+            row["id"]: row
+            for row in json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))["tests"]
+        }
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        dispatched = hle_manifest.selftest_dispatched_nids(source)
+        expected = {
+            "h_GetTlsAddr": (
+                {0xFA835CDE: "sceKernelGetTlsAddr"},
+                "PSP-SAFE-SCALAR-001",
+                "tls-addr-normal, tls-status-normal, tls-addr-high, tls-status-high, tls-addr-high-2, tls-thread",
+                ["test_psp_measured_safe_scalar_tls_20261117"],
+                (
+                    "PSP-SAFE-SCALAR-001 TLS cells only", "0x100-aligned", "the same address",
+                    "3 of 4 blocks free", "boot 221", "86279e852", "both partition layouts",
+                    "never an address", "zero-fills", "every block is held", "interrupt context",
+                ),
+            ),
+            "h_WlanOn": (
+                {0xD7763699: "sceWlanGetSwitchState", 0x93440B11: "sceWlanDevIsPowerOn"},
+                "PSP-KERNEL-SEM-001",
+                "wlan-state",
+                ["test_wlan_state_with_the_switch_on"],
+                (
+                    "wlan-state cell only", "the two NIDs this handler serves", "return 1",
+                    "switch on", "boot 84", "0c3cf0da", "game context", "with the switch off",
+                    "wlan_switch", "XMB context",
+                ),
+            ),
+            "h_DcacheWritebackAll": (
+                {0x79D1C3FA: "sceKernelDcacheWritebackAll"},
+                "PSP-CACHE-001",
+                "cache-wball",
+                ["test_dcache_writeback_all_cached_store_reaches_the_uncached_alias"],
+                (
+                    "cache-wball cell only", "0xDEADBEEF", "uncached alias", "f6ccfb33", "f2d6c91a",
+                    "discards the call's return value", "one coherent array", "named stop",
+                ),
+            ),
+            "h_IoIoctl": (
+                {0x63632449: "sceIoIoctl"},
+                "PSP-HLE-IO-SEEK-001",
+                "io-seek-ms-*, io-seek-umd-*",
+                ["test_io_memory_stick_cells_through_syscall", "test_io_ioctl_disc0_seek_range_and_position"],
+                (
+                    "PSP-HLE-IO-SEEK-001 only", "0x80020325", "0x80010005", "writes only the low out word",
+                    "boot 156", "59520eb0", "runtime checks", "PPSSPP-derived", "sceIoIoctlAsync",
+                ),
+            ),
+        }
+        for handler, (nids, record_id, cells_text, cells, needles) in expected.items():
+            with self.subTest(handler=handler):
+                record = records[record_id]
+                self.assertEqual(record["hardware_evidence"], "MEASURED")
+                # Metadata is per handler: these are every NID the handler serves.
+                self.assertEqual({nid for nid, reg in self.regs.items() if reg["handler"] == handler}, set(nids))
+                for nid, name in nids.items():
+                    registration = self.regs[nid]
+                    self.assertEqual(registration["name"], name)
+                    self.assertEqual(registration["classification"], "dedicated")
+                    self.assertEqual(registration["status"], "partial")
+                    self.assertIn(name, record["apis"])
+                    self.assertIn(nid, dispatched)
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertEqual(
+                    evidence,
+                    [
+                        f"docs/HARDWARE_ORACLE.md ({record_id}: {cells_text})",
+                        *(f"tests/native/hle_thread_selftest.c:{cell}" for cell in cells),
+                    ],
+                )
+                self._assert_cited_cells_are_manifest_cells(evidence)
+                limitation = meta.HANDLER_LIMITATIONS[handler]
+                for needle in (*needles, "one PSP-3000", "acceptance-eligible", "not reviewed here", "(#2807)"):
+                    self.assertIn(needle, limitation)
+
+        def body(cell: str) -> str:
+            return _matched(
+                re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+            ).group(0)
+
+        def define(name: str, value: str) -> str:
+            return _matched(re.search(rf"^#define {name}[ \t]+{value}$", source, re.MULTILINE)).group(0)
+
+        # Each new cell, cut out with its named NID constants, dispatches exactly the NIDs it
+        # covers through sr_syscall and asserts the record's published results.
+        wlan = body("test_wlan_state_with_the_switch_on")
+        self.assertEqual(
+            hle_manifest.selftest_dispatched_nids(
+                "\n".join(
+                    [
+                        define("NID_WLAN_GET_SWITCH_STATE", "0xd7763699u"),
+                        define("NID_WLAN_DEV_IS_POWER_ON", "0x93440b11u"),
+                        wlan,
+                    ]
+                )
+            ),
+            {0xD7763699, 0x93440B11},
+        )
+        self.assertLess(
+            wlan.index("sr_syscall(&cpu, NID_WLAN_GET_SWITCH_STATE)"),
+            wlan.index("sr_syscall(&cpu, NID_WLAN_DEV_IS_POWER_ON)"),
+        )
+        for needle in ("sysreg_restart();", "switch_state == 1u", "power_on == 1u", "PSP-KERNEL-SEM-001"):
+            self.assertIn(needle, wlan)
+
+        wball = body("test_dcache_writeback_all_cached_store_reaches_the_uncached_alias")
+        self.assertEqual(
+            hle_manifest.selftest_dispatched_nids(
+                "\n".join([define("NID_DCACHE_WRITEBACK_ALL", "0x79d1c3fau"), wball])
+            ),
+            {0x79D1C3FA},
+        )
+        self.assertRegex(source, r"(?m)^#define DCACHE_WBALL_UNCACHED_BIT[ \t]+0x40000000u$")
+        self.assertRegex(source, r"(?m)^#define DCACHE_WBALL_WORD[ \t]+0xdeadbeefu$")
+        self.assertLess(
+            wball.index("MEM_W32(DCACHE_WBALL_BUFFER + 4u, DCACHE_WBALL_WORD);"),
+            wball.index("sr_syscall(&cpu, NID_DCACHE_WRITEBACK_ALL)"),
+        )
+        for needle in (
+            "sr_hle_test_unmodelled_stops() == stops",
+            "MEM_R32((DCACHE_WBALL_BUFFER + 4u) | DCACHE_WBALL_UNCACHED_BIT) == DCACHE_WBALL_WORD",
+        ):
+            self.assertIn(needle, wball)
+
+        disc0 = body("test_io_ioctl_disc0_seek_range_and_position")
+        self.assertIn(define("NID_IO_IOCTL_DISC0", "0x63632449u"), source)
+        self.assertRegex(source, r"(?m)^#define IOCTL_DISC0_OUT_OF_RANGE[ \t]+0x80010005u$")
+        self.assertEqual(disc0.count("sr_syscall(&cpu, NID_IO_IOCTL_DISC0)"), 2)
+        for needle in (
+            '"disc0:/UMD_DATA.BIN", 0x0001u',
+            "{-1, IOCTL_DISC0_OUT_OF_RANGE,",
+            "{2048, 0u,",
+            "{2049, IOCTL_DISC0_OUT_OF_RANGE,",
+            "cpu.r[5] = IOCTL_DISC0_SEEK; cpu.r[6] = MS_CELL_IOCTL_IN; cpu.r[7] = 16u;",
+            "cpu.r[8] = MS_CELL_IOCTL_OUT; cpu.r[9] = 8u;",
+            "MEM_R32(MS_CELL_IOCTL_OUT + 4u) == IOCTL_DISC0_SENTINEL",
+            "runtime check, not a published value",
+        ):
+            self.assertIn(needle, disc0)
+        memory_stick = body("test_io_memory_stick_cells_through_syscall")
+        for needle in (
+            "ms_cell_ioctl(fd, 0x01010005u, MS_CELL_IOCTL_IN, 16u, 0u, 0u) ==",
+            "MS_IOCTL_INVALID = 0x80020325u",
+            "{0x01020007u, 8u, 8u, 8u,",
+            "{0x01030008u, 4u, 0u, 0u,",
+        ):
+            self.assertIn(needle, memory_stick)
+
+        get_addr = _matched(
+            re.search(
+                r"^static uint32_t selftest_tlspl_get_addr\(uint32_t uid\) \{\n.*?^\}\n", source, re.MULTILINE | re.DOTALL
+            )
+        ).group(0)
+        self.assertEqual(
+            hle_manifest.selftest_dispatched_nids("\n".join([define("NID_TLSPL_GET_ADDR", "0xfa835cdeu"), get_addr])),
+            {0xFA835CDE},
+        )
+        tls = body("test_psp_measured_safe_scalar_tls_20261117")
+        self.assertGreaterEqual(tls.count("selftest_tlspl_get_addr("), 7)
+        for needle in (
+            "a_normal - lo_head == 0x100u",
+            "hi_head - a_high == 0x400u",
+            "hi_head - a_high2 == 0x800u && a_high2 - a_high == 0xfffffc00u",
+            "b_normal - a_normal == 0x100u && b_high - a_high == 0x100u",
+            "selftest_tlspl_get_addr(normal) == a_normal",
+            "sstls_status_is(normal, 0u, 0u)",
+        ):
+            self.assertIn(needle, tls)
+
+        # Listed by a MEASURED record but left unreviewed: the runtime's sceKernelTotalFreeMemSize
+        # subtracts a 0x100 tail per partition block slot ever used, so where a call opens a new
+        # slot it does not reproduce the published falls (0x200 for two 0x100 brackets, 0 at
+        # cleanup; h_CreateTlspl's limitation says so too), and the HARDWARE_ORACLE.md rows of
+        # PSP-DISPLAY-004 publish no sceDisplayGetCurrentHcount word.
+        for nid, handler, name, record_id in (
+            (0xF919F628, "h_TotalFreeMemSize", "sceKernelTotalFreeMemSize", "PSP-SAFE-SCALAR-001"),
+            (0x773DD3A3, "h_DisplayGetCurrentHcount", "sceDisplayGetCurrentHcount", "PSP-DISPLAY-004"),
+        ):
+            with self.subTest(left=handler):
+                self.assertIn(name, records[record_id]["apis"])
+                self.assertEqual(self.regs[nid]["handler"], handler)
+                self.assertEqual(self.regs[nid]["status"], "unreviewed")
+                self.assertNotIn(handler, meta.HANDLER_METADATA)
+
     def test_sce_atrac_get_channel_uses_the_canonical_nid(self) -> None:
         """Regression for the 0x31668bba -> 0x31668baa transcription fix."""
         self.assertNotIn(0x31668BBA, self.regs)
@@ -1204,9 +1391,10 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertEqual(meta.HANDLER_EVIDENCE[handler], evidence)
                 self.assertIn("measur", meta.HANDLER_LIMITATIONS[handler].lower())
 
-        # PSP-IO-001's current source matrix has no Ioctl or Rename call. Keep
-        # these handlers unreviewed until a direct hardware cell covers them.
-        for nid, handler in ((0x63632449, "h_IoIoctl"), (0x779103A0, "h_IoRename")):
+        # PSP-IO-001's current source matrix has no Ioctl or Rename call. Rename stays
+        # unreviewed until a direct hardware cell covers it; Ioctl is reviewed on the
+        # PSP-HLE-IO-SEEK-001 cells instead (test_measured_single_imports_are_partial_on_their_cells).
+        for nid, handler in ((0x779103A0, "h_IoRename"),):
             with self.subTest(nid=f"0x{nid:08x}"):
                 self.assertEqual(self.regs[nid]["handler"], handler)
                 self.assertEqual(self.regs[nid]["classification"], "dedicated")
