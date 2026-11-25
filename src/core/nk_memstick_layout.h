@@ -128,7 +128,8 @@ typedef enum {
     NK_MEMSTICK_COLLISION_COPY_MISMATCH,
     NK_MEMSTICK_COLLISION_JOURNAL_MISSING,
     NK_MEMSTICK_COLLISION_JOURNAL_DAMAGED,
-    NK_MEMSTICK_COLLISION_IO
+    NK_MEMSTICK_COLLISION_IO,
+    NK_MEMSTICK_COLLISION_STICK_IN_USE
 } NkMemstickCollisionResult;
 
 /* Copy one colliding PSP/SAVEDATA folder from two legacy slots during first migration.
@@ -223,6 +224,25 @@ NkMemstickCollisionResult nk_memstick_savedata_move_begin(const char *saves_root
 NkMemstickCollisionResult nk_memstick_savedata_move_resume(const char *saves_root,
                                                            size_t max_groups,
                                                            bool *complete);
+
+/* Inspect one title's legacy PSP/SAVEDATA folders in a READY layout. This only
+ * reads. COPIED with an empty unit name means there is nothing to bring in.
+ * A present unit is the next offer, or the last confirmed offer if interrupted.
+ * Its decision describes the destination: STAGE means a new slot on the active
+ * stick, KEEP means a complete legacy copy outside it, and DEDUPLICATE means
+ * the same bytes already exist. The initial PSP/SAVEDATA plan supplies the
+ * original fingerprints for sources recorded as moved. */
+NkMemstickCollisionResult nk_memstick_savedata_bring_in_offer(const char *saves_root,
+                                                             const char *slot,
+                                                             NkMemstickPlanUnit *unit);
+
+/* Acquire the stick lock, verify the selected offer, and apply it without
+ * replacing any files. An immutable completion receipt identifies that legacy
+ * version. A retry verifies any output before completing a confirmed intent. */
+NkMemstickCollisionResult nk_memstick_savedata_bring_in(const char *saves_root,
+                                                       const char *slot,
+                                                       const NkMemstickPlanUnit *offer);
+const char *nk_memstick_bring_in_result_code(NkMemstickCollisionResult result);
 
 typedef enum {
     NK_MEMSTICK_STATE_MOVING = 0,

@@ -46,16 +46,16 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **718** (dedicated **671**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **648** handlers across **30** API families, covering **678** handler-associated NID registrations.
+Registered NIDs: **720** (dedicated **673**, fake_success **3**, controlled_unsupported **44**).
+Semantic handler census: **650** handlers across **30** API families, covering **680** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 406 | 418 |
+| `partial` | 409 | 421 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 224 | 229 |
+| `unreviewed` | 223 | 228 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -72,11 +72,11 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | `sceHprm` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceImpose` | 0 | 0 | 0 | 0 | 2 | 2 | 2 |
 | `sceIo` | 2 | 28 | 0 | 0 | 4 | 34 | 34 |
-| `sceKernel` | 3 | 146 | 0 | 0 | 42 | 191 | 209 |
+| `sceKernel` | 3 | 147 | 0 | 0 | 41 | 191 | 209 |
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
-| `sceNet` | 0 | 46 | 0 | 0 | 13 | 59 | 59 |
+| `sceNet` | 0 | 48 | 0 | 0 | 13 | 61 | 61 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `scePower` | 0 | 19 | 0 | 0 | 0 | 19 | 24 |
@@ -89,7 +89,7 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **406** | **1** | **3** | **224** | **648** | **678** |
+| **Total** | **14** | **409** | **1** | **3** | **223** | **650** | **680** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -986,6 +986,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_rotate_ready_queue_selection_order
   - Evidence: tests/native/hle_thread_selftest.c:test_rotate_equal_priority_yields_to_peers
   - Evidence: tests/native/sched_selftest.c:test_rotate_ready_queue_moves_head_behind_peers
+- **`h_SelfStopUnloadModule`** (`sceKernel`): `sceKernelSelfStopUnloadModule` (0xd675ebb8)
+  - Limitation: only (0, 0, NULL) and (1, 0, NULL) from a started helper's own thread are reproduced: module_stop runs once with length zero and a null pointer, the caller does not resume, and address lookup returns 0x8002012e after unload. For (0, 4, argp past RAM) the PSP ran module_stop with a substituted pointer and unloaded; the runtime refuses the span with 0x80000103 and preserves the module (#2397). Other first-argument and argument-block forms, a call from the module_start thread, sibling threads, no stop entry and a nonzero module_stop return remain unmeasured (#341)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-SELFSTOP-001: self-stop-arg0, self-stop-arg1)
+  - Evidence: tests/native/hle_thread_selftest.c:test_self_stop_unload_measured_forms
 - **`h_SendMbx`** (`sceKernel`): `sceKernelSendMbx` (0xe9b3061e)
   - Limitation: invalid-message-pointer error class unmeasured; interrupt-context placement unmeasured (#339, #341)
 - **`h_SendMsgPipe`** (`sceKernel`): `sceKernelSendMsgPipe` (0x876dbfad)
@@ -1362,13 +1366,22 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network
   - Evidence: PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): fresh sceNetInetInit returns 0 after utility module and core Net setup
 - **`h_NetInetTerm`** (`sceNet`): `sceNetInetTerm` (0xa9ed66b9)
-  - Limitation: clears active Inet state before core Net teardown; early or repeated Term stops by name; LoadExec clears Inet with the process's core Net and module state
+  - Limitation: clears active Inet state before core Net teardown; early or repeated Term and Term while Resolver is active stop by name; LoadExec clears Inet with the process's core Net and module state
   - Evidence: tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network
   - Evidence: PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): active sceNetInetTerm returns 0 before core Net Term and module unload
 - **`h_NetInit`** (`sceNet`): `sceNetInit` (0x39af39a6)
   - Limitation: the library's state and its pool (from the user partition) only: no network stack, no socket and no host network API; the SceNetCallout and SceNetNetintr threads are not created; the PSP results were recorded with the WLAN switch on, and with the console profile's switch off sceNetInit still returns 0 (UNMEASURED; PPSSPP does not consult the switch either); the pool-size and priority codes, the pool's placement and the Init failure codes follow PPSSPP (a behaviour reference, UNMEASURED); a second Init without Term starts over with one pool, but checks its arguments before releasing the first pool, unlike PPSSPP (the PSP's order is UNMEASURED); a pool size whose 256-byte rounding passes 4 GB is refused with NO_MEMORY; core re-Init while Inet is active stops by name
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
   - Evidence: PSPAutotests tests/net (70e72391, recorded on a PSP): sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0 in every net test with no access point connected, and again after sceNetTerm (net/adhoc/socketids)
+- **`h_NetResolverInit`** (`sceNet`): `sceNetResolverInit` (0xf3370e61)
+  - Limitation: tracks only lifecycle in the disconnected Inet stack with WLAN on; first Init without prior object operations is PPSSPP-derived and logs once; unsupported ordering stops by name; resolver objects, DNS and host transport remain outside the handler
+  - Evidence: tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network
+  - Evidence: PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): after normal Net/Inet setup, AP Term and a preceding resolver Create/lookup/Stop/Delete, first Init returns 0 and duplicate Init returns 0x80000020
+  - Evidence: PPSSPP Core/HLE/sceNetResolver.cpp:sceNetResolverInit (cdf563b85c42c275ec2835a0883f48d63a9c9406): Init consults only the initialized flag; equivalence of Init without prior resolver object operations is reference-derived
+- **`h_NetResolverTerm`** (`sceNet`): `sceNetResolverTerm` (0x6138194a)
+  - Limitation: clears active Resolver and permits repeated Term in the same disconnected Inet lifetime with WLAN on; Term without successful Init in this lifetime stops by name; LoadExec resets the lifecycle state
+  - Evidence: tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network
+  - Evidence: PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): first and repeated Resolver Term return 0 after Init and deletion of the resolver objects
 - **`h_NetTerm`** (`sceNet`): `sceNetTerm` (0x281928a9)
   - Limitation: frees the pool and clears the library state; sceNetTerm before sceNetInit returns 0 as PPSSPP does (UNMEASURED); core Term while Inet is active stops by name
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network

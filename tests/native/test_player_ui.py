@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager, nullcontext
 import os
 import hashlib
 import itertools
@@ -19,7 +20,7 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Sequence
+from typing import Iterator, Sequence
 from urllib.parse import parse_qs, quote, urlsplit
 import zipfile
 import zlib
@@ -1497,6 +1498,21 @@ def update_report(stdout: str) -> tuple[list[dict[str, str]], list[str]]:
     return steps, requests
 
 
+@contextmanager
+def hold_test_stick_lock(path: Path) -> Iterator[None]:
+    """Hold the same OS lock the player uses, on its synthetic root."""
+    with path.open("r+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
 class NativePlayerUiTests(unittest.TestCase):
     # The executable runs from a sandbox folder under build/, where none of the folders
     # beside it holds tools/nk_cli.py, and the working folder is never searched
@@ -1544,6 +1560,8 @@ class NativePlayerUiTests(unittest.TestCase):
         screenshot_path: Path | None = None,
         cover_cache: dict[str, bytes] | None = None,
         save_backups: dict[str, tuple[str, ...]] | None = None,
+        save_fixture: dict[str, bytes] | None = None,
+        hold_stick_lock: bool = False,
         expect_failure: bool = False,
         runtime_root_arg: str | None = None,
         library_unwritable: bool = False,
@@ -1861,19 +1879,28 @@ class NativePlayerUiTests(unittest.TestCase):
             dedicated = scratch / "dedicated-data-root"
             if dedicated_data_root:
                 args.append(f"--user-data-root={dedicated}")
+            saves = dedicated / "saves"
+            if save_fixture is not None:
+                if not dedicated_data_root:
+                    raise ValueError("A save fixture needs an explicit synthetic data root")
+                for name, data in save_fixture.items():
+                    path = saves / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
 
             effective_timeout = compute_effective_timeout(event_script, timeout)
 
             started = time.perf_counter()
-            completed = subprocess.run(
-                args,
-                cwd=ROOT,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-                check=False,
-            )
+            with hold_test_stick_lock(saves / ".nakagawa-stick.lock") if hold_stick_lock else nullcontext():
+                completed = subprocess.run(
+                    args,
+                    cwd=ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                    check=False,
+                )
             wall_seconds = time.perf_counter() - started
             if os.environ.get(PLAYER_UI_ECHO_ENV) == "1":
                 sys.stderr.write(completed.stdout)
@@ -1949,6 +1976,8 @@ class NativePlayerUiTests(unittest.TestCase):
                 "default_profile_files": default_profile_files(),
                 "data_folder_files": files_under(data_folder),
                 "dedicated_files": files_under(dedicated),
+                "save_fixture": ({name: (saves / name).read_bytes() for name in files_under(saves)}
+                                 if save_fixture is not None else None),
                 "downloaded_tool_marker_exists": (
                     tool_marker.is_file() if tool_marker is not None else None
                 ),
@@ -3068,6 +3097,77 @@ class NativePlayerUiTests(unittest.TestCase):
                          f"the card stays: {shown}")
         self.assertEqual(shown[asked + 2][0], title,
                          f"the next Back closes the card to the title page: {shown}")
+
+    @staticmethod
+    def ready_stick_bring_in_fixture() -> dict[str, bytes]:
+        unit = "PSP/SAVEDATA/TEST00005_SLOT"
+        return {
+            "nakagawa-saves.json": json.dumps({
+                "schema_version": 1, "layout": "shared-memory-stick", "stick": "Memory Stick",
+                "state": "ready", "written_by": "0.1.0-dev", "sources": [],
+            }).encode("utf-8"),
+            f"TEST00005/{unit}/DATA.BIN": b"older edit",
+            f"TEST00005/{unit}/PARAM.SFO": b"old metadata",
+            f"Memory Stick/{unit}/DATA.BIN": b"shared edit",
+            f"Memory Stick/{unit}/PARAM.SFO": b"shared metadata",
+            f"Kept copies/TEST00005/{unit}/DATA.BIN": b"earlier kept",
+        }
+
+    def test_next_ui_bring_in_cancel_preserves_ready_stick(self) -> None:
+        """The real Saves route offers Bring In and defaults its question to Cancel."""
+        fixture = self.ready_stick_bring_in_fixture()
+        for activate, back in (("KEY_RETURN", "KEY_ESCAPE"), ("PAD_SOUTH", "PAD_EAST")):
+            with self.subTest(activate=activate):
+                run = self.next_ui_run(
+                    "library",
+                    ("WAIT_MS=200", activate, "WAIT_MS=200", activate, "WAIT_MS=200",
+                     activate, "WAIT_MS=200", back, "WAIT_MS=200"),
+                    dedicated_data_root=True, save_fixture=fixture,
+                )
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                states = [(int(frame["next_route"]), int(frame["next_focus"])) for frame in frames
+                          if frame["selected_disc"] == "TEST00005"]
+                saves, bring_in, cancel = 8, 0x4429, 0x4426
+                self.assertIn((saves, bring_in), states, run["stdout"])
+                self.assertIn((saves, cancel), states, run["stdout"])
+                self.assertEqual(states[-1], (saves, bring_in), run["stdout"])
+                self.assertEqual(run["save_fixture"], fixture)
+
+    def test_next_ui_bring_in_confirm_keeps_legacy_whole_and_refuses_busy_stick(self) -> None:
+        """Confirm is the write boundary and the real interprocess lock applies there."""
+        fixture = self.ready_stick_bring_in_fixture()
+        fixture[".nakagawa-stick.lock"] = b""
+        for held, activate, right in ((True, "KEY_RETURN", "KEY_RIGHT"),
+                                       (False, "PAD_SOUTH", "PAD_DPAD_RIGHT")):
+            with self.subTest(held=held):
+                run = self.next_ui_run(
+                    "library",
+                    ("WAIT_MS=200", activate, "WAIT_MS=200", activate, "WAIT_MS=200",
+                     activate, "WAIT_MS=200", right, "WAIT_MS=200", activate, "WAIT_MS=200"),
+                    dedicated_data_root=True, save_fixture=fixture, hold_stick_lock=held,
+                )
+                observed = run["save_fixture"]
+                assert isinstance(observed, dict)
+                if held:
+                    self.assertIn("SAVES_BRING_IN STICK_IN_USE", run["stderr"])
+                    self.assertEqual(observed, fixture)
+                    continue
+                self.assertIn("SAVES_BRING_IN BRING_IN_OK", run["stderr"])
+                self.assertIn("Kept the older version of TEST00005_SLOT in Kept copies.", run["stderr"])
+                for name, data in fixture.items():
+                    self.assertEqual(observed[name], data)
+                journal = ".nakagawa-migration/bring-in/test00005/"
+                intent = f"{journal}intent.json"
+                receipts = [name for name in observed if name.startswith(journal) and name != intent]
+                self.assertEqual(len(receipts), 1)
+                self.assertEqual(observed[intent], observed[receipts[0]])
+                generation = Path(receipts[0]).stem
+                retained = f"Kept copies/TEST00005/Bring In/{generation}/PSP/SAVEDATA/TEST00005_SLOT"
+                self.assertEqual(observed[f"{retained}/DATA.BIN"], b"older edit")
+                self.assertEqual(observed[f"{retained}/PARAM.SFO"], b"old metadata")
+                self.assertEqual(set(observed) - set(fixture),
+                                 {intent, receipts[0], f"{retained}/DATA.BIN", f"{retained}/PARAM.SFO"})
 
     def test_next_ui_settings_tab_opens_by_mouse_keyboard_and_controller(self) -> None:
         """#1281: Settings has a visible SETTINGS tab, and the menu prompt opens it."""

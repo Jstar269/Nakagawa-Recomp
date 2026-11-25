@@ -1534,11 +1534,25 @@ class LiveManifestTests(unittest.TestCase):
                        "stay unmeasured"):
             self.assertIn(needle, limitation)
         self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
-        # The one entry left needs a PSP measurement, not derived evidence.
-        self.assertEqual(
-            {left: entry["name"] for left, entry in meta.PROFILE_ZERO_UNREVIEWED_IMPORTS.items()},
-            {0xD675EBB8: "sceKernelSelfStopUnloadModule"},
-        )
+
+    def test_profile_zero_self_stop_cites_only_the_two_reproduced_forms(self) -> None:
+        nid = 0xD675EBB8
+        handler = "h_SelfStopUnloadModule"
+        registration = self.regs[nid]
+        self.assertEqual(registration["handler"], handler)
+        self.assertEqual(registration["classification"], "dedicated")
+        self.assertEqual(registration["status"], "partial")
+        evidence = meta.HANDLER_EVIDENCE[handler]
+        self.assertIn("docs/HARDWARE_ORACLE.md (PSP-HLE-SELFSTOP-001: self-stop-arg0, self-stop-arg1)", evidence)
+        self.assertIn("tests/native/hle_thread_selftest.c:test_self_stop_unload_measured_forms", evidence)
+        self.assertFalse(any("self-stop-argp-past-ram" in reference for reference in evidence))
+        self._assert_cited_cells_are_manifest_cells(evidence)
+        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(hle_manifest.SELFTEST_C.read_text(encoding="utf-8")))
+        limitation = meta.HANDLER_LIMITATIONS[handler]
+        for term in ("(0, 0, NULL)", "(1, 0, NULL)", "0x80000103", "past RAM", "module_start thread",
+                     "nonzero module_stop return", "unmeasured"):
+            self.assertIn(term, limitation)
+        self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
 
     def test_route_a_batches_eleven_and_twelve_leave_uncovered_contracts_unreviewed(self) -> None:
         # The WritebackInvalidate range variant is not measured. It may not ride along with the
@@ -2894,14 +2908,8 @@ class ProfileZeroImportGateTests(unittest.TestCase):
             with self.assertRaises(ManifestError):
                 hle_manifest.load_imports(path)
 
-    def test_the_live_allowlist_names_341_and_only_unreviewed_registrations(self) -> None:
-        self.assertTrue(meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
-        by_nid = {int(r["nid"], 16): r for r in self.manifest["registrations"]}
-        for nid, entry in meta.PROFILE_ZERO_UNREVIEWED_IMPORTS.items():
-            with self.subTest(nid=f"0x{nid:08x}"):
-                self.assertEqual(entry["issue"], "https://github.com/Jstar269/nakagawa-recomp/issues/341")
-                self.assertEqual(entry["name"], by_nid[nid]["name"])
-                self.assertTrue(hle_manifest.is_dedicated_unreviewed(by_nid[nid]))
+    def test_the_live_allowlist_has_no_remaining_entries(self) -> None:
+        self.assertEqual(meta.PROFILE_ZERO_UNREVIEWED_IMPORTS, {})
 
     def test_metadata_rejects_an_allowlist_entry_whose_handler_was_reviewed(self) -> None:
         reviewed = next(
@@ -2933,24 +2941,35 @@ class ProfileZeroImportGateTests(unittest.TestCase):
 
     def test_the_cli_fails_on_a_stale_allowlist_entry(self) -> None:
         import tempfile
-        allowlisted = sorted(meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
-        # The guest still imports something: a reviewed NID keeps its import table non-empty
-        # when the allowlist holds a single entry.
+        unreviewed_nid = self.live_unreviewed[0]
+        unreviewed = next(r for r in self.manifest["registrations"] if int(r["nid"], 16) == unreviewed_nid)
+        allow = {unreviewed_nid: {"name": unreviewed["name"], "issue": meta.PROFILE_ZERO_ISSUE}}
         reviewed = next(
             int(r["nid"], 16) for r in self.manifest["registrations"]
             if r["classification"] == "dedicated" and r["status"] == "partial"
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            module = self._module(tmp, allowlisted[1:] + [reviewed])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(meta, "PROFILE_ZERO_UNREVIEWED_IMPORTS", allow):
+            module = self._module(tmp, [reviewed])
             rc, err = self._main("--out", str(Path(tmp) / "m.json"), "--imports", str(module),
                                  "--check-profile-zero-imports")
         self.assertEqual(rc, 1)
-        self.assertIn(f"stale PROFILE_ZERO_UNREVIEWED_IMPORTS entry 0x{allowlisted[0]:08x}", err)
+        self.assertIn(f"stale PROFILE_ZERO_UNREVIEWED_IMPORTS entry 0x{unreviewed_nid:08x}", err)
 
     def test_the_cli_passes_when_every_unreviewed_import_is_allowlisted(self) -> None:
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            module = self._module(tmp, sorted(meta.PROFILE_ZERO_UNREVIEWED_IMPORTS))
+        unreviewed_nid = self.live_unreviewed[0]
+        unreviewed = next(r for r in self.manifest["registrations"] if int(r["nid"], 16) == unreviewed_nid)
+        allow = {unreviewed_nid: {"name": unreviewed["name"], "issue": meta.PROFILE_ZERO_ISSUE}}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(meta, "PROFILE_ZERO_UNREVIEWED_IMPORTS", allow):
+            module = self._module(tmp, [unreviewed_nid])
+            rc, err = self._main("--out", str(Path(tmp) / "m.json"), "--imports", str(module),
+                                 "--check-profile-zero-imports")
+        self.assertEqual((rc, err), (0, ""))
+
+    def test_the_cli_passes_for_the_reviewed_self_stop_with_empty_allowlist(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(meta, "PROFILE_ZERO_UNREVIEWED_IMPORTS", {}):
+            module = self._module(tmp, [0xD675EBB8])
             rc, err = self._main("--out", str(Path(tmp) / "m.json"), "--imports", str(module),
                                  "--check-profile-zero-imports")
         self.assertEqual((rc, err), (0, ""))

@@ -9613,6 +9613,127 @@ static void test_net_inet_lifecycle_without_network(int stop_at_socket) {
     sr_hle_test_partition_reset();
 }
 
+static int resolver_test_start_inet_stack(void) {
+    return net_call(0x1579a159u /* LoadNetModule */, 1u /* COMMON */, 0, 0, 0, 0) == 0u &&
+           net_call(0x1579a159u /* LoadNetModule */, 3u /* INET */, 0, 0, 0, 0) == 0u &&
+           net_call(0x39af39a6u /* NetInit */, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           net_call(0x17943399u /* InetInit */, 0, 0, 0, 0, 0) == 0u;
+}
+
+/* #2999: exercise local lifecycle, including the reference-derived initial cell without the
+ * prior object operations in the PSP test. Parent and LoadExec reset cases verify runtime scope. */
+static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
+    enum {
+        NID_NET_TERM = 0x281928a9u, NID_INET_TERM = 0xa9ed66b9u,
+        NID_RESOLVER_INIT = 0xf3370e61u, NID_RESOLVER_TERM = 0x6138194au,
+        NID_RESOLVER_CREATE = 0x244172afu, NID_RESOLVER_LOOKUP = 0x224c5f44u,
+        NID_UNLOAD_NET = 0x64d50c56u,
+        NET_COMMON = 1u, NET_INET = 3u,
+    };
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_net_inited(void);
+    extern uint32_t sr_hle_test_net_pool_uid(void);
+    const int initial_failures = s_failures;
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    sr_hle_init();
+    const int init_registered = sr_hle_test_is_registered(NID_RESOLVER_INIT);
+    const int term_registered = sr_hle_test_is_registered(NID_RESOLVER_TERM);
+    const int lookup_registered = sr_hle_test_is_registered(NID_RESOLVER_LOOKUP);
+    expect(init_registered, "Resolver lifecycle registers the Init NID");
+    expect(term_registered, "Resolver lifecycle registers the Term NID");
+    expect(!sr_hle_test_is_registered(NID_RESOLVER_CREATE) && !lookup_registered,
+           "Resolver lifecycle leaves object creation and lookup unregistered");
+    if (!init_registered || !term_registered) return;
+
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_loadexec_reset_guest_state();
+    sysreg_scratch_clean();
+    sysreg_restart();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u,
+           "Resolver lifecycle: Init before Inet was started stops by name");
+    const int inet_ready = resolver_test_start_inet_stack();
+    expect(inet_ready, "Resolver lifecycle: normal offline utility, Net and Inet startup");
+    const uint32_t pool = sr_hle_test_net_pool_uid();
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 2u,
+           "Resolver lifecycle: Term before successful Init stops by name");
+
+    static const char wlan_off[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, "
+        "\"categories\": [], \"keys\": [], \"console\": {\"wlan_mac_hex\": \"00a1b2c3d4e5\", "
+        "\"open_psid_hex\": \"00112233445566778899aabbccddeeff\", \"wlan_switch\": 0}}";
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, wlan_off, sizeof(wlan_off) - 1u),
+           "Resolver lifecycle: create the synthetic WLAN-off profile");
+    sysreg_restart();
+    expect(profile_call(0xd7763699u, 0u) == 0u &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Resolver lifecycle: the unmeasured WLAN-off cell stops by name");
+    sysreg_scratch_clean();
+    sysreg_restart();
+
+    const int resolver_ready = net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u;
+    expect(resolver_ready && sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: initial Init without prior object operations preserves the Net pool");
+    if (stop_at_lookup) {
+        /* Never exercise a lookup if a future change registers this import. */
+        if (inet_ready && resolver_ready && !lookup_registered && s_failures == initial_failures) {
+            sr_sched_on = 1;
+            (void)net_call(NID_RESOLVER_LOOKUP, 0, 0, 0, 0, 0);
+        }
+        return;
+    }
+    FILE *duplicate_capture;
+    int duplicate_fd;
+    char duplicate_log[512] = {0};
+    const int duplicate_capturing = hle_data_stderr_capture_begin(&duplicate_capture, &duplicate_fd);
+    const uint32_t duplicate_result = net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0);
+    if (duplicate_capturing)
+        hle_data_stderr_capture_end(duplicate_capture, duplicate_fd, duplicate_log, sizeof(duplicate_log));
+    expect(duplicate_result == 0x80000020u && sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Resolver lifecycle: duplicate Init returns the observed error without a stop");
+    expect(duplicate_capturing &&
+               strstr(duplicate_log, "HLE: sceNetResolverInit (NID 0xf3370e61): "
+                                     "duplicate Init returns 0x80000020 (already initialized)") != NULL,
+           "Resolver lifecycle: duplicate Init visibly reports its modeled error");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 4u && sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: Inet cannot tear down while Resolver is active");
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == 0u &&
+               sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: first and repeated Term return zero and leave core Net alive");
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 5u,
+           "Resolver lifecycle: the unmeasured re-init order stops by name");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: normal Inet and core teardown follows Resolver Term");
+    expect(resolver_test_start_inet_stack(), "Resolver lifecycle: the parent Inet stack can start again");
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 6u,
+           "Resolver lifecycle: repeat Term does not carry into the rebuilt Inet stack");
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 7u,
+           "Resolver lifecycle: re-init in a later Inet lifetime stops by name");
+    sr_hle_loadexec_reset_guest_state();
+    expect(resolver_test_start_inet_stack() &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: the new program can Init after a terminated predecessor");
+    sr_hle_loadexec_reset_guest_state();
+    expect(resolver_test_start_inet_stack() &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: the new program can Init after an active predecessor");
+    sr_hle_loadexec_reset_guest_state();
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
 static void test_net_core_without_network(void) {
     enum {
         NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
@@ -58842,6 +58963,7 @@ static void lifecycle_stop_fn(CpuState *s) {
 #define SELFSTOP_ARG_ADDR 0x08a02000u
 static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
+static uint32_t s_selfstop_guest_result;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
 static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
@@ -58853,7 +58975,7 @@ static void selfstop_guest_entry(CpuState *s) {
     s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
     s->r[5] = s_selfstop_guest_args[1];
     s->r[6] = s_selfstop_guest_args[2];
-    (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
+    s_selfstop_guest_result = sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
 
@@ -59390,56 +59512,110 @@ static void test_late_prx_unload_reload_lifecycle(void) {
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
 
-    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
-     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
-     * with argument size 0 and argp 0, and the module is unloaded. */
-    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
-                                          LIFECYCLE_PATCH_OFF_A_1);
-    expect(self_uid != 0u &&
-               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
-                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
-           "self-stop (1, 0, NULL): module image loads");
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
-    memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = self_uid;
-    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
-    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
-     * so the call returns and the module stays loaded. */
-    s_lifecycle_stop_calls = 0u;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
-               sr_hle_test_module_count() == 1u,
-           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
-    s_lifecycle_stop_calls = 0u;
-    s_lifecycle_stop_arglen = 0xffffffffu;
-    s_lifecycle_stop_argp_word = 0xffffffffu;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 0u;
-    s_selfstop_guest_args[2] = 0u;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    s_selfstop_guest_args[0] = 0u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    expect(s_selfstop_guest_returned == 0u,
-           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
-    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
-               s_lifecycle_stop_argp_word == 0u,
-           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
-    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
-           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
-
     remove(path_a);
     remove(path_b);
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
+}
+
+static uint32_t s_selfstop_stop_argp;
+static void selfstop_zero_result_stop_fn(CpuState *s) {
+    s_lifecycle_stop_calls++;
+    s_lifecycle_stop_arglen = s->r[4];
+    s_selfstop_stop_argp = s->r[5]; /* Record the pointer itself, without reading it. */
+    s->r[2] = 0u;
+}
+
+static void test_self_stop_unload_measured_forms(void) {
+    extern void sr_hle_test_partition_reset(void);
+    const char *path = HLE_BUILD_ROOT "/hle_lifecycle_self_stop.prx";
+    const uint32_t entry = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
+    const uint32_t address_nid = 0xd8b73127u, export_pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_PATCH_OFF_A_1;
+    const struct {
+        uint32_t first, arglen, argp, refusal;
+    } cases[] = {
+        {0u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg0 */
+        {1u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg1 */
+        /* PSP-HLE-SELFSTOP-001's past-RAM cell unloaded with a substituted pointer.
+         * The host deliberately refuses an unreadable span instead. */
+        {0u, 4u, 0x0c000000u, 0x80000103u},
+        {1u, 4u, SELFSTOP_ARG_ADDR, 0x80020002u}, /* Unmeasured first argument of 1 with a block. */
+    };
+
+    if (!write_lifecycle_prx(path, 0x51570a0bu)) {
+        expect(0, "self-stop: synthetic image written");
+        return;
+    }
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_fixture();
+        sr_hle_init();
+        sr_test_guest_fn_reset();
+        sr_hle_test_module_reset();
+        /* A refusal deliberately leaves its fixed-address partition block allocated. */
+        sr_hle_test_partition_reset();
+
+        uint32_t uid = sr_hle_test_load_prx_image(path, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                                  LIFECYCLE_PATCH_OFF_A_1);
+        s_selfstop_guest_gp = 0x0aabbccdu;
+        const int loaded = uid != 0u &&
+            sr_hle_test_set_module_image(uid, LIFECYCLE_MOD_B_BASE,
+                                         LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, s_selfstop_guest_gp);
+        expect(loaded, "self-stop: fresh synthetic module image loaded");
+        if (!loaded) break;
+        sr_test_register_guest_fn(entry, lifecycle_start_fn);
+        sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_STOP_OFF, selfstop_zero_result_stop_fn);
+        sr_test_register_guest_fn(export_pc, lifecycle_export_b_fn);
+        CpuState cpu = {0};
+        cpu.r[4] = uid;
+        expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop: fresh module starts");
+        cpu.r[4] = entry;
+        expect(sr_syscall(&cpu, address_nid) == uid && sr_hle_test_module_count() == 1u &&
+                   sr_hle_test_image_count() == 1u && sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+               "self-stop: started module, image and export present before call");
+
+        s_selfstop_guest_args[0] = cases[i].first;
+        s_selfstop_guest_args[1] = cases[i].arglen;
+        s_selfstop_guest_args[2] = cases[i].argp;
+        s_selfstop_guest_result = UINT32_MAX;
+        s_selfstop_guest_returned = 0u;
+        s_selfstop_guest_in_scheduler = 0;
+        s_lifecycle_stop_calls = 0u;
+        s_lifecycle_stop_arglen = UINT32_MAX;
+        s_selfstop_stop_argp = UINT32_MAX;
+        sr_test_register_guest_fn(entry, selfstop_guest_entry);
+        sched_run(entry, 0u, 0u);
+
+        expect(s_selfstop_guest_in_scheduler && s_selfstop_guest_pc == entry,
+               "self-stop: caller runs as a scheduled thread in the started module");
+        cpu.r[4] = entry;
+        const uint32_t after = sr_syscall(&cpu, address_nid);
+        if (cases[i].refusal != 0u) {
+            expect(s_selfstop_guest_returned && s_selfstop_guest_result == cases[i].refusal &&
+                       s_lifecycle_stop_calls == 0u,
+                   "self-stop: unsupported argument form returns the refusal and runs no stop");
+            expect(after == uid && sr_hle_test_module_count() == 1u && sr_hle_test_image_count() == 1u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+                   "self-stop: refusal preserves the module, image and export");
+        } else {
+            expect(!s_selfstop_guest_returned && s_selfstop_guest_result == UINT32_MAX,
+                   cases[i].first ? "self-stop (1, 0, NULL) does not return" : "self-stop (0, 0, NULL) does not return");
+            expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u && s_selfstop_stop_argp == 0u,
+                   "self-stop: module_stop runs once with length zero and a raw null pointer");
+            expect(after == 0x8002012eu && sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
+                   "self-stop: module, image and export retired and address lookup no longer finds the module");
+        }
+    }
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    remove(path);
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
 }
 
 static void test_host_skipped_start_stop_unload_reload(void) {
@@ -64791,10 +64967,31 @@ static void test_font_glyph_image_and_handles(uint32_t served_index) {
            "the served font has a glyph whose bitmap fits a 16 x 16 buffer");
     uint32_t stops = sr_hle_test_unmodelled_stops();
     for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 4u, 0xa5u);
     flt_write_glyph_image(FLT_GI, 2u, 0, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
            "sceFontGetCharGlyphImage draws into a complete glyph image and bitmap");
+    /* The first glyph of each synthetic strike in test_flash0_font.py has coverage
+     * 0..15 in row order. Check what the guest actually sees at its 16-byte pitch. */
+    int coverage_ok = 1;
+    for (uint32_t y = 0; y < 4u; ++y) {
+        for (uint32_t x = 0; x < 4u; ++x) {
+            if (MEM_R8(FLT_BITMAP + 16u * y + x) != 17u * (4u * y + x)) coverage_ok = 0;
+        }
+    }
+    expect(coverage_ok && MEM_R8(FLT_BITMAP + 4u) == 0xa5u,
+           "format-2 glyph syscall writes all 16 coverage levels and preserves the next byte");
+
+    for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 5u, 0xa5u);
+    flt_write_glyph_image(FLT_GI, 2u, 32, 16u, 16u, 16u, FLT_BITMAP);
+    expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
+               sr_hle_test_unmodelled_stops() == stops &&
+               MEM_R8(FLT_BITMAP) == 0u && MEM_R8(FLT_BITMAP + 1u) == 9u &&
+               MEM_R8(FLT_BITMAP + 2u) == 25u && MEM_R8(FLT_BITMAP + 3u) == 43u &&
+               MEM_R8(FLT_BITMAP + 4u) == 25u && MEM_R8(FLT_BITMAP + 5u) == 0xa5u,
+           "half-pixel format-2 glyph write preserves the byte beyond its fifth column");
     flt_write_glyph_image(FLT_GI, 2u, 100 * 64, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
@@ -69693,6 +69890,17 @@ static int hle_selftest_main(int argc, char **argv) {
         free(g_mem_base);
         return 98;
     }
+    if (argc > 1 && strcmp(argv[1], "--resolver-lookup-stop-child") == 0) {
+        test_net_resolver_lifecycle_without_network(1);
+        free(g_mem_base);
+        return 1;
+    }
+    if (argc > 1 && strcmp(argv[1], "--resolver-offline") == 0) {
+        test_net_resolver_lifecycle_without_network(0);
+        fprintf(stderr, "resolver-offline: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--inet-offline") == 0) {
         test_net_inet_lifecycle_without_network(0);
         fprintf(stderr, "inet-offline: %d checks, %d failures\n", s_checks, s_failures);
@@ -69735,6 +69943,13 @@ static int hle_selftest_main(int argc, char **argv) {
         test_sysclib_snprintf();
         fprintf(stderr, "sysclib-snprintf: %d checks, %d failures\n", s_checks, s_failures);
         return s_failures != 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--self-stop-unload") == 0) {
+        test_self_stop_unload_measured_forms();
+        fprintf(stderr, "self-stop-unload: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
     }
 
     if (argc > 1 && strcmp(argv[1], "--title-config") == 0) {
@@ -69865,6 +70080,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_named_refusals();
     test_net_core_without_network();
     test_net_inet_lifecycle_without_network(0);
+    test_net_resolver_lifecycle_without_network(0);
     test_refer_system_status();
     test_ctrl_read_latch();
     test_ctrl_peek_latch_keeps_the_latch();
@@ -70306,6 +70522,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_prx_stop_entry_boundaries();
     test_module_stop_join_failure_keeps_stop_single();
     test_late_prx_unload_reload_lifecycle();
+    test_self_stop_unload_measured_forms();
     test_module_without_entry_runs_no_code();
     test_host_skipped_start_stop_unload_reload();
     test_late_prx_duplicate_base_last_reference();

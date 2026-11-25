@@ -10760,6 +10760,52 @@ static void test_play_mode_settings(void) {
         assert_cull_build_matches_line(app, 2);
         assert(!player_app_title_cull_problem(app, 2)[0]);
         assert(!app->games[0].enhancement_package_id[0]);             /* no package: authentic */
+        /* Both manifests accept IDs of this size. Their joined ID fits exactly. */
+        const char timing_id[] = "timing-0123456789012345678901234";
+        const char cull_id[] = "cull-01234567890123456789012345";
+        char timing_file[820], declaration[256], joined[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+        snprintf(timing_file, sizeof(timing_file), "%s%cenhancements%ctest90003-60hz.json",
+                 root, sep, sep);
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s\",\"target_title_id\":\"fixture-title\"}", timing_id);
+        write_text_file(timing_file, declaration);
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s\",\"target_title_id\":\"fixture-title\","
+                 "\"category\":\"guest_memory_code_hook\"}", cull_id);
+        write_text_file(cull_file, declaration);
+        player_app_refresh_title_enhancements(app);
+        assert(snprintf(joined, sizeof(joined), "%s+%s", timing_id, cull_id) == 64);
+        const GameRecord *game = &app->games[2];
+        assert(strcmp(game->enhancement_package_id, joined) == 0 && !game->enhancement_hook_only);
+        player_app_runtime_package_cache_mark_pending(app, 2);
+        assert(player_app_runtime_package_check_pending(app, game));
+        GameRecord combined_game = *game;
+        player_app_runtime_package_cache_store(app, 2, &combined_game, true, "prior-identity",
+                                               NK_RUNTIME_PACKAGE_OK, true, 100);
+        assert(player_app_cached_game_has_runtime(app, game));
+        player_app_runtime_package_worker_start_failed_record(app, game, 100);
+        assert(player_app_runtime_package_worker_start_failed(app, game));
+
+        /* A single extra byte falls back to the timing build and misses the old key. */
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s6\",\"target_title_id\":\"fixture-title\","
+                 "\"category\":\"guest_memory_code_hook\"}", cull_id);
+        write_text_file(cull_file, declaration);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[2].cull_available);
+        assert(strstr(player_app_title_cull_problem(app, 2), "too long together") != NULL);
+        assert(strcmp(game->enhancement_package_id, timing_id) == 0 && !game->enhancement_hook_only);
+        assert(!player_app_cached_game_has_runtime(app, game));
+        assert(!player_app_runtime_package_worker_start_failed(app, game));
+        player_app_runtime_package_cache_mark_explicit_retry(app, 2);
+        const PlayerRuntimePackageCacheEntry *cache = &app->runtime_package_cache[2];
+        assert(player_runtime_package_cache_entry_is_for(cache, game));
+        assert(cache->explicit_retry_pending && !cache->status_valid && !cache->identity_valid);
+        assert(!player_runtime_package_cache_entry_is_for(cache, &combined_game));
+        player_app_runtime_package_worker_start_failed_clear(app, &combined_game);
+        player_app_runtime_package_cache_invalidate(app);
+        write_text_file(timing_file,
+                        "{\"id\":\"fixture-60hz\",\"target_title_id\":\"fixture-title\"}");
         /* A culling package that cannot ride: not a code-hook package, another game's, the
            timing package's own id, or one whose joined name is too long. The timing build
            stays, and the reason is kept. */
@@ -22420,7 +22466,7 @@ int main(int argc, char **argv) {
         snprintf(cache_state->games[0].title_id,
                  sizeof(cache_state->games[0].title_id), "cache-title-a");
         snprintf(cache_state->games[0].selected_executable,
-                 sizeof(cache_state->games[0].selected_executable), "EBOOT.BIN");
+                 sizeof(cache_state->games[0].selected_executable), "MAXLENGTH15.BIN");
         GameRecord cache_game = cache_state->games[0];
 
         player_app_runtime_package_cache_mark_pending(cache_state, 0);

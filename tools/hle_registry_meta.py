@@ -369,7 +369,24 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network",
             "PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): active sceNetInetTerm returns 0 before core Net Term and module unload",
         ],
-        "limitation": "clears active Inet state before core Net teardown; early or repeated Term stops by name; LoadExec clears Inet with the process's core Net and module state",
+        "limitation": "clears active Inet state before core Net teardown; early or repeated Term and Term while Resolver is active stop by name; LoadExec clears Inet with the process's core Net and module state",
+    },
+    "h_NetResolverInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network",
+            "PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): after normal Net/Inet setup, AP Term and a preceding resolver Create/lookup/Stop/Delete, first Init returns 0 and duplicate Init returns 0x80000020",
+            "PPSSPP Core/HLE/sceNetResolver.cpp:sceNetResolverInit (cdf563b85c42c275ec2835a0883f48d63a9c9406): Init consults only the initialized flag; equivalence of Init without prior resolver object operations is reference-derived",
+        ],
+        "limitation": "tracks only lifecycle in the disconnected Inet stack with WLAN on; first Init without prior object operations is PPSSPP-derived and logs once; unsupported ordering stops by name; resolver objects, DNS and host transport remain outside the handler",
+    },
+    "h_NetResolverTerm": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network",
+            "PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): first and repeated Resolver Term return 0 after Init and deletion of the resolver objects",
+        ],
+        "limitation": "clears active Resolver and permits repeated Term in the same disconnected Inet lifetime with WLAN on; Term without successful Init in this lifetime stops by name; LoadExec resets the lifecycle state",
     },
     "h_NetGetLocalEtherAddr": {
         "status": "partial",
@@ -1555,6 +1572,20 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "uOFW src/kd/modulemgr/queryModule.c (f7b0623168842f02cddbdbf9437ac0c2380c51c8, MIT): both pointers pass the kernel's user-pointer check before anything is written",
         ],
         "limitation": "lists only the main module and the modules the runtime loaded (a PSP also lists firmware modules), main first and then in load order, an order that is not measured; the recorded 0x800200D3 covers a NULL pointer and one whose address, end or size has bit 31 set, of which the recording has 0x88000000; a count pointer or buffer that passes that check and is not guest memory has no recorded cell and stops the run by name",
+    },
+    "h_SelfStopUnloadModule": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-SELFSTOP-001: self-stop-arg0, self-stop-arg1)",
+            "tests/native/hle_thread_selftest.c:test_self_stop_unload_measured_forms",
+        ],
+        "limitation": "only (0, 0, NULL) and (1, 0, NULL) from a started helper's own thread "
+        "are reproduced: module_stop runs once with length zero and a null pointer, the caller "
+        "does not resume, and address lookup returns 0x8002012e after unload. For (0, 4, argp past RAM) "
+        "the PSP ran module_stop with a substituted pointer and unloaded; the runtime refuses the span "
+        "with 0x80000103 and preserves the module (#2397). Other first-argument and argument-block forms, "
+        "a call from the module_start thread, sibling threads, no stop entry and a nonzero module_stop "
+        "return remain unmeasured (#341)",
     },
     "h_LoadExecForUser_362A956B": {
         "status": "partial",
@@ -3379,9 +3410,7 @@ WAIVERS: tuple[FindingWaiver, ...] = ()
 #     guest no longer imports.
 # Never add an entry to make that gate pass: review the handler instead.
 PROFILE_ZERO_ISSUE = "https://github.com/Jstar269/nakagawa-recomp/issues/341"
-PROFILE_ZERO_UNREVIEWED_IMPORTS = {
-    0xD675EBB8: {"name": "sceKernelSelfStopUnloadModule", "issue": PROFILE_ZERO_ISSUE},  # h_SelfStopUnloadModule: PSP-HLE-SELFSTOP-001 measured (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM) from a helper thread; the first two are reproduced (a first argument of 1 only with no argument block), the third is refused with ILLEGAL_ADDR here where the PSP ran module_stop with an argp it chose (#2397)
-}
+PROFILE_ZERO_UNREVIEWED_IMPORTS: dict[int, dict[str, str]] = {}
 
 # Runtime subsystem that owns each registration (issue #307). The split of
 # src/rt/hle.c into subsystem modules needs one obvious owner per registered

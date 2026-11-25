@@ -1094,12 +1094,25 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 `settings.json` keeps the library's choice in `"enhanced"` and a sparse `"title_play"` map, every value by name:
 
 ```json
-"enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
-            "load": "off", "twin": "off", "mips": "off"},
-"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
-"texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+{
+  "enhanced": {
+    "default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on",
+    "wide": "off", "smooth": "off", "sas": "off", "tess": "off", "cull": "off",
+    "upscale": "off", "stick": "off", "load": "off", "twin": "off", "ssaa": "off",
+    "mips": "off", "texpack": "off", "pad": "off", "shadow": "off", "peak": "off",
+    "texscale": "off", "smart2d": "off"
+  },
+  "title_play": {
+    "ULUS10000": {"mode": "ace", "af": "8", "texpack": "on"},
+    "ULES00000": {"mode": "library", "logic_60": "off"}
+  },
+  "texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+}
 ```
+
+Here the library defaults to Enhanced with texture replacement off. `ULUS10000` enables its chosen pack with
+`"texpack": "on"`, while `ULES00000` inherits the library's texture pack setting. Authentic keeps texture
+replacement off even when a folder is saved.
 
 `"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
 256 of them; choosing one more is refused with a message. A member that is not a disc ID and a folder string is
