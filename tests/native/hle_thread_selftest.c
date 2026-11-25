@@ -14148,7 +14148,12 @@ static void offd_main_fn(CpuState *cpu) {
         /* (c) Lobby lost, then turned off, with no socket open: nothing opens after it. */
         const int peer_lsn = tp->ops->ptp_listen(tp, 0x5301u, 4);
         offd_kill_lobby(cpu);
-        expect(s_adh_events == 2u && adh_state() == 0u, "offd.c: the lobby is lost");
+        const uint32_t state = adh_state();
+        snprintf(msg, sizeof(msg), "offd.c: the lobby is lost (events=%u ev=%d err=0x%08x state=%u)",
+                 s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+                 s_adh_events > 1u ? ADH_AT(1).error : 0u, state);
+        expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
+               ADH_AT(1).error == 0x80410b09u && state == 0u, msg);
         offd_turn_off();
         for (int w = 0; w < 300; w++) d3_step(cpu); /* past the 250 ms between looks */
         const uint32_t pdp = adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29], ADH_P2_SELF_MAC,
