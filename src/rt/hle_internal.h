@@ -251,8 +251,8 @@ typedef struct {
  * pools grows on demand (vpl_new_slot). */
 #define VPL_MAX_WAITERS 64
 typedef struct { uint32_t addr, size; } VplSpan;
-typedef struct { uint32_t addr, size; } VplAlloc;
-typedef struct { uint32_t thread_uid; uint32_t size; } VplWaiter;
+typedef struct { uint32_t addr, size; SrWaitHandle reservation; } VplAlloc;
+typedef struct { SrWaitHandle invocation; uint32_t size; } VplWaiter;
 /* The free spans (sorted by address) and the live blocks are host arrays that grow on
  * demand. A PSP keeps a block's header inside the pool, so only the pool's own bytes bound
  * how many blocks it holds; every block here costs at least 16 bytes, which bounds
@@ -1236,7 +1236,6 @@ VplPool *vpl_slot(size_t index);
 VplPool *vpl_new_slot(void);
 void vpl_table_reset(void);
 void vpl_release(VplPool *p);
-void vpl_remove_waiter(VplPool *p, uint32_t thread_uid);
 VplPool *vpl_lookup(uint32_t uid);
 extern TlsplPool s_tlspls[TLSPL_MAX];
 void tlspl_release_thread(TlsplPool *p, uint32_t thread_uid);
