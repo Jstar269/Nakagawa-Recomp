@@ -3998,6 +3998,14 @@ def _walk_body(elf, start, ranges, known, resume_owners, dispatch_boundaries,
             # syscall there still ends the line), so the body is the same in either order.
             terminator_slots.discard(pc)
             seen.discard(pc)
+        elif pc in seen and continuations.get(pc - 4) == pc + 4:
+            # A label on the delay slot of a transfer whose fall-through stopped at another
+            # entry (jal, a linked call, a split conditional branch). The transfer marked the
+            # slot seen without walking it, so the labelled copy takes the same continuation
+            # edge: after the slot, control goes on into that entry, not into whatever block
+            # the address order puts next.
+            stop_at_continuation(pc, pc + 4)
+            continue
         while in_ranges(pc, ranges) and pc not in seen:
             seen.add(pc)
             insns.add(pc)
