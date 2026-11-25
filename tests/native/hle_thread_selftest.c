@@ -31142,6 +31142,48 @@ static void test_refer_run_and_callback_status_check_their_span(void) {
     s_cur = -1;
 }
 
+/* sceKernelCancelWakeupThread and sceKernelReferThreadRunStatus name a thread, so a UID that
+ * names none answers UNKNOWN_THID (0x80020198), the code every other thread call returns
+ * (sched.c) and the one PPSSPP's kernelObjects.Get<PSPThread> gives both calls
+ * (Core/HLE/sceKernelThread.cpp). 0x800201A0 is UNKNOWN_TEID, the thread-event-handler code.
+ * Not PSP-measured here. */
+extern uint32_t sr_hle_test_cancel_wakeup_thread(CpuState *s);
+static void test_cancel_wakeup_and_run_status_unknown_thread(void) {
+    enum {
+        RUN_INFO = 0x08302000u,
+        TEST_UNKNOWN_THID = 0x80020198u,
+    };
+    TCB *self = wsv_begin();
+    TCB *other = fixture_thread(0x1e1u, TH_READY, 40);
+    other->started = 1;
+    other->wakeups = 2;
+    CpuState cpu;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == 2u && other->wakeups == 0,
+           "CancelWakeupThread returns and clears a thread's banked wakeups");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == TEST_UNKNOWN_THID,
+           "CancelWakeupThread answers UNKNOWN_THID for a UID that names no thread");
+    other->deleted = 1;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == TEST_UNKNOWN_THID,
+           "CancelWakeupThread answers UNKNOWN_THID for a deleted thread");
+
+    MEM_W32(RUN_INFO, 0xa5a5a5a5u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID &&
+               MEM_R32(RUN_INFO) == 0xa5a5a5a5u,
+           "ReferThreadRunStatus answers UNKNOWN_THID for a UID that names no thread");
+    (void)self;
+    reset_fixture();
+}
+
 /* -------------------------------------------------------------------------
  * sceKernelGetThreadStackFreeSize (#1388)
  * -------------------------------------------------------------------------
@@ -69792,6 +69834,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_check_thread_stack_contract();
     test_refer_thread_status();
     test_refer_run_and_callback_status_check_their_span();
+    test_cancel_wakeup_and_run_status_unknown_thread();
     test_change_current_thread_attr();
     test_suspend_resume_errors_and_ready_thread();
     test_change_thread_priority_contract();

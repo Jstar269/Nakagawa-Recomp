@@ -387,7 +387,7 @@ static uint32_t h_WakeupThread(CpuState *s) {
 static uint32_t h_CancelWakeupThread(CpuState *s) {
     int old = sched_thread_cancel_wakeup(A0);
     if (hle_wakelog_on()) { static int n=0; if (n++<8) fprintf(stderr, "CANCEL_WAKE target=0x%x old=%d (from 0x%x)\n", A0, old, sched_current_uid()); }
-    return old < 0 ? 0x800201a0u : (uint32_t)old;
+    return old < 0 ? SCE_KERNEL_ERROR_UNKNOWN_THID : (uint32_t)old;
 }
 static uint32_t h_WaitThreadEnd(CpuState *s) {
     return h_WaitThreadEnd_impl(s, 0);
@@ -404,7 +404,7 @@ static uint32_t h_ReferThreadRunStatus(CpuState *s) {
         if (!sr_guest_span_writable(out, 0x2cu)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
         SrThreadRunStatus rs;
         int rc = sched_thread_run_status(A0, &rs);
-        if (rc < 0) return 0x800201a0u;
+        if (rc < 0) return SCE_KERNEL_ERROR_UNKNOWN_THID;
         for (uint32_t i = 0; i < 0x2c; i++) MEM_W8(out + i, 0);
         MEM_W32(out + 0x00, rs.size);
         MEM_W32(out + 0x04, rs.status);
@@ -1038,4 +1038,5 @@ void hle_register_init_kernel_thread_2(void) {
 /* Test-build-only call-throughs to the production handlers this build leaves unregistered. */
 uint32_t sr_hle_test_refer_thread_run_status(CpuState *s) { return h_ReferThreadRunStatus(s); }
 uint32_t sr_hle_test_refer_callback_status(CpuState *s) { return h_ReferCallbackStatus(s); }
+uint32_t sr_hle_test_cancel_wakeup_thread(CpuState *s) { return h_CancelWakeupThread(s); }
 #endif
