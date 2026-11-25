@@ -193,9 +193,11 @@ launcher itself, and a log needs route B.
 - **Rotate** the phone while the demo runs.
 - **Fold and unfold** while the demo runs. The screen size changes, so the presenter has to
   recreate its swapchain.
-- **Background and return.** Press Home while the demo runs, wait ten seconds, and switch back.
-  In the emulator the demo kept running unseen and did not draw again after returning (the
-  Lifecycle row below). Report what the phone does.
+- **Background and return.** Press Home while the demo runs, wait ten seconds, and switch back;
+  then do it once more. Before the presenter replaced a lost surface, the demo in the emulator
+  kept running unseen and did not draw again after returning. With that change (the Lifecycle
+  row below) the picture should come back, but no emulator or device has run it yet. Report
+  whether the picture comes back after each return.
 - The same rotate, fold and background steps on the launcher.
 
 ### What to report
@@ -338,7 +340,7 @@ relative path against that folder, so `SDL_GetBasePath()` (`./` on Android) find
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
 | Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Moving the package to the phone, and the launcher starting it, are not wired. |
 | Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the default APK; `-Pnk.toolchain` bundles them for arm64-v8a, and nothing runs them yet. |
-| Lifecycle | Measured in the emulator: with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
+| Lifecycle | The presenter replaces a lost Vulkan surface: when Android destroys the window surface it makes a new surface and swapchain for the same window, and while the title is in the background it holds frames back instead of turning the renderer terminal. The evidence is host selftests on Windows and Linux only; no emulator or device run has checked it. An earlier emulator run, before this change, saw the guest keep running in the background and every present fail (`swapchain acquire failed`). Pausing the guest, its audio and its clock in the background is not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
 | Video | The FFmpeg H.264 subset builds for Android; it has not been run on a device. |
 | Devices | The APK has run only in the emulator. The native test set has run on one physical arm64 device, an Android 16 handheld with a Snapdragon 7 Gen 4-class SoC ([Native tests on a device](#native-tests-on-a-device)). Memory and API floors have not been measured. |
