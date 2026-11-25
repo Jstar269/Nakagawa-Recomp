@@ -2431,6 +2431,14 @@ static void pipe_index_free(PipeIndex *ix) {
 
 static VkPipeline pipe_get(const PipeKey *k) {
     uint64_t profile_started = cpu_profile_now();
+    /* Fixed-function MIN and MAX ignore both RGB factors. Share the Vulkan
+     * object across those draws; alpha still uses the separate ADD state. */
+    PipeKey minmax_key;
+    if (k->blend_on && (k->eq == VK_BLEND_OP_MIN || k->eq == VK_BLEND_OP_MAX)) {
+        minmax_key = *k;
+        minmax_key.srcf = minmax_key.dstf = VK_BLEND_FACTOR_ONE;
+        k = &minmax_key;
+    }
     const int hit = pipe_index_find(&s_pipe_idx, s_pipes, s_pipe_n, k);
     if (hit >= 0) {
         if (s_cpu_profile) {
@@ -4636,8 +4644,11 @@ static uint32_t tex_span_size(uint32_t bufw, int tw, int th) {
         bytes = tile_idx * 4u + (((u % texels_per_tile) * bpp_num) >> 3) +
                 (bpp_num < 8u ? 1u : bpp_num >> 3);
     } else {
-        /* Linear rows are whole 16-byte lines, as ge.c samples them (ge_tex_row_bytes). */
-        bytes = (uint64_t)ge_tex_row_bytes(stride, bpp_num) * h;
+        /* The decoder advances by the aligned pitch and samples the full visible row.
+         * Retain the trailing padding for a wide pitch and the visible tail for a narrow one. */
+        const uint32_t pitch = ge_tex_row_bytes(stride, bpp_num);
+        const uint64_t visible = ((uint64_t)w * bpp_num + 7u) / 8u;
+        bytes = (uint64_t)(h - 1u) * pitch + (visible > pitch ? visible : pitch);
     }
     if (bytes > 4u << 20) bytes = 4u << 20;
     return (uint32_t)bytes;

@@ -47,22 +47,22 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 ### HLE Semantic Status Census
 
 Registered NIDs: **717** (dedicated **670**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **645** handlers across **30** API families, covering **677** handler-associated NID registrations.
+Semantic handler census: **647** handlers across **30** API families, covering **677** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 390 | 402 |
+| `partial` | 394 | 406 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 237 | 244 |
+| `unreviewed` | 235 | 240 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
 | `sceAtrac` | 0 | 0 | 0 | 0 | 34 | 34 | 35 |
-| `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
+| `sceAudio` | 0 | 12 | 0 | 0 | 5 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
 | `sceDisplay` | 1 | 15 | 0 | 0 | 1 | 17 | 17 |
@@ -72,7 +72,7 @@ Semantic handler census: **645** handlers across **30** API families, covering *
 | `sceHprm` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceImpose` | 0 | 0 | 0 | 0 | 2 | 2 | 2 |
 | `sceIo` | 2 | 28 | 0 | 0 | 4 | 34 | 34 |
-| `sceKernel` | 3 | 142 | 0 | 0 | 44 | 189 | 209 |
+| `sceKernel` | 3 | 145 | 0 | 0 | 43 | 191 | 209 |
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
@@ -89,7 +89,7 @@ Semantic handler census: **645** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **390** | **1** | **3** | **237** | **645** | **677** |
+| **Total** | **14** | **394** | **1** | **3** | **235** | **647** | **677** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -198,6 +198,13 @@ Semantic handler census: **645** handlers across **30** API families, covering *
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1
+- **`h_AudioOutputPannedBlocking`** (`sceAudio`): `sceAudioOutputPannedBlocking` (0x13f592bc)
+  - Limitation: PPSSPP-derived, not PSP-measured: a volume above 0xFFFF or a negative one (0x8026000b, checked first), a channel of 8 or more (0x80260003) and a channel 0 to 7 that is not reserved (0x80260001, nothing played, the caller not parked, the first refusal of a run reported by name) follow PPSSPP caa91b54b535; PSPAutotests output.expected (ea71108f) records this API's volume refusals and its length on a reserved channel, but records the bad-channel and unreserved-channel cells for sceAudioOutputBlocking only; there is no PSP measurement of this API (no docs/HARDWARE_ORACLE.md or tools/psp_oracle/manifest.json record); the blocking duration and wake timing, the mixer result, a busy channel, unequal left and right volumes and the volume-before-channel order stay unmeasured (#341)
+  - Evidence: tests/native/hle_thread_selftest.c:test_audio_output_panned_blocking_unreserved_channel
+  - Evidence: tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_channels
+  - Evidence: tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_volumes
+  - Evidence: PPSSPP caa91b54b53585811b0fd84405ea04aec72a952b Core/HLE/sceAudio.cpp sceAudioOutputPannedBlocking and `Core/HLE/__sceAudio.cpp` `__AudioEnqueue` (a behaviour reference; derived, not PSP-measured): the two volumes ORed and compared unsigned above 0xFFFF give 0x8026000b first, a channel of 8 or more 0x80260003, a channel not reserved 0x80260001
+  - Evidence: PSPAutotests tests/audio/sceaudio/output.expected (ea71108f00933712c4662276261b39cd42249b1e, a third-party expectation file; corroboration only): for this API, equal left and right volumes on a reserved channel with NULL data give 0x8026000b for -256, -2, -1, -2147483648 and 65536 and up and the length for 0 to 65535, and a reserved channel at 0x8000 returns its length (0x1040); the bad-channel (0x80260003, channel -1) and unreserved-channel (0x80260001, channel 5) cells are recorded for sceAudioOutputBlocking only
 - **`h_AudioRestLen`** (`sceAudio`): `sceAudioGetChannelRestLength` (0xb011922f), `sceAudioGetChannelRestLen` (0xe9d97901)
   - Limitation: serves sceAudioGetChannelRestLength and sceAudioGetChannelRestLen; the PSP-AUDIO-001 cells query both on channel 0 before and after blocking output and just after release, and PSP-HLE-AUDIO-REST-001 finds them equal (F or F - 64) after each blocking output on stereo channels of 1024, 2048 and 4096 frames, which is evidence that the two calls give one answer, not that this handler gives the console's: the runtime's blocking output returns with up to two blocks queued (#67), so both calls can read up to 2F there where the console held one block (#279, open); invalid-channel error behavior and other queue states are unmeasured for both calls (#341, #2361)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
@@ -442,13 +449,13 @@ Semantic handler census: **645** handlers across **30** API families, covering *
   - Limitation: only the mode field is supported; attribute, size, and timestamp fields fail closed with IO_CHSTAT_NON_MODE_FIELDS
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoClose`** (`sceIo`): `sceIoClose` (0x810c4bc3)
-  - Limitation: the measured cells establish close result 0 for one freshly written host0 file and for the eleven successful fixed UMD/disc/msstor0p1 opens; double close, directory descriptors, standard descriptors and error precedence are not hardware measured, and the refusal while an asynchronous request is pending (ASYNC_BUSY) is covered by the host selftest only (#341)
+  - Limitation: the measured cells establish close result 0 for one freshly written host0 file and for the eleven successful fixed UMD/disc/msstor0p1 opens; PSP-HLE-STDIO-001 measures sceIoClose of the Stdout handle as refused with nothing closed in both launch contexts, 0x800200d1 from the XMB and 0x80020325 in the game context (one launch); the runtime answers the game context's 0x80020325 because it starts its programs as games, and the Stdin and Stderr handles answer that refusal as a modelled, unmeasured result; double close, directory descriptors, the descriptors 0, 1 and 2 named by number and error precedence are not hardware measured, and the refusal while an asynchronous request is pending (ASYNC_BUSY) is covered by the host selftest only (#341)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-UMDIO-001: io-open-0000..0012)
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_io_console_model
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoCloseAsync`** (`sceIo`): `sceIoCloseAsync` (0xff5940b6)
-  - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; close callback timing remains unmeasured
+  - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; close callback timing remains unmeasured; sceIoCloseAsync of a standard handle (sceKernelStdin, sceKernelStdout, sceKernelStderr) is unmeasured and stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) with nothing queued or closed (#341)
   - Evidence: tests/native/hle_thread_selftest.c:test_fd_namespace
 - **`h_IoDclose`** (`sceIo`): `sceIoDclose` (0xeb092469)
   - Limitation: the measured cells establish close result 0 for the two successful disc0:/ and disc0:/PSP_GAME directory descriptors only; closing a file, stale or out-of-range descriptor, and listings that were read before the close remain host-selftested only (#341)
@@ -544,7 +551,7 @@ Semantic handler census: **645** handlers across **30** API families, covering *
 - **`h_IoWaitAsyncCB`** (`sceIo`): `sceIoWaitAsyncCB` (0x35dbd746)
   - Limitation: callback dispatch is modeled at the wait boundary; PSP blocking and callback interleaving remain unmeasured
 - **`h_IoWrite`** (`sceIo`): `sceIoWrite` (0x42ec03ac)
-  - Limitation: PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; PSP-HLE-IO-SEEK-001 measures a write through a PSP_O_RDONLY Memory Stick descriptor as 0x80020323 with the file unchanged (#1380); PSP-HLE-IO-SEEK-002 measures sceIoWriteAsync on an idle PSP_O_RDONLY ms0: descriptor returning 0x80020323 at once with nothing queued; with a request pending both calls answer the busy error first (unmeasured), and a fatms0: sceIoWriteAsync queues and completes with this write's refusal (unmeasured); read-only descriptors on other devices, short writes, zero-length writes, unreadable source buffers, raw devices and standard-stream writes remain unmeasured (#341); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)
+  - Limitation: PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; PSP-HLE-IO-SEEK-001 measures a write through a PSP_O_RDONLY Memory Stick descriptor as 0x80020323 with the file unchanged (#1380); PSP-HLE-IO-SEEK-002 measures sceIoWriteAsync on an idle PSP_O_RDONLY ms0: descriptor returning 0x80020323 at once with nothing queued; with a request pending both calls answer the busy error first (unmeasured), and a fatms0: sceIoWriteAsync queues and completes with this write's refusal (unmeasured); read-only descriptors on other devices, short writes, zero-length writes, unreadable source buffers and raw devices remain unmeasured (#341); PSP-HLE-STDIO-001 measures a one-byte write through the Stdout and the Stderr handle returning 1 in both launch contexts, a larger standard-stream write and a write to descriptor 0, 1 or 2 named by number return the count unmeasured, and a write through the Stdin handle is unmeasured and stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write and io-append)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-ms-*)
@@ -841,6 +848,20 @@ Semantic handler census: **645** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_kernel_devkit_version_measured
   - Evidence: src/rt/sdkver.h:SR_PSP_FIRMWARE_DEVKIT_VERSION
   - Evidence: hardware oracle 2026-10-15 PSP-SYSTEM-001 case model-profile (0x06060110)
+- **`h_KernelStderr`** (`sceKernel`): `sceKernelStderr` (0xf78ba90a)
+  - Limitation: returns 0x00936f17; PSP-HLE-STDIO-001 recorded this kernel UID on one PSP-3000 in both measured launch contexts, which agree on it (from the XMB on boots 135 and 222, in the game context on boot 200; ARK-5 5.1.0 and 5.2.0), every launch through PSPLink, whose tty the handle is; its value on a launch without PSPLink, on another console and on other system software is unmeasured; measured in both contexts and reproduced through the handle: a one-byte sceIoWrite returns 1 and the import returns the same handle afterwards; unmeasured in either context: sceIoClose, which answers the refusal modelled from the Stdout close (0x80020325) and closes nothing, a write of more than one byte and sceIoWriteAsync (both return the count), sceIoRead, sceIoLseek, sceIoLseek32 and sceIoIoctl (the runtime's earlier standard-stream error 0x80010009, not a PSP result), and sceIoCloseAsync, which stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) (#341)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles, stdio-write-stderr)
+  - Evidence: tests/native/hle_thread_selftest.c:test_std_handles_measured
+  - Evidence: tests/native/hle_thread_selftest.c:test_std_handles_unmeasured_are_named
+- **`h_KernelStdin`** (`sceKernel`): `sceKernelStdin` (0x172d316e)
+  - Limitation: this status covers the returned handle value only, 0x0093a513; PSP-HLE-STDIO-001 recorded this kernel UID on one PSP-3000 in both measured launch contexts, which agree on it (from the XMB on boots 135 and 222, in the game context on boot 200; ARK-5 5.1.0 and 5.2.0), every launch through PSPLink, whose tty the handle is; its value on a launch without PSPLink, on another console and on other system software is unmeasured; a read from Stdin is UNMEASURED and unclaimed (the probe runs none): sceIoRead and sceIoReadAsync through the handle still give the runtime's earlier standard-stream error 0x80010009, which is not a PSP result and is not reviewed here; no other call on the Stdin handle is measured either: sceIoClose answers the refusal modelled from the Stdout close and closes nothing, and sceIoWrite, sceIoWriteAsync and sceIoCloseAsync stop at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) (#341)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles)
+  - Evidence: tests/native/hle_thread_selftest.c:test_std_handles_measured
+- **`h_KernelStdout`** (`sceKernel`): `sceKernelStdout` (0xa6bab2e9)
+  - Limitation: returns 0x00938a15; PSP-HLE-STDIO-001 recorded this kernel UID on one PSP-3000 in both measured launch contexts, which agree on it (from the XMB on boots 135 and 222, in the game context on boot 200; ARK-5 5.1.0 and 5.2.0), every launch through PSPLink, whose tty the handle is; its value on a launch without PSPLink, on another console and on other system software is unmeasured; measured in both contexts and reproduced through the handle: a one-byte sceIoWrite returns 1 and the import returns the same handle after the write and after the close; sceIoClose is refused and closes nothing in both contexts, with 0x800200d1 from the XMB and 0x80020325 in the game context (one launch); the runtime answers the game context's 0x80020325 because it starts its programs as games; unmeasured in either context: a write of more than one byte and sceIoWriteAsync (both return the count), sceIoRead, sceIoLseek, sceIoLseek32 and sceIoIoctl (the runtime's earlier standard-stream error 0x80010009, not a PSP result), and sceIoCloseAsync, which stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) (#341)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles, stdio-write-stdout, stdio-close-stdout)
+  - Evidence: tests/native/hle_thread_selftest.c:test_std_handles_measured
+  - Evidence: tests/native/hle_thread_selftest.c:test_std_handles_unmeasured_are_named
 - **`h_LockLwMutex`** (`sceKernel`): `_sceKernelLockLwMutex` (0x7cff8cf3), `sceKernelLockLwMutex` (0xbea46419)
   - Limitation: uncontended and recursive acquisition, blocking until the owner's hand-off, the self-held non-recursive refusal and the timeout code follow the recorded cells; invalid workareas, a count of 0 or below, an unwritable timeout pointer, callback delivery during the wait, interrupt context and several-waiter ordering are not measured (#341)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 LwMutex cells: an owner's unlock hands ownership directly to the waiter; a self-held non-recursive timed Lock fails immediately with 0x800201CF)

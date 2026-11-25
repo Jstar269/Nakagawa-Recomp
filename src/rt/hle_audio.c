@@ -631,6 +631,10 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
  * channel -1 and 0x80260001 on an unreserved channel 5. The first refusal of a run is reported by
  * name. */
 static int s_audio_output_refusal_noted;
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Lets a fixture observe the once-per-run report from a known state. Test builds only. */
+void sr_hle_test_audio_refusal_note_reset(void) { s_audio_output_refusal_noted = 0; }
+#endif
 static uint32_t audio_regular_output_refusal(const char *call, uint32_t ch) {
     uint32_t code = 0u;
     if (ch >= 8u) code = SCE_AUDIO_ERROR_INVALID_CH;

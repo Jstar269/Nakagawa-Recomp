@@ -1234,6 +1234,98 @@ class LiveManifestTests(unittest.TestCase):
                 line = next(l for l in source.splitlines() if f'0x{nid:08X}: {{"name"' in l)
                 self.assertRegex(line, r"# h_\w+: \S")
 
+    def test_std_handle_imports_graduate_on_the_measured_handles(self) -> None:
+        """#341: the three standard-handle imports leave the profile-zero list on PSP-HLE-STDIO-001."""
+        batch = {
+            0x172D316E: ("sceKernelStdin", "h_KernelStdin", "0x0093a513"),
+            0xA6BAB2E9: ("sceKernelStdout", "h_KernelStdout", "0x00938a15"),
+            0xF78BA90A: ("sceKernelStderr", "h_KernelStderr", "0x00936f17"),
+        }
+        dispatched = hle_manifest.selftest_dispatched_nids(
+            hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        )
+        for nid, (name, handler, value) in batch.items():
+            with self.subTest(name=name):
+                registration = self.regs[nid]
+                self.assertEqual(registration["name"], name)
+                self.assertEqual(registration["handler"], handler)
+                self.assertEqual(registration["classification"], "dedicated")
+                self.assertEqual(registration["status"], "partial")
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertTrue(
+                    any(e.startswith("docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles") for e in evidence)
+                )
+                self.assertIn("tests/native/hle_thread_selftest.c:test_std_handles_measured", evidence)
+                self._assert_cited_cells_are_manifest_cells(evidence)
+                self.assertIn(nid, dispatched)
+                # The limitation names the returned value, both launch contexts and what neither measured.
+                limitation = meta.HANDLER_LIMITATIONS[handler]
+                for needle in (value, "both measured launch contexts", "PSPLink", "unmeasured",
+                               "IO_STD_HANDLE_OPERATION"):
+                    self.assertIn(needle, limitation)
+                self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # One handler per import: a shared handler could not return three handles.
+        self.assertEqual(len({handler for _, handler, _ in batch.values()}), 3)
+        # The Stdout close differs by launch context; the limitation names both answers and the one modelled.
+        stdout_limitation = meta.HANDLER_LIMITATIONS["h_KernelStdout"]
+        for needle in ("0x800200d1 from the XMB", "0x80020325 in the game context", "starts its programs as games"):
+            self.assertIn(needle, stdout_limitation)
+        # A read from Stdin is unmeasured: the Stdin status covers the handle value only. It cites
+        # the handle cell and the measured selftest, and no evidence entry stands for a read.
+        stdin_limitation = meta.HANDLER_LIMITATIONS["h_KernelStdin"]
+        self.assertIn("covers the returned handle value only", stdin_limitation)
+        self.assertIn("a read from Stdin is UNMEASURED and unclaimed", stdin_limitation)
+        self.assertIn("not a PSP result", stdin_limitation)
+        self.assertEqual(
+            meta.HANDLER_EVIDENCE["h_KernelStdin"],
+            [
+                "docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles)",
+                "tests/native/hle_thread_selftest.c:test_std_handles_measured",
+            ],
+        )
+
+    def test_panned_blocking_output_graduates_on_derived_evidence(self) -> None:
+        """#341: sceAudioOutputPannedBlocking leaves the profile-zero list as partial, PPSSPP-derived."""
+        nid = 0x13F592BC
+        registration = self.regs[nid]
+        self.assertEqual(registration["name"], "sceAudioOutputPannedBlocking")
+        self.assertEqual(registration["handler"], "h_AudioOutputPannedBlocking")
+        self.assertEqual(registration["classification"], "dedicated")
+        self.assertEqual(registration["status"], "partial")
+        evidence = meta.HANDLER_EVIDENCE["h_AudioOutputPannedBlocking"]
+        for selftest in ("test_audio_output_panned_blocking_unreserved_channel",
+                         "test_audio_regular_output_refuses_bad_channels",
+                         "test_audio_regular_output_refuses_bad_volumes"):
+            self.assertIn(f"tests/native/hle_thread_selftest.c:{selftest}", evidence)
+        self.assertTrue(any(
+            e.startswith("PPSSPP caa91b54b53585811b0fd84405ea04aec72a952b Core/HLE/sceAudio.cpp")
+            and "derived, not PSP-measured" in e for e in evidence
+        ))
+        autotests = [e for e in evidence if e.startswith("PSPAutotests tests/audio/sceaudio/output.expected")]
+        self.assertEqual(len(autotests), 1)
+        self.assertIn("ea71108f00933712c4662276261b39cd42249b1e", autotests[0])
+        self.assertIn("corroboration only", autotests[0])
+        self.assertIn("recorded for sceAudioOutputBlocking only", autotests[0])
+        # Derived evidence only: no PSP oracle record is cited, because none measures this API.
+        self.assertFalse(any(re.search(r"PSP-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d{3}", e) for e in evidence))
+        self._assert_cited_cells_are_manifest_cells(evidence)
+        dispatched = hle_manifest.selftest_dispatched_nids(
+            hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        )
+        self.assertIn(nid, dispatched)
+        limitation = meta.HANDLER_LIMITATIONS["h_AudioOutputPannedBlocking"]
+        for needle in ("PPSSPP-derived, not PSP-measured", "0x80260001", "0x80260003", "0x8026000b",
+                       "for sceAudioOutputBlocking only", "no PSP measurement of this API",
+                       "blocking duration and wake timing", "the mixer result", "a busy channel",
+                       "stay unmeasured"):
+            self.assertIn(needle, limitation)
+        self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # The one entry left needs a PSP measurement, not derived evidence.
+        self.assertEqual(
+            {left: entry["name"] for left, entry in meta.PROFILE_ZERO_UNREVIEWED_IMPORTS.items()},
+            {0xD675EBB8: "sceKernelSelfStopUnloadModule"},
+        )
+
     def test_route_a_batches_eleven_and_twelve_leave_uncovered_contracts_unreviewed(self) -> None:
         # The WritebackInvalidate range variant is not measured. It may not ride along with the
         # batches above.
@@ -2575,8 +2667,14 @@ class ProfileZeroImportGateTests(unittest.TestCase):
     def test_the_cli_fails_on_a_stale_allowlist_entry(self) -> None:
         import tempfile
         allowlisted = sorted(meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # The guest still imports something: a reviewed NID keeps its import table non-empty
+        # when the allowlist holds a single entry.
+        reviewed = next(
+            int(r["nid"], 16) for r in self.manifest["registrations"]
+            if r["classification"] == "dedicated" and r["status"] == "partial"
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            module = self._module(tmp, allowlisted[1:])
+            module = self._module(tmp, allowlisted[1:] + [reviewed])
             rc, err = self._main("--out", str(Path(tmp) / "m.json"), "--imports", str(module),
                                  "--check-profile-zero-imports")
         self.assertEqual(rc, 1)

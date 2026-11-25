@@ -3807,6 +3807,95 @@ static int coherence_run_texture_ram_unnotified_change(void) {
     return 1;
 }
 
+/* A linear texture can expose more texels in its last row than fit in the declared
+ * pitch. A plain RAM store to that tail must change what the next GPU draw samples. */
+static int coherence_texture_ram_linear_tail_cell(unsigned fmt, unsigned pitch) {
+    enum { W = 32, H = 4, X0 = 10, X1 = 50, Y = 10 };
+    const uint32_t base = 0x04140000u, stride = 512u;
+    const uint32_t tex_addr = 0x08530000u, clut_addr = 0x08540000u;
+    const uint32_t list_addr = 0x00100800u, rgb = 0x00FFFFFFu;
+    const unsigned bits = fmt == 3u ? 32u : 8u;
+    const unsigned tail = (H - 1u) * ge_tex_row_bytes(pitch, bits) + (W - 1u) * bits / 8u;
+    const uint32_t old_rgb = 0x00313131u;
+    const uint32_t new_rgb = fmt == 3u ? 0x003131C3u : 0x00C3C3C3u;
+    uint32_t *guest = (uint32_t *)SR_HOST(base);
+    uint8_t *tex = SR_HOST(tex_addr);
+    uint32_t *clut = (uint32_t *)SR_HOST(clut_addr);
+    uint32_t decoded[W * H];
+
+    coherence_reset_targets();
+    memset(guest, 0, stride * FB_H * 4u);
+    sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+    memset(tex, 0x31, 2048u);
+    for (uint32_t i = 0; i < 256u; i++) clut[i] = 0xFF000000u | (i * 0x00010101u);
+
+    wrap_state(base, stride);
+    const uint32_t list[] = {
+        0xA0000000u | (tex_addr & 0x00FFFFFFu),
+        0xA8000000u | ((tex_addr & 0xFF000000u) >> 8) | pitch,
+        0xB8000205u, /* 32 x 4 */
+        0xC2000000u, /* linear */
+        0xC3000000u | fmt,
+        0xC6000000u, /* nearest */
+        0xC9000103u, /* replace, RGBA */
+        0xB0000000u | (clut_addr & 0x00FFFFFFu),
+        0xB1000000u | ((clut_addr & 0xFF000000u) >> 8),
+        0xC500FF03u, /* 8888, shift 0, mask 0xFF */
+        0xC4000020u, /* load 256 palette entries */
+        0x1E000001u, /* texture enable */
+        0x0F000000u, 0x0C000000u,
+    };
+    memcpy(SR_HOST(list_addr), list, sizeof(list));
+    ge_set_gpu_hooks(&k_hooks);
+    if (ge_run_list(list_addr, 0) || s_ge->tex_w != W || s_ge->tex_h != H ||
+        s_ge->tex_bufw != pitch) {
+        fprintf(stderr, "gpu coherence selftest [texture-ram-linear-tail]: GE setup failed\n");
+        return 0;
+    }
+
+    ge_decode_tex_rgba(decoded);
+    const uint32_t ref_first = decoded[W * H - 1u] & rgb;
+    GeVtx p0, p1;
+    wrap_vtx(&p0, X0, Y, 0xFFFFFFFFu);
+    wrap_vtx(&p1, X0 + W, Y + H, 0xFFFFFFFFu);
+    p1.u = W;
+    p1.v = H;
+    int ok = hook_sprite(&p0, &p1, 0) && submit_pending();
+
+    tex[tail] = 0xC3; /* No notification or texture state change between draws. */
+    ge_decode_tex_rgba(decoded);
+    const uint32_t ref_second = decoded[W * H - 1u] & rgb;
+    p0.x += X1 - X0;
+    p1.x += X1 - X0;
+    ok = ok && hook_sprite(&p0, &p1, 0) && s_cur && target_readback(s_cur);
+    const uint32_t first = guest[(Y + H - 1) * stride + X0 + W - 1] & rgb;
+    const uint32_t second = guest[(Y + H - 1) * stride + X1 + W - 1] & rgb;
+    coherence_reset_targets();
+
+    if (!ok || ref_first != old_rgb || ref_second != new_rgb ||
+        first != ref_first || second != ref_second) {
+        fprintf(stderr, "gpu coherence selftest [texture-ram-linear-tail]: "
+                "fmt=%u pitch=%u tail=%u draw=%d gpu=%06x/%06x reference=%06x/%06x "
+                "expected=%06x/%06x\n",
+                fmt, pitch, tail, ok, first, second, ref_first, ref_second, old_rgb, new_rgb);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS texture-ram-linear-tail "
+           "fmt=%u pitch=%u tail=%u gpu=%06x/%06x reference=%06x/%06x\n",
+           fmt, pitch, tail, first, second, ref_first, ref_second);
+    return 1;
+}
+
+static int coherence_run_texture_ram_linear_tail(void) {
+    const unsigned formats[] = { 3u, 5u }; /* RGBA8888 and CLUT8 */
+    const unsigned pitches[] = { 8u, 16u, 32u, 64u }; /* narrow, equal, and padded */
+    int ok = 1;
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++)
+        for (size_t j = 0; j < sizeof(pitches) / sizeof(pitches[0]); j++)
+            if (!coherence_texture_ram_linear_tail_cell(formats[i], pitches[j])) ok = 0;
+    return ok;
+}
+
 /* One CLUT8 texture drawn twice through the same palette bytes with a different CLUT format
  * word: the palette identity in the texture cache key covers the format, so the second draw
  * decodes again (index >> 1 picks another entry) instead of reusing the first decode. The
@@ -4276,7 +4365,7 @@ static int parity_r6_chan(int s, int d, int sf, int df, int eq) {
 #define PARITY_FIXB 0x7F5F2Fu
 
 static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
-                            uint32_t fixb, uint32_t sprites) {
+                            uint32_t fixb, uint32_t sprites, uint32_t mask_rgb) {
     const uint32_t list_addr = 0x00100000u;
     uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
     uint32_t stride = 512u;
@@ -4295,7 +4384,7 @@ static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, 
     PARITY_EMIT(0x22, 0);
     PARITY_EMIT(0x23, 0);
     PARITY_EMIT(0xE7, 1);
-    PARITY_EMIT(0xE8, 0);
+    PARITY_EMIT(0xE8, mask_rgb);
     PARITY_EMIT(0xE9, 0);
     PARITY_EMIT(0x15, 0);
     PARITY_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
@@ -4359,7 +4448,7 @@ static int coherence_run_blend_parity(void) {
             for (uint32_t dfp = 0; dfp <= 10 && ok; dfp++) {
                 const uint32_t fixa = PARITY_FIXA, fixb = PARITY_FIXB;
                 const uint32_t mode = sfp | (dfp << 4) | (eq << 8);
-                const uint32_t list = parity_list(base, vaddr, mode, fixa, fixb, sprites);
+                const uint32_t list = parity_list(base, vaddr, mode, fixa, fixb, sprites, 0);
                 /* the matrix draws onto an 8888 framebuffer with dithering off, so
                  * build_state's routing reduces to blend_needs_shader() */
                 int shader_path = blend_needs_shader(sfp, dfp, eq, fixa, fixb);
@@ -9033,6 +9122,99 @@ static int twin_ref_read(const char *path, TwinRef *r) {
     return 1;
 }
 
+/* #2361: regular Vulkan MIN/MAX ignore the RGB factors. The same geometry with either
+ * factor pair must therefore reuse the pipeline and draw the same image. ADD keeps
+ * both factors, and masking one channel still changes the MAX pipeline. */
+static int coherence_run_pipeline_minmax(void) {
+    const char *name = "pipeline-minmax";
+    const uint32_t base = 0x04000000u | 0x00140000u, vaddr = 0x00101000u;
+    const uint32_t sprites = PARITY_GRID * PARITY_GRID;
+    const uint32_t sample = (PARITY_ORIGIN + 1u) * FB_W + PARITY_ORIGIN + 1u;
+    static const uint32_t equations[] = { 3u, 4u, 0u };
+    static const char *const operations[] = { "MIN", "MAX", "ADD" };
+    /* DST_COLOR and SRC_COLOR, then ONE_MINUS_DST_COLOR and ONE_MINUS_SRC_COLOR. */
+    static const uint32_t factors[] = { 0u, 1u | (1u << 4) };
+    static uint32_t first_images[3][FB_W * FB_H];
+    const GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = FB_W, .width = 480, .height = FB_H };
+    const uint32_t src = parity_src(0), dst = parity_bg(sample);
+    int ok = 1;
+
+    parity_vertices(vaddr, sprites);
+    ge_set_gpu_hooks(&k_hooks);
+    for (size_t op = 0; op < sizeof equations / sizeof equations[0]; op++) {
+        const uint32_t eq = equations[op];
+        const unsigned variants = eq == 4u ? 3u : 2u;
+        for (unsigned variant = 0; variant < variants; variant++) {
+            const uint32_t mask = variant == 2u ? 0x0000FFu : 0;
+            const uint32_t factor_pair = factors[variant != 0u];
+            const unsigned long want = variant == 0u || eq == 0u || mask != 0 ? 1u : 0u;
+            const uint32_t list = parity_list(base, vaddr, (eq << 8) | factor_pair, PARITY_FIXA,
+                                              PARITY_FIXB, sprites, mask);
+            coherence_reset_targets();
+            parity_fill_background(base);
+            const unsigned long creates0 = s_pcache_creates;
+            const unsigned long long draws0 = s_replay_stats.draws;
+            const unsigned long long fallback0 = s_replay_stats.fallback_prims;
+            const unsigned long long snapshots0 = s_replay_stats.snapshot_requests;
+            ge_run_list(list, 0);
+            if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK || s_replay_stats.draws == draws0 ||
+                s_replay_stats.fallback_prims != fallback0 || s_replay_stats.snapshot_requests != snapshots0) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u did not draw and read back "
+                        "through regular Vulkan blending (draws=%llu fallbacks=%llu snapshots=%llu)\n",
+                        name, operations[op], variant, s_replay_stats.draws - draws0,
+                        s_replay_stats.fallback_prims - fallback0, s_replay_stats.snapshot_requests - snapshots0);
+                coherence_reset_targets();
+                return 0;
+            }
+            const unsigned long creates = s_pcache_creates - creates0;
+            if (creates != want) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u created %lu pipelines, wanted %lu\n",
+                        name, operations[op], variant, creates, want);
+                ok = 0;
+            }
+            const uint32_t *pixels = (const uint32_t *)SR_HOST(base);
+            if (eq != 0u) {
+                /* Stencil is disabled, so the destination alpha is kept even on a blended pixel. */
+                uint32_t expected = dst & 0xFF000000u;
+                for (unsigned shift = 0; shift < 24u; shift += 8u) {
+                    const uint32_t s = (src >> shift) & 0xFFu, d = (dst >> shift) & 0xFFu;
+                    uint32_t chosen = (eq == 3u ? s < d : s > d) ? s : d;
+                    if ((mask >> shift) & 0xFFu) chosen = d;
+                    expected |= chosen << shift;
+                }
+                if (pixels[sample] != expected) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u interior pixel=%08x "
+                            "(wanted %08x)\n", name, operations[op], variant,
+                            (unsigned)pixels[sample], (unsigned)expected);
+                    ok = 0;
+                }
+            }
+            for (size_t earlier = 0; earlier < op; earlier++) {
+                if (!memcmp(pixels, first_images[earlier], sizeof first_images[earlier])) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u matched the %s image\n",
+                            name, operations[op], variant, operations[earlier]);
+                    ok = 0;
+                }
+            }
+            if (variant == 0u) {
+                memcpy(first_images[op], pixels, sizeof first_images[op]);
+            } else {
+                const int want_same = eq != 0u && mask == 0;
+                const int same = memcmp(pixels, first_images[op], sizeof first_images[op]) == 0;
+                if (same != want_same) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u image was %s\n",
+                            name, operations[op], variant, same ? "the same" : "different");
+                    ok = 0;
+                }
+            }
+        }
+    }
+    coherence_reset_targets();
+    if (ok) printf("gpu coherence selftest: PASS %-22s MIN/MAX reused both factor pairs; ADD and the mask "
+                   "kept separate pipelines and images\n", name);
+    return ok;
+}
+
 /* ---- the pipeline cache on disk (#2149) ------------------------------------------------
  *
  * Run by the recipe as three processes over one empty folder (`--pipeline-cache DIR`):
@@ -9065,7 +9247,7 @@ static int pcache_scene(uint32_t eq_end, uint64_t *hash) {
         for (uint32_t sfp = 0; sfp <= 10; sfp++)
             for (uint32_t dfp = 0; dfp <= 10; dfp++) {
                 const uint32_t list = parity_list(base, vaddr, sfp | (dfp << 4) | (eq << 8), PARITY_FIXA,
-                                                  PARITY_FIXB, sprites);
+                                                  PARITY_FIXB, sprites, 0);
                 coherence_reset_targets();
                 parity_fill_background(base);
                 ge_run_list(list, 0);
@@ -16856,6 +17038,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
         if (strcmp(only, "through-float-z") == 0) return coherence_run_through_float_z();
         if (strcmp(only, "clut-stride-padding") == 0) return coherence_run_clut_stride_padding();
+        if (strcmp(only, "texture-ram-linear-tail") == 0) return coherence_run_texture_ram_linear_tail();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
         if (strcmp(only, "patch-tess") == 0) return coherence_run_patch_tess();
@@ -16880,6 +17063,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
+        if (strcmp(only, "pipeline-minmax") == 0) return coherence_run_pipeline_minmax();
         if (strcmp(only, "pipeline-clear-prewarm-cold") == 0) return coherence_run_pipeline_clear_prewarm(0, 0);
         if (strcmp(only, "pipeline-clear-prewarm-warm") == 0) return coherence_run_pipeline_clear_prewarm(1, 0);
         if (strcmp(only, "pipeline-clear-prewarm-retry") == 0) return coherence_run_pipeline_clear_prewarm(0, 1);
@@ -16962,6 +17146,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_texture_dirty_same_state()) ok = 0;
     if (!coherence_run_texture_clean_page_index()) ok = 0;
     if (!coherence_run_texture_ram_unnotified_change()) ok = 0;
+    if (!coherence_run_texture_ram_linear_tail()) ok = 0;
     if (!coherence_run_clut_format_same_palette()) ok = 0;
     if (!coherence_run_clut_format_list()) ok = 0;
     if (!coherence_run_through_float_z()) ok = 0;

@@ -675,8 +675,14 @@ A guest CALL (`jal`, `jalr rd`, or since #968 a linking branch `bal`/`bltzal`/`b
 callable target) is a nested native call: the callee's frame lives on the guest thread's host fiber
 until its `jr $ra` returns, so host stack use follows guest call depth. A linking branch whose
 target is its own link (`bal .+8`, which reads the PC) or a frame-releasing continuation is a jump
-that also writes `$ra`, not a call; the analyzer, the frame walk and codegen share that one rule. The
-dispatcher's host-stack preflight stops a dispatched transfer at a named
+that also writes `$ra`, not a call; the analyzer, the frame walk and codegen share that one rule.
+A pseudo-direct `jal .+8` also reads the PC (#2574). It writes `$ra = PC+8` before executing its
+delay slot, then continues at the link without starting a nested host call. The analyzer keeps
+the next word executable and keeps any independently established entry there. An independently
+owned continuation uses the existing TAIL handoff. For a runtime-placed module's unrelocated
+JAL, generated code compares the actual target latched before the delay slot with the runtime
+link. Placement can make a link-space external call target equal that link.
+The dispatcher's host-stack preflight stops a dispatched transfer at a named
 `host-fiber-stack-exhausted` boundary before the fiber is exhausted. A direct `jal` to a known
 body does not pass through the dispatcher, so every generated body that makes such a call opens
 with `SR_HOST_STACK_CHECK` (#855): one test of its frame address against
