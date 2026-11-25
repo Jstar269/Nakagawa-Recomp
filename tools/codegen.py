@@ -25,6 +25,7 @@ import os
 import sys
 from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
+from io import StringIO
 from typing import Any
 
 # The packaged Windows embeddable interpreter can omit this script's directory
@@ -883,8 +884,15 @@ def load_symbol_map(path):
     A malformed line, an address that does not fit 32 bits, or two different
     names (or sizes) for one address is an error naming the file and line.
     """
+    return _load_symbol_map_with_digest(path)[0]
+
+
+def _load_symbol_map_with_digest(path):
+    """Parse and hash the same bytes of an explicit guest symbol map."""
+    with open(path, "rb") as source:
+        raw = source.read()
     symbols = {}
-    with open(path, encoding="utf-8") as source:
+    with StringIO(raw.decode("utf-8"), newline=None) as source:
         for line_no, line in enumerate(source, 1):
             text = line.strip()
             if not text or text.startswith(("#", "//")):
@@ -916,7 +924,7 @@ def load_symbol_map(path):
                     f"{where}: 0x{addr:08x} is already {previous[0]} "
                     f"(size 0x{previous[1]:x}), not {name} (size 0x{size:x})")
             symbols[addr] = (name, size)
-    return symbols
+    return symbols, hashlib.sha256(raw).hexdigest()
 
 
 def site_names_from_symbol_map(symbols):
@@ -6808,8 +6816,8 @@ def _apply_options(cli, checked, options):
 
 
 def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, data_root,
-                        read_words, read_loaded_data):
-    """The validated package, the resolved symbols and any effective adjacent sidecar digest.
+                        read_words, read_loaded_data, *, explicit_map_digest=None):
+    """The validated package, the resolved symbols and any effective external map digest.
 
     A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only through its own
     site map, after its keyed digests match this executable. A private one uses the ELF's own
@@ -6824,17 +6832,18 @@ def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, 
         )
         return resolved, sym_map, None
     sym_map = enhancement_package.extract_elf_func_symbols(elf)
-    sidecar_digest = None
+    map_digest = None
     if symbol_map_path is not None:
         # The guest symbol map names the package's sites too, in place of the
         # <package>.symbols.json sidecar.
         sym_map.update(site_names_from_symbol_map(symbols))
+        map_digest = explicit_map_digest
     else:
         sidecar = Path(pkg_path).with_suffix(".symbols.json")
         if sidecar.is_file():
-            sidecar_symbols, sidecar_digest = enhancement_package.load_symbol_map_with_digest(sidecar)
+            sidecar_symbols, map_digest = enhancement_package.load_symbol_map_with_digest(sidecar)
             sym_map.update(sidecar_symbols)
-    return pkg_validated, sym_map, sidecar_digest
+    return pkg_validated, sym_map, map_digest
 
 
 def _refuse_uncallable_control_sites(sites):
@@ -6978,7 +6987,7 @@ def _reset_enhancement_tables() -> None:
 
 
 def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path, code_hook_pkg_path=None):
+                              symbol_map_path, code_hook_pkg_path=None, *, explicit_map_digest=None):
     """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables,
     then the ``--code-hook-package`` beside it, if any (``_load_code_hook_package``).
 
@@ -6999,9 +7008,10 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             # Instruction words as codegen reads them, and initialised data as the loader
             # places it (enhancement_package.elf_readers).
             _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
-            pkg_validated, sym_map, sidecar_digest = _package_symbol_map(
+            pkg_validated, sym_map, map_digest = _package_symbol_map(
                 elf, pkg_validated, enhancement_pkg_path, symbols, symbol_map_path,
-                enhancement_data_root, _read_words, _read_loaded_data)
+                enhancement_data_root, _read_words, _read_loaded_data,
+                explicit_map_digest=explicit_map_digest)
 
             ENHANCEMENT_SITES = enhancement_package.verify_and_resolve_sites(
                 pkg_validated,
@@ -7070,7 +7080,7 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 "disc_id": declaration_disc_id,
                 "game_version": pkg_validated.get("game_version"),
                 "timing": pkg_validated["category"] == "timing_frame_presentation",
-                "symbol_map_sha256": sidecar_digest,
+                "symbol_map_sha256": map_digest,
                 "sites_count": len(ENHANCEMENT_SITES),
                 "data_sites_count": len(ENHANCEMENT_DATA_PATCHES),
                 "data_files_count": len(ENHANCEMENT_DATA_FILES),
@@ -7545,10 +7555,11 @@ def _translate(argv):
         cfg_gate = True
 
     symbols = {}
+    explicit_map_digest = None
     if symbol_map_path is not None:
         # Read before the analysis so a bad map fails in a second, not after it.
         try:
-            symbols = load_symbol_map(symbol_map_path)
+            symbols, explicit_map_digest = _load_symbol_map_with_digest(symbol_map_path)
         except (OSError, UnicodeDecodeError, SymbolMapError) as exc:
             sys.stderr.write(f"codegen: symbol map: {exc}\n")
             return 2
@@ -7618,7 +7629,8 @@ def _translate(argv):
 
     GUEST_SP_ENTRIES.clear()
     _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path, code_hook_pkg_path)
+                              symbol_map_path, code_hook_pkg_path,
+                              explicit_map_digest=explicit_map_digest)
 
     try:
         impmap = primary_import_map(elf)

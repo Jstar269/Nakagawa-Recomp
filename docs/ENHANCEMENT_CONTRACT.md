@@ -389,11 +389,16 @@ To inspect the timing inputs observed by one native run, use
 `python tools/enhancement_package.py --inspect-timing-run <run-log>` with the saved log for a fresh run.
 A new package build with a verified disc revision records its generated startup mode (`stock` or
 `timing`), disc revision and executable digest. A timing-capable build also records its compiled
-declaration ID and digest and the adjacent symbol map digest when it used that map, even if its
-timing switch was off. The observation comes from the executing runtime after registration. A
-missing, ambiguous or superseded observation reports `unavailable`. This includes older packages
-without the startup record, logs that combine several runs, and retained tail-only logs. The output identifies local timing inputs. Measurements of gameplay speed
-and tests of peer interoperability are separate. [Timing identity tracking](https://github.com/Jstar269/Nakagawa-Recomp/issues/3034)
+declaration ID and digest and the digest of the effective external symbol map, if it used one,
+even if its timing switch was off. The existing `symbol_map_sha256` field hashes the explicit
+guest map or the adjacent map bytes that supplied the resolved symbols. Published declarations
+carry their own map in the hashed declaration, and symbols from the ELF are covered by its digest.
+The observation comes from the executing runtime after registration. A missing, ambiguous or
+superseded observation reports `unavailable`. This includes older packages without the startup
+record, logs that combine several runs, and retained tail-only logs. Older timing records could
+omit an effective explicit map's digest, so an absent digest alone leaves that input unknown.
+The output identifies local timing inputs. Gameplay speed and peer interoperability need their
+own evidence. [Timing identity tracking](https://github.com/Jstar269/Nakagawa-Recomp/issues/3034)
 
 ### 9.5. Update Boundary: Gating Counts Logic Updates
 

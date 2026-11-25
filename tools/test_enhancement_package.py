@@ -945,13 +945,19 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             elf_path = root / "fixture.elf"
-            elf = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+            words = dict(self.words)
+            for offset in (0, 4, 8):
+                words[0x1700 + offset] = words[0x1100 + offset]
+            words.update({0x1030: 0x0C0005C0, 0x1034: 0, 0x1038: 0x03E00008, 0x103C: 0})
+            elf = _write_synthetic_mips_elf(elf_path, words, self.entry)
             package, symbols = self._make_package_and_symbols(elf)
             harness = root / "startup.c"
             harness.write_text(
                 '#include "recomp.h"\n'
                 'void sr_register_all(void);\n'
                 'void sr_register_chunk_0(void) {}\n'
+                'void sr_guest_symbols_register(const SrGuestSymbol *table, uint32_t count) '
+                '{ (void)table; (void)count; }\n'
                 'void sr_exec_span_reset(void) {}\n'
                 'int sr_exec_span_register(uint32_t start, uint32_t end) { return end > start; }\n'
                 'void sr_enhancement_register_updates(const volatile uint32_t *counter) { (void)counter; }\n'
@@ -959,7 +965,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 encoding="ascii",
             )
 
-            def build(name, revision, declaration=None, *, symbol_indent=None):
+            def build(name, revision, declaration=None, *, symbol_indent=None, explicit_wait=None):
                 out = root / name
                 out.mkdir()
                 flags = [f"--record-timing-identity=TEST30340:{revision}"] if revision else []
@@ -969,8 +975,22 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                     package_path.with_suffix(".symbols.json").write_text(
                         json.dumps(symbols, indent=symbol_indent), encoding="utf-8")
                     flags.append(f"--enhancement-package={package_path}")
-                rc, log, _ = self._run_codegen(elf_path, out / "out.c", flags)
+                if explicit_wait is not None:
+                    symbol_path = out / "guest.map"
+                    effective = dict(symbols, synth_vblank_wait=f"0x{explicit_wait:08x}")
+                    symbol_path.write_bytes("".join(
+                        f"{name} = {addr};\n" for name, addr in effective.items()
+                    ).encode("ascii"))
+                    flags.append(f"--symbol-map={symbol_path}")
+                rc, log, files = self._run_codegen(elf_path, out / "out.c", flags)
                 self.assertEqual(rc, 0, log)
+                if explicit_wait is not None:
+                    generated = files["out_0.c"].decode()
+                    wait = re.findall(
+                        r"if \(nk_enhancement_on\(\)\) \{ sr_begin\(s, (0x[0-9a-f]+)u, 0x24020002u\);",
+                        generated,
+                    )
+                    self.assertEqual(wait, [f"0x{explicit_wait:08x}"])
                 exe = out / "startup.exe"
                 compiler = _run([
                     GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(ROOT / "src/rt"),
@@ -1031,6 +1051,10 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             changed = build("changed-declaration", "1.00", dict(package, version="1.1.0"))
             changed_symbols = build("changed-sidecar", "1.00", package, symbol_indent=2)
             mismatched = build("mismatched-declaration", "1.01", package)
+            explicit_maps = {
+                "first-map": build("first-map", "1.00", package, explicit_wait=0x1100),
+                "second-map": build("second-map", "1.00", package, explicit_wait=0x1700),
+            }
 
             stock_identity = observe(stock, "stock", "1")
             self.assertEqual(stock_identity, {
@@ -1058,6 +1082,13 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             other_symbols = observe(changed_symbols, "other-symbols", "1")
             self.assertEqual(other_symbols["declaration_sha256"], active["declaration_sha256"])
             self.assertNotEqual(other_symbols["symbol_map_sha256"], active["symbol_map_sha256"])
+
+            for name, executable in explicit_maps.items():
+                with self.subTest(name=name):
+                    digest = hashlib.sha256((root / name / "guest.map").read_bytes()).hexdigest()
+                    self.assertEqual(observe(executable, name, "1"), dict(active, symbol_map_sha256=digest))
+                    self.assertEqual(observe(executable, f"{name}-off", "0"),
+                                     dict(active, mode="stock", symbol_map_sha256=digest))
 
             event_text = (root / "timed-on.events").read_text(encoding="utf-8")
             for name, text in (
