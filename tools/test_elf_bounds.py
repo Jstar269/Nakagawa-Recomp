@@ -989,7 +989,7 @@ def _canonical_cfg_report_reference(image, ranges=None, entries=None):
         edge_rows.append(edge)
         nodes[source]["edges"].append(edge)
 
-    landed = set()
+    landed = set(entry_set)
     for address in sorted(nodes):
         word = nodes[address]["word"]
         if word >> 26 in (2, 3):
@@ -1281,6 +1281,34 @@ class CanonicalCfgTests(unittest.TestCase):
                 linked_report,
                 _canonical_cfg_report_reference(linked_image, ranges=spans, entries=[0x3100, 0x3210]),
             )
+
+        # An entry is landed on too: dispatch to an entry that sits in another function's
+        # jr delay slot (a function entered only through a pointer, or an export) runs the
+        # slot as an ordinary instruction and goes on past it, as the analyzer's trace and
+        # code generation's body walk both do. No direct transfer names the entry here.
+        pointer_words = {
+            0x3300: 0x24020001, 0x3304: jr(31), 0x3308: 0x24420010,  # jr ra; slot = entry
+            0x330C: 0x24420100, 0x3310: jr(31), 0x3314: 0,
+        }
+        pointer_spans = [(0x3300, 0x3318)]
+        pointer_report = analyze.canonical_cfg_report(
+            FakeCodeImage(pointer_words), ranges=pointer_spans, entries=[0x3300, 0x3308])
+        self.assertIn(
+            {"source": 0x3308, "target": 0x330C, "kind": "fallthrough",
+             "detail": "landed-delay-slot"},
+            cfg_node(pointer_report, 0x3308)["edges"],
+        )
+        for address in (0x330C, 0x3310, 0x3314):
+            self.assertEqual(cfg_node(pointer_report, address)["owners"], [0x3308], hex(address))
+        self.assertEqual(
+            pointer_report,
+            _canonical_cfg_report_reference(
+                FakeCodeImage(pointer_words), ranges=pointer_spans, entries=[0x3300, 0x3308]),
+        )
+        self.assertEqual(analyze.canonical_cfg_gate(pointer_report), [])
+        coverage = analyze.static_coverage(
+            FakeCodeImage(pointer_words), pointer_spans, [0x3300, 0x3308])
+        self.assertEqual(coverage["unowned_words"], 0)
 
         # The same slot reached only as jr's delay slot gets no such edge.
         words[0x3000] = branch(4, 4, 0, 0x3000, 0x3008)
