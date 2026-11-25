@@ -243,6 +243,21 @@ void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
     app->runtime_package_cache_generation++;
 }
 
+static size_t player_package_key_length(const char *text, size_t capacity) {
+    const char *end = memchr(text, '\0', capacity);
+    return end ? (size_t)(end - text) : capacity;
+}
+
+static void player_copy_package_key_field(char *dst, size_t dst_capacity,
+                                          const char *src, size_t src_capacity) {
+    /* Cache slots can be wider than the source field, notably selected_executable. */
+    size_t limit = dst_capacity - 1;
+    if (src_capacity < limit) limit = src_capacity;
+    size_t length = player_package_key_length(src, limit);
+    memmove(dst, src, length);
+    dst[length] = '\0';
+}
+
 /* The four fields that name one package of a title (its variant): a GameRecord, a cache entry
    and a worker-failure record all carry them under these names, so one comparison and one copy
    serve each; a fifth field goes here once. */
@@ -251,15 +266,15 @@ void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
      strcmp((a)->title_id, (b)->title_id) == 0 &&                               \
      strcmp((a)->selected_executable, (b)->selected_executable) == 0 &&         \
      strcmp((a)->enhancement_package_id, (b)->enhancement_package_id) == 0)
+#define PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, field)                           \
+    player_copy_package_key_field((dst)->field, sizeof((dst)->field),            \
+                                  (src)->field, sizeof((src)->field))
 #define PLAYER_PACKAGE_KEY_COPY(dst, src)                                        \
     do {                                                                         \
-        snprintf((dst)->disc_id, sizeof((dst)->disc_id), "%s", (src)->disc_id);  \
-        snprintf((dst)->title_id, sizeof((dst)->title_id), "%s", (src)->title_id); \
-        snprintf((dst)->selected_executable, sizeof((dst)->selected_executable), \
-                 "%s", (src)->selected_executable);                              \
-        snprintf((dst)->enhancement_package_id,                                  \
-                 sizeof((dst)->enhancement_package_id), "%s",                    \
-                 (src)->enhancement_package_id);                                 \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, disc_id);                        \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, title_id);                       \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, selected_executable);            \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, enhancement_package_id);         \
     } while (0)
 
 static bool player_runtime_worker_failure_matches(
@@ -3615,22 +3630,33 @@ static void player_app_select_package_variant(PlayerApp *app, int game_index) {
     bool cull = enhancement->cull_available &&
                 player_app_title_cull_on_play(app, game_index, &play, logic_60_on);
     game->enhancement_hook_only = false;
-    if (logic_60 && cull) {
-        /* cull_available holds beside a usable timing package only when the joined name is a
-           valid variant (player_read_title_enhancement), so it fits; were it ever cut, the
-           timing build stays, as for a culling package that cannot be used. */
-        int n = snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id),
-                         "%s+%s", enhancement->package_id, enhancement->cull_package_id);
-        if (n < 0 || (size_t)n >= sizeof(game->enhancement_package_id)) {
-            snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                     enhancement->package_id);
+    if (logic_60) {
+        if (cull) {
+            size_t timing_length = player_package_key_length(
+                enhancement->package_id, sizeof(enhancement->package_id));
+            size_t cull_length = player_package_key_length(
+                enhancement->cull_package_id, sizeof(enhancement->cull_package_id));
+            /* Keep the timing build if the pair cannot be written as a complete variant. */
+            char variant[sizeof(game->enhancement_package_id)];
+            size_t variant_size = timing_length + cull_length + 2;
+            if (timing_length < sizeof(enhancement->package_id) &&
+                cull_length < sizeof(enhancement->cull_package_id) &&
+                variant_size <= sizeof(variant)) {
+                memcpy(variant, enhancement->package_id, timing_length);
+                variant[timing_length] = '+';
+                memcpy(variant + timing_length + 1, enhancement->cull_package_id, cull_length + 1);
+                memcpy(game->enhancement_package_id, variant, variant_size);
+                return;
+            }
         }
-    } else if (logic_60) {
-        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                 enhancement->package_id);
+        player_copy_package_key_field(game->enhancement_package_id,
+                                     sizeof(game->enhancement_package_id),
+                                     enhancement->package_id, sizeof(enhancement->package_id));
     } else if (cull) {
-        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                 enhancement->cull_package_id);
+        player_copy_package_key_field(game->enhancement_package_id,
+                                     sizeof(game->enhancement_package_id),
+                                     enhancement->cull_package_id,
+                                     sizeof(enhancement->cull_package_id));
         game->enhancement_hook_only = true;
     } else {
         game->enhancement_package_id[0] = '\0';
