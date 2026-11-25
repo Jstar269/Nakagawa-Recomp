@@ -85,7 +85,7 @@ Semantic handler census: **647** handlers across **30** API families, covering *
 | `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
 | `sceSas` | 0 | 0 | 0 | 1 | 27 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
-| `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
+| `sceUtility` | 0 | 11 | 0 | 0 | 26 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
@@ -1624,6 +1624,10 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_sequence
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_without_update
   - Evidence: PSPAutotests tests/utility/msgdialog/abort.expected (2ed7c9c5, recorded on a PSP): the return codes and status sequence before init, during init, while visible, after the next Update and through shutdown
+- **`h_MsgDialogStatus`** (`sceUtility`): `sceUtilityMsgDialogGetStatus` (0x9a1c91d7)
+  - Limitation: this status covers one cell only: with no InitStart of any utility dialog in the process, GetStatus returns 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so the statuses the handler returns then (INIT 1, RUNNING 2, FINISHED 3, SHUTDOWN 4 and NONE 0 after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this status; the record's Update(1) and ShutdownStart results and the other dialog kinds (savedata, netconf, gamedata install, game sharing, the OSK) belong to separate handlers and are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)
+  - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_status_with_no_dialog_started
 - **`h_OskUpdate`** (`sceUtility`): `sceUtilityOskUpdate` (0x4b85c861)
   - Limitation: the return codes follow the measured states, and INIT ends on the vblank after InitStart (#1386); Update does not drive the keyboard, whose text is collected from GetStatus (#281), and Update in FINISHED returns 0, which is not measured (#341)
   - Evidence: #363 (PSP-3000 measurements, comments 6330742629 and 6331070692): WRONG_TYPE 0x80110005 before a keyboard starts; 0 in VISIBLE for speed 0 and 1; INVALID_STATUS 0x80110001 in INIT, QUIT and NONE after use
