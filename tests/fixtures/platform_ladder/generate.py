@@ -91,7 +91,7 @@ NID_IO_READ = 0x6A638D83
 NID_IO_CLOSE = 0x810C4BC3
 LIB_IOFILEMGR = "IoFileMgrForUser"
 
-# System-library export NIDs every PSP module publishes.
+# System-library export NIDs used by this synthetic module.
 NID_MODULE_START = 0xD632ACDB
 NID_MODULE_STOP = 0xCEE8593C
 NID_MODULE_INFO = 0xF01D73A7

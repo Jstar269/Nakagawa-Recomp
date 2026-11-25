@@ -1682,7 +1682,7 @@ static uint32_t libfont_start_call(CpuState *cpu, uint32_t uid) {
 /* A source-owned PRX with a real module-info/export layout. Its export pointers
  * use the loaded guest-address form consumed by prx_loader; the HLE export
  * registrar must resolve those same fields back through the ELF segments. */
-static int write_synthetic_libfont_prx(const char *path, uint32_t base) {
+static int write_synthetic_libfont_prx(const char *path, uint32_t base, int with_stop) {
     enum { SIZE = 0x380, PHOFF = 0x34, MODOFF = 0x100, SHSTR_OFF = 0x2c0,
            SEG_SIZE = 0x200, EXPORT_VA = 0x100, TABLE_VA = 0x140,
            START_OFF = 0x70 };
@@ -1722,16 +1722,21 @@ static int write_synthetic_libfont_prx(const char *path, uint32_t base) {
     fixture_wr32(image + MODOFF + 40, base + EXPORT_VA + 16u);
     uint8_t *entry = image + 0x80 + EXPORT_VA;
     entry[8] = 4;
-    /* Three functions: the table is the NIDs (module_start, the export, module_stop),
-     * then their addresses in the same order. */
-    fixture_wr16(entry + 10, 3);
+    /* The NIDs precede the corresponding addresses. Omit the stop function entirely
+     * in the no-stop image, while keeping both the start and the regular export. */
+    uint16_t function_count = with_stop ? 3u : 2u;
+    uint8_t *table = image + 0x80 + TABLE_VA;
+    uint8_t *addresses = table + 4u * function_count;
+    fixture_wr16(entry + 10, function_count);
     fixture_wr32(entry + 12, base + TABLE_VA);
-    fixture_wr32(image + 0x80 + TABLE_VA, 0xd632acdbu);
-    fixture_wr32(image + 0x84 + TABLE_VA, SYNTH_LIBFONT_EXPORT_NID);
-    fixture_wr32(image + 0x88 + TABLE_VA, 0xcee8593cu);
-    fixture_wr32(image + 0x8c + TABLE_VA, START_OFF);
-    fixture_wr32(image + 0x90 + TABLE_VA, SYNTH_LIBFONT_EXPORT_OFF);
-    fixture_wr32(image + 0x94 + TABLE_VA, SYNTH_LIBFONT_STOP_OFF);
+    fixture_wr32(table, 0xd632acdbu);
+    fixture_wr32(table + 4, SYNTH_LIBFONT_EXPORT_NID);
+    fixture_wr32(addresses, START_OFF);
+    fixture_wr32(addresses + 4, SYNTH_LIBFONT_EXPORT_OFF);
+    if (with_stop) {
+        fixture_wr32(table + 8, 0xcee8593cu);
+        fixture_wr32(addresses + 8, SYNTH_LIBFONT_STOP_OFF);
+    }
     fixture_wr32(image + 0x80 + START_OFF, 0x03e00008u); /* jr ra */
     fixture_wr32(image + 0x80 + SYNTH_LIBFONT_EXPORT_OFF, 0x03e00008u);
     fixture_wr32(image + 0x80 + SYNTH_LIBFONT_STOP_OFF, 0x03e00008u);
@@ -1775,7 +1780,7 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
     expect(runtime_module_path(path, sizeof(path), name),
            "libfont startup fixture path is under SR_MODULE_DIR and fits the bounded test buffer");
     if (!path[0]) return;
-    expect(write_synthetic_libfont_prx(path, base),
+    expect(write_synthetic_libfont_prx(path, base, 1),
            "source-owned libfont PRX fixture is written");
 
     hle_test_setenv("SR_REAL_MODULE_START", NULL);
@@ -1890,6 +1895,34 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
             expect(0, "imports route to the reloaded libfont export");
         }
     }
+
+    /* A translated stop body alone is not an export. Load the same image with a real
+     * start but no stop entry in the table, and exercise the existing host no-entry
+     * behavior through the actual loader. */
+    sr_hle_test_module_reset();
+    expect(write_synthetic_libfont_prx(path, base, 0),
+           "libfont no-stop PRX omits the module_stop export");
+    title_hle_write_cstr(0x08906000u, guest_path);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x08906000u;
+    uint32_t without_stop = sr_hle_test_load_module(&cpu);
+    uint32_t starts_without_stop = s_synth_libfont_start_calls;
+    uint32_t stops_without_stop = s_synth_libfont_stop_calls;
+    expect(without_stop != 0u && libfont_start_call(&cpu, without_stop) == 0u &&
+               s_synth_libfont_start_calls == starts_without_stop + 1u,
+           "libfont no-stop PRX still runs its declared module_start");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = without_stop;
+    cpu.r[7] = 0x089060c0u;
+    MEM_W32(0x089060c0u, 0xFFFFFFFFu);
+    expect(sr_hle_test_stop_module(&cpu) == 0u &&
+               s_synth_libfont_stop_calls == stops_without_stop &&
+               MEM_R32(0x089060c0u) == 0xFFFFFFFFu,
+           "libfont no-stop PRX stops without a guest call or status write");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = without_stop;
+    expect(sr_hle_test_unload_module(&cpu) == 0u,
+           "libfont no-stop PRX can be unloaded after StopModule");
 
     /* Phase 3: SR_REAL_MODULE_START=1 keeps translated startup for every module. */
     hle_test_setenv("SR_REAL_MODULE_START", "1");
