@@ -2098,11 +2098,11 @@ static void short_exit_run(PlayerApp *app, const char *exit_code, const char *bo
     assert_session_released(&app->launch_session);
 }
 
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
 static void append_boot_event_to_session(PlayerApp *app, const char *line) {
     assert(append_runtime_event(app->boot_event_file_path, line));
 }
 
-#if defined(NK_PLAYER_STATE_TEST_SEAMS)
 static void append_first_frame_after_live_read(PlayerApp *app) {
     append_boot_event_to_session(app, "BOOT_EVENT phase=first_frame source=cpu\n");
 }
