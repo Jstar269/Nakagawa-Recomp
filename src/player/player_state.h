@@ -1073,6 +1073,7 @@ struct PlayerApp {
         bool download_available;
         bool picking;
         bool busy;
+        bool fetching_sources;
     } cheat_db;
     GameRecord games[MAX_LIBRARY_GAMES];
     PlayerRuntimePackageCacheEntry runtime_package_cache[MAX_LIBRARY_GAMES];

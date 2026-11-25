@@ -1583,11 +1583,12 @@ static void player_cheat_db_close(PlayerApp *app) {
         app->cheat_db.import_path[0] = '\0';
         app->cheat_db.status[0] = '\0';
         player_app_set_view(app, VIEW_CHEAT_DB);
-    } else if (app->active_view == VIEW_CHEAT_DB_BUSY) {
-        if (s_cheat_db_job && s_cheat_db_job->kind != PLAYER_CHEAT_DB_IMPORT) {
-            player_cheat_db_cancel_job(s_cheat_db_job);
-        }
+    } else if (app->active_view == VIEW_CHEAT_DB_BUSY &&
+               s_cheat_db_job && s_cheat_db_job->kind == PLAYER_CHEAT_DB_LIST) {
+        /* The list cannot change files. Cancel before confirming a database to install. */
+        player_cheat_db_cancel_job(s_cheat_db_job);
     } else if (!app->cheat_db.picking) {
+        /* After confirmation, Back leaves the accepted file operation to finish. */
         player_app_set_view(app, VIEW_ONLINE_SETTINGS);
     }
 }
@@ -1624,6 +1625,7 @@ static void player_cheat_db_start(PlayerApp *app, PlayerCheatDbJobKind kind) {
     }
     s_cheat_db_job = job;
     app->cheat_db.busy = true;
+    app->cheat_db.fetching_sources = kind == PLAYER_CHEAT_DB_LIST;
     snprintf(app->cheat_db.status, sizeof(app->cheat_db.status), "%s",
              kind == PLAYER_CHEAT_DB_LIST ? NK_UI_STR(SETTINGS_CHEAT_DB_LIST_BUSY) :
              kind == PLAYER_CHEAT_DB_DOWNLOAD ? NK_UI_STR(SETTINGS_CHEAT_DB_FILE_BUSY) :
@@ -1650,6 +1652,7 @@ static void player_cheat_db_poll(PlayerApp *app) {
     SDL_WaitThread(job->thread, NULL);
     s_cheat_db_job = NULL;
     app->cheat_db.busy = false;
+    app->cheat_db.fetching_sources = false;
     bool showing = app->active_view == VIEW_CHEAT_DB_BUSY;
     if (showing) player_app_set_view(app, VIEW_CHEAT_DB);
     if (job->kind == PLAYER_CHEAT_DB_LIST) {
@@ -7715,7 +7718,7 @@ static void player_frame_begin(PlayerRun *run) {
         &run->build_check_pending);
     if (player_ui_test_active(&run->ui_test)) {
         player_ui_test_step_script(&run->ui_test, app, &run->running,
-                                   run->package_status_job != NULL);
+                                   run->package_status_job != NULL || s_cheat_db_job != NULL);
     }
     uint64_t now_tick = SDL_GetTicks();
     uint32_t delta_ms = (uint32_t)(now_tick >= run->last_tick ? (now_tick - run->last_tick) : 0);

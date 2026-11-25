@@ -915,6 +915,7 @@ typedef struct {
     bool cheat_db_replace;
     bool cheat_db_download_available;
     bool cheat_db_busy;
+    bool cheat_db_fetching_sources;
     const char *current_version;    /* "0.0.3" */
     const char *update_version;     /* "0.0.4", once checked */
     bool update_prerelease;

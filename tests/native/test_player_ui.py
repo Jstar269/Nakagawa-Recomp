@@ -5561,6 +5561,19 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertEqual(request_urls(confirmed), [source_url, database_url])
             self.assertEqual(confirmed["cheat_db_bytes"], contents)
 
+            # After an explicit confirmation, Back dismisses progress while
+            # the accepted download continues. Hold the fake response until Back.
+            backed = self.next_ui_run(
+                "online-settings", open_page + first_click + (
+                    "KEY_UP", "KEY_RETURN", "WAIT_VIEW=cheat_db_busy,5000",
+                    "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_VIEW=online_settings,5000",
+                ),
+                env_extra={**env, "NK_UI_TEST_CHEAT_DB_WAIT_FOR_BACK": "1"},
+                cheat_db_seed=sentinel, wait_background=True,
+            )
+            self.assertEqual(request_urls(backed), [source_url, database_url])
+            self.assertEqual(backed["cheat_db_bytes"], contents)
+
             from_disk = self.next_ui_run(
                 "online-settings", open_page + (
                     "PAD_DPAD_DOWN", "PAD_SOUTH", f"PICK_FILE={folder / 'database.db'}",

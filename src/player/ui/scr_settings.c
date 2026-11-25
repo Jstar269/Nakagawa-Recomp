@@ -2715,10 +2715,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 }
             }
             if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK,
-                             confirm || model->cheat_db_busy ? NK_UI_STR(SETTINGS_CANCEL)
-                                                              : NK_UI_STR(SETTINGS_BACK),
-                             confirm ? NK_UI_BUTTON_PRIMARY :
-                             model->cheat_db_busy && model->cheat_db_import ? NK_UI_BUTTON_DISABLED : 0u)) {
+                             confirm || model->cheat_db_fetching_sources
+                                 ? NK_UI_STR(SETTINGS_CANCEL) : NK_UI_STR(SETTINGS_BACK),
+                             confirm ? NK_UI_BUTTON_PRIMARY : 0u)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_BACK);
             }
             nk_ui_end_container(ui);

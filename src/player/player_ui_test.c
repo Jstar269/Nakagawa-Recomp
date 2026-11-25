@@ -204,6 +204,7 @@ static int player_ui_test_music_state(const char *name) {
    reached it. The main thread is the one that set the harness up. */
 static char s_ui_test_pick[1024];
 static bool s_ui_test_pick_pending;
+static SDL_AtomicInt s_ui_test_cheat_db_background;
 static SDL_ThreadID s_ui_test_main_thread;
 
 int player_ui_test_next_event(const char *script, size_t *cursor,
@@ -1491,6 +1492,9 @@ void player_ui_test_report_update_phase(const PlayerUiTest *t, const PlayerApp *
 void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
                                 bool background_pending) {
     if (!t->mode) return;
+    if (app->active_view == VIEW_ONLINE_SETTINGS && app->cheat_db.busy) {
+        SDL_SetAtomicInt(&s_ui_test_cheat_db_background, 1);
+    }
     uint64_t ui_test_now = SDL_GetTicks();
     bool ui_test_block_script = false;
     if (t->waiting_for_music) {
@@ -2349,6 +2353,14 @@ static bool player_cheat_db_test_open(void *context, const char *url, const char
     if (strcmp(url, NK_CHEAT_DB_SOURCES_URL) == 0) {
         path = getenv("NK_UI_TEST_CHEAT_DB_LIST");
     } else if (database_url && strcmp(url, database_url) == 0) {
+        if (getenv("NK_UI_TEST_CHEAT_DB_WAIT_FOR_BACK")) {
+            /* Hold only the fake response until the real Back action leaves the screen. */
+            uint64_t expired = SDL_GetTicks() + 10000u;
+            while (SDL_GetAtomicInt(&s_ui_test_cheat_db_background) == 0) {
+                if (SDL_GetTicks() >= expired) return false;
+                SDL_Delay(1u);
+            }
+        }
         path = getenv("NK_UI_TEST_CHEAT_DB_FILE");
     }
     return path && path[0] && player_ui_test_file_response(path, url, out);

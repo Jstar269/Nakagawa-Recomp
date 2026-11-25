@@ -1277,7 +1277,9 @@ Online and developer options > **Cheat database** fills it in either of two ways
   which database to fetch, then shows its name, its maintainer and its licence as stated (the
   first and only source, CWCheat-Database-Plus by Saramagrean, states no licence), warns that
   cheats can break a game or its saves, and asks before it replaces a `cheat.db` you already have.
-  Only your second click fetches the file. Each source in the list is pinned to one commit of its
+  Only your second click fetches the file. Cancel the confirmation to leave without fetching the
+  database. After you confirm, Back returns to Settings while the download finishes.
+  Each source in the list is pinned to one commit of its
   repository with the file's exact size and SHA-256: a download that differs is refused by name
   (`CHEAT_DB_SIZE_MISMATCH`, `CHEAT_DB_HASH_MISMATCH`) and nothing is written. The file is also
   read by the cheat reader before it replaces anything; one with a cheat outside every game's

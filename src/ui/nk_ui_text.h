@@ -538,8 +538,8 @@ NkUiTextBackend nk_ui_text_fixed(void);
     "raw.githubusercontent.com. GitHub receives your IP address, the requested URL and the client name " \
     "NakagawaRecomp/CheatDatabase. The database downloads after you confirm its source."
 #define NK_UI_EN_SETTINGS_CHEAT_DB_LIST_BUSY "Fetching the source list…"
-#define NK_UI_EN_SETTINGS_CHEAT_DB_FILE_BUSY "Downloading and checking the database…"
-#define NK_UI_EN_SETTINGS_CHEAT_DB_IMPORT_BUSY "Checking the selected database…"
+#define NK_UI_EN_SETTINGS_CHEAT_DB_FILE_BUSY "Downloading and checking the database. It continues if you go back."
+#define NK_UI_EN_SETTINGS_CHEAT_DB_IMPORT_BUSY "Checking the selected database. The import continues if you go back."
 #define NK_UI_EN_SETTINGS_CHEAT_DB_INSTALLED "The database is ready in your cheats folder."
 #define NK_UI_EN_SETTINGS_CHEAT_DB_OFFLINE "This build cannot download the database. You can import a file."
 #define NK_UI_EN_SETTINGS_CHEAT_DB_IMPORT "Use my own file"
