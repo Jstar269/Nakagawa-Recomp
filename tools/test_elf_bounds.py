@@ -1310,6 +1310,19 @@ class CanonicalCfgTests(unittest.TestCase):
             FakeCodeImage(pointer_words), pointer_spans, [0x3300, 0x3308])
         self.assertEqual(coverage["unowned_words"], 0)
 
+        # Without the second entry the slot is reached only through the jr: it gets no
+        # fall-through edge and the words after it stay unowned.
+        lone_report = analyze.canonical_cfg_report(
+            FakeCodeImage(pointer_words), ranges=pointer_spans, entries=[0x3300])
+        self.assertEqual([edge["kind"] for edge in cfg_node(lone_report, 0x3308)["edges"]], [])
+        for address in (0x330C, 0x3310, 0x3314):
+            self.assertEqual(cfg_node(lone_report, address)["owners"], [], hex(address))
+        self.assertEqual(
+            lone_report,
+            _canonical_cfg_report_reference(
+                FakeCodeImage(pointer_words), ranges=pointer_spans, entries=[0x3300]),
+        )
+
         # The same slot reached only as jr's delay slot gets no such edge.
         words[0x3000] = branch(4, 4, 0, 0x3000, 0x3008)
         report = analyze.canonical_cfg_report(
