@@ -3611,7 +3611,7 @@
     "classification": "dedicated",
     "handler": "h_SelfStopUnloadModule",
     "name": "sceKernelSelfStopUnloadModule",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xd6a5f2f7": {
     "classification": "dedicated",

@@ -58842,6 +58842,7 @@ static void lifecycle_stop_fn(CpuState *s) {
 #define SELFSTOP_ARG_ADDR 0x08a02000u
 static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
+static uint32_t s_selfstop_guest_result;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
 static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
@@ -58853,7 +58854,7 @@ static void selfstop_guest_entry(CpuState *s) {
     s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
     s->r[5] = s_selfstop_guest_args[1];
     s->r[6] = s_selfstop_guest_args[2];
-    (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
+    s_selfstop_guest_result = sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
 
@@ -59390,56 +59391,110 @@ static void test_late_prx_unload_reload_lifecycle(void) {
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
 
-    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
-     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
-     * with argument size 0 and argp 0, and the module is unloaded. */
-    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
-                                          LIFECYCLE_PATCH_OFF_A_1);
-    expect(self_uid != 0u &&
-               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
-                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
-           "self-stop (1, 0, NULL): module image loads");
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
-    memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = self_uid;
-    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
-    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
-     * so the call returns and the module stays loaded. */
-    s_lifecycle_stop_calls = 0u;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
-               sr_hle_test_module_count() == 1u,
-           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
-    s_lifecycle_stop_calls = 0u;
-    s_lifecycle_stop_arglen = 0xffffffffu;
-    s_lifecycle_stop_argp_word = 0xffffffffu;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 0u;
-    s_selfstop_guest_args[2] = 0u;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    s_selfstop_guest_args[0] = 0u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    expect(s_selfstop_guest_returned == 0u,
-           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
-    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
-               s_lifecycle_stop_argp_word == 0u,
-           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
-    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
-           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
-
     remove(path_a);
     remove(path_b);
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
+}
+
+static uint32_t s_selfstop_stop_argp;
+static void selfstop_zero_result_stop_fn(CpuState *s) {
+    s_lifecycle_stop_calls++;
+    s_lifecycle_stop_arglen = s->r[4];
+    s_selfstop_stop_argp = s->r[5]; /* Record the pointer itself, without reading it. */
+    s->r[2] = 0u;
+}
+
+static void test_self_stop_unload_measured_forms(void) {
+    extern void sr_hle_test_partition_reset(void);
+    const char *path = HLE_BUILD_ROOT "/hle_lifecycle_self_stop.prx";
+    const uint32_t entry = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
+    const uint32_t address_nid = 0xd8b73127u, export_pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_PATCH_OFF_A_1;
+    const struct {
+        uint32_t first, arglen, argp, refusal;
+    } cases[] = {
+        {0u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg0 */
+        {1u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg1 */
+        /* PSP-HLE-SELFSTOP-001's past-RAM cell unloaded with a substituted pointer.
+         * The host deliberately refuses an unreadable span instead. */
+        {0u, 4u, 0x0c000000u, 0x80000103u},
+        {1u, 4u, SELFSTOP_ARG_ADDR, 0x80020002u}, /* Unmeasured first argument of 1 with a block. */
+    };
+
+    if (!write_lifecycle_prx(path, 0x51570a0bu)) {
+        expect(0, "self-stop: synthetic image written");
+        return;
+    }
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_fixture();
+        sr_hle_init();
+        sr_test_guest_fn_reset();
+        sr_hle_test_module_reset();
+        /* A refusal deliberately leaves its fixed-address partition block allocated. */
+        sr_hle_test_partition_reset();
+
+        uint32_t uid = sr_hle_test_load_prx_image(path, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                                  LIFECYCLE_PATCH_OFF_A_1);
+        s_selfstop_guest_gp = 0x0aabbccdu;
+        const int loaded = uid != 0u &&
+            sr_hle_test_set_module_image(uid, LIFECYCLE_MOD_B_BASE,
+                                         LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, s_selfstop_guest_gp);
+        expect(loaded, "self-stop: fresh synthetic module image loaded");
+        if (!loaded) break;
+        sr_test_register_guest_fn(entry, lifecycle_start_fn);
+        sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_STOP_OFF, selfstop_zero_result_stop_fn);
+        sr_test_register_guest_fn(export_pc, lifecycle_export_b_fn);
+        CpuState cpu = {0};
+        cpu.r[4] = uid;
+        expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop: fresh module starts");
+        cpu.r[4] = entry;
+        expect(sr_syscall(&cpu, address_nid) == uid && sr_hle_test_module_count() == 1u &&
+                   sr_hle_test_image_count() == 1u && sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+               "self-stop: started module, image and export present before call");
+
+        s_selfstop_guest_args[0] = cases[i].first;
+        s_selfstop_guest_args[1] = cases[i].arglen;
+        s_selfstop_guest_args[2] = cases[i].argp;
+        s_selfstop_guest_result = UINT32_MAX;
+        s_selfstop_guest_returned = 0u;
+        s_selfstop_guest_in_scheduler = 0;
+        s_lifecycle_stop_calls = 0u;
+        s_lifecycle_stop_arglen = UINT32_MAX;
+        s_selfstop_stop_argp = UINT32_MAX;
+        sr_test_register_guest_fn(entry, selfstop_guest_entry);
+        sched_run(entry, 0u, 0u);
+
+        expect(s_selfstop_guest_in_scheduler && s_selfstop_guest_pc == entry,
+               "self-stop: caller runs as a scheduled thread in the started module");
+        cpu.r[4] = entry;
+        const uint32_t after = sr_syscall(&cpu, address_nid);
+        if (cases[i].refusal != 0u) {
+            expect(s_selfstop_guest_returned && s_selfstop_guest_result == cases[i].refusal &&
+                       s_lifecycle_stop_calls == 0u,
+                   "self-stop: unsupported argument form returns the refusal and runs no stop");
+            expect(after == uid && sr_hle_test_module_count() == 1u && sr_hle_test_image_count() == 1u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+                   "self-stop: refusal preserves the module, image and export");
+        } else {
+            expect(!s_selfstop_guest_returned && s_selfstop_guest_result == UINT32_MAX,
+                   cases[i].first ? "self-stop (1, 0, NULL) does not return" : "self-stop (0, 0, NULL) does not return");
+            expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u && s_selfstop_stop_argp == 0u,
+                   "self-stop: module_stop runs once with length zero and a raw null pointer");
+            expect(after == 0x8002012eu && sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
+                   "self-stop: module, image and export retired and address lookup no longer finds the module");
+        }
+    }
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    remove(path);
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
 }
 
 static void test_host_skipped_start_stop_unload_reload(void) {
@@ -69737,6 +69792,13 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures != 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--self-stop-unload") == 0) {
+        test_self_stop_unload_measured_forms();
+        fprintf(stderr, "self-stop-unload: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--title-config") == 0) {
         test_title_config_hle_bindings();
         fprintf(stderr, "hle_title_production_selftest: %d checks, %d failures\n",
@@ -70306,6 +70368,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_prx_stop_entry_boundaries();
     test_module_stop_join_failure_keeps_stop_single();
     test_late_prx_unload_reload_lifecycle();
+    test_self_stop_unload_measured_forms();
     test_module_without_entry_runs_no_code();
     test_host_skipped_start_stop_unload_reload();
     test_late_prx_duplicate_base_last_reference();
