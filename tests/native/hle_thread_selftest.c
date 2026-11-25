@@ -12153,7 +12153,8 @@ enum {
     ADH_P2_PEER_GUEST_BUDGET_US = 500000 /* a tenth of the 5 s online request timeout */
 };
 
-/* Waits for a synthetic peer thread to reach `want` (#2996). The peer runs in host time, while
+/* Waits for a synthetic peer thread to reach `want` (#2996, #3042); `stage` only grows, so it may
+ * be a stage or a count of answers. The peer runs in host time, while
  * guest time moves only when the guest delays, so a guest polling loop alone can use up a guest
  * deadline (the 5 s online request timeout) before the peer's thread has run at all. Here the
  * guest delays between host sleeps only until ADH_P2_PEER_GUEST_BUDGET_US of guest time has
@@ -13226,8 +13227,11 @@ typedef struct {
     int group_exists;
     uint8_t active_group[8], group_bssid[6];
     volatile int stop, running;
-    volatile int drop_lobby_on_connect;
-    volatile int drop_lobby_mid_session;
+    atomic_int drop_lobby_on_connect;
+    atomic_int drop_lobby_mid_session;
+    /* Progress the guest waits for in host time (#3042), counted once the frames are sent. */
+    atomic_int joins_answered;    /* group joins answered with their BSSID */
+    atomic_int mid_session_drops; /* pump passes that closed every in-group lobby connection */
     volatile int silent_lobby;
     volatile int hold_connect_reply; /* joins the group but keeps the members and the BSSID back */
     volatile int inject_late_reply;  /* sends a member and a BSSID to a logged-in client once */
@@ -13266,13 +13270,17 @@ static void mr_nonblock(adh_p2_sock_t s) {
     int nd = 1;
     (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof(nd));
 }
-static void mr_send(adh_p2_sock_t fd, const void *buf, size_t n) {
+/* Returns whether all of `buf` was sent. ADH_P2_SEND_FLAGS (MSG_NOSIGNAL where it exists) turns
+ * an answer to a client that has already closed its socket into a failed send, not a SIGPIPE
+ * that ends the whole run. */
+static bool mr_send(adh_p2_sock_t fd, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t sent = 0u;
     for (int tries = 0; sent < n && tries < 2000; tries++) {
-        int r = send(fd, (const char *)(p + sent), (int)(n - sent), 0);
+        int r = send(fd, (const char *)(p + sent), (int)(n - sent), ADH_P2_SEND_FLAGS);
         if (r > 0) sent += (size_t)r;
     }
+    return sent == n;
 }
 /* The answer to a join the client no longer waits for: a member called Ghost, then a BSSID
  * (02:00:00:00:00:66) that is not the test group's (02:00:00:00:00:77). */
@@ -13315,11 +13323,15 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
         }
         if (!placed) adh_p2_close_sock(c);
     }
+    /* Read once, so that a pass closes all in-group connections or none of them. */
+    const int drop_mid_session = atomic_load(&r->drop_lobby_mid_session);
+    int dropped_mid_session = 0;
     for (int i = 0; i < 6; i++) {
         MiniRelayPeer *p = &r->peers[i];
         if (!p->active) continue;
-        if (r->drop_lobby_mid_session && p->in_group) {
+        if (drop_mid_session && p->in_group) {
             adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
+            dropped_mid_session = 1;
             continue;
         }
         int closed = 0;
@@ -13379,7 +13391,7 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
                 p->in_group = 1;
                 uint8_t bp[7] = {6u, r->group_bssid[0], r->group_bssid[1], r->group_bssid[2],
                                  r->group_bssid[3], r->group_bssid[4], r->group_bssid[5]};
-                mr_send(p->fd, bp, sizeof(bp));
+                if (mr_send(p->fd, bp, sizeof(bp))) atomic_fetch_add(&r->joins_answered, 1);
             } else if (op == 3u) {
                 if (p->in_group) {
                     p->in_group = 0;
@@ -13411,6 +13423,7 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
             adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
         }
     }
+    if (dropped_mid_session) atomic_fetch_add(&r->mid_session_drops, 1);
     for (int i = 0; i < 24; i++) {
         MiniRelayConn *dc = &r->conns[i];
         if (!dc->active) continue;
@@ -13520,6 +13533,10 @@ static void *mr_thread_fn(void *arg) {
 }
 static int mr_start(AdhP2MiniRelay *r) {
     memset(r, 0, sizeof(*r));
+    atomic_init(&r->drop_lobby_on_connect, 0);
+    atomic_init(&r->drop_lobby_mid_session, 0);
+    atomic_init(&r->joins_answered, 0);
+    atomic_init(&r->mid_session_drops, 0);
     r->lobby_lsn = socket(AF_INET, SOCK_STREAM, 0);
     r->data_lsn = socket(AF_INET, SOCK_STREAM, 0);
     if (r->lobby_lsn == ADH_P2_BAD_SOCK || r->data_lsn == ADH_P2_BAD_SOCK) return 0;
@@ -13556,6 +13573,36 @@ static void mr_stop(AdhP2MiniRelay *r) {
     adh_p2_close_sock(r->lobby_lsn); adh_p2_close_sock(r->data_lsn);
     for (int i = 0; i < 6; i++) if (r->peers[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->peers[i].fd);
     for (int i = 0; i < 24; i++) if (r->conns[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->conns[i].fd);
+}
+
+/* Waits until the relay has answered one more group join than `before` (#3042). Polling GetState
+ * alone moves guest time on without letting the relay's thread run: on one CPU, the 4 s of guest
+ * time adh_p2_wait_state allows passed in about a millisecond of host time, before the relay had
+ * read the join. The answer is waited for mostly in host time instead, and a missing one is
+ * reported as a fixture failure for `cell`. */
+static bool mr_wait_join_answered(CpuState *cpu, AdhP2MiniRelay *r, int before, const char *cell) {
+    char msg[160];
+    const bool answered = adh_p2_wait_peer(cpu, &r->joins_answered, before + 1);
+    snprintf(msg, sizeof(msg), "%s: fixture relay answered the group join within %d ms (answers=%d)",
+             cell, ADH_P2_PEER_WAIT_MS, atomic_load(&r->joins_answered) - before);
+    expect(answered, msg);
+    return answered;
+}
+
+/* Has the relay close every in-group lobby connection and waits, mostly in host time, until a pump
+ * pass has done so (#3042). The flag is cleared only after that: cleared on a guest-side deadline,
+ * it could be gone before a late relay thread read it. A drop that does not happen is reported as
+ * a fixture failure for `cell`. */
+static bool mr_drop_lobby_mid_session(CpuState *cpu, AdhP2MiniRelay *r, const char *cell) {
+    char msg[160];
+    const int before = atomic_load(&r->mid_session_drops);
+    atomic_store(&r->drop_lobby_mid_session, 1);
+    const bool dropped = adh_p2_wait_peer(cpu, &r->mid_session_drops, before + 1);
+    atomic_store(&r->drop_lobby_mid_session, 0);
+    snprintf(msg, sizeof(msg), "%s: fixture relay closed the lobby connections within %d ms (passes=%d)",
+             cell, ADH_P2_PEER_WAIT_MS, atomic_load(&r->mid_session_drops) - before);
+    expect(dropped, msg);
+    return dropped;
 }
 
 /* ---- D4 regression: PtpOpen before Peer listens retries cleanly in PtpConnect; self-connect ---- */
@@ -13775,29 +13822,23 @@ static void d3_main_fn(CpuState *cpu) {
     s_adh_events = 0u;
     s_d3_srv->drop_lobby_on_connect = 0;
     s_d3_srv->drop_lobby_mid_session = 0;
+    const int d32_joins = atomic_load(&s_d3_srv->joins_answered);
     expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
            adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
            adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
            adh(ADH_NID_CREATE, adh_name(0, "D3MID01"), 0u, 0u) == 0u, "d3.2: Create");
-    adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u && s_adh_events == 1u, "d3.2: in group D3MID01");
-    s_d3_srv->drop_lobby_mid_session = 1;
-    for (int w = 0; w < 100 && s_adh_events < 2u; w++) {
-#ifdef _WIN32
-        Sleep(1u);
-#else
-        adh_p2_usleep(1000);
-#endif
-        cpu->r[4] = 5000u;
-        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    if (mr_wait_join_answered(cpu, s_d3_srv, d32_joins, "d3.2")) adh_p2_wait_state(cpu, 1u, 1u);
+    const bool d32_in_group = adh_state() == 1u && s_adh_events == 1u;
+    expect(d32_in_group, "d3.2: in group D3MID01");
+    if (d32_in_group && mr_drop_lobby_mid_session(cpu, s_d3_srv, "d3.2")) {
+        for (int w = 0; w < 100 && s_adh_events < 2u; w++) d3_step(cpu);
+        snprintf(msg, sizeof(msg),
+                 "d3.2: mid-session lobby drop resets state=0 and fires DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
+                 s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+                 s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state());
+        expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
+               ADH_AT(1).error == 0x80410b09u && adh_state() == 0u, msg);
     }
-    s_d3_srv->drop_lobby_mid_session = 0;
-    snprintf(msg, sizeof(msg),
-             "d3.2: mid-session lobby drop resets state=0 and fires DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
-             s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
-             s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state());
-    expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
-           ADH_AT(1).error == 0x80410b09u && adh_state() == 0u, msg);
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.2: cleanup");
 
@@ -13960,13 +14001,21 @@ static void off_main_fn(CpuState *cpu) {
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
     s_adh_events = 0u;
+    const int joins = atomic_load(&s_off_srv->joins_answered);
     expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
            adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
            adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
            adh(ADH_NID_CREATE, adh_name(0, "OFFGRP1"), 0u, 0u) == 0u, "off: Create");
-    adh_p2_wait_state(cpu, 1u, 1u);
+    const bool answered = mr_wait_join_answered(cpu, s_off_srv, joins, "off");
+    if (answered) adh_p2_wait_state(cpu, 1u, 1u);
     expect(adh_state() == 1u && s_adh_events == 1u && off_active_peers() == 1,
            "off: in group OFFGRP1 with the lobby connected");
+    if (!answered) {
+        /* Turning Online play off is checked from a connected group only. */
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
+    }
     /* The launcher turns Online play off: it creates the file SR_ADHOC_OFF_FILE names. */
     FILE *marker = fopen(s_off_path, "wb");
     expect(marker != NULL, "off: the marker file is written");
@@ -14058,9 +14107,8 @@ static int offd_guest_conns(const uint8_t peer_mac[6]) {
 }
 
 static void offd_kill_lobby(CpuState *cpu) {
-    s_off_srv->drop_lobby_mid_session = 1;
+    if (!mr_drop_lobby_mid_session(cpu, s_off_srv, "offd")) return;
     for (int w = 0; w < 400 && s_adh_events < 2u; w++) d3_step(cpu);
-    s_off_srv->drop_lobby_mid_session = 0;
 }
 
 static void offd_turn_off(void) {
