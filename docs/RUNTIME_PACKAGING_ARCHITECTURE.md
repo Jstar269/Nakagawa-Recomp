@@ -939,8 +939,9 @@ check is open under #324.
 
 ### Reproducible portable ZIP
 
-`tools/stage_install.py --portable-zip <zip> --zip-stage <folder>` writes the ZIP from the
-staged folder. It rewrites `SHA256SUMS.txt` in ordinal path order, verifies
+`tools/stage_install.py --portable-zip <zip> --zip-stage <folder> --artifact-reference <reference>` writes the ZIP from the
+staged folder. The closed temporary ZIP must pass the [artifact content audit](PREVIEW_RELEASE.md#recreate-the-package)
+against the independently approved reference before promotion. The writer rewrites `SHA256SUMS.txt` in ordinal path order, verifies
 `bin/runtime-manifest.json`, and stores one entry per file and per empty folder, sorted by
 UTF-8 path, every entry dated `SOURCE_DATE_EPOCH` (the commit time of `--revision` unless the
 variable or `--source-date-epoch` sets it; times before 1980 become 1980-01-01), mode 0644 for
