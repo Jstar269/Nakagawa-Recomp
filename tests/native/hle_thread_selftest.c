@@ -9672,9 +9672,19 @@ static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
         }
         return;
     }
-    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0x80000020u &&
-               sr_hle_test_unmodelled_stops() == stops + 3u,
+    FILE *duplicate_capture;
+    int duplicate_fd;
+    char duplicate_log[512] = {0};
+    const int duplicate_capturing = hle_data_stderr_capture_begin(&duplicate_capture, &duplicate_fd);
+    const uint32_t duplicate_result = net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0);
+    if (duplicate_capturing)
+        hle_data_stderr_capture_end(duplicate_capture, duplicate_fd, duplicate_log, sizeof(duplicate_log));
+    expect(duplicate_result == 0x80000020u && sr_hle_test_unmodelled_stops() == stops + 3u,
            "Resolver lifecycle: duplicate Init returns the observed error without a stop");
+    expect(duplicate_capturing &&
+               strstr(duplicate_log, "HLE: sceNetResolverInit (NID 0xf3370e61): "
+                                     "duplicate Init returns 0x80000020 (already initialized)") != NULL,
+           "Resolver lifecycle: duplicate Init visibly reports its modeled error");
     expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
                sr_hle_test_unmodelled_stops() == stops + 4u && sr_hle_test_net_pool_uid() == pool,
            "Resolver lifecycle: Inet cannot tear down while Resolver is active");

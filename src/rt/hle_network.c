@@ -97,6 +97,7 @@ typedef enum {
 } NetResolverState;
 static NetResolverState s_netresolver_state;
 static int s_netresolver_init_noted;
+static int s_netresolver_duplicate_noted;
 
 int hle_net_inet_initialized(void) { return s_netinet_inited; }
 
@@ -204,8 +205,14 @@ static uint32_t h_NetResolverInit(CpuState *s) {
     if (!net_resolver_offline_stack_ready(s))
         return hle_unmodelled_stop("sceNetResolverInit",
                                    "outside the disconnected Inet stack with WLAN on (UNMEASURED)");
-    if (s_netresolver_state == NET_RESOLVER_ACTIVE)
+    if (s_netresolver_state == NET_RESOLVER_ACTIVE) {
+        if (!s_netresolver_duplicate_noted) {
+            s_netresolver_duplicate_noted = 1;
+            fprintf(stderr, "HLE: sceNetResolverInit (NID 0xf3370e61): "
+                            "duplicate Init returns 0x80000020 (already initialized)\n");
+        }
         return 0x80000020u;
+    }
     if (s_netresolver_state != NET_RESOLVER_UNSTARTED)
         return hle_unmodelled_stop("sceNetResolverInit", "after a prior Term (UNMEASURED re-init order)");
     s_netresolver_state = NET_RESOLVER_ACTIVE;
