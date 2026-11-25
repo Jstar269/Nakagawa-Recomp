@@ -835,7 +835,7 @@ int main(int argc, char **argv) {
     fi.physical_device = g.physical;
     fi.device = g.device;
     fi.queue_family = g.family;
-    Fsr1Pass *f = fsr1_create(&fi, why, sizeof(why));
+    Fsr1Pass *f = fsr1_create(&fi, why, sizeof(why), NULL);
     CHECK(f != NULL, "fsr1_create: %s", why);
     if (a && f) {
         cell_line_art(a, f);
