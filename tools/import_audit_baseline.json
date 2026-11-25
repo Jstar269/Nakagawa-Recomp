@@ -1768,7 +1768,7 @@
     "classification": "dedicated",
     "handler": "h_IoIoctl",
     "name": "sceIoIoctl",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x63f2889c": {
     "classification": "dedicated",
@@ -2142,7 +2142,7 @@
     "classification": "dedicated",
     "handler": "h_DcacheWritebackAll",
     "name": "sceKernelDcacheWritebackAll",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x7a20e7af": {
     "classification": "dedicated",
@@ -2553,7 +2553,7 @@
     "classification": "dedicated",
     "handler": "h_WlanOn",
     "name": "sceWlanDevIsPowerOn",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x93ef3843": {
     "classification": "dedicated",
@@ -3635,7 +3635,7 @@
     "classification": "dedicated",
     "handler": "h_WlanOn",
     "name": "sceWlanGetSwitchState",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xd7a29f46": {
     "classification": "dedicated",
@@ -4270,7 +4270,7 @@
     "classification": "dedicated",
     "handler": "h_GetTlsAddr",
     "name": "sceKernelGetTlsAddr",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xfa8a5739": {
     "classification": "dedicated",
