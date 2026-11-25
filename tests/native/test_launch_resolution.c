@@ -4320,7 +4320,9 @@ static void test_developer_executable_path_fit(const char *base, const char *iso
         root[used] = '\0';
     }
 
-    snprintf(build_directory, sizeof(build_directory), "%s%s", root, build_suffix);
+    assert(used + (size_t)suffix_length < sizeof(build_directory));
+    memcpy(build_directory, root, used);
+    memcpy(build_directory + used, build_suffix, (size_t)suffix_length + 1u);
     snprintf(fitting_path, sizeof(fitting_path), "%s%c%s", build_directory, sep, name);
     snprintf(overlong_path, sizeof(overlong_path), "%s.exe", fitting_path);
     assert(strlen(fitting_path) == sizeof(session.executable_path) - 1u);
