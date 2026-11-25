@@ -52,17 +52,17 @@ Semantic handler census: **647** handlers across **30** API families, covering *
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 393 | 405 |
+| `partial` | 394 | 406 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 236 | 241 |
+| `unreviewed` | 235 | 240 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
 | `sceAtrac` | 0 | 0 | 0 | 0 | 34 | 34 | 35 |
-| `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
+| `sceAudio` | 0 | 12 | 0 | 0 | 5 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
 | `sceDisplay` | 1 | 15 | 0 | 0 | 1 | 17 | 17 |
@@ -89,7 +89,7 @@ Semantic handler census: **647** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **393** | **1** | **3** | **236** | **647** | **677** |
+| **Total** | **14** | **394** | **1** | **3** | **235** | **647** | **677** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -198,6 +198,13 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1
+- **`h_AudioOutputPannedBlocking`** (`sceAudio`): `sceAudioOutputPannedBlocking` (0x13f592bc)
+  - Limitation: PPSSPP-derived, not PSP-measured: a volume above 0xFFFF or a negative one (0x8026000b, checked first), a channel of 8 or more (0x80260003) and a channel 0 to 7 that is not reserved (0x80260001, nothing played, the caller not parked, the first refusal of a run reported by name) follow PPSSPP caa91b54b535; PSPAutotests output.expected (ea71108f) records this API's volume refusals and its length on a reserved channel, but records the bad-channel and unreserved-channel cells for sceAudioOutputBlocking only; there is no PSP measurement of this API (no docs/HARDWARE_ORACLE.md or tools/psp_oracle/manifest.json record); the blocking duration and wake timing, the mixer result, a busy channel, unequal left and right volumes and the volume-before-channel order stay unmeasured (#341)
+  - Evidence: tests/native/hle_thread_selftest.c:test_audio_output_panned_blocking_unreserved_channel
+  - Evidence: tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_channels
+  - Evidence: tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_volumes
+  - Evidence: PPSSPP caa91b54b53585811b0fd84405ea04aec72a952b Core/HLE/sceAudio.cpp sceAudioOutputPannedBlocking and `Core/HLE/__sceAudio.cpp` `__AudioEnqueue` (a behaviour reference; derived, not PSP-measured): the two volumes ORed and compared unsigned above 0xFFFF give 0x8026000b first, a channel of 8 or more 0x80260003, a channel not reserved 0x80260001
+  - Evidence: PSPAutotests tests/audio/sceaudio/output.expected (ea71108f00933712c4662276261b39cd42249b1e, a third-party expectation file; corroboration only): for this API, equal left and right volumes on a reserved channel with NULL data give 0x8026000b for -256, -2, -1, -2147483648 and 65536 and up and the length for 0 to 65535, and a reserved channel at 0x8000 returns its length (0x1040); the bad-channel (0x80260003, channel -1) and unreserved-channel (0x80260001, channel 5) cells are recorded for sceAudioOutputBlocking only
 - **`h_AudioRestLen`** (`sceAudio`): `sceAudioGetChannelRestLength` (0xb011922f), `sceAudioGetChannelRestLen` (0xe9d97901)
   - Limitation: serves sceAudioGetChannelRestLength and sceAudioGetChannelRestLen; the PSP-AUDIO-001 cells query both on channel 0 before and after blocking output and just after release, and PSP-HLE-AUDIO-REST-001 finds them equal (F or F - 64) after each blocking output on stereo channels of 1024, 2048 and 4096 frames, which is evidence that the two calls give one answer, not that this handler gives the console's: the runtime's blocking output returns with up to two blocks queued (#67), so both calls can read up to 2F there where the console held one block (#279, open); invalid-channel error behavior and other queue states are unmeasured for both calls (#341, #2361)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001

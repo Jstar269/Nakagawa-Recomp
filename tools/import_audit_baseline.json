@@ -352,7 +352,7 @@
     "classification": "dedicated",
     "handler": "h_AudioOutputPannedBlocking",
     "name": "sceAudioOutputPannedBlocking",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x1575d64b": {
     "classification": "controlled_unsupported",
