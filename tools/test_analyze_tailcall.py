@@ -388,6 +388,9 @@ class TestBoundedComputedGoto(unittest.TestCase):
                 inserted=(0x10400002, 0x00000000)),  # beqz $v0, +2; nop
             # The index is not a masked value at all.
             "unmasked index": _computed_goto_words(0x00C01821),  # addu $v1, $a2, $zero
+            # The base is not word-aligned: every pad would be an address error, not code.
+            "unaligned base": _computed_goto_words(la_low=0x24211031),  # addiu $at, $at, 0x1031
+            "unaligned ori base": _computed_goto_words(la_low=0x34211032),  # ori $at, $at, 0x1032
         }
         for name, words in cases.items():
             with self.subTest(name):
