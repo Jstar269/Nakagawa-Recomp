@@ -52,10 +52,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 395 | 407 |
+| `partial` | 396 | 408 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 235 | 240 |
+| `unreviewed` | 234 | 239 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -89,7 +89,7 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **395** | **1** | **3** | **235** | **648** | **678** |
+| **Total** | **14** | **396** | **1** | **3** | **234** | **648** | **678** |
 
 #### Complete Handlers (Evidence-Backed)
 
