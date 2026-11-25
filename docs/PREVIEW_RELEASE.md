@@ -576,9 +576,11 @@ Wine and Proton: the Windows ZIP is the build used there. The smoke run and its 
 
 From v0.1.0 onward, measure the frozen candidate on the reference PC using the
 [two gameplay windows and reporting convention](COMPATIBILITY.md#release-performance-baselines).
-Build each title's runtime package from the same candidate as the launcher. Replay the fixed
-route from the same starting state, in Authentic and in Ace where the title has a timing package.
-Verify that each run reaches the end of its window. Use the
+Build each title's runtime package from the same candidate as the launcher. Use a private
+input replay to verify the route and its start and end points. `SR_REPLAY` uses the unpaced
+deterministic clock. For frame-delivery measurements, repeat the qualified inputs with normal
+real-time pacing from the same starting state, in Authentic and in Ace where the title has a
+timing package. Verify the same landmarks on each timed run. Use the
 [guarded benchmark runs from #2574, stage 4](https://github.com/Jstar269/Nakagawa-Recomp/issues/2574).
 If the guard is unavailable or refuses a run, leave its measurements out and record the reason
 in the private run record. Keep results pending until a run qualifies.
