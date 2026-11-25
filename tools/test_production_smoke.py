@@ -4746,6 +4746,61 @@ class DisplaySmokeFirstFrameSidecarTests(unittest.TestCase):
             self.check(2, 1)
 
 
+class DisplaySmokeRecordingTests(unittest.TestCase):
+    @staticmethod
+    def _bgrx(rgb: bytes) -> bytes:
+        bgrx = bytearray(len(rgb) // 3 * 4)
+        bgrx[0::4], bgrx[1::4], bgrx[2::4] = rgb[2::3], rgb[1::3], rgb[0::3]
+        return bytes(bgrx)
+
+    def test_alternating_buffer_has_a_distinct_guest_and_keeps_legacy_bytes(self):
+        original = display_generator.build_prx(60)
+        self.assertEqual(display_generator.sha256(original),
+                         "135f06eae8b91fa7ff2075c55009ea306d26c1adbfac90bc93b11f32e8a1de4f")
+        alternating = display_generator.build_prx(60, double_buffer=True)
+        self.assertNotEqual(alternating, original)
+        manifest = json.loads(display_generator.manifest_bytes(
+            alternating, display_generator.build_psp_header(), 60, double_buffer=True))
+        self.assertEqual(manifest["back_buffer"], "0x04100000")
+        self.assertEqual(manifest["prx_sha256"], display_generator.sha256(alternating))
+
+    def test_in_place_recording_checks_actual_presents_and_rejects_stale_or_wrong_images(self):
+        g = display_generator
+        previous = g._expected_present_pixels(0)
+        upcoming = g._expected_present_pixels(1)
+        split = 25335 * 3
+        partial = upcoming[:split] + previous[split:]
+        near_partial = upcoming[:split+3] + previous[split+3:]
+        hdr = b"P6\n480 272\n255\n"
+        bundle = {"events": [
+            {"class": "present", "kind": g.FLIGHT_KIND_PRESENT_FRAME, "arg3": 2},
+            {"class": "present", "kind": g.FLIGHT_KIND_PRESENT_FRAME, "arg3": 3},
+            {"class": "present", "kind": g.FLIGHT_KIND_PRESENT_SET_FRAMEBUF, "arg3": 3},
+        ]}
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            video = folder / "video.bgr0"
+            (folder / "frame_v2.ppm").write_bytes(hdr + previous)
+            captured = folder / "frame_v3.ppm"
+            captured.write_bytes(hdr + partial)
+            sound_video = self._bgrx(previous) + 2 * self._bgrx(partial)
+            video.write_bytes(sound_video)
+            self.assertEqual(g._recorded_present_images(video, [2, 3, 4], folder, bundle), [2, 3, 3])
+            video.write_bytes(3 * self._bgrx(previous))
+            with self.assertRaisesRegex(RuntimeError, "VBLANK 3 does not match"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
+            video.write_bytes(sound_video)
+            captured.write_bytes(hdr + near_partial)
+            with self.assertRaisesRegex(RuntimeError, "VBLANK 3 does not match"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
+            captured.write_bytes(hdr + previous)
+            with self.assertRaisesRegex(RuntimeError, "not an exact partial draw"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
+            captured.unlink()
+            with self.assertRaisesRegex(RuntimeError, "do not match the accepted VBLANKs"):
+                g._recorded_present_images(video, [2, 3, 4], folder, bundle)
+
+
 class DisplaySmokeVramdumpCaptureTests(unittest.TestCase):
     #: The capture run asks for the first eight vblanks whatever the baseline run did.
     WINDOW = range(display_generator.VRAMDUMP_FIRST_VBLANK,

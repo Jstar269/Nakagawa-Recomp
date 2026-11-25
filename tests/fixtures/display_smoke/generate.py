@@ -41,7 +41,10 @@ Guest program
 ``colour(v)`` packs ``v`` into an ABGR8888 word. The index is the linear pixel
 number, so the output is horizontal striping that shifts by one band per frame.
 The flight gate checks every displayed RGB pixel against the stripe pattern
-for the first frame accepted by the host presenter.
+for the first frame accepted by the host presenter. The recording-only guest
+uses the same stripe pattern and alternates two VRAM surfaces. It advances its
+drawing address only after requesting the completed surface and waiting for the
+VBLANK latch.
 """
 
 from __future__ import annotations
@@ -114,6 +117,7 @@ NIDS = (NID_SET_FRAME_BUF, NID_WAIT_VBLANK_START, NID_GE_LIST_ENQUEUE)
 # be 0..3; src/rt/hle.c rejects anything else, which is part of what the gate
 # proves is being honoured.
 FRAMEBUFFER = 0x04000000
+BACK_BUFFER = 0x04100000
 GE_LIST = 0x08900000
 STRIDE = 512
 PIXEL_FORMAT = 3  # PSP_DISPLAY_PIXEL_FORMAT_8888
@@ -154,7 +158,7 @@ SHT_PRX_RELOC = 0x700000A0
 # Register numbers used by the hand-assembled guest.
 ZERO, A0, A1, A2, A3 = 0, 4, 5, 6, 7
 T0, T1, T2, T3, T4, T5, T6, T7 = 8, 9, 10, 11, 12, 13, 14, 15
-S0, T8, T9, SP, RA = 16, 24, 25, 29, 31
+S0, S1, T8, T9, SP, RA = 16, 17, 24, 25, 29, 31
 
 
 def _r(rs: int, rt: int, rd: int, shift: int, function: int) -> int:
@@ -237,8 +241,8 @@ def _require_exact_vram_frame(data: bytes, label: str) -> int:
     return frame
 
 
-def _require_exact_present_pixels(path: Path, frames: int, label: str) -> int:
-    """Require every captured pixel to match one complete guest frame."""
+def _present_pixels(path: Path, label: str) -> bytes:
+    """Read a submitted picture in PSP-sized P6 RGB."""
     try:
         data = path.read_bytes()
     except OSError as exc:
@@ -254,6 +258,12 @@ def _require_exact_present_pixels(path: Path, frames: int, label: str) -> int:
             f"{label} first-frame PPM has {len(actual)} pixel bytes; expected {expected_length}"
         )
 
+    return actual
+
+
+def _require_exact_present_pixels(path: Path, frames: int, label: str) -> int:
+    """Require every captured pixel to match one complete guest frame."""
+    actual = _present_pixels(path, label)
     frame = actual[0]
     if frames <= 256 and frame >= frames:
         raise RuntimeError(
@@ -273,11 +283,11 @@ def _require_exact_present_pixels(path: Path, frames: int, label: str) -> int:
     return frame
 
 
-def _entry_words(frames: int) -> list[int]:
+def _entry_words(frames: int, double_buffer: bool = False) -> list[int]:
     """The guest submits a GE list, then fills and presents each frame."""
     if not 1 <= frames <= 0x7FFF:
         raise ValueError(f"frame count {frames} does not fit a signed 16-bit immediate")
-    return [
+    words = [
         # prologue
         _i(0x09, SP, SP, -32),           # 0x00 addiu sp, sp, -32
         _i(0x2B, SP, RA, 28),            # 0x04 sw ra, 28(sp)
@@ -339,9 +349,27 @@ def _entry_words(frames: int) -> list[int]:
         _r(RA, 0, 0, 0, 0x08),           # 0xD0 jr ra
         _i(0x09, SP, SP, 32),            # 0xD4 addiu sp, sp, 32 (delay slot)
     ]
+    if double_buffer:
+        # Preserve S1 in the GE call's delay slot. Its upper address half
+        # supplies both the drawing cursor and the completed display address.
+        # The wait's delay slot selects the other surface for the next frame.
+        words[0x40 // 4] = _i(0x2B, SP, S1, 20)
+        words[0x44 // 4] = _r(ZERO, S1, T0, 16, 0x00)
+        words[0x98 // 4] = _r(ZERO, S1, A0, 16, 0x00)
+        words[0xB4 // 4] = _i(0x0E, S1, S1, (FRAMEBUFFER ^ BACK_BUFFER) >> 16)
+        words.insert(0xD0 // 4, _i(0x23, SP, S1, 20))
+        words.insert(0x44 // 4, _i(0x09, ZERO, S1, FRAMEBUFFER >> 16))
+    return words
 
 
-def relocation_records() -> list[tuple[int, int]]:
+def _import_calls(double_buffer: bool) -> tuple[tuple[int, int, str], ...]:
+    offset = 4 if double_buffer else 0
+    return ((0x3C, GE_LIST_ENQUEUE_STUB, "sceGeListEnQueue"),
+            (0xA8 + offset, SETFB_STUB, "sceDisplaySetFrameBuf"),
+            (0xB0 + offset, VBLANK_STUB, "sceDisplayWaitVblankStart"))
+
+
+def relocation_records(double_buffer: bool = False) -> list[tuple[int, int]]:
     """The ordered PSP type-A relocation table.
 
     Segment 0 is .text, segment 1 is .data. The three R_MIPS_26 records rebase the
@@ -350,9 +378,7 @@ def relocation_records() -> list[tuple[int, int]]:
     targets the text segment.
     """
     return [
-        (0x3C, relocation_info(R_MIPS_26, 0, 0)),  # jal sceGeListEnQueue
-        (0xA8, relocation_info(R_MIPS_26, 0, 0)),  # jal sceDisplaySetFrameBuf
-        (0xB0, relocation_info(R_MIPS_26, 0, 0)),  # jal sceDisplayWaitVblankStart
+        *((offset, relocation_info(R_MIPS_26, 0, 0)) for offset, _, _ in _import_calls(double_buffer)),
         (0x2C, relocation_info(R_MIPS_32, 1, 1)),  # module libstub
         (0x30, relocation_info(R_MIPS_32, 1, 1)),  # module libstubend
         (0x50, relocation_info(R_MIPS_32, 1, 1)),  # display library name
@@ -364,12 +390,14 @@ def relocation_records() -> list[tuple[int, int]]:
     ]
 
 
-def build_text_segment(frames: int) -> bytes:
-    entry = _entry_words(frames)
-    if len(entry) * 4 != TEXT_SECTION_SIZE:
-        raise AssertionError(
-            f"entry body is {len(entry) * 4:#x} bytes but .text is declared {TEXT_SECTION_SIZE:#x}"
-        )
+def _entry_size(double_buffer: bool) -> int:
+    return TEXT_SECTION_SIZE + (8 if double_buffer else 0)
+
+
+def build_text_segment(frames: int, double_buffer: bool = False) -> bytes:
+    entry = _entry_words(frames, double_buffer)
+    if len(entry) * 4 != _entry_size(double_buffer) or len(entry) * 4 > STUB_OFFSET:
+        raise AssertionError("entry body does not fit the declared .text before the import stubs")
     text = bytearray(TEXT_FILE_SIZE)
     text[0 : len(entry) * 4] = _words(entry)
     # Three 8-byte import slots: the recompiler pairs each with its NID and routes
@@ -429,10 +457,10 @@ def build_data_segment() -> bytes:
     return bytes(data)
 
 
-def build_prx(frames: int = DEFAULT_FRAMES) -> bytes:
-    text = build_text_segment(frames)
+def build_prx(frames: int = DEFAULT_FRAMES, double_buffer: bool = False) -> bytes:
+    text = build_text_segment(frames, double_buffer)
     data = build_data_segment()
-    relocations = relocation_records()
+    relocations = relocation_records(double_buffer)
     relocation_bytes = b"".join(struct.pack("<II", *record) for record in relocations)
 
     section_names = (
@@ -515,7 +543,7 @@ def build_prx(frames: int = DEFAULT_FRAMES) -> bytes:
     sections = [struct.pack("<10I", *([0] * 10))]
     sections.extend(
         [
-            section(".text", 1, 6, 0, TEXT_FILE_OFFSET, TEXT_SECTION_SIZE, 4),
+            section(".text", 1, 6, 0, TEXT_FILE_OFFSET, _entry_size(double_buffer), 4),
             section(
                 ".sceStub.text", 1, 6, STUB_OFFSET,
                 TEXT_FILE_OFFSET + STUB_OFFSET, len(NIDS) * 8, 4,
@@ -739,7 +767,7 @@ def _request_player_window_close(process: subprocess.Popen, what: str = "native 
         raise OSError(ctypes.get_last_error(), "PostMessage(WM_CLOSE) failed")
 
 
-def manifest_bytes(prx: bytes, psp_header: bytes, frames: int) -> bytes:
+def manifest_bytes(prx: bytes, psp_header: bytes, frames: int, double_buffer: bool = False) -> bytes:
     manifest = {
         "schema": 1,
         "kind": "source-owned-psp-display-smoke",
@@ -762,16 +790,18 @@ def manifest_bytes(prx: bytes, psp_header: bytes, frames: int) -> bytes:
         "prx_sha256": sha256(prx),
         "psp_header_sha256": sha256(psp_header),
     }
+    if double_buffer:
+        manifest["back_buffer"] = f"0x{BACK_BUFFER:08x}"
     return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("ascii")
 
 
-def generate(out_dir: Path, frames: int = DEFAULT_FRAMES) -> int:
-    prx = build_prx(frames)
+def generate(out_dir: Path, frames: int = DEFAULT_FRAMES, double_buffer: bool = False) -> int:
+    prx = build_prx(frames, double_buffer)
     psp_header = build_psp_header()
     outputs = {
         out_dir / "guest.prx": prx,
         out_dir / "guest.psp": psp_header,
-        out_dir / "manifest.json": manifest_bytes(prx, psp_header, frames),
+        out_dir / "manifest.json": manifest_bytes(prx, psp_header, frames, double_buffer),
     }
     changed = [str(path) for path, data in outputs.items() if write_if_changed(path, data)]
     state = "updated" if changed else "unchanged"
@@ -801,11 +831,7 @@ def verify(build_dir: Path) -> int:
     if len(image) < TEXT_FILE_SIZE:
         raise RuntimeError(f"image {image_path} is {len(image)} bytes, shorter than .text")
 
-    for offset, expected_target, label in (
-        (0x3C, GE_LIST_ENQUEUE_STUB, "sceGeListEnQueue"),
-        (0xA8, SETFB_STUB, "sceDisplaySetFrameBuf"),
-        (0xB0, VBLANK_STUB, "sceDisplayWaitVblankStart"),
-    ):
+    for offset, expected_target, label in _import_calls("back_buffer" in manifest):
         word = struct.unpack_from("<I", image, offset)[0]
         opcode = (word >> 26) & 0x3F
         target = ((word & 0x03FFFFFF) << 2) | (BASE & 0xF0000000)
@@ -875,6 +901,7 @@ def run(
     flight_trigger: str | None = None,
     extra_env: dict[str, str | None] | None = None,
     texdump_refused: bool = False,
+    sched: bool = False,
 ) -> int:
     # The runtime is spawned with cwd=ROOT, so a relative build_dir would make the
     # CHILD resolve the executable/image paths against ROOT rather than the
@@ -884,6 +911,7 @@ def run(
     manifest = _read_manifest(fixture)
     frames = int(manifest["frames"])
     expected = final_frame_first_pixel(frames)
+    final_buffer = BACK_BUFFER if "back_buffer" in manifest and frames % 2 == 0 else FRAMEBUFFER
     executable = (build_dir / f"{ARTIFACT_STEM}.exe").resolve()
     if not executable.exists():
         executable = (build_dir / ARTIFACT_STEM).resolve()
@@ -898,8 +926,8 @@ def run(
         f"0x{ENTRY:08x}",
         "none",
         "none",
-        *(("--sched", "--gui") if offscreen else ("--gui",) if gui else ("--sched",)),
-        f"--expect-u32=0x{FRAMEBUFFER:08x}:0x{expected:08x}",
+        *(("--sched", "--gui") if gui and (offscreen or sched) else ("--gui",) if gui else ("--sched",)),
+        f"--expect-u32=0x{final_buffer:08x}:0x{expected:08x}",
     ]
     env = os.environ.copy()
     if offscreen:
@@ -966,7 +994,7 @@ def run(
         f"BOOT_EVENT phase=image_loaded entry=0x{ENTRY:08x}",
         f"BOOT_EVENT phase=runtime_registered entry=0x{ENTRY:08x}",
         (
-            f"DRIVER_EXPECT_U32 addr=0x{FRAMEBUFFER:08x} got=0x{expected:08x} "
+            f"DRIVER_EXPECT_U32 addr=0x{final_buffer:08x} got=0x{expected:08x} "
             f"expected=0x{expected:08x} status=PASS"
         ),
     )
@@ -984,7 +1012,7 @@ def run(
         raise RuntimeError("SR_TEX_DUMP=1 without the Vulkan GE was not refused with the renderer's reason")
     print(
         f"DISPLAY_SMOKE_RUN status=PASS mode={mode} "
-        f"frames={frames} framebuffer=0x{FRAMEBUFFER:08x} value=0x{expected:08x}"
+        f"frames={frames} framebuffer=0x{final_buffer:08x} value=0x{expected:08x}"
     )
     return 0
 
@@ -1917,6 +1945,14 @@ def flight_smoke(build_dir: Path) -> int:
     return 0
 
 
+def _recorded_rgb(bgrx: bytes) -> bytes:
+    rgb = bytearray(DISPLAY_WIDTH * DISPLAY_HEIGHT * 3)
+    rgb[0::3] = bgrx[2::4]
+    rgb[1::3] = bgrx[1::4]
+    rgb[2::3] = bgrx[0::4]
+    return bytes(rgb)
+
+
 def _videorec_frames(video: Path, frames: int) -> list[int]:
     """Decode raw BGRX frames into the guest frame index each picture shows.
 
@@ -1933,22 +1969,62 @@ def _videorec_frames(video: Path, frames: int) -> list[int]:
     expected_cache: dict[int, bytes] = {}
     shown: list[int] = []
     for index in range(len(data) // size):
-        bgrx = data[index * size:(index + 1) * size]
-        rgb = bytearray(DISPLAY_WIDTH * DISPLAY_HEIGHT * 3)
-        rgb[0::3] = bgrx[2::4]
-        rgb[1::3] = bgrx[1::4]
-        rgb[2::3] = bgrx[0::4]
+        rgb = _recorded_rgb(data[index * size:(index + 1) * size])
         frame = rgb[0]
         if frames <= 256 and frame >= frames:
             raise RuntimeError(f"recorded frame {index} shows guest frame {frame}, outside the run")
         if frame not in expected_cache:
             expected_cache[frame] = _expected_present_pixels(frame)
-        if bytes(rgb) != expected_cache[frame]:
+        if rgb != expected_cache[frame]:
             raise RuntimeError(f"recorded frame {index} is not exactly guest frame {frame}")
         if shown and frame < shown[-1]:
             raise RuntimeError(f"recorded frame {index} goes back to guest frame {frame}")
         shown.append(frame)
     return shown
+
+
+def _require_partial_stripe(picture: bytes) -> None:
+    previous = _expected_present_pixels(0)
+    upcoming = _expected_present_pixels(1)
+    cut = next((i for i in range(0, len(upcoming), 3) if picture[i:i+3] != upcoming[i:i+3]),
+               len(upcoming))
+    if cut in (0, len(upcoming)) or picture[cut:] != previous[cut:]:
+        raise RuntimeError("VBLANK 3 capture is not an exact partial draw over the previous stripe")
+
+
+def _recorded_present_images(video: Path, vcounts: list[int], capture_dir: Path, bundle: dict) -> list[int]:
+    """Compare every encoded tick to the most recent accepted presenter capture."""
+    events = [event for event in bundle["events"] if event["class"] == "present"]
+    presents = [event for event in events if event["kind"] == FLIGHT_KIND_PRESENT_FRAME]
+    presented_vblanks = {event["arg3"] for event in presents}
+    if len(presented_vblanks) != len(presents):
+        raise RuntimeError("more than one accepted capture can share a recording VBLANK")
+    observed = {p.name for p in capture_dir.glob("frame_v*.ppm")}
+    expected = {f"frame_v{vcount}.ppm" for vcount in presented_vblanks}
+    if not observed or observed != expected:
+        raise RuntimeError("present captures do not match the accepted VBLANKs")
+    tick_three = [event["kind"] for event in events if event["arg3"] == 3]
+    if tick_three != [FLIGHT_KIND_PRESENT_FRAME, FLIGHT_KIND_PRESENT_SET_FRAMEBUF]:
+        raise RuntimeError("VBLANK 3 must submit the active image before the next guest flip")
+    _require_partial_stripe(_present_pixels(capture_dir / "frame_v3.ppm", "in-place VBLANK 3"))
+
+    size = DISPLAY_WIDTH * DISPLAY_HEIGHT * 4
+    data = video.read_bytes()
+    if len(data) != len(vcounts) * size:
+        raise RuntimeError("recorder picture count differs from frames.csv")
+    seen: list[int] = []
+    latest = -1
+    pixels = b""
+    for index, vcount in enumerate(vcounts):
+        if vcount in presented_vblanks:
+            latest = vcount
+            pixels = _present_pixels(capture_dir / f"frame_v{vcount}.ppm", f"VBLANK {vcount}")
+        if not pixels or _recorded_rgb(data[index * size:(index + 1) * size]) != pixels:
+            raise RuntimeError(f"recorded VBLANK {vcount} does not match its submitted picture")
+        seen.append(latest)
+    if 3 not in seen:
+        raise RuntimeError("the recorder did not include the VBLANK 3 partial picture")
+    return seen
 
 
 # The fake encoder sleeps this long after each frame it reads, so the recorder's pipe writes
@@ -1958,7 +2034,7 @@ VIDEOREC_STALL_MS = 40
 _DETERMINISTIC = {"SR_DETERMINISTIC_CLOCK": "1", "SR_NOVBPACE": None}
 
 
-def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
+def videorec_smoke(build_dir: Path, fake_ffmpeg: Path, *, in_place: bool = False, mapped: bool = False) -> int:
     """Record the fixture's run through a stalled encoder and prove the guest is unchanged (#1273).
 
     Two offscreen runs on the deterministic clock, one recording through ``fake_ffmpeg`` (the
@@ -1967,7 +2043,10 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
     presents are projected out, so the stall moved no guest event in guest time. Both runs finish
     with the exact framebuffer word; record.json is PASS and muxed, shows the stall in
     ``encoder_write_ms``, and the recording holds one exact guest picture per VBLANK with a
-    silent WAV exactly as long as the video.
+    silent WAV exactly as long as the video. The alternating-surface fixture
+    checks complete stripe frames. The one-surface control checks every recorder
+    tick against the actual submitted picture, including the partial draw at
+    VBLANK 3.
     """
     build_dir = build_dir.resolve()
     fake_ffmpeg = fake_ffmpeg.resolve()
@@ -1975,6 +2054,19 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
         raise RuntimeError(f"the fake encoder {fake_ffmpeg.name} was not built")
     manifest = _read_manifest(build_dir / "fixture")
     frames = int(manifest["frames"])
+    if ("back_buffer" in manifest) == in_place:
+        raise RuntimeError("the whole-frame gate requires alternating buffers and the in-place gate requires one")
+    if mapped and not in_place:
+        raise RuntimeError("the mapped recorder control uses the in-place guest")
+    extra_env = dict(_DETERMINISTIC)
+    if in_place:
+        extra_env["SR_FPS_CAP"] = "0"
+    capture_env: dict[str, str | None] = {}
+    if in_place:
+        capture_env.update(SR_FBSNAP_WINDOWS="0-4096", SR_FBDUMP=None, SR_FBSNAP=None, SR_FBSNAP_AFTER=None)
+    if mapped:
+        extra_env.update(SR_PRESENT_TRACE="1", SR_WINDOW_HIDDEN=None, SR_VIDEO=None, SR_PRESENT_UPSCALE=None)
+        capture_env["SR_VIDEOREC_SIZE"] = f"{DISPLAY_WIDTH}x{DISPLAY_HEIGHT}"
     with tempfile.TemporaryDirectory(prefix="display-smoke-videorec-") as temp_dir:
         temp = Path(temp_dir)
         plain_dir = temp / "plain"
@@ -1984,15 +2076,20 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
         rec_dir.mkdir()
         plain_path = plain_dir / "flight.json"
         rec_path = rec_dir / "flight.json"
-        run(build_dir, gui=True, offscreen=True, flight_output=plain_path, extra_env=_DETERMINISTIC)
-        run(build_dir, gui=True, offscreen=True, flight_output=rec_path,
-            extra_env={**_DETERMINISTIC, "SR_VIDEOREC_DIR": str(out_dir),
+        run(build_dir, gui=True, offscreen=not mapped, sched=mapped, flight_output=plain_path,
+            extra_env={**extra_env, **capture_env} if mapped else extra_env)
+        run(build_dir, gui=True, offscreen=not mapped, sched=mapped, flight_output=rec_path,
+            extra_env={**extra_env, **capture_env, "SR_VIDEOREC_DIR": str(out_dir),
                        "SR_VIDEOREC_CODEC": "ffv1", "SR_VIDEOREC_FFMPEG": str(fake_ffmpeg),
                        "NK_VIDEOREC_FAKE_FFMPEG": f"enc=slow:{VIDEOREC_STALL_MS};mux=ok"})
-        log = (build_dir / f"{ARTIFACT_STEM}.gui-offscreen.stderr.log").read_text(
+        log_mode = "gui" if mapped else "gui-offscreen"
+        log = (build_dir / f"{ARTIFACT_STEM}.{log_mode}.stderr.log").read_text(
             encoding="utf-8", errors="replace")
         if "VIDEOREC: PASS" not in log:
             raise RuntimeError("the recording run did not report VIDEOREC: PASS")
+        if mapped and not any(f"BOOT_EVENT phase=window_ready backend={backend}" in log
+                              for backend in ("vulkan", "gdi")):
+            raise RuntimeError("the mapped recorder control needs a windowed presenter")
 
         plain = json.loads(plain_path.read_text(encoding="utf-8"))
         recorded = json.loads(rec_path.read_text(encoding="utf-8"))
@@ -2002,7 +2099,20 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
             if bundle["recorder"]["dropped"] != 0:
                 raise RuntimeError(f"{label} flight bundle dropped events")
             _require_vblank_progress(bundle, label)
-            _require_exact_present_pixels(run_dir / "frame_first.ppm", frames, label)
+            first_frame = "frame_first.ppm"
+            if mapped:
+                first_tick = next((event["arg3"] for event in bundle["events"]
+                                   if event["class"] == "present" and event["kind"] == FLIGHT_KIND_PRESENT_FRAME),
+                                  None)
+                if first_tick is None:
+                    raise RuntimeError(f"{label} has no accepted mapped frame")
+                first_frame = f"frame_v{first_tick}.ppm"
+            _require_exact_present_pixels(run_dir / first_frame, frames, label)
+            flips = [event["arg0"] for event in bundle["events"]
+                     if event["class"] == "present" and event["kind"] == FLIGHT_KIND_PRESENT_SET_FRAMEBUF]
+            expected = [BACK_BUFFER if not in_place and frame % 2 else FRAMEBUFFER for frame in range(frames)]
+            if flips != expected:
+                raise RuntimeError(f"{label} guest did not flip its expected {frames} surfaces")
         plain_path.write_text(
             json.dumps(_without_host_present_events(plain, keep_vblank_count=True), sort_keys=True),
             encoding="utf-8")
@@ -2046,7 +2156,8 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
         if vcounts != list(range(vcounts[0], vcounts[0] + count)):
             raise RuntimeError("the recording does not hold one frame per VBLANK")
         video = out_dir / "video.mkv"
-        shown = _videorec_frames(video, frames)
+        shown = (_recorded_present_images(video, vcounts, rec_dir, recorded) if in_place
+                 else _videorec_frames(video, frames))
         if len(shown) != count:
             raise RuntimeError(f"{video.name} holds {len(shown)} frames, record.json {count}")
         if (out_dir / "recording.mkv").read_bytes() != video.read_bytes():
@@ -2056,15 +2167,16 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
         if new != int(record["new_frames"]) or len(set(shown)) > new:
             raise RuntimeError("new frames in frames.csv and the pictures disagree")
         flips = sum(int(cell[4]) for cell in cells)
-        if flips < 1 or flips != int(record["guest_flips"]):
+        if flips != frames or flips != int(record["guest_flips"]):
             raise RuntimeError(f"frames.csv counts {flips} guest flips, record.json {record['guest_flips']}")
         wav = (out_dir / "audio.wav").read_bytes()
         samples = (len(wav) - 44) // 4
         if samples != count * 44144100 // 60000 or any(wav[44:]):
             raise RuntimeError(f"audio.wav holds {samples} samples; the fixture is silent")
+    mode = "submitted-vblanks" if in_place else "complete-guest-frames"
     print(
-        f"DISPLAY_SMOKE_VIDEOREC status=PASS frames={count} new={new} guest_flips={flips} "
-        f"guest_frames={shown[0]}..{shown[-1]} audio_samples={samples} "
+        f"DISPLAY_SMOKE_VIDEOREC status=PASS mode={mode} frames={count} new={new} guest_flips={flips} "
+        f"pictures={shown[0]}..{shown[-1]} audio_samples={samples} "
         f"encoder_write_ms={stall_ms} stall_ms_per_frame={VIDEOREC_STALL_MS} "
         "clock=deterministic guest=MATCH vblank_counts=MATCH pixels=EXACT"
     )
@@ -2388,6 +2500,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     generate_parser = subparsers.add_parser("generate")
     generate_parser.add_argument("--out-dir", type=Path, required=True)
     generate_parser.add_argument("--frames", type=int, default=DEFAULT_FRAMES)
+    generate_parser.add_argument("--double-buffer", action="store_true",
+                                 help="alternate the two drawing surfaces for complete recording frames")
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--build-dir", type=Path, required=True)
     run_parser = subparsers.add_parser("run")
@@ -2403,6 +2517,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     flight_parser.add_argument("--build-dir", type=Path, required=True)
     videorec_parser = subparsers.add_parser("videorec")
     videorec_parser.add_argument("--build-dir", type=Path, required=True)
+    videorec_parser.add_argument("--in-place", action="store_true",
+                                 help="check the recorder against accepted presentations of the one-buffer guest")
+    videorec_parser.add_argument("--mapped", action="store_true",
+                                 help="run the in-place control on a usable windowed presenter")
     videorec_parser.add_argument("--fake-ffmpeg", type=Path, required=True,
                                  help="the videorec selftest binary, run as a stalling FFmpeg")
     fsr1_parser = subparsers.add_parser("fsr1")
@@ -2438,7 +2556,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         if args.command == "generate":
-            return generate(args.out_dir, frames=args.frames)
+            return generate(args.out_dir, frames=args.frames, double_buffer=args.double_buffer)
         if args.command == "verify":
             return verify(args.build_dir)
         if args.command == "run":
@@ -2449,7 +2567,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "flight":
             return flight_smoke(args.build_dir)
         if args.command == "videorec":
-            return videorec_smoke(args.build_dir, args.fake_ffmpeg)
+            return videorec_smoke(args.build_dir, args.fake_ffmpeg, in_place=args.in_place, mapped=args.mapped)
         if args.command == "fsr1":
             return fsr1_smoke(args.build_dir)
         if args.command == "anime4k":
