@@ -15573,16 +15573,21 @@ static void mvc_state(void) {
     ge_set_gpu_hooks(&k_hooks);
 }
 
-/* A through-mode sprite over [x0, x1) x [y0, y1): textured 1:1 from the picture, or one colour. */
-static int mvc_sprite(float x0, float y0, float x1, float y1, int textured, uint32_t colour) {
+/* A through-mode sprite over [x0, x1) x [y0, y1), with the first texture row at v0. */
+static int mvc_sprite_at_row(float x0, float y0, float x1, float y1, float v0,
+                             int textured, uint32_t colour) {
     s_ge->tex_enable = textured;
     ge_state_note_external_write();
     s_tmpl_ok = 0;
     GeVtx p0, p1;
     wrap_vtx(&p0, x0, y0, colour);
     wrap_vtx(&p1, x1, y1, colour);
-    p0.u = x0; p0.v = y0; p1.u = x1; p1.v = y1;
+    p0.u = x0; p0.v = v0; p1.u = x1; p1.v = v0 + (y1 - y0);
     return hook_sprite(&p0, &p1, 0);
+}
+
+static int mvc_sprite(float x0, float y0, float x1, float y1, int textured, uint32_t colour) {
+    return mvc_sprite_at_row(x0, y0, x1, y1, y0, textured, colour);
 }
 
 /* Presents the framebuffer and checks the kind the upscale pass was given. */
@@ -16261,6 +16266,115 @@ static int coherence_run_movie_target(void) {
     coherence_reset_targets();
     if (ok) printf("gpu coherence selftest: PASS %-22s decoded picture found; 5 ways it is not; guest VRAM unchanged\n",
                    cell);
+    return ok;
+}
+
+enum { MVC_STRIP_ROWS = 30, MVC_STRIP_COUNT = 9 };
+enum { MVC_NO_OVERLAY, MVC_SUBTITLE, MVC_OVERWRITE };
+
+typedef struct {
+    const char *step;
+    unsigned int strips;
+    unsigned int last_rows;
+    unsigned int first_draws;
+    int notes;
+    int overlay;
+    int kind;
+} MvcStripCase;
+
+static unsigned int mvc_strip_rows(const MvcStripCase *test, unsigned int strip) {
+    return test->strips >> (strip + 1u) ? MVC_STRIP_ROWS : test->last_rows;
+}
+
+/* This fixture supplies synthetic RGB and notes directly, then uses the real GE draw and present. */
+static int mvc_strip_frame(const MvcStripCase *test, int tracking) {
+    const uint32_t pitch = 512u * sizeof(uint32_t);
+    sr_movie_set_tracking(0);
+    sr_movie_set_tracking(tracking);
+    coherence_reset_targets();
+    mvc_state();
+    if (test->notes) {
+        for (unsigned int i = 0; i < MVC_STRIP_COUNT; i++)
+            sr_movie_note_picture(MVC_OWNER, MVC_PIC + i * MVC_STRIP_ROWS * pitch,
+                                  512u, 3u, DRAW_W, MVC_STRIP_ROWS);
+    }
+    if (!mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF3F5368u)) return 0;
+    for (unsigned int i = 1; i < MVC_STRIP_COUNT; i++) {
+        if (!(test->strips & (1u << i))) continue;
+        const unsigned int top = i * MVC_STRIP_ROWS;
+        s_ge->tex_addr = MVC_PIC + top * pitch;
+        s_ge->tex_h = 32;
+        const unsigned int draws = i == 1u ? test->first_draws : 1u;
+        for (unsigned int draw = 0; draw < draws; draw++)
+            if (!mvc_sprite_at_row(0.0f, (float)top, (float)DRAW_W,
+                                   (float)(top + mvc_strip_rows(test, i)), 0.0f, 1, 0xFFFFFFFFu))
+                return 0;
+    }
+    if (test->overlay == MVC_SUBTITLE) return mvc_sprite(0.0f, 245.0f, 48.0f, 255.0f, 0, 0xFFF09020u);
+    if (test->overlay == MVC_OVERWRITE)
+        return mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF176BADu);
+    return 1;
+}
+
+static int mvc_strip_pixels(const char *cell, const MvcStripCase *test, const uint32_t *frame) {
+    static const unsigned int samples[] = { 40u, 130u, 164u, 165u, 250u };
+    const unsigned int x = 10u;
+    for (unsigned int i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+        const unsigned int y = samples[i];
+        const unsigned int strip = y / MVC_STRIP_ROWS;
+        uint32_t expected = 0xFF3F5368u;
+        if ((test->strips & (1u << strip)) && y % MVC_STRIP_ROWS < mvc_strip_rows(test, strip))
+            expected = mvc_pixel(x, y, 7u);
+        if (test->overlay == MVC_SUBTITLE && y == 250u) expected = 0xFFF09020u;
+        if (test->overlay == MVC_OVERWRITE) expected = 0xFF176BADu;
+        const uint32_t actual = frame[y * 512u + x];
+        if ((actual & 0xFFFFFFu) != (expected & 0xFFFFFFu)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %s: framebuffer pixel at %u,%u differs\n",
+                    cell, test->step, x, y);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int coherence_run_movie_strip_coverage(void) {
+    const char *cell = "movie-strip-coverage";
+    static uint32_t on[512u * FB_H], off[512u * FB_H];
+    enum { SPARSE = (1u << 1) | (1u << 8), FIVE = 0x3eu, SURVIVING = 0x1feu };
+    static const MvcStripCase cases[] = {
+        { "two distant strips", SPARSE, 30u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "overlapping repeated strip", SPARSE, 30u, 4u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "135 covered rows", FIVE, 15u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "136 covered rows", FIVE, 16u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_MOVIE },
+        { "contiguous surviving strips", SURVIVING, 30u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_MOVIE },
+        { "same strips without notes", SURVIVING, 30u, 1u, 0, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "subtitles over strips", SURVIVING, 30u, 1u, 1, MVC_SUBTITLE, SDL3VK_FRAME_MOVIE },
+        { "opaque overwrite", SURVIVING, 30u, 1u, 1, MVC_OVERWRITE, SDL3VK_FRAME_GE },
+    };
+    int ok = 1;
+    mvc_write_picture(MVC_PIC, 512u, DRAW_W, FB_H, 7u);
+    s_mvc_pass_runs = 0;
+    sdl3vk_set_upscale_pass(mvc_upscale_pass);
+    for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const MvcStripCase *test = &cases[i];
+        if (!mvc_strip_frame(test, 1)) { ok = 0; break; }
+        if (!mvc_present(cell, test->step, test->kind)) ok = 0;
+        if (!mvc_guest_frame(on) || !mvc_strip_pixels(cell, test, on)) { ok = 0; break; }
+        if (!mvc_strip_frame(test, 0) || !mvc_present(cell, "tracking off", SDL3VK_FRAME_GE) ||
+            !mvc_guest_frame(off)) { ok = 0; break; }
+        if (memcmp(on, off, sizeof(on)) != 0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %s: guest framebuffer differs with tracking off\n",
+                    cell, test->step);
+            ok = 0;
+        }
+    }
+    if (!mvc_pass_ran(cell)) ok = 0;
+    sr_movie_set_tracking(0);
+    sdl3vk_set_upscale_pass(NULL);
+    coherence_reset_targets();
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s sparse, overlapping and threshold coverage; framebuffer unchanged\n",
+               cell);
     return ok;
 }
 
@@ -17389,6 +17503,7 @@ static int coherence_selftest_cases(void) {
         if (strncmp(only, "ngef-", 5) == 0) return coherence_run_ngef_ram(only);
         if (strcmp(only, "movie-texture") == 0) return coherence_run_movie_texture();
         if (strcmp(only, "movie-target") == 0) return coherence_run_movie_target();
+        if (strcmp(only, "movie-strip-coverage") == 0) return coherence_run_movie_strip_coverage();
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
         if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();
         if (strcmp(only, "soft-shadow") == 0) return coherence_run_soft_shadow();
@@ -17441,6 +17556,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_wide_raster()) ok = 0;
     if (!coherence_run_movie_texture()) ok = 0;   /* #2111 */
     if (!coherence_run_movie_target()) ok = 0;
+    if (!coherence_run_movie_strip_coverage()) ok = 0;
     if (!coherence_run_linear_sprite()) ok = 0;
     if (!coherence_run_tflt_filters()) ok = 0;
     if (!coherence_run_ring_wrap()) ok = 0;
