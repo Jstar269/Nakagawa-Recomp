@@ -865,11 +865,15 @@ class CompatManifestCoverageTests(unittest.TestCase):
             int(item["address"]): (str(item["role"]), item.get("owner"))
             for item in compat_overrides.HST_ENTRY_ROLES
         }
+        # The six callable seeds are retired (#363): the analyzer finds those leaves from the
+        # image, so the profile seeds resume entries only and the inventory lists only them.
         expected = {
-            **{addr: ("callable", None) for addr in codegen.HST_MANUAL_CALLABLES},
-            **{addr: ("resume", owner) for addr, owner in codegen.HST_RESUME_OWNERS.items()},
+            addr: ("resume", owner) for addr, owner in codegen.HST_RESUME_OWNERS.items()
         }
         self.assertEqual(documented, expected)
+        self.assertEqual(len(documented), 3, "the HST profile's entry-role inventory changed size")
+        self.assertFalse(hasattr(codegen, "HST_MANUAL_CALLABLES"),
+                         "tools/codegen.py seeds callable entries again; inventory them here")
 
     def test_codegen_custom_stubs_are_documented(self):
         found = extract_codegen_custom_stub_addresses()
