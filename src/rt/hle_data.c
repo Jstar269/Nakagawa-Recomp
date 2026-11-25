@@ -2134,8 +2134,16 @@ int io_restore_truncated_gap(Fd *f) {
     if (!sr_stream_size_u32(f->host, &end)) return 0;
     const uint32_t stop = f->off < f->truncated_size ? f->off : f->truncated_size;
     if (end >= stop) return 1;
-    return io_host_seek(f->host, end) == 0 &&
-           fwrite(f->truncated_bytes + end, 1, stop - end, f->host) == stop - end;
+    if (io_host_seek(f->host, end) != 0) return 0;
+    clearerr(f->host);
+    const uint32_t restored = (uint32_t)fwrite(f->truncated_bytes + end, 1, stop - end, f->host);
+    /* The gap itself can have made partial host progress before the guest payload. */
+    f->size = end + restored;
+    if (restored != stop - end) {
+        clearerr(f->host);
+        return 0;
+    }
+    return 1;
 }
 
 /* Host-serve a guest file from the extracted-XB data root (SR_DATAROOT).
@@ -2371,6 +2379,14 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             fclose(fp);
             return io_open_read_only_create_boundary(path);
         }
+        /* For ordinary writable files, count accepted bytes at fwrite. Keep
+         * append and read-only streams on their existing policy. */
+        const int write_counted = fp && (writing || creating) && !(flags & 0x0100u);
+        if (write_counted && setvbuf(fp, NULL, _IONBF, 0u) != 0) {
+            fprintf(stderr, "sceIoOpen: cannot configure counted host writes: %s\n", path);
+            fclose(fp);
+            return 0x80010005u;
+        }
         if (!fp) {
             if (read_only_create_exclusive_ms0) {
                 if (read_only_create_exclusive_missing) return 0x80010016u;
@@ -2496,6 +2512,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             host_size = 0;
         }
         s_fds[slot].used = 1; s_fds[slot].host = fp; s_fds[slot].lba = 0;
+        s_fds[slot].write_counted = write_counted;
         s_fds[slot].size = host_size; s_fds[slot].off = 0;
         s_fds[slot].writable = writing || creating;
         s_fds[slot].truncated_bytes = truncated_bytes;

@@ -31,6 +31,10 @@
  * protection, so it is a hard requirement rather than an option.
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #ifndef _WIN32
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -232,6 +236,7 @@ extern uint32_t sr_hle_test_io_dclose(CpuState *s);
 extern uint32_t sr_hle_test_vfs_initial_find_error(unsigned long error, int *found);
 extern uint32_t sr_hle_test_io_ioctl(CpuState *s);
 extern void sr_hle_test_register_iofilemgr(void);
+extern void sr_hle_test_io_write_fault(uint32_t fd, uint32_t limit, int refuse_seek);
 extern uint32_t sr_hle_test_io_devctl_callback_count(void);
 extern uint32_t sr_hle_test_io_devctl_callback_at(uint32_t index);
 extern uint32_t sr_hle_test_io_devctl_refusal_log_count(void);
@@ -5202,6 +5207,175 @@ static void test_io_assign_through_syscall(void) {
            "fatms0 assigns a third time");
 }
 
+enum {
+    PROGRESS_OPEN = 0x109f50bcu,
+    PROGRESS_READ = 0x6a638d83u,
+    PROGRESS_WRITE = 0x42ec03acu,
+    PROGRESS_SEEK = 0x68963324u,
+    PROGRESS_CLOSE = 0x810c4bc3u,
+    PROGRESS_CREATE_TRUNC = 0x0603u,
+    PROGRESS_IO_ERROR = 0x80010005u
+};
+
+static uint32_t fd_progress_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+#if defined(__GLIBC__)
+/* The fake stream can accept an exact prefix and report a host error. It is
+ * bounded to a few bytes of test memory and never opens a host device. */
+typedef struct {
+    uint8_t bytes[16];
+    size_t size, position, write_limit;
+    int read_error;
+} FdProgressStream;
+
+static ssize_t fd_progress_read(void *opaque, char *out, size_t count) {
+    FdProgressStream *stream = opaque;
+    if (stream->read_error) {
+        errno = EIO;
+        return -1;
+    }
+    size_t available = stream->position < stream->size ? stream->size - stream->position : 0u;
+    if (count > available) count = available;
+    memcpy(out, stream->bytes + stream->position, count);
+    stream->position += count;
+    return (ssize_t)count;
+}
+
+static ssize_t fd_progress_write(void *opaque, const char *in, size_t count) {
+    FdProgressStream *stream = opaque;
+    size_t amount = count < stream->write_limit ? count : stream->write_limit;
+    if (amount > sizeof(stream->bytes) - stream->position) amount = sizeof(stream->bytes) - stream->position;
+    memcpy(stream->bytes + stream->position, in, amount);
+    stream->position += amount;
+    if (stream->size < stream->position) stream->size = stream->position;
+    if (amount != count) errno = EIO;
+    return (ssize_t)amount;
+}
+
+static int fd_progress_seek(void *opaque, off64_t *offset, int whence) {
+    FdProgressStream *stream = opaque;
+    off64_t base = whence == SEEK_END ? (off64_t)stream->size :
+                   whence == SEEK_CUR ? (off64_t)stream->position : 0;
+    if ((whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) ||
+        *offset < -base || *offset > (off64_t)sizeof(stream->bytes) - base) {
+        errno = EINVAL;
+        return -1;
+    }
+    *offset += base;
+    stream->position = (size_t)*offset;
+    return 0;
+}
+
+static void test_fd_progress_stream(uint32_t fd, uint32_t src, uint32_t dst) {
+    const cookie_io_functions_t handlers = {
+        .read = fd_progress_read, .write = fd_progress_write, .seek = fd_progress_seek,
+    };
+    /* This is the original buffered writer's ambiguity: fwrite can report
+     * the whole request even though a failed flush accepted only a prefix. */
+    FdProgressStream delayed = { .write_limit = 2u };
+    FILE *buffered = fopencookie(&delayed, "w", handlers);
+    expect(buffered != NULL, "can build the bounded delayed-flush counterexample");
+    if (buffered) {
+        const size_t reported = fwrite("XYZ", 1, 3u, buffered);
+        const int flush_error = fflush(buffered);
+        expect(reported == 3u && flush_error != 0 && delayed.size == 2u &&
+               memcmp(delayed.bytes, "XY", 2u) == 0,
+               "a failed flush can follow full buffered credit and leave a real prefix");
+        fclose(buffered);
+    }
+    FdProgressStream stream = { .bytes = "abcde", .size = 5u };
+    FILE *fake = fopencookie(&stream, "r+", handlers);
+    const int ready = fake && setvbuf(fake, NULL, _IONBF, 0u) == 0;
+    expect(ready, "can install a bounded counted I/O fake");
+    if (!ready) {
+        if (fake) fclose(fake);
+        return;
+    }
+    FILE *original = sr_hle_test_io_replace_host(fd, fake);
+    expect(original != NULL, "file-progress test has a real opened backing stream");
+    if (!original) {
+        fclose(fake);
+        return;
+    }
+    expect(fd_progress_call(PROGRESS_SEEK, fd, 1u, 0u) == 1u, "file-progress seek before a failed host write");
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src, 3u) == PROGRESS_IO_ERROR &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 1u &&
+           memcmp(stream.bytes, "abcde", 5u) == 0 && stream.size == 5u,
+           "zero-progress stream error preserves cursor, size and data");
+    stream.write_limit = 2u;
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src, 3u) == 2u &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 3u &&
+           memcmp(stream.bytes, "aXYde", 5u) == 0 && stream.size == 5u,
+           "error after a real partial overwrite returns the accepted prefix and advances by it");
+    stream.write_limit = sizeof(stream.bytes);
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src + 2u, 1u) == 1u &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 4u &&
+           memcmp(stream.bytes, "aXYZe", 5u) == 0,
+           "same stream accepts only the remaining suffix after the earlier error");
+    expect(fd_progress_call(PROGRESS_SEEK, fd, 0u, 0u) == 0u, "seek to the beginning for read recovery");
+    MEM_W8(dst, 0xccu);
+    stream.read_error = 1;
+    expect(fd_progress_call(PROGRESS_READ, fd, dst, 5u) == PROGRESS_IO_ERROR &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 0u && MEM_R8(dst) == 0xccu,
+           "zero-progress read error is distinct from EOF and leaves cursor and data unchanged");
+    stream.read_error = 0;
+    expect(fd_progress_call(PROGRESS_READ, fd, dst, 5u) == 5u &&
+           MEM_R8(dst) == 'a' && MEM_R8(dst + 3u) == 'Z' && MEM_R8(dst + 4u) == 'e' &&
+           fd_progress_call(PROGRESS_READ, fd, dst, 1u) == 0u,
+           "same stream reads again and returns an ordinary EOF");
+    (void)sr_hle_test_io_replace_host(fd, original);
+    fclose(fake);
+}
+#endif
+
+static void test_fd_host_progress(void) {
+    const uint32_t path_addr = 0x09010000u, src = 0x09011000u;
+    static const char guest[] = "ms0:/NAKAGAWA_SYNTHETIC_HOST_PROGRESS.BIN";
+    static const char root[] = HLE_BUILD_ROOT "/hle_io_host_progress_ms";
+    static const char host[] = HLE_BUILD_ROOT "/hle_io_host_progress_ms/NAKAGAWA_SYNTHETIC_HOST_PROGRESS.BIN";
+    const char *old = getenv("SR_MEMSTICK");
+    char *previous_root = old ? (char *)malloc(strlen(old) + 1u) : NULL;
+    if (old && !previous_root) { expect(0, "save the original synthetic root setting"); return; }
+    if (old) memcpy(previous_root, old, strlen(old) + 1u);
+    nk_platform_mkdir_p(root);
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", root);
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    expect(sr_hle_test_is_registered(PROGRESS_WRITE) && sr_hle_test_is_registered(PROGRESS_READ),
+           "the production IoFileMgr read and write NIDs are registered");
+    fd_guest_copy(path_addr, guest, sizeof(guest));
+    fd_guest_copy(src, "XYZ", 3u);
+    fd_guest_copy(src + 8u, "abcde?", 6u);
+    uint32_t fd = fd_progress_call(PROGRESS_OPEN, path_addr, PROGRESS_CREATE_TRUNC, 0u);
+    expect(fd < 64u, "open a real contained file for progress controls");
+    if (fd >= 64u) goto done;
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src + 8u, 5u) == 5u,
+           "ordinary nonappend write stores the initial file");
+#if defined(__GLIBC__)
+    test_fd_progress_stream(fd, src, 0x09011100u);
+#endif
+    expect(fd_progress_call(PROGRESS_SEEK, fd, 1u, 0u) == 1u, "ordinary write begins before EOF");
+    sr_hle_test_io_write_fault(fd, 2u, 0);
+    uint32_t short_write = fd_progress_call(PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    expect(short_write == 2u && fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 3u &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 2u) == 5u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"aXYde", 5u),
+           "normal short overwrite keeps the real size and advances by the bytes written");
+    expect(fd_progress_call(PROGRESS_CLOSE, fd, 0u, 0u) == 0u, "close normal write control");
+
+done:
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", previous_root);
+    free(previous_root);
+}
+
 static void test_fd_namespace(void) {
     enum {
         FD_KIND_STD = 1,
@@ -5259,103 +5433,6 @@ static void test_fd_namespace(void) {
            "write through the first ordinary descriptor reports the full payload");
     expect(fd_host_bytes_equal(result_host, payload, sizeof(payload) - 1u),
            "Phase-5 payload is persisted byte-for-byte through the ordinary fd");
-
-#ifdef __linux__
-    /* A host write that fails must not reach the guest as a full count. /dev/full opens and
-     * buffers writes but refuses every flush (ENOSPC), as a full host volume does; it stands in
-     * for the host stream of an ordinary ms0: descriptor, and the production sceIoWrite runs
-     * against it. The write answers the host I/O error and leaves the position where it was. */
-    {
-        FILE *full_volume = fopen("/dev/full", "r+b");
-        if (!full_volume) {
-            printf("hle_thread_selftest: SKIP full-volume sceIoWrite (no writable /dev/full)\n");
-        } else {
-            fd_set_path(&cpu, path_addr, "ms0:/NAKAGAWA_FULL_VOLUME.BIN");
-            uint32_t full_fd = sr_hle_test_io_open(&cpu);
-            FILE *real_host = full_fd < 64u ? sr_hle_test_io_replace_host(full_fd, full_volume)
-                                            : NULL;
-            expect(real_host != NULL, "the full-volume fixture opens a host-backed ms0: file");
-            if (real_host) {
-                fd_guest_copy(payload_addr, "xyz", 3u);
-                fd_set_write(&cpu, full_fd, payload_addr, 3u);
-                uint32_t full_write = sr_hle_test_io_write(&cpu);
-                expect(full_write == 0x80010005u,
-                       "sceIoWrite answers the host I/O error when the host refuses the bytes");
-                if (full_write != 0x80010005u)
-                    fprintf(stderr, "  full-volume sceIoWrite: 0x%08x (want 0x80010005)\n",
-                            full_write);
-                memset(&cpu, 0, sizeof(cpu));
-                cpu.r[4] = full_fd; cpu.r[5] = 0u; cpu.r[6] = 1u;   /* SEEK_CUR */
-                uint32_t full_pos = sr_hle_test_io_lseek32(&cpu);
-                expect(full_pos == 0u, "a refused host write leaves the position unchanged");
-                if (full_pos != 0u)
-                    fprintf(stderr, "  full-volume position after the write: %u (want 0)\n",
-                            full_pos);
-                (void)sr_hle_test_io_replace_host(full_fd, real_host);
-                memset(&cpu, 0, sizeof(cpu));
-                cpu.r[4] = full_fd;
-                (void)sr_hle_test_io_close(&cpu);
-            }
-            fclose(full_volume);
-            char full_host[256];
-            fd_host_path(full_host, sizeof(full_host), "ms0:/NAKAGAWA_FULL_VOLUME.BIN");
-            remove(full_host);
-        }
-    }
-    /* A host read that fails must not reach the guest as the end of the file. A directory
-     * opened as a stream fails every read (EISDIR); it stands in for the host stream of an
-     * ordinary three-byte ms0: file, and the production sceIoRead runs against it. The read
-     * answers the host I/O error and leaves the position where it was. */
-    {
-        char failing_host[256];
-        fd_host_path(failing_host, sizeof(failing_host), "ms0:/");
-        FILE *failing = fopen(failing_host, "rb");
-        if (!failing) {
-            printf("hle_thread_selftest: SKIP failing-read sceIoRead (a directory does not open)\n");
-        } else {
-            fd_set_path(&cpu, path_addr, "ms0:/NAKAGAWA_READ_ERROR.BIN");
-            uint32_t rd_fd = sr_hle_test_io_open(&cpu);
-            fd_guest_copy(payload_addr, "abc", 3u);
-            fd_set_write(&cpu, rd_fd, payload_addr, 3u);
-            expect(rd_fd < 64u && sr_hle_test_io_write(&cpu) == 3u,
-                   "the failing-read fixture holds three bytes");
-            memset(&cpu, 0, sizeof(cpu));
-            cpu.r[4] = rd_fd; cpu.r[5] = 0u; cpu.r[6] = 0u;   /* SEEK_SET 0 */
-            (void)sr_hle_test_io_lseek32(&cpu);
-            FILE *real_host = rd_fd < 64u ? sr_hle_test_io_replace_host(rd_fd, failing) : NULL;
-            if (real_host) {
-                memset(&cpu, 0, sizeof(cpu));
-                cpu.r[4] = rd_fd; cpu.r[5] = payload_addr + 0x40u; cpu.r[6] = 3u;
-                uint32_t failed_read = sr_hle_test_io_read(&cpu);
-                expect(failed_read == 0x80010005u,
-                       "sceIoRead answers the host I/O error when the host read fails");
-                if (failed_read != 0x80010005u)
-                    fprintf(stderr, "  failing-read sceIoRead: 0x%08x (want 0x80010005)\n",
-                            failed_read);
-                memset(&cpu, 0, sizeof(cpu));
-                cpu.r[4] = rd_fd; cpu.r[5] = 0u; cpu.r[6] = 1u;   /* SEEK_CUR */
-                expect(sr_hle_test_io_lseek32(&cpu) == 0u,
-                       "a failed host read leaves the position unchanged");
-                (void)sr_hle_test_io_replace_host(rd_fd, real_host);
-                memset(&cpu, 0, sizeof(cpu));
-                cpu.r[4] = rd_fd; cpu.r[5] = payload_addr + 0x40u; cpu.r[6] = 3u;
-                expect(sr_hle_test_io_read(&cpu) == 3u &&
-                           MEM_R8(payload_addr + 0x40u) == 'a' &&
-                           MEM_R8(payload_addr + 0x42u) == 'c',
-                       "the descriptor reads its bytes once the host read works again");
-            }
-            if (rd_fd < 64u) {
-                memset(&cpu, 0, sizeof(cpu));
-                cpu.r[4] = rd_fd;
-                (void)sr_hle_test_io_close(&cpu);
-            }
-            fclose(failing);
-            char rd_host[256];
-            fd_host_path(rd_host, sizeof(rd_host), "ms0:/NAKAGAWA_READ_ERROR.BIN");
-            remove(rd_host);
-        }
-    }
-#endif
 
     /* Standard descriptor operations */
     fd_set_write(&cpu, 1u, payload_addr, (uint32_t)(sizeof(payload) - 1u));
@@ -69575,6 +69652,13 @@ static int hle_selftest_main(int argc, char **argv) {
     }
 #endif
 
+    if (argc > 1 && strcmp(argv[1], "--io-host-progress") == 0) {
+        test_fd_host_progress();
+        fprintf(stderr, "io-host-progress: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--flash0-font") == 0) {
         test_flash0_font_device();
         fprintf(stderr, "flash0-font: %d checks, %d failures\n", s_checks, s_failures);
@@ -69651,6 +69735,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_module_identity_is_its_export_table();
     test_variable_import_linker();
     test_fd_namespace();
+    test_fd_host_progress();
     test_main_function_exports_link_from_boot();
     test_umd_io_console_model();
     test_ms0_unified_namespace();

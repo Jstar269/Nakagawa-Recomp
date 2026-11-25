@@ -334,6 +334,49 @@ static uint32_t io_path_error(uint32_t rc, uint32_t fallback) {
     return rc == HLE_KERNEL_ERROR_NO_SUCH_DEVICE ? rc : fallback;
 }
 
+#ifdef SR_HLE_THREAD_SELFTEST
+/* A bounded regular-file write and a refused seek, scoped to one test descriptor. */
+static uint32_t s_test_write_fd = UINT32_MAX;
+static uint32_t s_test_write_limit;
+static int s_test_write_refuse_seek;
+
+void sr_hle_test_io_write_fault(uint32_t fd, uint32_t limit, int refuse_seek) {
+    s_test_write_fd = fd;
+    s_test_write_limit = limit;
+    s_test_write_refuse_seek = refuse_seek;
+}
+#endif
+
+static int io_seek_for_write(uint32_t fd, FILE *host, uint32_t offset) {
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (fd == s_test_write_fd && s_test_write_refuse_seek) return -1;
+#else
+    (void)fd;
+#endif
+    return io_host_seek(host, offset);
+}
+
+static uint32_t io_write_guest_prefix(uint32_t fd, FILE *host,
+                                      uint32_t src, uint32_t count) {
+#ifndef SR_HLE_THREAD_SELFTEST
+    (void)fd;
+#endif
+    uint8_t tmp[4096];
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
+        for (uint32_t k = 0; k < n; k++) tmp[k] = (uint8_t)MEM_R8(src + done + k);
+        uint32_t request = n;
+#ifdef SR_HLE_THREAD_SELFTEST
+        if (fd == s_test_write_fd && request > s_test_write_limit) request = s_test_write_limit;
+#endif
+        uint32_t wrote = (uint32_t)fwrite(tmp, 1, request, host);
+        done += wrote;
+        if (wrote < n) break;
+    }
+    return done;
+}
+
 static uint32_t h_IoOpen(CpuState *s) {
     char path[512];
     uint32_t rc = io_guest_path(A0, path, sizeof(path));
@@ -392,23 +435,17 @@ uint32_t h_IoWrite(CpuState *s) {
      * file and report the full count. Any view will do, because the loop reads byte by byte. */
     if (count != 0u && !sr_inrange_n(src, count)) return 0x80010016u;
     if (f->truncated_bytes && !io_restore_truncated_gap(f)) return 0x80010005u;
-    if (io_host_seek(f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
+    if (io_seek_for_write(fd, f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
     clearerr(f->host);   /* an earlier read's error is not this write's */
-    uint8_t tmp[4096]; uint32_t done = 0;
-    while (done < count) {
-        uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
-        for (uint32_t k = 0; k < n; k++) tmp[k] = (uint8_t)MEM_R8(src + done + k);
-        uint32_t wrote = (uint32_t)fwrite(tmp, 1, n, f->host);
-        done += wrote;
-        if (wrote < n) break;
-    }
-    /* The host stream buffers what fwrite takes, so a full or failing host volume refuses the
-     * bytes only at the flush (or in fwrite itself). Such a write answers the host I/O error
-     * and leaves the position and size as they were, rather than the count it never stored. */
-    if (fflush(f->host) != 0 || ferror(f->host)) {
+    uint32_t done = io_write_guest_prefix(fd, f->host, src, count);
+    /* Buffered streams keep the flush-error rule. Count only the actual accepted
+     * prefix for an ordinary writable stream configured unbuffered at open. */
+    if (!f->write_counted && (fflush(f->host) != 0 || ferror(f->host))) {
         clearerr(f->host);
         return 0x80010005u;
     }
+    clearerr(f->host);
+    if (f->write_counted && count != 0u && done == 0u) return 0x80010005u;
     f->off += done; if (f->off > f->size) f->size = f->off;
     return done;
 }
