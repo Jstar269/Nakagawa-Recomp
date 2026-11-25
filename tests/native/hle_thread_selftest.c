@@ -19382,6 +19382,36 @@ static void test_audio_output2_release_refuses_while_queued(void) {
     audio_fixture_reset();
 }
 
+/* sceAudioOutput2Reserve's argument codes. PSPAutotests tests/audio/sceaudio/reserve.expected at
+ * ea71108f00933712c4662276261b39cd42249b1e (recorded on a PSP; corroborative here) records
+ * 0x80268002 for a second Output2Reserve over a held one, and 0x80000104 for every sample count
+ * outside 17..4111 (0, 16, 4112, 65472 and the negative ones). PPSSPP agrees (hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp, sceAudioOutput2Reserve:
+ * SCE_KERNEL_ERROR_INVALID_SIZE and SCE_ERROR_AUDIO_CHANNEL_ALREADY_RESERVED). A refused call
+ * leaves Output2 as it was. */
+static void test_audio_output2_reserve_codes(void) {
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    s_audio_queue_result = 0;
+    static const uint32_t bad[] = {0u, 16u, 4112u, 65472u, 0xffffffc0u};
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, bad[i], 0u, 0u) ==
+                   0x80000104u,
+               "Output2Reserve refuses a sample count outside 17..4111 with 0x80000104");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0x80260008u,
+           "a refused Output2Reserve leaves nothing reserved");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 17u, 0u, 0u) == 0u,
+           "Output2Reserve accepts 17 samples");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 1024u, 0u, 0u) == 0x80268002u,
+           "a second Output2Reserve over a held one returns 0x80268002");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "the first reservation is still held and releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 4111u, 0u, 0u) == 0u &&
+               audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "Output2Reserve accepts 4111 samples");
+}
+
 /* The Output2/SRC blocking outputs accept volumes up to 0xFFFFF (PPSSPP-derived, unmeasured
  * on a PSP: hrydgard/ppsspp caa91b54b535 Core/HLE/sceAudio.cpp, "0xFFFFF, not 0xFFFF"), not
  * just up to the 0x8000 unity gain. A game that plays its
@@ -69720,6 +69750,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_regular_output_refuses_bad_volumes();
     test_audio_output_panned_blocking_unreserved_channel();
     test_audio_output2_release_refuses_while_queued();
+    test_audio_output2_reserve_codes();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
     test_audio_output2_and_src_accept_volumes_to_0xfffff();
