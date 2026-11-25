@@ -1250,6 +1250,8 @@ def _constant_arguments_at_calls(elf, covered, relocated):
             consts = {}
             continue
         if op in (0x02, 0x03):
+            if op == 0x03:
+                consts.pop(31, None)  # JAL writes the link before its slot reads the arguments.
             target = None if is_jal_pc_read(address, word) else jump_target(address, word)
             pending = (address, target)
         elif (op == 0 and (word & 0x3F) in (0x08, 0x09)) or branch_target(address, word) is not None:
