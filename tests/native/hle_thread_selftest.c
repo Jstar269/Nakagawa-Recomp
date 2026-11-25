@@ -19014,6 +19014,43 @@ static void test_audio_regular_contract_safety(void) {
            "the negative queue sentinel takes the open-loop path after one query");
 }
 
+/* sceAudioChReserve with a negative channel takes the highest free regular channel, searching
+ * down from 7. PSPAutotests tests/audio/sceaudio/reserve.expected at
+ * ea71108f00933712c4662276261b39cd42249b1e (recorded on a PSP; corroborative here) gives 7 for
+ * channels -9, -7, -2, -1 and 0x80000000 with all eight free, and 0x80260005 once all eight are
+ * reserved; PPSSPP agrees (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
+ * Core/HLE/sceAudio.cpp, GetFreeChannel runs from PSP_AUDIO_CHANNEL_MAX - 1 down). A game that
+ * reserves one channel with -1 and another by number then gets both, as on the PSP. */
+static void test_audio_reserve_auto_channel_order(void) {
+    CpuState cpu;
+    int reserved = -1;
+
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 7u,
+           "AudioChReserve(-1) with every channel free takes channel 7, the highest");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 1024u, 0u) == 0u,
+           "after an auto reserve, channel 0 is still free to reserve by number");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0x80000000u, 1024u, 0u) == 6u,
+           "AudioChReserve(0x80000000) takes the highest channel still free (6)");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 7u, 0u, 0u) == 0u,
+           "the auto-reserved channel 7 releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xfffffff7u, 1024u, 0u) == 7u,
+           "AudioChReserve(-9) takes channel 7 again once it is free");
+    for (uint32_t ch = 1u; ch <= 5u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, ch, 1024u, 0u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) ==
+               0x80260005u,
+           "AudioChReserve(-1) with all eight reserved returns 0x80260005");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 3u, 0u, 0u) == 0u,
+           "a middle channel releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 3u &&
+               sr_hle_test_audio_state(3u, &reserved, NULL, NULL) && reserved == 1,
+           "AudioChReserve(-1) takes the only free channel (3)");
+    sr_hle_test_audio_reset();
+}
+
 /* Regular output and release refuse a channel that is out of range or not reserved, and
  * sceAudioOutputPanned is the non-blocking form (audit 2026-11-17). The refusal codes and the
  * busy rule are PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
@@ -69678,6 +69715,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_thread_end_blocking_and_resume();
     test_wait_thread_end_cb_execution();
     test_audio_regular_contract_safety();
+    test_audio_reserve_auto_channel_order();
     test_audio_regular_output_refuses_bad_channels();
     test_audio_regular_output_refuses_bad_volumes();
     test_audio_output_panned_blocking_unreserved_channel();

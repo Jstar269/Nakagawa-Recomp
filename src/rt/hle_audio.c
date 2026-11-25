@@ -90,11 +90,16 @@ static int audio_regular_sample_count_valid(uint32_t frames) {
            (frames & 63u) == 0u;
 }
 
+/* A negative channel takes the highest free one, searching down from 7. Corroborative, not
+ * measured here: PSPAutotests tests/audio/sceaudio/reserve.expected at
+ * ea71108f00933712c4662276261b39cd42249b1e records 7 for channels -9 .. -1 and 0x80000000 with
+ * all eight free, and PPSSPP (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
+ * Core/HLE/sceAudio.cpp, GetFreeChannel) searches downward. */
 static uint32_t h_AudioChReserve(CpuState *s) {
     int32_t ch = (int32_t)A0;
     if (ch < 0) {
         ch = -1;
-        for (int32_t i = 0; i < 8; i++) {
+        for (int32_t i = 7; i >= 0; i--) {
             if (!s_audio_ch[i]) { ch = i; break; }
         }
         if (ch < 0) return SCE_AUDIO_ERROR_NOT_FOUND;
