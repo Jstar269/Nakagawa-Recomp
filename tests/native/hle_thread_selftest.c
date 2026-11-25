@@ -18043,6 +18043,122 @@ static void test_utility_dialog_wrong_states_unmeasured_types(void) {
     }
 }
 
+/* Netconf, gamedata install and game sharing with no utility dialog started: the measured
+ * sequence of PSP-HLE-UTILITY-NONE-001, one kind per cell (#2807). The record
+ * (docs/HARDWARE_ORACLE.md, cells utility-none-netconf, utility-none-gamedata and
+ * utility-none-sharing: a PSP-3000 on system software 6.61, one launch from the XMB context, boot
+ * 115, 2026-11-04) calls GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart
+ * and GetStatus of each kind, in that order, in a process that calls no InitStart, and every one of
+ * the seven calls answers 0x80110005 (WRONG_TYPE). Each cell makes the same seven calls in the same
+ * order, back to back as the probe does, each one entering its NID directly through sr_syscall.
+ *
+ * What stands for that state here: sr_hle_init() registers the production handlers, and
+ * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog, the state the
+ * runtime starts a program in. No InitStart is called.
+ *
+ * What these cells do not show. The reset is synthetic: the measured process was freshly launched,
+ * not one whose earlier dialogs were forgotten, so nothing here says a PSP answers WRONG_TYPE again
+ * after a dialog was used. Every call after an InitStart (the INIT, RUNNING, FINISHED and SHUTDOWN
+ * states, NONE after use, and their timing) is outside the record, and so is a process in the game
+ * context, which is how the runtime starts its programs, and every call while another kind holds
+ * the slot. Those cells are test_utility_dialog_single_slot's and
+ * test_utility_dialog_wrong_states_unmeasured_types', and are not reviewed by these. */
+static void test_netconf_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-netconf, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_UPDATE) == 0x80110005u,
+           "netconf call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_SHUTDOWN) == 0x80110005u,
+           "netconf call 4, ShutdownStart with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_SHUTDOWN) == 0x80110005u,
+           "netconf call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_gamedata_install_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-gamedata, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_UPDATE) == 0x80110005u,
+           "gamedata install call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "gamedata install call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 5, GetStatus after ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "gamedata install call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 7, GetStatus after the second ShutdownStart, returns "
+           "0x80110005 (WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_game_sharing_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-sharing, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_UPDATE) == 0x80110005u,
+           "game sharing call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_SHUTDOWN) == 0x80110005u,
+           "game sharing call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_SHUTDOWN) == 0x80110005u,
+           "game sharing call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
 static void test_utility_dialog_measured_states(void) {
     CpuState cpu;
     sr_hle_init();
@@ -69829,6 +69945,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_utility_dialog_measured_states();
     test_osk_nested_ranges();
     test_utility_dialog_wrong_states_unmeasured_types();
+    test_netconf_calls_with_no_dialog_started();
+    test_gamedata_install_calls_with_no_dialog_started();
+    test_game_sharing_calls_with_no_dialog_started();
     test_exit_thread_does_not_wake_launcher(0);
     test_exit_thread_does_not_wake_launcher(2);
     test_explicit_exit_status_exact((int32_t)0x800201acu, 0x800200d2u);
