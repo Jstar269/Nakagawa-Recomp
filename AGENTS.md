@@ -100,6 +100,9 @@ expected. Edits to existing files: [`contrib-refresh`](CONTRIBUTING.md#provenanc
 - By default, stop and report after a bounded implementation, its tests, or its pull request.
 - Only the maintainer integrates and lands pull requests, and only on a head whose full required hosted CI is
   green (Section 10); green quick checks alone never land a head.
+- An open issue labelled `good first issue`, and each open line of a starter-task tracker carrying that label, is
+  kept for a contributor. A maintainer's agent takes one only when the maintainer names that issue or line in the
+  current turn; a request to clear the backlog or to do everything does not name it.
 - Generic requests to finish, ship, publish, integrate, or do everything do not expand mission authority.
 
 ## 3. Human-only hard stops
