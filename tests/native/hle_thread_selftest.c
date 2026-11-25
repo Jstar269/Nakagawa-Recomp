@@ -54761,6 +54761,178 @@ static void test_psp_mutex(void) {
     s_cur = -1;
 }
 
+/* sceKernelLockMutexCB (0x5bf4dd27) from a VBLANK sub-interrupt handler: the one cell of
+ * PSP-MUTEX-001 that measures this handler (#2807). The record (docs/HARDWARE_ORACLE.md, case
+ * mutex-interrupt-context: a PSP-3000 on system software 6.61, PSPLink 3.2.1, one launch of the
+ * probe built from ec5dd563, acceptance-eligible, 2026-10-15) runs six mutex calls in each of 20
+ * firings of a VBLANK sub-interrupt handler (sub-interrupt 0) that the main thread registered. In
+ * the probe's order they are LockMutex with an unknown UID, LockMutex with count 0, LockMutex
+ * (count 1, no timeout) on an unlocked mutex, LockMutexCB (count 1, no timeout) on the same mutex,
+ * TryLockMutex on it, and UnlockMutex of a mutex the main thread created held. In 20 of 20 firings
+ * each call returned 0x80020064 (ILLEGAL_CONTEXT), and the handler reached the end of its body
+ * every time, so none of the calls blocked it.
+ *
+ * Here the production path runs the same sequence: the main thread creates both mutexes through
+ * sceKernelCreateMutex, registers and enables the handler through sceKernelRegisterSubIntrHandler
+ * and sceKernelEnableSubIntr, and each of 20 VBLANKs is latched under sceKernelCpuSuspendIntr and
+ * delivered by sceKernelCpuResumeIntr through the scheduler's own deliver_vblank. The handler body
+ * is a host function bound at its guest entry, standing in for the generated translation of the
+ * probe's handler; every call it makes enters the NID through sr_syscall.
+ *
+ * This cell covers the interrupt-context refusal. In the separate mutex-timeout-quanta case,
+ * the probe calls LockMutexCB with a 250 us timeout on a mutex the main thread holds. It
+ * discards the return code and emits the timeout word and elapsed time in slots 13 and 14.
+ * The public summary does not qualify timeout behavior. Thread-context acquisition, wake
+ * outcomes and callback delivery remain outside this cell. The post-call mutex-state
+ * assertion checks runtime consistency. The interrupt probe reads no mutex status. */
+#define NID_MUTEX_INTR_LOCK_MUTEX     0xb011b11fu
+#define NID_MUTEX_INTR_LOCK_MUTEX_CB  0x5bf4dd27u
+#define NID_MUTEX_INTR_TRY_LOCK_MUTEX 0x0ddcd2c9u
+#define NID_MUTEX_INTR_UNLOCK_MUTEX   0x6b30100fu
+#define MUTEX_INTR_TRIALS             20
+#define MUTEX_INTR_HANDLER_ENTRY      0x08a3c040u
+#define MUTEX_INTR_UNKNOWN_UID        0x7fffffffu
+#define MUTEX_INTR_ILLEGAL_CONTEXT    0x80020064u
+
+typedef struct {
+    int      intr_context;
+    uint32_t r_bad_uid;
+    uint32_t r_bad_cnt;
+    uint32_t r_lock;
+    uint32_t r_lock_cb;
+    uint32_t r_try;
+    uint32_t r_unlock;
+    int      done;
+} MutexIntrTrial;
+
+static MutexIntrTrial s_mutex_intr_trials[MUTEX_INTR_TRIALS];
+static int s_mutex_intr_count;
+static uint32_t s_mutex_intr_unlocked;
+static uint32_t s_mutex_intr_main_owned;
+
+static void mutex_intr_subintr_fn(CpuState *cpu) {
+    const int idx = s_mutex_intr_count;
+    cpu->r[2] = 0u;
+    if (idx >= MUTEX_INTR_TRIALS) return;
+    MutexIntrTrial t;
+    memset(&t, 0, sizeof t);
+    t.intr_context = sched_is_intr_context();
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = MUTEX_INTR_UNKNOWN_UID; sc.r[5] = 1u;
+    t.r_bad_uid = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 0u;
+    t.r_bad_cnt = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u; sc.r[6] = 0u;
+    t.r_lock = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u; sc.r[6] = 0u;
+    t.r_lock_cb = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX_CB);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u;
+    t.r_try = sr_syscall(&sc, NID_MUTEX_INTR_TRY_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_main_owned; sc.r[5] = 1u;
+    t.r_unlock = sr_syscall(&sc, NID_MUTEX_INTR_UNLOCK_MUTEX);
+    t.done = 1;
+    s_mutex_intr_trials[idx] = t;
+    s_mutex_intr_count = idx + 1;
+}
+
+/* Open wait invocations, which a blocking call adds while it waits and removes when it finishes. */
+static int mutex_intr_wait_invocations(void) {
+    int n = 0;
+    for (const WaitInvocation *w = s_wait_invocations; w; w = w->next) n++;
+    return n;
+}
+
+static void test_lock_mutex_cb_refused_in_vblank_subintr(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(MUTEX_INTR_HANDLER_ENTRY, mutex_intr_subintr_fn);
+    s_vbl_next_us = UINT64_MAX;   /* only the VBLANKs this cell latches are delivered */
+    TCB *main_t = fixture_thread(0x5f8u, TH_RUNNING, 32);
+    main_t->started = 1;
+    s_cur = (int)(main_t - s_tcb);
+    s_mutex_intr_count = 0;
+    memset(s_mutex_intr_trials, 0, sizeof s_mutex_intr_trials);
+
+    SceKernelMutexInfoTest info;
+    s_mutex_intr_unlocked = mtx_create("oracle-intr-unl", 0, 0);
+    s_mutex_intr_main_owned = mtx_create("oracle-intr-own", 0, 1);
+    expect((int32_t)s_mutex_intr_unlocked > 0 && (int32_t)s_mutex_intr_main_owned > 0 &&
+               mtx_get_info(s_mutex_intr_unlocked, &info) && info.currentCount == 0 &&
+               mtx_get_info(s_mutex_intr_main_owned, &info) && info.currentCount == 1 &&
+               info.lockThread == (int32_t)main_t->uid,
+           "intr LockMutexCB: the main thread creates one unlocked mutex and one it holds");
+
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u; cpu.r[6] = MUTEX_INTR_HANDLER_ENTRY; cpu.r[7] = 0u;
+    const uint32_t reg = sr_syscall(&cpu, NID_SCE_KERNEL_REGISTER_SUBINTR);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t ena = sr_syscall(&cpu, NID_SCE_KERNEL_ENABLE_SUBINTR);
+    expect(reg == 0u && ena == 0u,
+           "intr LockMutexCB: the VBLANK sub-interrupt 0 handler registers and enables");
+
+    const int waits_before = mutex_intr_wait_invocations();
+    for (int i = 0; i < MUTEX_INTR_TRIALS; i++) {
+        memset(&cpu, 0, sizeof cpu);
+        const uint32_t token = sr_syscall(&cpu, NID_SCE_KERNEL_CPU_SUSPEND_INTR);
+        sched_raise_interrupt(SCHED_INTR_VBLANK);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = token;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_CPU_RESUME_INTR);
+    }
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t dis = sr_syscall(&cpu, NID_SCE_KERNEL_DISABLE_SUBINTR);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t rel = sr_syscall(&cpu, NID_SCE_KERNEL_RELEASE_SUBINTR);
+    expect(dis == 0u && rel == 0u,
+           "intr LockMutexCB: the handler disables and releases again, as the probe's teardown does");
+
+    expect(s_mutex_intr_count == MUTEX_INTR_TRIALS,
+           "intr LockMutexCB: the handler completes all 20 trials, as on the PSP (20 of 20)");
+    int in_intr = 1, lock_cb = 1, others = 1, done = 1;
+    for (int i = 0; i < s_mutex_intr_count; i++) {
+        const MutexIntrTrial *t = &s_mutex_intr_trials[i];
+        if (!t->intr_context) in_intr = 0;
+        if (!t->done) done = 0;
+        if (t->r_lock_cb != MUTEX_INTR_ILLEGAL_CONTEXT) lock_cb = 0;
+        if (t->r_bad_uid != MUTEX_INTR_ILLEGAL_CONTEXT || t->r_bad_cnt != MUTEX_INTR_ILLEGAL_CONTEXT ||
+            t->r_lock != MUTEX_INTR_ILLEGAL_CONTEXT || t->r_try != MUTEX_INTR_ILLEGAL_CONTEXT ||
+            t->r_unlock != MUTEX_INTR_ILLEGAL_CONTEXT)
+            others = 0;
+    }
+    expect(in_intr, "intr LockMutexCB: every trial runs in interrupt context");
+    expect(lock_cb,
+           "intr LockMutexCB: LockMutexCB(unlocked mutex, 1, NULL) in a VBLANK sub-interrupt handler "
+           "returns 0x80020064 (ILLEGAL_CONTEXT): PSP-MUTEX-001 mutex-interrupt-context, 20 of 20 trials");
+    expect(done, "intr LockMutexCB: the refused call returns to the handler, which never parks");
+    expect(others,
+           "intr LockMutexCB: the record's other five calls in the same trial also return 0x80020064");
+    expect(s_cur == (int)(main_t - s_tcb) && main_t->state == TH_RUNNING &&
+               mutex_intr_wait_invocations() == waits_before,
+           "intr LockMutexCB: the interrupted main thread is current again and no wait was opened");
+    expect(mtx_get_info(s_mutex_intr_unlocked, &info) && info.currentCount == 0 &&
+               info.lockThread == 0 && info.numWaitThreads == 0,
+           "intr LockMutexCB: the refused locks leave the mutex unlocked with no waiter (runtime check)");
+    expect(mtx_get_info(s_mutex_intr_main_owned, &info) && info.currentCount == 1 &&
+               info.lockThread == (int32_t)main_t->uid && info.numWaitThreads == 0,
+           "intr LockMutexCB: the refused unlock leaves the main thread's mutex held (runtime check)");
+
+    (void)mtx_delete(s_mutex_intr_unlocked);
+    (void)mtx_delete(s_mutex_intr_main_owned);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
+}
+
 /* ---- coroutine lifecycle invariants ---------------------------------------------------
  *
  * These read counters recorded by sr_coro.c itself as each operation happened, so they hold
@@ -70008,6 +70180,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_intr_conformance_create_failure_is_setup_failure();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
+    test_lock_mutex_cb_refused_in_vblank_subintr();
     test_kernel_nested_join();
     test_kernel_nested_mutex();
     test_real_module_start_lifecycle();

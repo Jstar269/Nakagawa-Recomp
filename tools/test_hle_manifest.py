@@ -749,6 +749,76 @@ class LiveManifestTests(unittest.TestCase):
         for sibling in ("h_MsgDialogUpdate", "h_MsgDialogShutdown"):
             self.assertNotIn(sibling, meta.HANDLER_METADATA)
 
+    def test_lock_mutex_cb_is_partial_on_its_one_measured_cell(self) -> None:
+        """#2807: sceKernelLockMutexCB is reviewed for the mutex-interrupt-context cell of PSP-MUTEX-001 only."""
+        nid, handler = 0x5BF4DD27, "h_LockMutexCB"
+        cell, guest_handler = "test_lock_mutex_cb_refused_in_vblank_subintr", "mutex_intr_subintr_fn"
+        registration = self.regs[nid]
+        self.assertEqual(registration["name"], "sceKernelLockMutexCB")
+        self.assertEqual(registration["handler"], handler)
+        self.assertEqual(registration["classification"], "dedicated")
+        self.assertEqual(registration["status"], "partial")
+        evidence = meta.HANDLER_EVIDENCE[handler]
+        self.assertEqual(
+            evidence,
+            [
+                "docs/HARDWARE_ORACLE.md (PSP-MUTEX-001: mutex-interrupt-context)",
+                f"tests/native/hle_thread_selftest.c:{cell}",
+            ],
+        )
+        self._assert_cited_cells_are_manifest_cells(evidence)
+        record = next(
+            row
+            for row in json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))["tests"]
+            if row["id"] == "PSP-MUTEX-001"
+        )
+        self.assertIn("sceKernelLockMutexCB", record["apis"])
+        self.assertEqual(record["hardware_evidence"], "MEASURED")
+        # The limitation names the one cell, its launch, and what stays unmeasured.
+        limitation = meta.HANDLER_LIMITATIONS[handler]
+        for needle in (
+            "one cell only", "0x80020064", "VBLANK sub-interrupt handler", "20 of 20",
+            "one acceptance-eligible launch", "callback delivery", "mutex-timeout-quanta",
+            "discards the return code", "timeout word and elapsed time", "slots 13 and 14",
+            "does not qualify timeout behavior", "runtime check",
+        ):
+            self.assertIn(needle, limitation)
+        # The guest handler enters the NID through sr_syscall with its named constant, and the
+        # cell delivers that handler through the production sub-interrupt path.
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(source))
+        define = _matched(
+            re.search(r"^#define NID_MUTEX_INTR_LOCK_MUTEX_CB[ \t]+0x5bf4dd27u$", source, re.MULTILINE)
+        ).group(0)
+        handler_body = _matched(
+            re.search(
+                rf"^static void {guest_handler}\(CpuState \*cpu\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL
+            )
+        ).group(0)
+        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(f"{define}\n{handler_body}"))
+        self.assertIn("sched_is_intr_context()", handler_body)
+        body = _matched(
+            re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+        ).group(0)
+        for needle in (
+            "sr_hle_init();",
+            f"sr_test_register_guest_fn(MUTEX_INTR_HANDLER_ENTRY, {guest_handler});",
+            "sr_syscall(&cpu, NID_SCE_KERNEL_REGISTER_SUBINTR)",
+            "sr_syscall(&cpu, NID_SCE_KERNEL_CPU_RESUME_INTR)",
+            "sched_raise_interrupt(SCHED_INTR_VBLANK);",
+            "MUTEX_INTR_ILLEGAL_CONTEXT",
+            "PSP-MUTEX-001 mutex-interrupt-context, 20 of 20 trials",
+        ):
+            self.assertIn(needle, body)
+        self.assertRegex(source, r"(?m)^#define MUTEX_INTR_ILLEGAL_CONTEXT[ \t]+0x80020064u$")
+        self.assertRegex(source, r"(?m)^#define MUTEX_INTR_TRIALS[ \t]+20$")
+        # sceKernelDeleteMutex is in the record's API list only as probe teardown: the probe
+        # discards every DeleteMutex result and no case deletes a mutex with a waiter, so it
+        # stays unreviewed.
+        self.assertNotIn("h_DeleteMutex", meta.HANDLER_METADATA)
+        self.assertEqual(self.regs[0xF8170FBE]["handler"], "h_DeleteMutex")
+        self.assertEqual(self.regs[0xF8170FBE]["status"], "unreviewed")
+
     def test_sce_atrac_get_channel_uses_the_canonical_nid(self) -> None:
         """Regression for the 0x31668bba -> 0x31668baa transcription fix."""
         self.assertNotIn(0x31668BBA, self.regs)
