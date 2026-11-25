@@ -26923,6 +26923,25 @@ static void test_trylock600_cells(void) {
     expect(MEM_R32(wa) == 0x7fffffffu, "T600 overflow leaves the level unchanged");
     b1_expect(b1_call(N, wa, 0u, 0u, 0u), 0x800201bdu, "T600 recursive count 0 returns 800201BD");
     b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "T600 recursive delete");
+    /* sceKernelLockLwMutex on a self-held recursive mutex whose level would pass INT_MAX:
+     * pspautotests tests/threads/lwmutex/lock.expected (reference output) "Lock 1 => INT_MAX
+     * (recursive): Failed (800201CD)" with current=1 after it, "Lock 1 => INT_MAX - 1
+     * (recursive): OK" with current=2147483647, and "Lock INT_MAX => INT_MAX (recursive):
+     * Failed (800201CD)". A wrapped level would read negative, so no Unlock could release it. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 1u), 0u, "Lock overflow: create recursive held");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0x800201cdu,
+              "Lock 1 => INT_MAX (recursive) returns 800201CD");
+    expect(MEM_R32(wa) == 1u, "Lock 1 => INT_MAX (recursive) leaves the level at 1");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0x7ffffffeu, 0u, 0u), 0u,
+              "Lock 1 => INT_MAX - 1 (recursive) succeeds");
+    expect(MEM_R32(wa) == 0x7fffffffu, "Lock 1 => INT_MAX - 1 (recursive) reaches level INT_MAX");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0x800201cdu,
+              "Lock INT_MAX => INT_MAX (recursive) returns 800201CD");
+    expect(MEM_R32(wa) == 0x7fffffffu, "Lock INT_MAX => INT_MAX (recursive) leaves the level unchanged");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0u,
+              "Lock overflow: the owner unlocks its INT_MAX level");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock overflow: the mutex is free again");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock overflow: delete");
     s_cur = -1;
 }
 

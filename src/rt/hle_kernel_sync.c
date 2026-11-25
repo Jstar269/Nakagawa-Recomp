@@ -1981,6 +1981,16 @@ static uint32_t h_lwmutex_lock_common(CpuState *s, int is_cb) {
      * on a non-recursive mutex is ILLEGAL_COUNT and takes nothing, as TryLock_600. */
     if (!(MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) && count > 1)
         return 0x800201bdu;   /* ILLEGAL_COUNT */
+    /* lock.expected "Lock 1 => INT_MAX (recursive)" and "Lock INT_MAX => INT_MAX
+     * (recursive)": a self-held recursive level that would pass INT_MAX is 0x800201CD
+     * (LOCK_OVERFLOW) with the level unchanged, as TryLock_600 answers; the level never
+     * wraps negative, where no Unlock could release it. */
+    if ((MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) &&
+        sync_find(MEM_R32(wa + LWMUTEX_UID), SYNC_KIND_LWMUTEX) &&
+        MEM_R32(wa + LWMUTEX_LOCK_THREAD) == sched_current_uid()) {
+        const int level = (int)MEM_R32(wa + LWMUTEX_LOCK_LEVEL);
+        if (level > 0 && (int64_t)level + (int64_t)count > 0x7fffffffLL) return 0x800201cdu;
+    }
     uint32_t toptr = A2;
     if (toptr && !sr_guest_span_writable(toptr, 4)) return 0x80000103u;
     uint32_t woken = 0;
