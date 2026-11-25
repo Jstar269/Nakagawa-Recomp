@@ -809,8 +809,10 @@ typedef enum {
 NkHostKind nk_platform_host_kind(void);
 
 /* Linux Steam integration: discover the common per-user Steam root and conservatively check
-   `$HOME/.steam/steam.pid`. These POSIX-backend helpers return false on non-Linux hosts. */
-bool nk_platform_linux_steam_find_root(char *root, size_t root_cap);
+   `$HOME/.steam/steam.pid`. The supplied account check distinguishes usable roots from ones
+   containing only a userdata directory. These POSIX helpers return false on non-Linux hosts. */
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap,
+                                      bool (*has_accounts)(const char *));
 bool nk_platform_linux_steam_client_running(void);
 
 /* Path text comparison as the host's file system compares names: Win32 folds ASCII case
