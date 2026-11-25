@@ -2644,7 +2644,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogStatus",
     "name": "sceUtilityMsgDialogGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x9ac2eeac": {
     "classification": "dedicated",
@@ -3331,6 +3331,12 @@
     "classification": "dedicated",
     "handler": "h_ReferLwMutexStatus",
     "name": "sceKernelReferLwMutexStatus",
+    "status": "partial"
+  },
+  "0xc2145e80": {
+    "classification": "dedicated",
+    "handler": "h_SysclibSnprintf",
+    "name": "snprintf",
     "status": "partial"
   },
   "0xc2df770e": {

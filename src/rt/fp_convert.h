@@ -383,13 +383,15 @@ static inline float sr_fpu_soft_ftz_div(float a, float b, float r) {
     return (sr_float_bits(vs) & 0x7fffffffu) < 0x20800000u ? sr_fpu_soft_signed_zero(r) : r;
 }
 
-/* Invalid-operation NaN of add.s, sub.s and div.s (Inf - Inf, 0 / 0, Inf / Inf): when neither
- * operand is a NaN and the result is one, the result word is 0x7FC00000 on every host. The host
- * default NaN differs (x86 SSE writes 0xFFC00000, AArch64 0x7FC00000), so without this the same
- * guest instruction left different register bits on the x86-64 and arm64 builds. The word is the
- * one mul.s returns for Inf * 0. It is the PSP's word: pspautotests tests/cpu/fpu/fpu_nan.expected
- * at e37443a6 (recorded on a PSP) has 0x7FC00000 for 0 / 0, -0 / 0, Inf - Inf, -Inf + Inf,
- * Inf / Inf and -Inf / Inf, and for Inf * 0 and 0 * -Inf, under RM 0 with FS clear.
+/* Invalid-operation NaN of add.s, sub.s, div.s and sqrt.s (Inf - Inf, 0 / 0, Inf / Inf, the
+ * square root of a number below -0): when no operand is a NaN and the result is one, the result
+ * word is 0x7FC00000 on every host. The host default NaN differs (x86 SSE writes 0xFFC00000,
+ * AArch64 0x7FC00000), so without this the same guest instruction left different register bits
+ * on the x86-64 and arm64 builds. The word is the one mul.s returns for Inf * 0. It is the PSP's
+ * word: pspautotests tests/cpu/fpu/fpu_nan.expected at e37443a6 (recorded on a PSP) has
+ * 0x7FC00000 for 0 / 0, -0 / 0, Inf - Inf, -Inf + Inf, Inf / Inf and -Inf / Inf, and for Inf * 0
+ * and 0 * -Inf, under RM 0 with FS clear; roundmode.expected at the same commit has it for the
+ * roots of -1.0 and -inf under every RM.
  *
  * A NaN operand of add.s, sub.s, mul.s or div.s gives the first NaN operand with its quiet bit
  * set and its sign and payload kept. roundmode.expected at the same commit has that word under
@@ -522,18 +524,21 @@ static inline float sr_fpu_div_s(float a, float b, uint32_t fcr31) {
  * the caller's environment restored exactly: a bare host sqrtf rounded under the ambient host
  * mode, read a subnormal input as zero under an ambient DAZ, and left the inexact sticky bit in
  * the caller's MXCSR. FS needs no flush here, on either backend: the square root of the
- * smallest subnormal, 2^-149, is about 2^-74.5, so no result is tiny. A NaN result (a NaN or
- * negative operand) is the host's word, as it was before; that word is not PSP-measured, and
- * neither is PSP sqrt.s under an RM other than RN. */
+ * smallest subnormal, 2^-149, is about 2^-74.5, so no result is tiny. The square root of a
+ * number below -0 is 0x7FC00000 on every host (sr_fpu_invalid_op_nan; #3030); a NaN operand
+ * propagates as the host returns it. pspautotests tests/cpu/fpu/roundmode.expected at e37443a6
+ * (recorded on a PSP) has sqrt.s under all four RM values, and this helper gives its words for
+ * every operand that file has. */
 static inline float sr_fpu_sqrt_s(float a, uint32_t fcr31) {
     volatile float va = a;
+    const uint32_t a_bits = sr_float_bits(va);
     const uint32_t saved = sr_fpu_env_save();
     sr_fpu_env_apply_guest(saved, fcr31);
     sr_fpu_scalar_barrier();
     volatile float vr = sqrtf(va);
     sr_fpu_scalar_barrier();
     sr_fpu_env_restore(saved);
-    return vr;
+    return sr_fpu_invalid_op_nan(a_bits, 0u, vr);
 }
 
 /* CVT.S.W rounds per guest RM near the binary32 precision boundary. Unlike the

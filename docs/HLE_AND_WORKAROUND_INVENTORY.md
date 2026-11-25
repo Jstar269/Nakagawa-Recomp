@@ -46,21 +46,21 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **717** (dedicated **670**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **647** handlers across **30** API families, covering **677** handler-associated NID registrations.
+Registered NIDs: **718** (dedicated **671**, fake_success **3**, controlled_unsupported **44**).
+Semantic handler census: **648** handlers across **30** API families, covering **678** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 394 | 406 |
+| `partial` | 396 | 408 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 235 | 240 |
+| `unreviewed` | 234 | 239 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
-| `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
+| `other` | 1 | 2 | 0 | 0 | 0 | 3 | 3 |
 | `sceAtrac` | 0 | 0 | 0 | 0 | 34 | 34 | 35 |
 | `sceAudio` | 0 | 12 | 0 | 0 | 5 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
@@ -85,11 +85,11 @@ Semantic handler census: **647** handlers across **30** API families, covering *
 | `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
 | `sceSas` | 0 | 0 | 0 | 1 | 27 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
-| `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
+| `sceUtility` | 0 | 11 | 0 | 0 | 26 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **394** | **1** | **3** | **235** | **647** | **677** |
+| **Total** | **14** | **396** | **1** | **3** | **234** | **648** | **678** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -162,6 +162,11 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Limitation: reads the registered exit callback's argument block as {mode, params, common}: no live callback 0x800201a1, NULL argument 0x800200d3, mode 4 or above 0x800200d2, params size below 12 0x800201bc, else clears params->unk1 and sets params->unk2 to -1; an unusable params pointer stops the run by name; the check order when mode and size both fail, and other compiled SDK versions, are not measured
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
   - Evidence: PSPAutotests tests/threads/callbacks/exit.expected (1a9e6c31, recorded on a PSP, compiled SDK 3.95): checkpoints under LoadExecForUser_362A956B
+- **`h_SysclibSnprintf`** (`other`): `snprintf` (0xc2145e80)
+  - Limitation: positive-capacity truncation and the full count are reference-derived, not PSP-measured; handles bounded literal text and one-word integer, character and string fields with space padding and bounded string precision; zero capacity, unreadable arguments, and other format forms stop by name (#341)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sysclib_snprintf
+  - Evidence: uofw/uofw f7b0623168842f02cddbdbf9437ac0c2380c51c8 src/kd/sysmem/sysclib.c prnt/snprintf
+  - Evidence: hrydgard/ppsspp cdf563b85c42c275ec2835a0883f48d63a9c9406 Core/HLE/sceKernelInterrupt.cpp sysclib_snprintf
 - **`h_AudioChRelease`** (`sceAudio`): `sceAudioChRelease` (0x6fc46853)
   - Limitation: the cells release channel 0 after the two valid blocking-output calls and query it after release; a release clears the channel's length, format and volumes; the out-of-range (0x80260003) and not-reserved (0x80260008) refusals follow PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp sceAudioChRelease and are unmeasured, as are other channel-state release results (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
@@ -1624,6 +1629,10 @@ Semantic handler census: **647** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_sequence
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_without_update
   - Evidence: PSPAutotests tests/utility/msgdialog/abort.expected (2ed7c9c5, recorded on a PSP): the return codes and status sequence before init, during init, while visible, after the next Update and through shutdown
+- **`h_MsgDialogStatus`** (`sceUtility`): `sceUtilityMsgDialogGetStatus` (0x9a1c91d7)
+  - Limitation: this status covers one cell only: with no InitStart of any utility dialog in the process, GetStatus returns 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so the statuses the handler returns then (INIT 1, RUNNING 2, FINISHED 3, SHUTDOWN 4 and NONE 0 after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this status; the record's Update(1) and ShutdownStart results and the other dialog kinds (savedata, netconf, gamedata install, game sharing, the OSK) belong to separate handlers and are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)
+  - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_status_with_no_dialog_started
 - **`h_OskUpdate`** (`sceUtility`): `sceUtilityOskUpdate` (0x4b85c861)
   - Limitation: the return codes follow the measured states, and INIT ends on the vblank after InitStart (#1386); Update does not drive the keyboard, whose text is collected from GetStatus (#281), and Update in FINISHED returns 0, which is not measured (#341)
   - Evidence: #363 (PSP-3000 measurements, comments 6330742629 and 6331070692): WRONG_TYPE 0x80110005 before a keyboard starts; 0 in VISIBLE for speed 0 and 1; INVALID_STATUS 0x80110001 in INIT, QUIT and NONE after use

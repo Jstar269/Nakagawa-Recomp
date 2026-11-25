@@ -188,8 +188,9 @@ static const ScalarOpVector kScalarOpVectors[] = {
     {"add NaN operand kept",SR_FP_OP_ADD, 0x7fc00123u, 0x3f800000u, 0u,          0x7fc00123u},
     {"div qNaN by 0 kept",  SR_FP_OP_DIV, 0xffc00000u, 0x00000000u, 0u,          0xffc00000u},
     /* sqrt.s runs in the same scoped window: the result follows the guest RM whatever the host
-     * mode is. sqrt(2) lies between 0x3FB504F3 and 0x3FB504F4, nearer the first. The directed
-     * rows are the helper's IEEE contract; PSP sqrt.s under RM other than RN is unmeasured. */
+     * mode is. sqrt(2) lies between 0x3FB504F3 and 0x3FB504F4, nearer the first; the four
+     * sqrt 2 words are the ones pspautotests tests/cpu/fpu/roundmode.expected at e37443a6
+     * (recorded on a PSP) has under each RM. */
     {"sqrt 2 RN",           SR_FP_OP_SQRT, 0x40000000u, 0u,         0u,          0x3fb504f3u},
     {"sqrt 2 RZ",           SR_FP_OP_SQRT, 0x40000000u, 0u,         1u,          0x3fb504f3u},
     {"sqrt 2 RP",           SR_FP_OP_SQRT, 0x40000000u, 0u,         2u,          0x3fb504f4u},
@@ -202,6 +203,20 @@ static const ScalarOpVector kScalarOpVectors[] = {
     {"sqrt min subnormal RP",SR_FP_OP_SQRT, 0x00000001u, 0u,        0x01000002u, 0x1a3504f4u},
     {"sqrt -0 keeps sign",  SR_FP_OP_SQRT, 0x80000000u, 0u,         0x01000003u, 0x80000000u},
     {"sqrt +inf",           SR_FP_OP_SQRT, 0x7f800000u, 0u,         1u,          0x7f800000u},
+    /* The square root of a number below -0 is 0x7FC00000 under every RM, as the same
+     * roundmode.expected has for -1.0 and -inf; x86 SSE writes 0xFFC00000 (#3030). A NaN
+     * operand still propagates as the host returns it, the three words that file records. */
+    {"sqrt -1 RN NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         0u,          0x7fc00000u},
+    {"sqrt -1 RZ NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         1u,          0x7fc00000u},
+    {"sqrt -1 RP NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         2u,          0x7fc00000u},
+    {"sqrt -1 RM NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         3u,          0x7fc00000u},
+    {"sqrt -inf RN NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         0u,          0x7fc00000u},
+    {"sqrt -inf RZ NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         1u,          0x7fc00000u},
+    {"sqrt -inf RP NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         2u,          0x7fc00000u},
+    {"sqrt -inf RM NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         3u,          0x7fc00000u},
+    {"sqrt qNaN kept",      SR_FP_OP_SQRT, 0x7fc00000u, 0u,         0u,          0x7fc00000u},
+    {"sqrt -qNaN kept",     SR_FP_OP_SQRT, 0xffc00000u, 0u,         2u,          0xffc00000u},
+    {"sqrt sNaN quieted",   SR_FP_OP_SQRT, 0x7f800001u, 0u,         3u,          0x7fc00001u},
 };
 
 /* CVT.S.W honors guest RM near the binary32 precision boundary. */
