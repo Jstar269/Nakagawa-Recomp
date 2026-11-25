@@ -23,7 +23,10 @@
  * cvt.s.w results. Mul.s infinity*zero is the repository's explicit canonical
  * qNaN result, not a host-NaN assumption. The ctc1 write rule (FCR31 bits 25..31
  * do not exist) is the project's own PSP-3000 measurement PSP-FPU-CC-001, indexed
- * in docs/HARDWARE_ORACLE.md.
+ * in docs/HARDWARE_ORACLE.md. SQRT.S follows PSPAutotests commit
+ * e37443a681c6a4d562f32b6b48e1f4e36cd69c97 tests/cpu/fpu/roundmode.expected
+ * (recorded on a PSP): under each of the four RM values the finite positive
+ * results are the correctly rounded roots, and -1.0 and -inf give 0x7fc00000.
  *
  * Exact NaN payload propagation, signaling-NaN quieting, FS behavior for an
  * exact subnormal result, and COP1 exception/flag/enable behavior have no PSP
@@ -636,9 +639,6 @@ uint32_t fpu_reference_binary(unsigned op, uint32_t a_bits, uint32_t b_bits,
 static uint32_t unary_sqrt(uint32_t bits, unsigned mode, unsigned fs,
                            enum FpuReferenceStatus *status) {
     RefFinite value;
-    if (mode != 0u) {
-        ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
-    }
     if (float_is_nan(bits)) {
         ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
         return 0x7fc00000u;
@@ -647,7 +647,6 @@ static uint32_t unary_sqrt(uint32_t bits, unsigned mode, unsigned fs,
         return bits;
     }
     if ((bits >> 31) != 0u) {
-        ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
         return 0x7fc00000u;
     }
     if (float_is_inf(bits)) {

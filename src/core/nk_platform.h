@@ -48,12 +48,13 @@ int64_t nk_ftell64(FILE *f);
 FILE *nk_fopen_utf8(const char *path, const char *mode);
 int nk_remove_utf8(const char *path);
 int nk_rename_utf8(const char *from, const char *to);
-/* Move file `from` to `to` only while `to` does not exist, so a file someone else put at `to`
+/* Move `from` to `to` only while `to` does not exist, so an entry someone else put at `to`
  * (a player's edited image, say) is never replaced, even one made between a check and the move.
  * Returns 0 when moved, 1 when `to` already exists (`from` is left where it is), -1 on any other
  * failure. Win32: MoveFileExW without MOVEFILE_REPLACE_EXISTING. POSIX: link() and then unlink()
  * of `from`; on a Linux file system without hard links, renameat2 with RENAME_NOREPLACE; with
- * neither the move is refused (-1), never done by a rename that could replace. */
+ * neither the move is refused (-1), never done by a rename that could replace. Directories
+ * work on Win32 and where Linux's RENAME_NOREPLACE is available. */
 int nk_rename_noreplace_utf8(const char *from, const char *to);
 
 /* Filesystem and path utilities (all paths in UTF-8) */
@@ -103,6 +104,11 @@ bool nk_platform_list_dir(const char *dir, NkDirEntryFn fn, void *ctx);
  * stops on a read error part way. */
 bool nk_platform_list_dir_counted(const char *dir, NkDirEntryFn fn, void *ctx,
                                   size_t *skipped);
+/* A strict walk that reports skipped names without following or opening their
+ * entries. An unrepresentable name fails the listing, and either callback can
+ * stop it early by returning false. */
+bool nk_platform_list_dir_report_skipped(const char *dir, NkDirEntryFn fn,
+                                        NkDirFileFn skipped_name, void *ctx);
 /* Flush f's buffered bytes and have the operating system put them on the disk
  * (fflush, then FlushFileBuffers or fsync). False when either fails. */
 bool nk_platform_sync_file(FILE *f);
@@ -575,6 +581,14 @@ bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
  * the open handle, so the file cannot be swapped for a link between a check and the
  * open. NULL on refusal or failure. */
 FILE *nk_platform_open_regular_file(const char *path);
+
+typedef struct {
+    int64_t seconds;
+    uint32_t nanoseconds;
+} NkFileWriteTime;
+
+/* Last-write time of an open regular file, in Unix seconds and nanoseconds. */
+bool nk_platform_file_write_time(FILE *file, NkFileWriteTime *out);
 
 /* Open the file at `path` for reading in binary mode and, while the stream stays
  * open, keep other programs from changing it where the platform can. Windows:

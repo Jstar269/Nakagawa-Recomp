@@ -658,6 +658,8 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_SETTINGS_PPSSPPS_LIST "PPSSPP's list"
 #define NK_UI_EN_SETTINGS_PPSSPPS_LIST_SHIPPED_COPY "PPSSPP's list (shipped copy)"
 #define NK_UI_EN_SETTINGS_PRESET_CUSTOM "Custom"
+#define NK_UI_EN_SETTINGS_PRESET_FSR1_QUEUE_REFUSED "%s stays selected. The graphics queue has no compute for FSR 1. This session uses normal scaling."
+#define NK_UI_EN_SETTINGS_PRESET_FSR1_STARTUP_REFUSED "%s stays selected. FSR 1 could not start. This session uses normal scaling."
 #define NK_UI_EN_SETTINGS_PRESET_HANDHELD "Handheld"
 #define NK_UI_EN_SETTINGS_PRESET_HIGH "High"
 #define NK_UI_EN_SETTINGS_PRESET_LOW "Low"

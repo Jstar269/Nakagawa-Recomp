@@ -17,6 +17,7 @@
 #ifndef SR_FSR1_PASS_H
 #define SR_FSR1_PASS_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
@@ -45,8 +46,10 @@ typedef struct {
 /* SR_PRESENT_UPSCALE: NULL, empty or "off" is 0, "fsr1" is 1, anything else -1. */
 int fsr1_parse_mode(const char *value);
 
-/* NULL, with the reason, when the queue has no compute or a Vulkan object cannot be made. */
-Fsr1Pass *fsr1_create(const Fsr1Init *init, char *error, size_t error_size);
+/* NULL, with the diagnostic reason, when the pass cannot be made.
+ * The optional flag identifies a refusal from the selected queue's compute capability. */
+Fsr1Pass *fsr1_create(const Fsr1Init *init, char *error, size_t error_size,
+                      bool *queue_lacks_compute);
 /* Waits for the device to go idle, then frees everything. NULL is fine. */
 void fsr1_destroy(Fsr1Pass *p);
 
