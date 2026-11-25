@@ -76,6 +76,8 @@ class SignReleaseBinariesTests(unittest.TestCase):
         recipe = release.index("sign_release_binaries.ps1")
         self.assertLess(recipe, release.index("python tools/generate_sbom.py"))
         self.assertLess(recipe, release.index("python tools/stage_install.py --portable-zip"))
+        self.assertIn("$SigningRecord = Join-Path $ApprovedBundle 'signing-record.json'", release)
+        self.assertIn("Copy-Item -LiteralPath $SigningRecord -Destination (Join-Path $Layout 'signing-record.json')", release)
 
     def test_signtool_discovery_ignores_unversioned_sdk_folders(self):
         self.assertIn("bin/[0-9][0-9.]*/x64/signtool", self.script)

@@ -1086,10 +1086,10 @@ def generated_digest(image, base):
 def every_path_runs_into_a_reserved_word(elf, start):
     """True when every path the CPU could take from ``start`` executes a reserved word. An
     oracle independent of the analysis's walk, read from the words alone: a call may never
-    return, and a return, `jr`, syscall, `break`, `eret`, a jump or branch out of the image,
-    or a loop without a reserved word ends a path unproven. A branch-likely's delay slot runs
-    only when it is taken. Unlike the analysis no entry ends a path, and a `b` runs only to
-    its target."""
+    return, but a JAL to its own link continues after its slot. A return, `jr`, syscall, `break`,
+    `eret`, a jump or branch out of the image, or a loop without a reserved word ends a path
+    unproven. A branch-likely's delay slot runs only when it is taken. Unlike the analysis no
+    entry ends a path, and a `b` runs only to its target."""
     index = analyze.span_index(analyze.exec_ranges(elf))
 
     def word(address):
@@ -1117,11 +1117,13 @@ def every_path_runs_into_a_reserved_word(elf, start):
         if reserved(pc + 4) and not likely:
             return []                                     # the slot always runs
         if op in (2, 3) or (op == 0 and funct in (0x08, 0x09)):
-            if op == 2:
-                target = (pc & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
-                if target != pc and analyze.in_ranges(target, index):
+            if op in (2, 3):
+                target = ((pc + 4) & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+                plain_jump = op == 2 and target != pc
+                link_read = op == 3 and target == ((pc + 8) & 0xFFFFFFFF)
+                if (plain_jump or link_read) and analyze.in_ranges(target, index):
                     return [target]
-            return None                                   # a call, a return, a jump out
+            return None                                   # a call, a return, a jump out or a loop
         if op == 1 and rt in (0x10, 0x11, 0x12, 0x13) and \
                 analyze._linked_branch_is_call(elf, pc, w, index):
             return None
@@ -1159,6 +1161,14 @@ class VoidProofTest(unittest.TestCase):
     """Every word the withdrawal takes out of a module's spans (executable without it, not
     with it) is proven non-code, on a seeded corpus of random overlays with data words naming
     random text addresses."""
+
+    def test_pc_read_continuation_can_prove_non_code_but_an_ordinary_call_cannot(self):
+        # The slot is ordinary code and both images put a reserved word at the link.
+        # In the call case the callee can choose a path that never reaches that word.
+        pc_read = small_overlay([jal(TEXT + 8), ADDU, RESERVED, JR_RA, 0])
+        real_call = small_overlay([jal(TEXT + 12), ADDU, RESERVED, JR_RA, 0])
+        self.assertTrue(every_path_runs_into_a_reserved_word(pc_read, TEXT))
+        self.assertFalse(every_path_runs_into_a_reserved_word(real_call, TEXT))
 
     def test_every_word_taken_out_is_proven_non_code(self):
         rng = random.Random(2564)
@@ -1223,9 +1233,13 @@ class PublicFixtureTest(unittest.TestCase):
     # digests change because sqrt.s now runs in the guest's FCR31 environment: its three
     # sqrt.s lines read `sr_fpu_sqrt_s(s->f[0],s->fcr31)` instead of `sqrtf(s->f[0])`, and
     # nothing else in either output differs (F-17fdc127).
+    # #2574 appends the PC-read cell. Its entry call and slot add eight bytes before
+    # the existing cells. On the old inputs, both codegens produce identical files.
+    # On the expanded inputs, the only codegen difference is in the relocated PRX:
+    # the new JAL keeps its link write and slot but has no synthetic callee at its link.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "2acadc479f0e0e73862e92945a9fabff4778f4647025dad4ff4bf3d406be794e",
-        ("cosim", "exec"): "c4039d0677157b86785cbec9af1495bbef1a4f9029742d8cf0dc92d7f1db995e",
+        ("cosim", "prx"): "2a5096f9c843a0e712d957771aed018930da0ecb337325202ffb69665412010a",
+        ("cosim", "exec"): "108b1b684bdb6f0f66667f1de42bc7798cb508317e882ec1b2be18db6dcbb3bb",
         ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
         ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
         ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",

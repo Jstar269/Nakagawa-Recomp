@@ -704,6 +704,121 @@ class LiveManifestTests(unittest.TestCase):
             digest = hashlib.sha1(name.encode("ascii")).digest()
             self.assertEqual(int.from_bytes(digest[:4], "little"), nid)
 
+    def test_msg_dialog_get_status_is_partial_on_its_one_measured_cell(self) -> None:
+        """#2807: sceUtilityMsgDialogGetStatus is reviewed for the no-InitStart cell of PSP-HLE-UTILITY-NONE-001 only."""
+        nid, handler = 0x9A1C91D7, "h_MsgDialogStatus"
+        cell = "test_msg_dialog_status_with_no_dialog_started"
+        registration = self.regs[nid]
+        self.assertEqual(registration["name"], "sceUtilityMsgDialogGetStatus")
+        self.assertEqual(registration["handler"], handler)
+        self.assertEqual(registration["classification"], "dedicated")
+        self.assertEqual(registration["status"], "partial")
+        evidence = meta.HANDLER_EVIDENCE[handler]
+        self.assertEqual(
+            evidence,
+            [
+                "docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)",
+                f"tests/native/hle_thread_selftest.c:{cell}",
+            ],
+        )
+        self._assert_cited_cells_are_manifest_cells(evidence)
+        # The limitation names the one cell, its single launch and context, and what stays unmeasured.
+        limitation = meta.HANDLER_LIMITATIONS[handler]
+        for needle in (
+            "one cell only", "no InitStart", "0x80110005", "one launch from the XMB context",
+            "synthetic reset", "nothing after an InitStart", "game context", "unmeasured",
+            "separate handlers", "not reviewed here",
+        ):
+            self.assertIn(needle, limitation)
+        # The cell enters the NID through sr_syscall itself. Cut from the selftest with the one
+        # constant it names, it is a dispatch of this NID and of no other, and it starts no dialog.
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(source))
+        define = _matched(
+            re.search(r"^#define NID_MSG_DIALOG_STATUS[ \t]+0x9a1c91d7u$", source, re.MULTILINE)
+        ).group(0)
+        body = _matched(
+            re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+        ).group(0)
+        self.assertEqual(hle_manifest.selftest_dispatched_nids(f"{define}\n{body}"), {nid})
+        self.assertIn("sr_hle_init();", body)
+        self.assertNotIn("_INIT", body)
+        for needle in ("== 0x80110005u", "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog", "XMB context"):
+            self.assertIn(needle, body)
+        # The record's other message-dialog calls did not ride along with this status.
+        for sibling in ("h_MsgDialogUpdate", "h_MsgDialogShutdown"):
+            self.assertNotIn(sibling, meta.HANDLER_METADATA)
+
+    def test_lock_mutex_cb_is_partial_on_its_one_measured_cell(self) -> None:
+        """#2807: sceKernelLockMutexCB is reviewed for the mutex-interrupt-context cell of PSP-MUTEX-001 only."""
+        nid, handler = 0x5BF4DD27, "h_LockMutexCB"
+        cell, guest_handler = "test_lock_mutex_cb_refused_in_vblank_subintr", "mutex_intr_subintr_fn"
+        registration = self.regs[nid]
+        self.assertEqual(registration["name"], "sceKernelLockMutexCB")
+        self.assertEqual(registration["handler"], handler)
+        self.assertEqual(registration["classification"], "dedicated")
+        self.assertEqual(registration["status"], "partial")
+        evidence = meta.HANDLER_EVIDENCE[handler]
+        self.assertEqual(
+            evidence,
+            [
+                "docs/HARDWARE_ORACLE.md (PSP-MUTEX-001: mutex-interrupt-context)",
+                f"tests/native/hle_thread_selftest.c:{cell}",
+            ],
+        )
+        self._assert_cited_cells_are_manifest_cells(evidence)
+        record = next(
+            row
+            for row in json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))["tests"]
+            if row["id"] == "PSP-MUTEX-001"
+        )
+        self.assertIn("sceKernelLockMutexCB", record["apis"])
+        self.assertEqual(record["hardware_evidence"], "MEASURED")
+        # The limitation names the one cell, its launch, and what stays unmeasured.
+        limitation = meta.HANDLER_LIMITATIONS[handler]
+        for needle in (
+            "one cell only", "0x80020064", "VBLANK sub-interrupt handler", "20 of 20",
+            "one acceptance-eligible launch", "callback delivery", "mutex-timeout-quanta",
+            "discards the return code", "timeout word and elapsed time", "slots 13 and 14",
+            "does not qualify timeout behavior", "runtime check",
+        ):
+            self.assertIn(needle, limitation)
+        # The guest handler enters the NID through sr_syscall with its named constant, and the
+        # cell delivers that handler through the production sub-interrupt path.
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(source))
+        define = _matched(
+            re.search(r"^#define NID_MUTEX_INTR_LOCK_MUTEX_CB[ \t]+0x5bf4dd27u$", source, re.MULTILINE)
+        ).group(0)
+        handler_body = _matched(
+            re.search(
+                rf"^static void {guest_handler}\(CpuState \*cpu\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL
+            )
+        ).group(0)
+        self.assertIn(nid, hle_manifest.selftest_dispatched_nids(f"{define}\n{handler_body}"))
+        self.assertIn("sched_is_intr_context()", handler_body)
+        body = _matched(
+            re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+        ).group(0)
+        for needle in (
+            "sr_hle_init();",
+            f"sr_test_register_guest_fn(MUTEX_INTR_HANDLER_ENTRY, {guest_handler});",
+            "sr_syscall(&cpu, NID_SCE_KERNEL_REGISTER_SUBINTR)",
+            "sr_syscall(&cpu, NID_SCE_KERNEL_CPU_RESUME_INTR)",
+            "sched_raise_interrupt(SCHED_INTR_VBLANK);",
+            "MUTEX_INTR_ILLEGAL_CONTEXT",
+            "PSP-MUTEX-001 mutex-interrupt-context, 20 of 20 trials",
+        ):
+            self.assertIn(needle, body)
+        self.assertRegex(source, r"(?m)^#define MUTEX_INTR_ILLEGAL_CONTEXT[ \t]+0x80020064u$")
+        self.assertRegex(source, r"(?m)^#define MUTEX_INTR_TRIALS[ \t]+20$")
+        # sceKernelDeleteMutex is in the record's API list only as probe teardown: the probe
+        # discards every DeleteMutex result and no case deletes a mutex with a waiter, so it
+        # stays unreviewed.
+        self.assertNotIn("h_DeleteMutex", meta.HANDLER_METADATA)
+        self.assertEqual(self.regs[0xF8170FBE]["handler"], "h_DeleteMutex")
+        self.assertEqual(self.regs[0xF8170FBE]["status"], "unreviewed")
+
     def test_sce_atrac_get_channel_uses_the_canonical_nid(self) -> None:
         """Regression for the 0x31668bba -> 0x31668baa transcription fix."""
         self.assertNotIn(0x31668BBA, self.regs)
@@ -1233,6 +1348,197 @@ class LiveManifestTests(unittest.TestCase):
             with self.subTest(remaining=entry["name"]):
                 line = next(l for l in source.splitlines() if f'0x{nid:08X}: {{"name"' in l)
                 self.assertRegex(line, r"# h_\w+: \S")
+
+    def test_utility_none_netconf_gamedata_sharing_are_partial_on_their_measured_sequence(self) -> None:
+        """#2807: netconf, gamedata install and game sharing GetStatus, Update and ShutdownStart are
+        reviewed for the no-InitStart sequence of PSP-HLE-UTILITY-NONE-001 only."""
+        kinds = {
+            "utility-none-netconf": (
+                "test_netconf_calls_with_no_dialog_started",
+                {
+                    0x6332AA39: ("sceUtilityNetconfGetStatus", "h_NetDialogStatus", "NID_NETCONF_DIALOG_STATUS"),
+                    0x91E70E35: ("sceUtilityNetconfUpdate", "h_NetDialogUpdate", "NID_NETCONF_DIALOG_UPDATE"),
+                    0xF88155F6: (
+                        "sceUtilityNetconfShutdownStart", "h_NetDialogShutdown", "NID_NETCONF_DIALOG_SHUTDOWN"
+                    ),
+                },
+            ),
+            "utility-none-gamedata": (
+                "test_gamedata_install_calls_with_no_dialog_started",
+                {
+                    0xB57E95D9: (
+                        "sceUtilityGamedataInstallGetStatus", "h_GamedataDialogStatus", "NID_GAMEDATA_DIALOG_STATUS"
+                    ),
+                    0x4AECD179: (
+                        "sceUtilityGamedataInstallUpdate", "h_GamedataDialogUpdate", "NID_GAMEDATA_DIALOG_UPDATE"
+                    ),
+                    0x32E32DCB: (
+                        "sceUtilityGamedataInstallShutdownStart",
+                        "h_GamedataDialogShutdown",
+                        "NID_GAMEDATA_DIALOG_SHUTDOWN",
+                    ),
+                },
+            ),
+            "utility-none-sharing": (
+                "test_game_sharing_calls_with_no_dialog_started",
+                {
+                    0x946963F3: (
+                        "sceUtilityGameSharingGetStatus", "h_SharingDialogStatus", "NID_SHARING_DIALOG_STATUS"
+                    ),
+                    0x7853182D: ("sceUtilityGameSharingUpdate", "h_SharingDialogUpdate", "NID_SHARING_DIALOG_UPDATE"),
+                    0xEFC6F80F: (
+                        "sceUtilityGameSharingShutdownStart", "h_SharingDialogShutdown", "NID_SHARING_DIALOG_SHUTDOWN"
+                    ),
+                },
+            ),
+        }
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        dispatched = hle_manifest.selftest_dispatched_nids(source)
+        for oracle_cell, (cell, handlers) in kinds.items():
+            body = _matched(
+                re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+            ).group(0)
+            defines = []
+            for nid, (name, handler, constant) in handlers.items():
+                with self.subTest(handler=handler):
+                    registration = self.regs[nid]
+                    self.assertEqual(registration["name"], name)
+                    self.assertEqual(registration["handler"], handler)
+                    self.assertEqual(registration["classification"], "dedicated")
+                    self.assertEqual(registration["status"], "partial")
+                    evidence = meta.HANDLER_EVIDENCE[handler]
+                    self.assertEqual(
+                        evidence,
+                        [
+                            f"docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: {oracle_cell})",
+                            f"tests/native/hle_thread_selftest.c:{cell}",
+                        ],
+                    )
+                    self._assert_cited_cells_are_manifest_cells(evidence)
+                    limitation = meta.HANDLER_LIMITATIONS[handler]
+                    for needle in (
+                        "one measured sequence only", "no InitStart", "0x80110005",
+                        "one launch from the XMB context", "synthetic reset", "nothing after an InitStart",
+                        "game context", "another dialog kind holds the slot", "unmeasured",
+                        "separate handlers", "not reviewed here",
+                    ):
+                        self.assertIn(needle, limitation)
+                    self.assertIn(nid, dispatched)
+                    defines.append(
+                        _matched(
+                            re.search(rf"^#define {constant}[ \t]+0x{nid:08x}u$", source, re.MULTILINE)
+                        ).group(0)
+                    )
+            with self.subTest(cell=cell):
+                # Cut from the selftest with its three constants, the cell dispatches its own kind's
+                # three NIDs and no other, starts no dialog, and asserts the measured sequence in order:
+                # GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart, GetStatus,
+                # each answering 0x80110005.
+                self.assertEqual(hle_manifest.selftest_dispatched_nids("\n".join([*defines, body])), set(handlers))
+                self.assertIn("sr_hle_init();", body)
+                self.assertNotIn("_INIT", body)
+                status, update, shutdown = (constant for _, _, constant in handlers.values())
+                calls = re.findall(r"sr_syscall\(&cpu, (NID_\w+)\) == (0x[0-9a-f]+u)", body)
+                self.assertEqual(
+                    calls,
+                    [(c, "0x80110005u") for c in (status, update, status, shutdown, status, shutdown, status)],
+                )
+                self.assertEqual(len(re.findall(r"sr_syscall\(", body)), 7)
+                self.assertIn(f"cpu.r[4] = 1u;\n    expect(sr_syscall(&cpu, {update})", body)
+                self.assertIn(f"PSP-HLE-UTILITY-NONE-001 {oracle_cell}", body)
+                self.assertIn("XMB context", body)
+
+    def test_std_handle_imports_graduate_on_the_measured_handles(self) -> None:
+        """#341: the three standard-handle imports leave the profile-zero list on PSP-HLE-STDIO-001."""
+        batch = {
+            0x172D316E: ("sceKernelStdin", "h_KernelStdin", "0x0093a513"),
+            0xA6BAB2E9: ("sceKernelStdout", "h_KernelStdout", "0x00938a15"),
+            0xF78BA90A: ("sceKernelStderr", "h_KernelStderr", "0x00936f17"),
+        }
+        dispatched = hle_manifest.selftest_dispatched_nids(
+            hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        )
+        for nid, (name, handler, value) in batch.items():
+            with self.subTest(name=name):
+                registration = self.regs[nid]
+                self.assertEqual(registration["name"], name)
+                self.assertEqual(registration["handler"], handler)
+                self.assertEqual(registration["classification"], "dedicated")
+                self.assertEqual(registration["status"], "partial")
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertTrue(
+                    any(e.startswith("docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles") for e in evidence)
+                )
+                self.assertIn("tests/native/hle_thread_selftest.c:test_std_handles_measured", evidence)
+                self._assert_cited_cells_are_manifest_cells(evidence)
+                self.assertIn(nid, dispatched)
+                # The limitation names the returned value, both launch contexts and what neither measured.
+                limitation = meta.HANDLER_LIMITATIONS[handler]
+                for needle in (value, "both measured launch contexts", "PSPLink", "unmeasured",
+                               "IO_STD_HANDLE_OPERATION"):
+                    self.assertIn(needle, limitation)
+                self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # One handler per import: a shared handler could not return three handles.
+        self.assertEqual(len({handler for _, handler, _ in batch.values()}), 3)
+        # The Stdout close differs by launch context; the limitation names both answers and the one modelled.
+        stdout_limitation = meta.HANDLER_LIMITATIONS["h_KernelStdout"]
+        for needle in ("0x800200d1 from the XMB", "0x80020325 in the game context", "starts its programs as games"):
+            self.assertIn(needle, stdout_limitation)
+        # A read from Stdin is unmeasured: the Stdin status covers the handle value only. It cites
+        # the handle cell and the measured selftest, and no evidence entry stands for a read.
+        stdin_limitation = meta.HANDLER_LIMITATIONS["h_KernelStdin"]
+        self.assertIn("covers the returned handle value only", stdin_limitation)
+        self.assertIn("a read from Stdin is UNMEASURED and unclaimed", stdin_limitation)
+        self.assertIn("not a PSP result", stdin_limitation)
+        self.assertEqual(
+            meta.HANDLER_EVIDENCE["h_KernelStdin"],
+            [
+                "docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles)",
+                "tests/native/hle_thread_selftest.c:test_std_handles_measured",
+            ],
+        )
+
+    def test_panned_blocking_output_graduates_on_derived_evidence(self) -> None:
+        """#341: sceAudioOutputPannedBlocking leaves the profile-zero list as partial, PPSSPP-derived."""
+        nid = 0x13F592BC
+        registration = self.regs[nid]
+        self.assertEqual(registration["name"], "sceAudioOutputPannedBlocking")
+        self.assertEqual(registration["handler"], "h_AudioOutputPannedBlocking")
+        self.assertEqual(registration["classification"], "dedicated")
+        self.assertEqual(registration["status"], "partial")
+        evidence = meta.HANDLER_EVIDENCE["h_AudioOutputPannedBlocking"]
+        for selftest in ("test_audio_output_panned_blocking_unreserved_channel",
+                         "test_audio_regular_output_refuses_bad_channels",
+                         "test_audio_regular_output_refuses_bad_volumes"):
+            self.assertIn(f"tests/native/hle_thread_selftest.c:{selftest}", evidence)
+        self.assertTrue(any(
+            e.startswith("PPSSPP caa91b54b53585811b0fd84405ea04aec72a952b Core/HLE/sceAudio.cpp")
+            and "derived, not PSP-measured" in e for e in evidence
+        ))
+        autotests = [e for e in evidence if e.startswith("PSPAutotests tests/audio/sceaudio/output.expected")]
+        self.assertEqual(len(autotests), 1)
+        self.assertIn("ea71108f00933712c4662276261b39cd42249b1e", autotests[0])
+        self.assertIn("corroboration only", autotests[0])
+        self.assertIn("recorded for sceAudioOutputBlocking only", autotests[0])
+        # Derived evidence only: no PSP oracle record is cited, because none measures this API.
+        self.assertFalse(any(re.search(r"PSP-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d{3}", e) for e in evidence))
+        self._assert_cited_cells_are_manifest_cells(evidence)
+        dispatched = hle_manifest.selftest_dispatched_nids(
+            hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        )
+        self.assertIn(nid, dispatched)
+        limitation = meta.HANDLER_LIMITATIONS["h_AudioOutputPannedBlocking"]
+        for needle in ("PPSSPP-derived, not PSP-measured", "0x80260001", "0x80260003", "0x8026000b",
+                       "for sceAudioOutputBlocking only", "no PSP measurement of this API",
+                       "blocking duration and wake timing", "the mixer result", "a busy channel",
+                       "stay unmeasured"):
+            self.assertIn(needle, limitation)
+        self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # The one entry left needs a PSP measurement, not derived evidence.
+        self.assertEqual(
+            {left: entry["name"] for left, entry in meta.PROFILE_ZERO_UNREVIEWED_IMPORTS.items()},
+            {0xD675EBB8: "sceKernelSelfStopUnloadModule"},
+        )
 
     def test_route_a_batches_eleven_and_twelve_leave_uncovered_contracts_unreviewed(self) -> None:
         # The WritebackInvalidate range variant is not measured. It may not ride along with the
@@ -2575,8 +2881,14 @@ class ProfileZeroImportGateTests(unittest.TestCase):
     def test_the_cli_fails_on_a_stale_allowlist_entry(self) -> None:
         import tempfile
         allowlisted = sorted(meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # The guest still imports something: a reviewed NID keeps its import table non-empty
+        # when the allowlist holds a single entry.
+        reviewed = next(
+            int(r["nid"], 16) for r in self.manifest["registrations"]
+            if r["classification"] == "dedicated" and r["status"] == "partial"
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            module = self._module(tmp, allowlisted[1:])
+            module = self._module(tmp, allowlisted[1:] + [reviewed])
             rc, err = self._main("--out", str(Path(tmp) / "m.json"), "--imports", str(module),
                                  "--check-profile-zero-imports")
         self.assertEqual(rc, 1)

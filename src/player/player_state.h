@@ -1342,6 +1342,8 @@ struct PlayerApp {
        game's page hides it for that game and the effects it named, for the rest of this
        player session: another game, or an effect it did not name, shows it again. The last
        game hidden is the one remembered. */
+    int fsr1_session_preset;          /* requesting preset for the current launch */
+    NkFsr1Refusal fsr1_session_refusal;
     uint16_t render_effects;
     char render_effects_text[384];
     uint16_t render_effects_hidden;

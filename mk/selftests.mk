@@ -1129,6 +1129,17 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@: > "$(GPU_COHERENCE_SKIPS)"
 	$(GPU_COHERENCE_RUN)
+	@d=$$(mktemp -d "$(BUILD_DIR)/ngef-ram.XXXXXX") || exit $$?; \
+	unset SR_GE_CAPTURE_EXIT SR_GE_CAPTURE_MIN_PRIMS SR_GPU_TEX_SHADOW_DISABLE; \
+	for cell in ngef-cold ngef-warm ngef-resident ngef-no-capture ngef-clut8 ngef-clut8-masked \
+		  ngef-palette ngef-mip ngef-conflict ngef-scratch-cold ngef-scratch-warm \
+		  ngef-scratch-dxt1 ngef-scratch-ram ngef-scratch-vram ngef-vram-eager ngef-no-shadow; do \
+		export SR_GE_CAPTURE_PATH="$$d/$$cell.ngef"; \
+		if [ "$$cell" = ngef-no-capture ]; then unset SR_GE_CAPTURE_FRAME; \
+		else export SR_GE_CAPTURE_FRAME=2; fi; \
+		if [ "$$cell" = ngef-no-shadow ]; then export SR_GPU_TEX_SHADOW_DISABLE=1; fi; \
+		$(GPU_COHERENCE_LEG) --authentic --scale 1 --case "$$cell" || exit $$?; \
+	done
 	$(GPU_COHERENCE_RUN) --scale 2 --case scaled-upload
 	$(GPU_COHERENCE_RUN) --scale 4 --case scaled-upload
 	$(GPU_COHERENCE_RUN) --scale 2 --case mip-lod
@@ -1264,6 +1275,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --scale 4 --case dst-read
 	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_RUN) --case pipeline-minmax
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm

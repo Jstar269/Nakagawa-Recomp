@@ -119,7 +119,8 @@ typedef struct {
 /* Steam's folder from this user's settings (Windows: HKCU\Software\Valve\Steam
  * SteamPath). NK_STEAM_ERR_UNSUPPORTED on systems other than Windows and Linux,
  * NK_STEAM_ERR_NOT_FOUND when Steam is not installed for this user or its folder is gone. Linux
- * checks `$HOME/.local/share/Steam` and `$HOME/.steam/steam`, preferring a root with `userdata/`. */
+ * checks `$HOME/.local/share/Steam` and `$HOME/.steam/steam`, preferring a root with an account
+ * over one with only `userdata/`. The standard root takes precedence when both have accounts. */
 NkSteamStatus nk_steam_find_root(char *root, size_t root_cap);
 
 /* The accounts that have signed in for this user: the all-digit folders of <root>/userdata other than

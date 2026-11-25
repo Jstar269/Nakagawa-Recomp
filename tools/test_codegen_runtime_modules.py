@@ -1309,7 +1309,11 @@ class RelocatedImmediateEmission(unittest.TestCase):
         decoded = ("((((sr_m7_base + 0x{0:08x}u) + 4u) & 0xF0000000u) | "
                    "((MEM_R32((sr_m7_base + 0x{0:08x}u)) & 0x03FFFFFFu) << 2))")
         self.assertIn(f"uint32_t _t = {decoded.format(0x00)};", text)
-        self.assertIn("if (dispatch_call_checked(s, _t, (sr_m7_base + 0x00000008u))) return;", text)
+        self.assertIn(
+            "if (_t != (sr_m7_base + 0x00000008u)) { "
+            "if (dispatch_call_checked(s, _t, (sr_m7_base + 0x00000008u))) return; }",
+            text,
+        )
         self.assertIn("m7_00000020(s);", text)
         self.assertIn(f"uint32_t _t = {decoded.format(0x10)};", text)
         self.assertIn("sr_tail_record(s, _t, NULL, _sp_entry, 1u); return;", text)

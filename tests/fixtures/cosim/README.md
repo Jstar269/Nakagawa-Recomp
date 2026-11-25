@@ -373,9 +373,12 @@ anchors.
 A reference result with `EXPECTED_UNKNOWN (#312)` is counted and reported but not
 treated as agreement. The boundary is explicit: unmeasured NaN payload/sign
 propagation and signaling-NaN behavior, exact subnormal results with FS set,
-non-nearest-even `sqrt.s` PSP behavior, and signaling/NaN behavior for the upper
-eight `c.cond.s` predicates. COP1 exception flags and enables are outside this
-oracle. None of those cases is guessed or counted as a pass.
+and signaling/NaN behavior for the upper eight `c.cond.s` predicates. COP1
+exception flags and enables are outside this oracle. None of those cases is
+guessed or counted as a pass. `sqrt.s` of a non-NaN operand is checked under all
+four rounding modes, a negative operand other than -0 giving `0x7fc00000`: the
+pspautotests `tests/cpu/fpu/roundmode.expected` words at `e37443a6`, recorded on a
+PSP, include `sqrt.s` under each mode (#3030).
 
 ### A constraint the fixture had to obey
 

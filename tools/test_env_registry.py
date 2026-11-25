@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
-"""Tests for the runtime's environment-variable registry (src/rt/env_registry.h).
+"""Tests for the runtime registry and documented launcher stability classes.
 
 The header is one table naming every variable the runtime reads, with its kind, default,
 reading files and purpose. These tests keep it honest:
@@ -13,6 +13,8 @@ reading files and purpose. These tests keep it honest:
    src/core files mk/runtime_sources.mk links into the runtime are read the same way.
 3. Every row is read or named, as a whole identifier, somewhere in those files (no stale
    rows), and its reading files exist.
+4. The player's accepted options and SETUP.md's runtime and project variables
+   have explicit classes in the packaging architecture document.
 """
 
 import pathlib
@@ -24,6 +26,12 @@ RT = ROOT / "src" / "rt"
 SRC = ROOT / "src"
 NATIVE_TESTS = ROOT / "tests" / "native"
 REGISTRY = RT / "env_registry.h"
+PLAYER = SRC / "player" / "main.c"
+SETUP = ROOT / "docs" / "SETUP.md"
+STABILITY = ROOT / "docs" / "RUNTIME_PACKAGING_ARCHITECTURE.md"
+BUILD_ENV_READERS = tuple(ROOT / "tools" / name for name in (
+    "contrib_check.py", "nk_cli.py", "nk_doctor_checks.py", "vulkan_sdk.py",
+))
 # The makefiles whose assignments name the runtime's sources, and the lists that link it.
 MAKE_FILES = (ROOT / "Makefile", *sorted((ROOT / "mk").glob("*.mk")))
 RUNTIME_LISTS = ("RT_SRCS", "SDL3VK_SRCS")
@@ -40,6 +48,131 @@ GETENV_RE = re.compile(r'\b_?w?getenv\(\s*L?"([A-Za-z][A-Za-z0-9_]*)"\s*\)')
 SR_LITERAL_RE = re.compile(r'"(SR_[A-Z0-9_]+)"')
 ASSIGNMENT_RE = re.compile(r"^\s*([A-Za-z0-9_]+)\s*(?::=|\?=|\+=|=)(.*)$")
 REFERENCE_RE = re.compile(r"\$\(([A-Za-z0-9_]+)\)")
+
+CLI_TABLE_RE = re.compile(r"^static const PlayerCliOption k_player_cli_options\[\] = \{\n(.*?)^\};$",
+                          re.MULTILINE | re.DOTALL)
+C_STRING = r'"(?:[^"\\\n]|\\.)*"'
+CLI_TOKEN_RE = re.compile(
+    rf'\{{\s*"(?P<option>--[a-z0-9-]+)"\s*,\s*(?:NULL|{C_STRING})\s*,'
+    rf'\s*(?P<help>NULL|(?:{C_STRING}\s*)+)\s*,\s*(?:true|false)\s*\}},?'
+    r'|(?P<directive>\#[^\n]+)|/\*[\s\S]*?\*/|//[^\n]*|\s+'
+)
+ENV_SYMBOL_RE = re.compile(r"\b[A-Z][A-Z0-9_]+\b")
+PYTHON_ENV_READ_RE = re.compile(
+    r'''\bos\.(?:(?:getenv|environ\.get)\(\s*|environ\[\s*)["']([A-Z][A-Z0-9_]+)["']'''
+)
+EXPLICIT_ENV_RE = re.compile(
+    r"\$env:([A-Za-z][A-Za-z0-9_]*)|%([A-Z][A-Z0-9_]+)%|\bexport\s+([A-Z][A-Z0-9_]+)\s*="
+    r"|`([A-Z][A-Z0-9_]+)`\s+environment variables?\b"
+    r"|\benvironment variable\s+`([A-Z][A-Z0-9_]+)`"
+    r'|\b(?i:set)[ \t]+"([A-Z][A-Z0-9_]+)=[^"\r\n]*"'
+    r"|\b(?i:prefix the command with)[ \t]+`([A-Z][A-Z0-9_]+)="
+)
+POSIX_ASSIGNMENT_WORD = r"""[A-Z][A-Z0-9_]+=(?:"[^"`\r\n]*"|'[^'`\r\n]*'|[^\s`"']*)"""
+POSIX_ASSIGNMENT_RE = re.compile(POSIX_ASSIGNMENT_WORD)
+# Require a command after the leading assignments. A Make argument or an
+# isolated assignment in prose does not establish an environment input.
+POSIX_ENV_COMMAND_RE = re.compile(
+    rf"(?:^|`)[ \t]*(?:env[ \t]+)?((?:{POSIX_ASSIGNMENT_WORD}[ \t]+)+)"
+    r"(?=[A-Za-z0-9_./-]+(?:[ \t\r\n`]|$))", re.MULTILINE,
+)
+CLI_CLASSES = {
+    "Stable user-facing, printed in `--help`",
+    "Documented QA, capture and scripted-run flags",
+    "Hidden but accepted",
+    "Removed, kept as a tombstone",
+    "Compile-gated test options",
+}
+QA_HELP = {
+    "--screenshot": True,
+    "--headless-launch": True,
+    "--headless-accept-presented-frames": False,
+    "--headless-timeout-ms": False,
+}
+RUNTIME_OVERRIDES = "Documented runtime overrides"
+LAUNCHER_OWNED = "Launcher-owned, not user knobs"
+ENV_CLASSES = {
+    "Build and toolchain inputs", RUNTIME_OVERRIDES, LAUNCHER_OWNED,
+    "Inherited fallback, not a launcher export", "Retired runtime overrides",
+    "Diagnostic and developer-only", "Host and system", "Test-only",
+}
+# Host inputs for launcher setup or its shell tooling, outside the runtime registry.
+SETUP_HOST_ONLY = {"APPDATA", "LOCALAPPDATA", "MSYS_NO_PATHCONV"}
+SETUP_TOOL_ONLY = {"CODEGEN_ORACLE", "LOCAL_COSIM_TRACE", "MICROTEST_MODULE", "MICROTEST_ORACLE",
+                   "PSP_HARDWARE_TRACE"}
+# SETUP names this compile-time limit next to the manifest overlay directory.
+SETUP_CODE_SYMBOLS = {"NK_MANIFEST_MAX_OVERLAYS"}
+DUAL_USE_OVERRIDES = {"SR_CHEATS", "SR_CHEATS_FILE", "SR_USER_DATA_ROOT"}
+
+
+def player_cli_options(source):
+    """Return option, help visibility and UI-test gating across platform branches."""
+    table = CLI_TABLE_RE.search(source)
+    if not table:
+        raise ValueError("missing k_player_cli_options table")
+    options = []
+    conditions = []
+    body = table.group(1)
+    pos = 0
+    while pos < len(body):
+        token = CLI_TOKEN_RE.match(body, pos)
+        if not token:
+            raise ValueError(f"unrecognized k_player_cli_options entry: {body[pos:].splitlines()[0]!r}")
+        pos = token.end()
+        if name := token["option"]:
+            options.append((name, token["help"] != "NULL", any(conditions)))
+        elif directive := token["directive"]:
+            kind, *args = directive[1:].split()
+            if kind in {"if", "ifdef", "ifndef"}:
+                conditions.append(kind == "ifdef" and args == ["NK_PLAYER_UI_REGRESSION_TEST"])
+            elif kind in {"else", "elif"}:
+                conditions[-1] = False
+            elif kind == "endif":
+                conditions.pop()
+    if conditions:
+        raise ValueError("unterminated conditional in k_player_cli_options")
+    return options
+
+
+def stability_classes(document, column):
+    """Read names from one class table, leaving contract text and examples out."""
+    section = re.search(r"^### Flags and environment variables\n(.*?)(?=^### |\Z)",
+                        document, re.MULTILINE | re.DOTALL)
+    if not section:
+        raise ValueError("missing Flags and environment variables section")
+    classes = {}
+    in_table = False
+    for line in section[1].splitlines():
+        if line.startswith(f"| Class | {column} |"):
+            in_table = True
+        elif in_table:
+            if not line.startswith("|"):
+                break
+            _, label, names, _ = line.split("|", 3)
+            label = label.strip()
+            if label.startswith("---"):
+                continue
+            if label in classes:
+                raise ValueError(f"duplicate stability class: {label}")
+            members = [entry.split()[0] for entry in re.findall(r"`([^`]+)`", names)]
+            if not members or len(members) != len(set(members)):
+                raise ValueError(f"empty or duplicate stability names: {label}")
+            classes[label] = set(members)
+    return classes
+
+
+def setup_environment_names(text, known, families):
+    """Find project names, known environment inputs and explicit environment syntax."""
+    symbols = set(ENV_SYMBOL_RE.findall(text)) - SETUP_CODE_SYMBOLS
+    names = {name for name in symbols if name.startswith(("SR_", "NK_"))
+             or covered(name, known, families)}
+    names.update(name.upper() for match in EXPLICIT_ENV_RE.findall(text) for name in match if name)
+    names.update(word.split("=", 1)[0]
+                 for prefix in POSIX_ENV_COMMAND_RE.findall(text)
+                 for word in POSIX_ASSIGNMENT_RE.findall(prefix))
+    # A numbered spelling in SETUP means the corresponding registered family.
+    return {re.sub(r"\d+$", "N", name)
+            if name not in known and covered(name, known, families) else name for name in names}
 
 
 def registry_rows():
@@ -224,6 +357,89 @@ class EnvRegistryTests(unittest.TestCase):
                     or (rel.startswith("core/") and (SRC / rel).is_file()),
                     f"{entry['name']}: reader {rel} does not exist",
                 )
+
+    def test_player_options_have_stability_classes(self):
+        options = player_cli_options(PLAYER.read_text(encoding="utf-8"))
+        classes = stability_classes(STABILITY.read_text(encoding="utf-8"), "Options")
+        self.assertEqual(set(classes), CLI_CLASSES, "player CLI stability class headings changed")
+        classified = set().union(*classes.values())
+        self.assertEqual({name for name, _, _ in options}, classified,
+                         "k_player_cli_options and documented option names differ")
+        self.assertEqual(sum(map(len, classes.values())), len(classified),
+                         "a player option has multiple stability classes")
+
+        stable = classes["Stable user-facing, printed in `--help`"]
+        qa = classes["Documented QA, capture and scripted-run flags"]
+        self.assertEqual(qa, set(QA_HELP), "documented QA options need explicit classification")
+        self.assertIn("--runtime-bin", classes["Hidden but accepted"], "old runtime-root spelling")
+        self.assertEqual(classes["Removed, kept as a tombstone"], {"--ui"})
+        for name, has_help, test_only in options:
+            with self.subTest(option=name):
+                self.assertEqual(has_help, name in stable or QA_HELP.get(name, False),
+                                 "option class disagrees with --help visibility")
+                self.assertEqual(test_only, name in classes["Compile-gated test options"],
+                                 "option class disagrees with NK_PLAYER_UI_REGRESSION_TEST")
+
+    def test_documented_environment_has_explicit_stability_classes(self):
+        classes = stability_classes(STABILITY.read_text(encoding="utf-8"), "Variables")
+        self.assertEqual(set(classes), ENV_CLASSES, "environment stability class headings changed")
+        classified = set().union(*classes.values())
+        self.assertEqual(sorted(name for name in classified if not ENV_SYMBOL_RE.fullmatch(name)),
+                         [], "list each variable explicitly in its stability class")
+        tooling = {name for path in BUILD_ENV_READERS
+                   for name in PYTHON_ENV_READ_RE.findall(path.read_text(encoding="utf-8"))}
+        known = self.names | self.getenv_names | tooling | SETUP_HOST_ONLY | SETUP_TOOL_ONLY
+        documented = setup_environment_names(SETUP.read_text(encoding="utf-8"), known,
+                                             self.families)
+        self.assertEqual(sorted(documented - classified), [], "SETUP.md variables missing a class")
+
+        build = classes["Build and toolchain inputs"]
+        host = classes["Host and system"]
+        test = classes["Test-only"]
+        runtime_names = classified - build - SETUP_HOST_ONLY - SETUP_TOOL_ONLY
+        self.assertEqual(sorted(runtime_names - self.names), [],
+                         "classified variables missing from src/rt/env_registry.h")
+        self.assertEqual(sorted(build & self.names), [], "runtime variables classed as build inputs")
+        self.assertLessEqual(SETUP_HOST_ONLY, host)
+        self.assertFalse(SETUP_HOST_ONLY & self.names, "host-only inputs belong outside the runtime registry")
+        self.assertLessEqual(SETUP_TOOL_ONLY, test)
+        self.assertEqual(host & self.names, {e["name"] for e in self.entries
+                                            if e["name"] in classified and e["kind"] == "system"})
+        self.assertEqual(classes["Inherited fallback, not a launcher export"], {"SR_INPUT_PROFILE"})
+        self.assertIn("NK_INPUT_PROFILE", classes[LAUNCHER_OWNED])
+        self.assertLessEqual({"SR_DEBUG", "SR_GE_TIMING", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES"},
+                             classes["Diagnostic and developer-only"],
+                             "SETUP documents these runtime diagnostics in their developer role")
+        self.assertEqual(classes["Retired runtime overrides"], {e["name"] for e in self.entries
+                         if e["name"] in classified and e["purpose"].startswith("Retired ")})
+        self.assertEqual(classes[RUNTIME_OVERRIDES] & classes[LAUNCHER_OWNED], DUAL_USE_OVERRIDES)
+        self.assertEqual(sum(map(len, classes.values())), len(classified) + len(DUAL_USE_OVERRIDES),
+                         "unexpected overlap between environment stability classes")
+
+    def test_setup_names_unprefixed_environment_inputs_without_counting_acronyms(self):
+        setup = ("Set the `CUSTOM_SDK`\nenvironment variable. "
+                 "Use the environment variable `OTHER_SDK`. "
+                 "Try `export BUILD_TOOL=tool`, `$env:DevSdk` or `%USER_HOME%`. "
+                 "Set `VULKAN_SDK` to its installed location. "
+                 "GPU and `WIDGET_SDK` are acronyms.")
+        self.assertEqual(setup_environment_names(setup, {"VULKAN_SDK"}, set()),
+                         {"CUSTOM_SDK", "OTHER_SDK", "BUILD_TOOL", "DEVSDK", "USER_HOME", "VULKAN_SDK"})
+
+    def test_setup_shell_assignments_are_classified_as_environment_inputs(self):
+        cases = (
+            ("inline POSIX", "Run `STAGER_MODE=quiet python stage.py`.", {"STAGER_MODE"}),
+            ("env command", "Run `env STAGER_MODE=quiet python stage.py`.", {"STAGER_MODE"}),
+            ("multiple prefixes", "STAGER_MODE='quiet output' STAGER_ROOT=scratch/stage python stage.py\n",
+             {"STAGER_MODE", "STAGER_ROOT"}),
+            ("quoted cmd set", 'Use `set "STAGER_MODE=quiet"` before staging.', {"STAGER_MODE"}),
+            ("host prefix instruction", "Prefix the command with `MSYS_NO_PATHCONV=1`.",
+             {"MSYS_NO_PATHCONV"}),
+            ("Make argument", "Run `make target STAGER_MODE=quiet`.", set()),
+            ("ordinary acronym", "STAGER_MODE is an acronym in this example.", set()),
+        )
+        for label, setup, names in cases:
+            with self.subTest(syntax=label):
+                self.assertEqual(setup_environment_names(setup, set(), set()), names)
 
 
 if __name__ == "__main__":

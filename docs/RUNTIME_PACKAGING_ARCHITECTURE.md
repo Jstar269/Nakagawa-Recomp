@@ -729,47 +729,46 @@ written over, and registry load makes no other write.
 
 ### Flags and environment variables
 
-The code table is authoritative: a player option exists only when it is in
-`k_player_cli_options` (`src/player/main.c:4345-4384`); `--help` prints that
-table, and `player_cli_normalize` checks the whole command line against it
-before anything else reads it (`src/player/main.c:4406-4463`). The classes below
-are a reading of that table at this commit; a new option must be added there
-and classed here.
+The player defines its options in `k_player_cli_options` in
+`src/player/main.c`. The help command prints the visible entries, and
+`player_cli_normalize` validates arguments against the same table. Add each new
+option to the table and assign it a stability class below.
 
 | Class | Options | Contract and source |
 | --- | --- | --- |
-| Stable user-facing, printed in `--help` | `--help`, `--version`, `--user-data-root`, `--iso`, `--stage`, `--stage-only`, `--launch-now`, `--launch-title`, `--launch-index`, `--runtime-root`, `--manifest-overlay`, `--experimental-60hz`, `--cheats`, `--cheats-file` | These are the flags a person or launcher may write. `--launch-title` is what Add to Steam writes (`docs/SETUP.md:321-324`), and `--user-data-root` moves the whole per-user folder (`docs/SETUP.md:868-872`). |
-| Documented QA, capture and scripted-run flags (**Proposal**) | `--screenshot`, `--headless-launch`, `--headless-accept-presented-frames`, `--headless-timeout-ms` | `--screenshot` and `--headless-launch` are printed in `--help`; the two acceptance options have `help == NULL`. `docs/TITLE_TESTING.md:314-324`, `:343-347` and `docs/SETUP.md:908-909`, `:914-922` document them for QA/acceptance and headless runs, not as a stable user contract. This class is a proposal: it separates documented QA/capture routes from the stable CLI above, and is not yet ratified. |
+| Stable user-facing, printed in `--help` | `--help`, `--version`, `--user-data-root`, `--iso`, `--stage`, `--stage-only`, `--launch-now`, `--launch-title`, `--launch-index`, `--runtime-root`, `--manifest-overlay`, `--experimental-60hz`, `--cheats`, `--cheats-file` | These are the flags a person or launcher may write. Add to Steam writes `--launch-title` into the shortcut. An explicit `--user-data-root` selects the per-user folder. See [Start a game from another launcher](SETUP.md#start-a-game-from-another-launcher). |
+| Documented QA, capture and scripted-run flags | `--screenshot`, `--headless-launch`, `--headless-accept-presented-frames`, `--headless-timeout-ms` | `--screenshot` and `--headless-launch` appear in `--help`. The two acceptance options have `help == NULL`. [Title testing](TITLE_TESTING.md) describes the QA and capture routes. These flags may change without the notice period for stable user-facing options. |
 | Hidden but accepted | `--runtime-bin`, `--view`, `--width`, `--height`, `--render-scale`, `--demo`, `--empty`, `--wizard` | `help == NULL` in the same table. `--runtime-bin` is the old spelling of `--runtime-root`; the others are harness or launcher internals, not a user contract. |
-| Removed, kept as a tombstone | `--ui <ignored>` | Parsed and ignored so shortcuts made before its removal still pass `--ui=next` (`src/player/main.c:4374`). |
-| Compile-gated test options | `--ui-test-events`, `--ui-test-screenshot`, `--ui-test-error-code`, `--ui-test-iso-path`, `--ui-test-wait-background`, `--ui-test-catalog-reload-path`, `--ui-test-catalog-reload-count` | Present only with `NK_PLAYER_UI_REGRESSION_TEST`; not in a release build (`src/player/main.c:4375-4383`). |
+| Removed, kept as a tombstone | `--ui <ignored>` | Retained in `k_player_cli_options` in `src/player/main.c` so shortcuts made before removal can still pass `--ui=next`. |
+| Compile-gated test options | `--ui-test-events`, `--ui-test-screenshot`, `--ui-test-error-code`, `--ui-test-iso-path`, `--ui-test-wait-background`, `--ui-test-catalog-reload-path`, `--ui-test-catalog-reload-count` | `k_player_cli_options` in `src/player/main.c` includes these only with `NK_PLAYER_UI_REGRESSION_TEST`. |
 
-A command line that names an unknown option, leaves a stray argument, omits a
-value, or gives a value to a switch is refused by name and exits 2; nothing is
-ignored in silence (`src/player/main.c:4414-4462`; the exit code is stated at `:4331-4333`). A stable user-facing flag is the
-contract; a QA/capture, hidden or test flag may change or disappear. The split
-between the stable list and the QA/capture class is the **Proposal** above, not
-a ratified promise. The current exceptions are the accepted legacy spellings:
-`--runtime-bin` still names the runtime root, and `--ui=next` is still accepted
-and ignored. Keeping a future removed spelling for a notice release is a
-**Proposal** (see the release rule below), not a current guarantee.
+`player_cli_normalize` rejects an unknown option, a stray argument, a missing
+value or a value supplied to a switch. The `cli_good` check in `main` prints
+the diagnostic and returns exit code 2 (`src/player/main.c`).
+Stable user-facing flags follow the notice policy below. Hidden and test flags
+may change or disappear. The current legacy spellings have their own behavior.
+`--runtime-bin` still names the runtime root, and `--ui=next` is accepted with
+a message explaining that the switch is ignored (`src/player/main.c:6257-6260`,
+`:6323-6327`).
 
 The runtime's variables have the same single source: `src/rt/env_registry.h`
 declares every name, its kind, its default, the file that reads it and its
 purpose (`src/rt/env_registry.h:7-24`). The classes below are a reading of that
-table and `docs/SETUP.md` at this commit. `tools/test_env_registry.py` fails on a
-name read in `src/rt` or linked `src/core` but missing from the table, on a row
-nothing reads, and on a malformed row.
+table and `docs/SETUP.md`. List each name explicitly so a new member of a prefix
+group receives its own classification. `tools/test_env_registry.py` checks for
+missing and malformed registry rows and checks the option and environment classes
+below against the option table and the variables in `docs/SETUP.md`.
 
-| Class | Examples | Contract and source |
+| Class | Variables | Contract and source |
 | --- | --- | --- |
-| Build and toolchain inputs | `NK_POWERSHELL`, `NK_PACKAGE_JOBS`, `NK_BUILD_ROOT`, `NK_INSTALL_ROOT` | Read by the build and player setup, not by a running title; documented in `docs/SETUP.md:41`, `:82-86`, `:1104`, `:1454-1465`. |
-| Documented runtime overrides | `SR_USER_DATA_ROOT`, `SR_MEMSTICK`, `SR_FPS_CAP`, `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_ACE`, `SR_TEX_*`, `SR_PRESENT_*`, `SR_RECORD`, `SR_REPLAY`, `SR_HEADLESS_*`, `SR_WATCHDOG_EXIT`, `SR_VIDEOREC_DIR`, `SR_SYSTEM_REGISTRY` | User-facing where `docs/SETUP.md` or `docs/DEBUGGING.md` gives a rule; each row in `src/rt/env_registry.h` carries its kind and default. `SR_USER_DATA_ROOT`, for example, is refused by name when invalid rather than silently replaced (`src/rt/env_registry.h:271`); other path variables keep their own row's default and validation. `SR_SYSTEM_REGISTRY` overrides the registry overlay path (`src/rt/hle_data.c:107-144`; `docs/DEBUGGING.md:1759`): an empty value falls back to the default, and a configured file that cannot be read leaves the change in memory only (`src/rt/hle.c:2190-2200`). |
-| Launcher-owned, not user knobs | `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_DISC_ID`, `SR_GAME_TITLE`, `SR_USER_DATA_ROOT`, `NK_INPUT_PROFILE`, `PSP_ISO` | The player always exports the switch and file so an inherited value cannot opt a launch in, and masks a stale title or data root (`src/core/nk_launch.c:1891-1929`; `src/rt/env_registry.h:34`). `NK_INPUT_PROFILE` is the path the launcher exports for the child; when it has none, it exports the bare name so an inherited value is removed (`src/core/nk_launch.c:1869-1873`, `:1998-2006`). |
+| Build and toolchain inputs | `BUILD_DIR`, `BUILD_ROOT`, `CC`, `GAME_NAME`, `MSYS_PATH`, `NK_BUILD_ROOT`, `NK_INSTALL_ROOT`, `NK_PACKAGE_JOBS`, `NK_POWERSHELL`, `PYTHON`, `SDL3_DIR`, `SDL3_DLL`, `SDL3_PATH`, `SDL3_TTF_DLL`, `TITLE_MANIFEST`, `VULKAN_SDK` | These inputs select compilers, interpreters, dependency paths, or build inputs and outputs. The Vulkan tool uses `VULKAN_SDK` after an explicit SDK path (`tools/vulkan_sdk.py`). SDL discovery consults `SDL3_DIR`, then `SDL3_PATH`, when no explicit path was given (`tools/nk_doctor_checks.py`). The staged SDL library overrides are `SDL3_DLL` and `SDL3_TTF_DLL`. |
+| Documented runtime overrides | `SR_ACE`, `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_FPS_CAP`, `SR_GPU_PIPELINE_CACHE`, `SR_MEMSTICK`, `SR_MOVIE_UPSCALE`, `SR_PRESENT_SCALING`, `SR_PRESENT_UPSCALE`, `SR_RECORD`, `SR_REPLAY`, `SR_SYSTEM_REGISTRY`, `SR_TEX_SCALE_BUDGET_MB`, `SR_USER_DATA_ROOT`, `SR_VIDEO`, `SR_VIDEOREC_DIR`, `SR_WATCHDOG_EXIT` | These listed runtime controls are user-facing and follow the notice policy below. The registry carries each name's kind and default. An invalid `SR_USER_DATA_ROOT` is refused by name. `SR_SYSTEM_REGISTRY` overrides the registry overlay path (`src/rt/hle_data.c:107-144`): an empty value falls back to the default, and a configured file that cannot be read leaves the change in memory only (`src/rt/hle.c:2190-2200`). |
+| Launcher-owned, not user knobs | `NK_INPUT_PROFILE`, `PSP_ISO`, `SR_ADHOC_ENABLED`, `SR_ADHOC_OFF_FILE`, `SR_ADHOC_PORT_OFFSET`, `SR_ADHOC_SERVER`, `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_DATAROOT`, `SR_DISC_ID`, `SR_GAME_TITLE`, `SR_MODULE_DIR`, `SR_TEX_REPLACE`, `SR_USER_DATA_ROOT` | For player starts, settings and validated launch paths determine the child values for cheats, online ad hoc, guest modules, texture packs and the data directories (`src/core/nk_launch.c`). `NK_INPUT_PROFILE` is the path the launcher exports for the child. When it has none, it exports the bare name so an inherited value is removed (`src/core/nk_launch.c:1869-1873`, `:1998-2006`). The direct-runtime uses of these variables do not change the player launch contract. |
 | Inherited fallback, not a launcher export | `SR_INPUT_PROFILE` | The runtime reads it only when `NK_INPUT_PROFILE` is unset or empty (`src/core/nk_input_profile.c:2491-2493`; `src/rt/env_registry.h:173`). It is the older name and a fallback, not an alias the launcher writes; an inherited value can reach a launch whose `NK_INPUT_PROFILE` is unset. |
-| Diagnostic and developer-only | `SR_*LOG`, `SR_GE*`, `SR_FLIGHT*`, `SR_*SNAP`, self-test fixture names | Registered and read, but not part of the player contract; `docs/DEBUGGING.md` documents their present meaning. |
-| Host and system | `HOME`, `PATH`, `TEMP`, `SDL_VIDEODRIVER`, `SDL_VIDEO_DRIVER` | Set by the host and read for their value; Nakagawa does not define their format (`src/rt/env_registry.h:10-16`, `:30`, `:36`, `:40-41`, `:304`). |
-| Test-only | `FUZZ_*`, `ATRAC3P_FIXTURE`, `NK_VIDEOREC_FAKE_FFMPEG` | Read only by a self-test tool; never needed to play. |
+| Retired runtime overrides | `SR_GLYPHS`, `SR_SMART_2D`, `SR_TEX_SCALE` | Nonempty inherited values are masked on player starts. A directly started runtime refuses nonempty values by name. These controls now use keys in `SR_ACE` (`src/rt/ace.c`). |
+| Diagnostic and developer-only | `SR_DEBUG`, `SR_GE_TIMING`, `SR_HEADLESS_ACCEPT_PRESENTED_FRAMES` | Diagnostic logging, the GE timing model and the frame-acceptance checkpoint are developer controls. `docs/DEBUGGING.md` describes other registry families, including log, flight recorder and snapshot controls. |
+| Host and system | `APPDATA`, `HOME`, `LOCALAPPDATA`, `MSYS_NO_PATHCONV`, `PATH`, `SDL_VIDEO_DRIVER`, `SDL_VIDEODRIVER`, `TEMP`, `USERPROFILE`, `WINDIR`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | Set by the host and read for their value. The runtime registry excludes `APPDATA` and `LOCALAPPDATA`, which are launcher and tooling inputs, and `MSYS_NO_PATHCONV`, which controls Git Bash path conversion. |
+| Test-only | `ATRAC3P_FIXTURE`, `CODEGEN_ORACLE`, `FUZZ_CONSTRAINT`, `FUZZ_SEED`, `FUZZ_TRIALS`, `LOCAL_COSIM_TRACE`, `MICROTEST_MODULE`, `MICROTEST_ORACLE`, `NK_VIDEOREC_FAKE_FFMPEG`, `PSP_HARDWARE_TRACE` | Inputs to self-tests and verification tools. The oracle, microtest and trace inputs belong to build and test commands outside the runtime registry. |
 
 The classes overlap by design: the launcher sets documented variables
 (`SR_CHEATS`, `SR_USER_DATA_ROOT`) as well as its own, and a hand-started
@@ -781,41 +780,31 @@ empty.
 
 ### Release notes, removal and version changes
 
-The release notes are the announcement point: `docs/PREVIEW_RELEASE.md:3` names
-the current release's notes as the description of what it holds, and
-`docs/RELEASE_NOTES_v0.0.3.md:1-5` is the current example. The deprecation
-promises below are a **Proposal** for
-[#2745](https://github.com/Jstar269/nakagawa-recomp/issues/2745), not an
-approved or code-enforced rule. The current legacy spellings and format refusals
-are behavior; the notice period is not.
+The release notes announce a deprecation and name its replacement. Give at
+least one published release of notice before removing or repurposing a stable
+user-facing flag or variable, a supported user-facing format version, or a
+release asset naming convention. The release that carries the notice keeps the
+existing contract in effect. The earliest removal is in a later release.
 
-* **Proposal:** A user-facing flag, environment variable, format version or
-  release-asset name is not removed or repurposed in the release that first
-  stops using it. That release's notes name the replacement; the old spelling
-  or version remains accepted for at least one published release, then may be
-  refused.
+* Keep a deprecated flag or variable spelling accepted with its existing meaning
+  through the notice release. A working alias can preserve the old spelling.
+  Keep an already obsolete player spelling as a recognized tombstone during its
+  notice period and document its behavior in the release notes.
 * A format version is bumped when a writer starts writing a layout the previous
-  reader cannot read. Runtime packages are the live example, with
-  `NK_AOT_PACKAGE_SCHEMA_VERSION 3` and v2 still accepted
-  (`src/core/nk_title_manifest.h:38-40`;
-  `src/core/nk_title_manifest.c:4727-4737`). The package reader refuses a newer
-  version by name and never rewrites it (`package_newer_format`,
-  `src/core/nk_title_manifest.c:2984-2996`); it does not call the file damaged.
-  **Proposal:** the previous version is kept readable for at least one release
-  under the notice period above.
-* **Proposal:** A removed player spelling is kept as a tombstone for that
-  window, not silently dropped. The current legacy spellings are behavior, not
-  evidence that the window is approved: `--runtime-bin` still names the runtime
-  root, and `--ui=next` is still accepted and ignored
-  (`src/player/main.c:4358`, `:4374`).
-* A published release asset is never replaced or edited; a changed file is a
-  new version (`docs/PREVIEW_RELEASE.md:518-520`). The version in every asset
-  name is the same version (`docs/PREVIEW_RELEASE.md:494-521`).
+  reader cannot read. Keep the previous supported format readable through the
+  notice release, including any existing migration on read. The
+  runtime package reader currently accepts v2 and v3 (`NK_AOT_PACKAGE_SCHEMA_VERSION`
+  in `src/core/nk_title_manifest.h`). It names a newer version and leaves the
+  package untouched (`package_newer_format` in `src/core/nk_title_manifest.c`).
+* Give notice before changing a release asset naming convention. The notice
+  release still uses the existing convention for its own version. The version
+  in every asset name agrees with that release, and published assets remain
+  immutable. See [release asset names](PREVIEW_RELEASE.md#release-asset-names).
 
-This is a release-process proposal, not a code-enforced rule. Nothing in `src/`
-reads these documents or counts published releases, and no test enforces the
-notice period. The format refusals above are enforced; the notice period and
-tombstone window are proposals, not code behavior.
+Maintainers check the notice at release review. The player and the readers
+enforce the option parsing and file checks described in this section. The
+v0.1.0 release notes will link to this policy when drafted
+([#2745](https://github.com/Jstar269/nakagawa-recomp/issues/2745)).
 
 ### The remaining contracts in detail
 
@@ -866,12 +855,6 @@ the declaration's SemVer (`docs/ENHANCEMENT_CONTRACT.md:247`). That
 `schema_version` is not the built runtime package's package schema (3 written;
 v2/v3 read, the table above), and that `version` is not the release asset set's
 SemVer. The file name and `id` are names, not versions.
-
-**Follow-up.** The drift test is deliberately not built here. It would fail
-when a player flag or a `SETUP.md`-documented variable is added without a
-class; `tools/test_env_registry.py` covers the `env_registry.h` rows, not the
-player-flag or `docs/SETUP.md` classification. That remains recorded for issue #2745. The shared writer's 1,000,000
-probe bound is documented above, not deferred; this change does not alter it.
 
 Logs, the update download (kept only when its SHA-256 matches) and the
 content-addressed package cache (section 6) hold no state a user could lose.
@@ -943,8 +926,9 @@ check is open under #324.
 
 ### Reproducible portable ZIP
 
-`tools/stage_install.py --portable-zip <zip> --zip-stage <folder>` writes the ZIP from the
-staged folder. It rewrites `SHA256SUMS.txt` in ordinal path order, verifies
+`tools/stage_install.py --portable-zip <zip> --zip-stage <folder> --artifact-reference <reference>` writes the ZIP from the
+staged folder. The closed temporary ZIP must pass the [artifact content audit](PREVIEW_RELEASE.md#recreate-the-package)
+against the independently approved reference before promotion. The writer rewrites `SHA256SUMS.txt` in ordinal path order, verifies
 `bin/runtime-manifest.json`, and stores one entry per file and per empty folder, sorted by
 UTF-8 path, every entry dated `SOURCE_DATE_EPOCH` (the commit time of `--revision` unless the
 variable or `--source-date-epoch` sets it; times before 1980 become 1980-01-01), mode 0644 for

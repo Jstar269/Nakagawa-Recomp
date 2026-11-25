@@ -352,7 +352,7 @@
     "classification": "dedicated",
     "handler": "h_AudioOutputPannedBlocking",
     "name": "sceAudioOutputPannedBlocking",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x1575d64b": {
     "classification": "controlled_unsupported",
@@ -393,9 +393,9 @@
   },
   "0x172d316e": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStdin",
     "name": "sceKernelStdin",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x17768e14": {
     "classification": "dedicated",
@@ -899,7 +899,7 @@
     "classification": "dedicated",
     "handler": "h_GamedataDialogShutdown",
     "name": "sceUtilityGamedataInstallShutdownStart",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x33be4024": {
     "classification": "dedicated",
@@ -1387,7 +1387,7 @@
     "classification": "dedicated",
     "handler": "h_GamedataDialogUpdate",
     "name": "sceUtilityGamedataInstallUpdate",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x4b1b5e82": {
     "classification": "dedicated",
@@ -1624,7 +1624,7 @@
     "classification": "dedicated",
     "handler": "h_LockMutexCB",
     "name": "sceKernelLockMutexCB",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x5c37c0ae": {
     "classification": "dedicated",
@@ -1762,7 +1762,7 @@
     "classification": "dedicated",
     "handler": "h_NetDialogStatus",
     "name": "sceUtilityNetconfGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x63632449": {
     "classification": "dedicated",
@@ -2124,7 +2124,7 @@
     "classification": "dedicated",
     "handler": "h_SharingDialogUpdate",
     "name": "sceUtilityGameSharingUpdate",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x787d04d5": {
     "classification": "dedicated",
@@ -2535,7 +2535,7 @@
     "classification": "dedicated",
     "handler": "h_NetDialogUpdate",
     "name": "sceUtilityNetconfUpdate",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x920f104a": {
     "classification": "dedicated",
@@ -2571,7 +2571,7 @@
     "classification": "dedicated",
     "handler": "h_SharingDialogStatus",
     "name": "sceUtilityGameSharingGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x94aa61ee": {
     "classification": "dedicated",
@@ -2650,7 +2650,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogStatus",
     "name": "sceUtilityMsgDialogGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x9ac2eeac": {
     "classification": "dedicated",
@@ -2890,9 +2890,9 @@
   },
   "0xa6bab2e9": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStdout",
     "name": "sceKernelStdout",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xa703fe0f": {
     "classification": "dedicated",
@@ -3109,7 +3109,7 @@
     "classification": "dedicated",
     "handler": "h_GamedataDialogStatus",
     "name": "sceUtilityGamedataInstallGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xb58e61b7": {
     "classification": "dedicated",
@@ -3337,6 +3337,12 @@
     "classification": "dedicated",
     "handler": "h_ReferLwMutexStatus",
     "name": "sceKernelReferLwMutexStatus",
+    "status": "partial"
+  },
+  "0xc2145e80": {
+    "classification": "dedicated",
+    "handler": "h_SysclibSnprintf",
+    "name": "snprintf",
     "status": "partial"
   },
   "0xc2df770e": {
@@ -4062,7 +4068,7 @@
     "classification": "dedicated",
     "handler": "h_SharingDialogShutdown",
     "name": "sceUtilityGameSharingShutdownStart",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xf0a26395": {
     "classification": "dedicated",
@@ -4174,9 +4180,9 @@
   },
   "0xf78ba90a": {
     "classification": "dedicated",
-    "handler": "h_StdFd",
+    "handler": "h_KernelStderr",
     "name": "sceKernelStderr",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xf79472d7": {
     "classification": "dedicated",
@@ -4207,7 +4213,7 @@
     "classification": "dedicated",
     "handler": "h_NetDialogShutdown",
     "name": "sceUtilityNetconfShutdownStart",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xf8dcb679": {
     "classification": "dedicated",

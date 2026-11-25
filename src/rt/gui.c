@@ -1406,7 +1406,8 @@ static void gui_wide_release(void) {
 static unsigned long long s_fsr1_presents;  /* presents the upscaler made, said at shutdown */
 
 /* An FSR 1 pass on the presenter's device, or NULL with the reason in error. */
-static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size) {
+static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size, bool *queue_lacks_compute) {
+    if (queue_lacks_compute) *queue_lacks_compute = false;
     Sdl3VkInfo vi;
     memset(&vi, 0, sizeof(vi));
     if (!sdl3vk_get_vk(&vi) || !vi.get_instance_proc_addr) {
@@ -1420,7 +1421,7 @@ static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size) {
     init.physical_device = (VkPhysicalDevice)vi.physical;
     init.device = (VkDevice)vi.device;
     init.queue_family = vi.queue_family;
-    return fsr1_create(&init, error, error_size);
+    return fsr1_create(&init, error, error_size, queue_lacks_compute);
 }
 
 /* An Anime4K pass on the presenter's device, or NULL with the reason in error. */
@@ -1453,7 +1454,7 @@ static int gui_movie_make(MovieUpscale *m, const char *where) {
                     error[0] ? error : "unknown");
     }
     error[0] = '\0';
-    m->fsr1 = gui_fsr1_make(error, sizeof(error));
+    m->fsr1 = gui_fsr1_make(error, sizeof(error), NULL);
     if (!m->fsr1 && !m->anime4k) {
         m->failed = 1;
         fprintf(stderr, "sdl3vk: movie upscaling is unavailable for %s (%s)\n", where,
@@ -1530,7 +1531,7 @@ static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out
     if (!s_fsr1 && !s_fsr1_rec) return NULL;
     if (!s_fsr1_rec && !s_fsr1_rec_failed) {
         char error[160] = "";
-        s_fsr1_rec = gui_fsr1_make(error, sizeof(error));
+        s_fsr1_rec = gui_fsr1_make(error, sizeof(error), NULL);
         if (!s_fsr1_rec) {
             s_fsr1_rec_failed = 1;
             fprintf(stderr, "sdl3vk: FSR 1 is unavailable for the recording (%s); it is scaled as "
@@ -1567,10 +1568,15 @@ static void gui_upscale_init(void) {
     if (mode != 1 && s_movie_mode == MOVIE_UPSCALE_OFF) return;
     char error[160] = "";
     if (mode == 1) {
-        s_fsr1 = gui_fsr1_make(error, sizeof(error));
-        if (!s_fsr1)
+        bool queue_lacks_compute;
+        s_fsr1 = gui_fsr1_make(error, sizeof(error), &queue_lacks_compute);
+        if (!s_fsr1) {
             fprintf(stderr, "sdl3vk: FSR 1 upscaling is unavailable (%s); the window scales as before\n",
                     error[0] ? error : "no Vulkan device");
+            NkFsr1Refusal refusal = queue_lacks_compute ? NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE
+                                                       : NK_FSR1_REFUSAL_STARTUP;
+            sr_gui_boot_event("%s", nk_fsr1_refusal_event(refusal));
+        }
     }
     if (s_movie_mode != MOVIE_UPSCALE_OFF && !gui_movie_make(&s_movie, "the window"))
         s_movie_mode = MOVIE_UPSCALE_OFF;
@@ -2331,6 +2337,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
                 s_first_gpu_frame = 0;
                 sr_gui_boot_event("BOOT_EVENT phase=first_frame source=gpu presented=1");
             }
+            sr_display_note_gpu_present();
             accepted = 1;
         }
         if (gpu_action != GUI_GPU_TRY_CPU) goto pace;

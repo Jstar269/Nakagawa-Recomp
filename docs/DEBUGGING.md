@@ -914,11 +914,11 @@ controller sample while it is open, as the system keyboard polls the pad on a PS
 it takes counts as read by the route. `SR_OSK_TEXT` and `SR_OSK_SCRIPT` are not needed for it.
 `SR_WINDOW_HIDDEN=1` runs the same presenter with a hidden window, so a headless route keeps the
 window's keyboard and its frame capture without a visible window. Under the offscreen presenter
-the overlay is not drawn, and the variables below still answer. Where the presenter cannot draw
-the keyboard, the native input box is the fallback. If SDL refuses the frame's surface or its
-renderer after a request opened, the request is dropped, one stderr line names the SDL error,
-and the field falls back to the native input path (the Windows input box) for the rest of the
-run.
+the overlay is not drawn. Without a configured script, the field stays open while the title continues.
+Windows uses its native input box when the presenter cannot draw the keyboard. On a host without
+that fallback, a live field stops the run at `osk-host-unavailable` without supplying an answer or
+changing the field's output. If SDL refuses the surface or renderer after opening a keyboard, the log
+names the SDL error and the next poll uses the same host rules.
 
 ### Scripted keyboard answers
 
@@ -1352,6 +1352,9 @@ frames are byte-identical to an ungated run.
 | `N` >= 1 | unset | presents at least `N` vblanks apart |
 | `N` >= 1 | set | presents at least `N` vblanks apart, inside the windows |
 | `0`, negative or non-numeric | either | none: an explicit `0` still disables FBSNAP |
+
+A host refresh of a static framebuffer counts as a present for FBSNAP. The cadence permits at
+most one capture attempt per VBLANK, preserving the filename of the first attempt.
 
 `SR_FBSNAP_AFTER` applies in every row, and `SR_FBDUMP` still takes the capture slot when it
 is set. A window whose text does not parse leaves no window active (reported on stderr as

@@ -3605,6 +3605,7 @@ IoAsyncState s_closed_async_state[64];
 uint64_t s_io_dispatch_epoch;
 uint64_t s_io_async_sequence;
 static atomic_uint s_io_raw_device_boundary_reported;
+static atomic_uint s_io_std_handle_unmeasured_reported;
 IoCwd s_io_cwds[64];
 
 IoCwd *io_cwd_find(uint32_t thread_uid, int create) {
@@ -3669,6 +3670,7 @@ void hle_fd_init(void) {
     s_io_dispatch_epoch = 0;
     s_io_async_sequence = 0;
     atomic_store_explicit(&s_io_raw_device_boundary_reported, 0u, memory_order_release);
+    atomic_store_explicit(&s_io_std_handle_unmeasured_reported, 0u, memory_order_release);
     hle_io_assign_reset();
     for (uint8_t stream = 0; stream < 3; stream++) {
         Fd *f = &s_fds[stream];
@@ -3711,6 +3713,44 @@ uint32_t hle_io_raw_fd_boundary(uint32_t fd, IoRawDeviceBoundary operation,
                                        const char *api) {
     if (!hle_fd_is_raw_device(fd)) return 0u;
     return hle_io_raw_device_boundary(operation, api, s_fds[fd].guest_path, fd);
+}
+
+static const char *hle_std_handle_name(int stream) {
+    return stream == 0 ? "Stdin" : stream == 1 ? "Stdout" : "Stderr";
+}
+
+static int hle_io_std_handle_first_report(IoStdUnmeasured operation) {
+    const unsigned bit = 1u << (unsigned)operation;
+    return !(atomic_fetch_or_explicit(&s_io_std_handle_unmeasured_reported, bit,
+                                      memory_order_acq_rel) & bit);
+}
+
+/* A call on a standard handle that PSP-HLE-STDIO-001 does not measure and that has no result to
+ * keep: it is named once per run, answers 0x80010086 and changes nothing, as the raw-device
+ * boundaries above do. */
+uint32_t hle_io_std_handle_boundary(IoStdUnmeasured operation, const char *api, int stream) {
+    if (hle_io_std_handle_first_report(operation))
+        fprintf(stderr,
+                "SEMANTIC_BOUNDARY: IO_STD_HANDLE_OPERATION: %s on the %s handle is not "
+                "measured on a PSP (PSP-HLE-STDIO-001) and is not supported yet (0x80010086)\n",
+                api, hle_std_handle_name(stream));
+    return 0x80010086u;
+}
+
+/* sceIoClose of the Stdin or the Stderr handle. Only the Stdout close is measured
+ * (PSP-HLE-STDIO-001: refused and nothing closed in both launch contexts). Before the three
+ * imports had handles of their own, a close through sceKernelStdin or sceKernelStderr named the
+ * Stdout handle and so answered its refusal; a program that closes its three standard streams
+ * as it exits still gets the Stdout answer. Modelled, not measured for these two handles in
+ * either context: said once per run for each. */
+uint32_t hle_io_std_handle_close_refusal(int stream) {
+    if (hle_io_std_handle_first_report(stream == 0 ? IO_STD_UNMEASURED_CLOSE_STDIN
+                                                   : IO_STD_UNMEASURED_CLOSE_STDERR))
+        fprintf(stderr,
+                "HLE: modelled, not PSP-measured: sceIoClose of the %s handle answers "
+                "0x80020325 and closes nothing, as the game-context close of the Stdout handle "
+                "does (PSP-HLE-STDIO-001)\n", hle_std_handle_name(stream));
+    return HLE_STD_CLOSE_REFUSED_GAME_CONTEXT;
 }
 
 int hle_fd_is_raw_umd(uint32_t fd) {

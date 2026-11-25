@@ -3807,6 +3807,95 @@ static int coherence_run_texture_ram_unnotified_change(void) {
     return 1;
 }
 
+/* A linear texture can expose more texels in its last row than fit in the declared
+ * pitch. A plain RAM store to that tail must change what the next GPU draw samples. */
+static int coherence_texture_ram_linear_tail_cell(unsigned fmt, unsigned pitch) {
+    enum { W = 32, H = 4, X0 = 10, X1 = 50, Y = 10 };
+    const uint32_t base = 0x04140000u, stride = 512u;
+    const uint32_t tex_addr = 0x08530000u, clut_addr = 0x08540000u;
+    const uint32_t list_addr = 0x00100800u, rgb = 0x00FFFFFFu;
+    const unsigned bits = fmt == 3u ? 32u : 8u;
+    const unsigned tail = (H - 1u) * ge_tex_row_bytes(pitch, bits) + (W - 1u) * bits / 8u;
+    const uint32_t old_rgb = 0x00313131u;
+    const uint32_t new_rgb = fmt == 3u ? 0x003131C3u : 0x00C3C3C3u;
+    uint32_t *guest = (uint32_t *)SR_HOST(base);
+    uint8_t *tex = SR_HOST(tex_addr);
+    uint32_t *clut = (uint32_t *)SR_HOST(clut_addr);
+    uint32_t decoded[W * H];
+
+    coherence_reset_targets();
+    memset(guest, 0, stride * FB_H * 4u);
+    sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+    memset(tex, 0x31, 2048u);
+    for (uint32_t i = 0; i < 256u; i++) clut[i] = 0xFF000000u | (i * 0x00010101u);
+
+    wrap_state(base, stride);
+    const uint32_t list[] = {
+        0xA0000000u | (tex_addr & 0x00FFFFFFu),
+        0xA8000000u | ((tex_addr & 0xFF000000u) >> 8) | pitch,
+        0xB8000205u, /* 32 x 4 */
+        0xC2000000u, /* linear */
+        0xC3000000u | fmt,
+        0xC6000000u, /* nearest */
+        0xC9000103u, /* replace, RGBA */
+        0xB0000000u | (clut_addr & 0x00FFFFFFu),
+        0xB1000000u | ((clut_addr & 0xFF000000u) >> 8),
+        0xC500FF03u, /* 8888, shift 0, mask 0xFF */
+        0xC4000020u, /* load 256 palette entries */
+        0x1E000001u, /* texture enable */
+        0x0F000000u, 0x0C000000u,
+    };
+    memcpy(SR_HOST(list_addr), list, sizeof(list));
+    ge_set_gpu_hooks(&k_hooks);
+    if (ge_run_list(list_addr, 0) || s_ge->tex_w != W || s_ge->tex_h != H ||
+        s_ge->tex_bufw != pitch) {
+        fprintf(stderr, "gpu coherence selftest [texture-ram-linear-tail]: GE setup failed\n");
+        return 0;
+    }
+
+    ge_decode_tex_rgba(decoded);
+    const uint32_t ref_first = decoded[W * H - 1u] & rgb;
+    GeVtx p0, p1;
+    wrap_vtx(&p0, X0, Y, 0xFFFFFFFFu);
+    wrap_vtx(&p1, X0 + W, Y + H, 0xFFFFFFFFu);
+    p1.u = W;
+    p1.v = H;
+    int ok = hook_sprite(&p0, &p1, 0) && submit_pending();
+
+    tex[tail] = 0xC3; /* No notification or texture state change between draws. */
+    ge_decode_tex_rgba(decoded);
+    const uint32_t ref_second = decoded[W * H - 1u] & rgb;
+    p0.x += X1 - X0;
+    p1.x += X1 - X0;
+    ok = ok && hook_sprite(&p0, &p1, 0) && s_cur && target_readback(s_cur);
+    const uint32_t first = guest[(Y + H - 1) * stride + X0 + W - 1] & rgb;
+    const uint32_t second = guest[(Y + H - 1) * stride + X1 + W - 1] & rgb;
+    coherence_reset_targets();
+
+    if (!ok || ref_first != old_rgb || ref_second != new_rgb ||
+        first != ref_first || second != ref_second) {
+        fprintf(stderr, "gpu coherence selftest [texture-ram-linear-tail]: "
+                "fmt=%u pitch=%u tail=%u draw=%d gpu=%06x/%06x reference=%06x/%06x "
+                "expected=%06x/%06x\n",
+                fmt, pitch, tail, ok, first, second, ref_first, ref_second, old_rgb, new_rgb);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS texture-ram-linear-tail "
+           "fmt=%u pitch=%u tail=%u gpu=%06x/%06x reference=%06x/%06x\n",
+           fmt, pitch, tail, first, second, ref_first, ref_second);
+    return 1;
+}
+
+static int coherence_run_texture_ram_linear_tail(void) {
+    const unsigned formats[] = { 3u, 5u }; /* RGBA8888 and CLUT8 */
+    const unsigned pitches[] = { 8u, 16u, 32u, 64u }; /* narrow, equal, and padded */
+    int ok = 1;
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++)
+        for (size_t j = 0; j < sizeof(pitches) / sizeof(pitches[0]); j++)
+            if (!coherence_texture_ram_linear_tail_cell(formats[i], pitches[j])) ok = 0;
+    return ok;
+}
+
 /* One CLUT8 texture drawn twice through the same palette bytes with a different CLUT format
  * word: the palette identity in the texture cache key covers the format, so the second draw
  * decodes again (index >> 1 picks another entry) instead of reusing the first decode. The
@@ -4275,8 +4364,10 @@ static int parity_r6_chan(int s, int d, int sf, int df, int eq) {
 #define PARITY_FIXA 0x3F7F9Fu
 #define PARITY_FIXB 0x7F5F2Fu
 
-static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
-                            uint32_t fixb, uint32_t sprites) {
+static uint32_t parity_list_configured(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
+                                       uint32_t fixb, uint32_t sprites, uint32_t mask_rgb,
+                                       uint32_t fmt, int dither, uint32_t stencil_zpass,
+                                       uint32_t mask_alpha) {
     const uint32_t list_addr = 0x00100000u;
     uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
     uint32_t stride = 512u;
@@ -4286,17 +4377,28 @@ static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, 
     PARITY_EMIT(0x4C, 0);
     PARITY_EMIT(0x9C, base & 0x00FFFFFFu);
     PARITY_EMIT(0x9D, stride | ((base & 0xFF000000u) >> 8));
-    PARITY_EMIT(0xD2, 3);
+    PARITY_EMIT(0xD2, fmt);
     PARITY_EMIT(0xD3, 0);
     PARITY_EMIT(0x1D, 0);
     PARITY_EMIT(0x1E, 0);
     PARITY_EMIT(0x1F, 0);
-    PARITY_EMIT(0x20, 0);
+    PARITY_EMIT(0x20, dither);
+    if (dither) {
+        PARITY_EMIT(0xE2, 0x147Fu);
+        PARITY_EMIT(0xE3, 0x7F41u);
+        PARITY_EMIT(0xE4, 0x417Fu);
+        PARITY_EMIT(0xE5, 0x1F74u);
+    }
     PARITY_EMIT(0x22, 0);
     PARITY_EMIT(0x23, 0);
+    PARITY_EMIT(0x24, stencil_zpass != 0u);
+    if (stencil_zpass != 0u) {
+        PARITY_EMIT(0xDC, 1u | (0xFFu << 16));  /* ALWAYS: every covered pixel takes zpass. */
+        PARITY_EMIT(0xDD, stencil_zpass << 16);
+    }
     PARITY_EMIT(0xE7, 1);
-    PARITY_EMIT(0xE8, 0);
-    PARITY_EMIT(0xE9, 0);
+    PARITY_EMIT(0xE8, mask_rgb);
+    PARITY_EMIT(0xE9, mask_alpha);
     PARITY_EMIT(0x15, 0);
     PARITY_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
     PARITY_EMIT(0xD4, 0);
@@ -4313,6 +4415,11 @@ static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, 
     PARITY_EMIT(0x0C, 0);
     #undef PARITY_EMIT
     return list_addr;
+}
+
+static uint32_t parity_list(uint32_t base, uint32_t vaddr, uint32_t blend_mode, uint32_t fixa,
+                            uint32_t fixb, uint32_t sprites, uint32_t mask_rgb) {
+    return parity_list_configured(base, vaddr, blend_mode, fixa, fixb, sprites, mask_rgb, 3u, 0, 0u, 0u);
 }
 
 /* Guest vertex layout for VERTEXTYPE 8888 colour + float position: colour first. */
@@ -4359,7 +4466,7 @@ static int coherence_run_blend_parity(void) {
             for (uint32_t dfp = 0; dfp <= 10 && ok; dfp++) {
                 const uint32_t fixa = PARITY_FIXA, fixb = PARITY_FIXB;
                 const uint32_t mode = sfp | (dfp << 4) | (eq << 8);
-                const uint32_t list = parity_list(base, vaddr, mode, fixa, fixb, sprites);
+                const uint32_t list = parity_list(base, vaddr, mode, fixa, fixb, sprites, 0);
                 /* the matrix draws onto an 8888 framebuffer with dithering off, so
                  * build_state's routing reduces to blend_needs_shader() */
                 int shader_path = blend_needs_shader(sfp, dfp, eq, fixa, fixb);
@@ -9033,6 +9140,210 @@ static int twin_ref_read(const char *path, TwinRef *r) {
     return 1;
 }
 
+/* Count both passes that bind set 2 (including ordinary pipelines) and recorded draws
+ * whose shader actually reads the destination through it. */
+static int coherence_run_minmax_routes(void) {
+    const uint32_t base = 0x04000000u | 0x00140000u, vaddr = 0x00101000u;
+    const uint32_t sprites = PARITY_GRID * PARITY_GRID;
+    const uint32_t alpha_sample = ((PARITY_ORIGIN + 1u) * FB_W + PARITY_ORIGIN + 1u) * 4u + 3u;
+    const uint32_t doubled = 6u | (8u << 4), inverse = 9u | (7u << 4), fix = 10u | (10u << 4);
+    const struct {
+        const char *name;
+        uint32_t mode, fmt;
+        int dither;
+        uint32_t stencil_zpass, mask_alpha;
+        int reads_dst;
+    } cases[] = {
+        { "min-doubled",         (3u << 8) | doubled, 3u, 0, 0u, 0u,    0 },
+        { "min-inverse",         (3u << 8) | inverse, 3u, 0, 0u, 0u,    0 },
+        { "min-dual-fix",        (3u << 8) | fix,     3u, 0, 0u, 0u,    0 },
+        { "max-doubled",         (4u << 8) | doubled, 3u, 0, 0u, 0u,    0 },
+        { "max-inverse",         (4u << 8) | inverse, 3u, 0, 0u, 0u,    0 },
+        { "max-dual-fix",        (4u << 8) | fix,     3u, 0, 0u, 0u,    0 },
+        { "add-doubled",                     doubled, 3u, 0, 0u, 0u,    1 },
+        { "add-dual-fix",                    fix,     3u, 0, 0u, 0u,    1 },
+        { "min-dither",          (3u << 8) | doubled, 3u, 1, 0u, 0u,    1 },
+        { "max-stencil",         (4u << 8) | inverse, 3u, 0, 3u, 0u,    1 },
+        { "min-565",             (3u << 8) | fix,     0u, 0, 0u, 0u,    1 },
+        /* ZERO stores alpha through fixed-function blending. A full preserve mask disables
+         * the alpha write. Preserving only some bits still needs a destination read. */
+        { "min-stencil-zero",    (3u << 8) | doubled, 3u, 0, 1u, 0u,    0 },
+        { "max-stencil-masked",  (4u << 8) | fix,     3u, 0, 1u, 0xffu, 0 },
+        { "min-stencil-partial", (3u << 8) | doubled, 3u, 0, 1u, 0x5au, 1 },
+    };
+    static uint8_t image[FB_W * FB_H * 4u];
+    parity_vertices(vaddr, sprites);
+    int ok = 1;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        const uint32_t fmt = cases[i].fmt, bpp = fmt == 3u ? 4u : 2u;
+        const size_t bytes = (size_t)FB_W * FB_H * bpp;
+        const uint32_t list = parity_list_configured(base, vaddr, cases[i].mode, PARITY_FIXA,
+            PARITY_FIXB, sprites, 0, fmt, cases[i].dither, cases[i].stencil_zpass, cases[i].mask_alpha);
+        const GeGpuFbDescriptor desc = { .addr = base, .format = fmt, .stride = FB_W,
+                                          .width = 480, .height = FB_H };
+        coherence_reset_targets();
+        stp_fill_background(base, fmt);
+        const uint32_t initial_alpha = fmt == 3u ? ((const uint8_t *)SR_HOST(base))[alpha_sample] : 0u;
+        const GegpuSelftestRecordCommands commands0 = s_selftest_record_commands;
+        const unsigned long long draws0 = s_replay_stats.draws, fallbacks0 = s_replay_stats.fallback_prims;
+        const unsigned long long copies0 = s_replay_stats.snapshot_copies, rmw0 = s_cnt_rmw_ops;
+        const unsigned long long fixed0 = s_replay_stats.stencil_fixed;
+        ge_set_gpu_hooks(&k_hooks);
+        ge_run_list(list, 0);
+        const int readback = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+        memcpy(image, SR_HOST(base), bytes);
+        const unsigned binds = s_selftest_record_commands.dst_set_binds - commands0.dst_set_binds;
+        const unsigned reads = s_selftest_record_commands.dst_read_draws - commands0.dst_read_draws;
+        const unsigned long long draws = s_replay_stats.draws - draws0;
+        const unsigned long long fallbacks = s_replay_stats.fallback_prims - fallbacks0;
+        const unsigned long long copies = s_replay_stats.snapshot_copies - copies0;
+        const unsigned long long rmw = s_cnt_rmw_ops - rmw0;
+        const unsigned long long fixed = s_replay_stats.stencil_fixed - fixed0;
+
+        coherence_reset_targets();
+        stp_fill_background(base, fmt);
+        ge_set_gpu_hooks(NULL);
+        ge_run_list(list, 0);
+        ge_set_gpu_hooks(&k_hooks);
+        const uint8_t *software = (const uint8_t *)SR_HOST(base);
+        const int equal = memcmp(image, software, bytes) == 0;
+        printf("pipeline-minmax-route %s draws=%llu fallbacks=%llu dst_binds=%u dst_reads=%u "
+               "copies=%llu rmw=%llu stencil_fixed=%llu frame=%016llx scalar_equal=%d\n", cases[i].name, draws,
+               fallbacks, binds, reads, copies, rmw, fixed,
+               (unsigned long long)nk_pcache_fnv1a64(0, image, bytes), equal);
+        const int fixed_stencil_matches = cases[i].stencil_zpass == 0u ||
+                                          ((fixed != 0) == !cases[i].reads_dst);
+        if (!readback || !draws || fallbacks || !binds || (reads != 0) != cases[i].reads_dst ||
+            ((copies != 0 || rmw != 0) != cases[i].reads_dst) || !fixed_stencil_matches) {
+            fprintf(stderr, "gpu coherence selftest [pipeline-minmax]: FAIL %s destination route "
+                    "wanted shader destination reads=%d\n", cases[i].name, cases[i].reads_dst);
+            ok = 0;
+        }
+        if (cases[i].stencil_zpass == 1u) {
+            const uint32_t mask = cases[i].mask_alpha, expected_alpha = initial_alpha & mask;
+            const int distinguishable = initial_alpha != 0u && (mask == 0u || expected_alpha != 0u) &&
+                                        (mask == 0xffu || expected_alpha != initial_alpha);
+            printf("pipeline-minmax-alpha %s before=0x%02x mask=0x%02x expected=0x%02x "
+                   "gpu=0x%02x software=0x%02x\n", cases[i].name, initial_alpha, mask, expected_alpha,
+                   (unsigned)image[alpha_sample], (unsigned)software[alpha_sample]);
+            if (!distinguishable || image[alpha_sample] != expected_alpha) {
+                fprintf(stderr, "gpu coherence selftest [pipeline-minmax]: FAIL %s stencil alpha mask\n",
+                        cases[i].name);
+                ok = 0;
+            }
+        }
+        if (!equal) {
+            for (uint32_t pixel = 0; pixel < FB_W * FB_H; pixel++) {
+                const uint32_t off = pixel * bpp;
+                if (!memcmp(image + off, software + off, bpp)) continue;
+                uint32_t gpu = 0, sw = 0;
+                memcpy(&gpu, image + off, bpp);
+                memcpy(&sw, software + off, bpp);
+                fprintf(stderr, "gpu coherence selftest [pipeline-minmax]: FAIL %s pixel (%u,%u) "
+                        "GPU=%08x software=%08x\n", cases[i].name, pixel % FB_W, pixel / FB_W, gpu, sw);
+                break;
+            }
+            ok = 0;
+        }
+    }
+    coherence_reset_targets();
+    return ok;
+}
+
+/* #2361: regular Vulkan MIN/MAX ignore the RGB factors. The same geometry with either
+ * factor pair must therefore reuse the pipeline and draw the same image. ADD keeps
+ * both factors, and masking one channel still changes the MAX pipeline. */
+static int coherence_run_pipeline_minmax(void) {
+    const char *name = "pipeline-minmax";
+    const uint32_t base = 0x04000000u | 0x00140000u, vaddr = 0x00101000u;
+    const uint32_t sprites = PARITY_GRID * PARITY_GRID;
+    const uint32_t sample = (PARITY_ORIGIN + 1u) * FB_W + PARITY_ORIGIN + 1u;
+    static const uint32_t equations[] = { 3u, 4u, 0u };
+    static const char *const operations[] = { "MIN", "MAX", "ADD" };
+    /* DST_COLOR and SRC_COLOR, then ONE_MINUS_DST_COLOR and ONE_MINUS_SRC_COLOR. */
+    static const uint32_t factors[] = { 0u, 1u | (1u << 4) };
+    static uint32_t first_images[3][FB_W * FB_H];
+    const GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = FB_W, .width = 480, .height = FB_H };
+    const uint32_t src = parity_src(0), dst = parity_bg(sample);
+    int ok = 1;
+
+    parity_vertices(vaddr, sprites);
+    ge_set_gpu_hooks(&k_hooks);
+    for (size_t op = 0; op < sizeof equations / sizeof equations[0]; op++) {
+        const uint32_t eq = equations[op];
+        const unsigned variants = eq == 4u ? 3u : 2u;
+        for (unsigned variant = 0; variant < variants; variant++) {
+            const uint32_t mask = variant == 2u ? 0x0000FFu : 0;
+            const uint32_t factor_pair = factors[variant != 0u];
+            const unsigned long want = variant == 0u || eq == 0u || mask != 0 ? 1u : 0u;
+            const uint32_t list = parity_list(base, vaddr, (eq << 8) | factor_pair, PARITY_FIXA,
+                                              PARITY_FIXB, sprites, mask);
+            coherence_reset_targets();
+            parity_fill_background(base);
+            const unsigned long creates0 = s_pcache_creates;
+            const unsigned long long draws0 = s_replay_stats.draws;
+            const unsigned long long fallback0 = s_replay_stats.fallback_prims;
+            const unsigned long long snapshots0 = s_replay_stats.snapshot_requests;
+            ge_run_list(list, 0);
+            if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK || s_replay_stats.draws == draws0 ||
+                s_replay_stats.fallback_prims != fallback0 || s_replay_stats.snapshot_requests != snapshots0) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u did not draw and read back "
+                        "through regular Vulkan blending (draws=%llu fallbacks=%llu snapshots=%llu)\n",
+                        name, operations[op], variant, s_replay_stats.draws - draws0,
+                        s_replay_stats.fallback_prims - fallback0, s_replay_stats.snapshot_requests - snapshots0);
+                coherence_reset_targets();
+                return 0;
+            }
+            const unsigned long creates = s_pcache_creates - creates0;
+            if (creates != want) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u created %lu pipelines, wanted %lu\n",
+                        name, operations[op], variant, creates, want);
+                ok = 0;
+            }
+            const uint32_t *pixels = (const uint32_t *)SR_HOST(base);
+            if (eq != 0u) {
+                /* Stencil is disabled, so the destination alpha is kept even on a blended pixel. */
+                uint32_t expected = dst & 0xFF000000u;
+                for (unsigned shift = 0; shift < 24u; shift += 8u) {
+                    const uint32_t s = (src >> shift) & 0xFFu, d = (dst >> shift) & 0xFFu;
+                    uint32_t chosen = (eq == 3u ? s < d : s > d) ? s : d;
+                    if ((mask >> shift) & 0xFFu) chosen = d;
+                    expected |= chosen << shift;
+                }
+                if (pixels[sample] != expected) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u interior pixel=%08x "
+                            "(wanted %08x)\n", name, operations[op], variant,
+                            (unsigned)pixels[sample], (unsigned)expected);
+                    ok = 0;
+                }
+            }
+            for (size_t earlier = 0; earlier < op; earlier++) {
+                if (!memcmp(pixels, first_images[earlier], sizeof first_images[earlier])) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u matched the %s image\n",
+                            name, operations[op], variant, operations[earlier]);
+                    ok = 0;
+                }
+            }
+            if (variant == 0u) {
+                memcpy(first_images[op], pixels, sizeof first_images[op]);
+            } else {
+                const int want_same = eq != 0u && mask == 0;
+                const int same = memcmp(pixels, first_images[op], sizeof first_images[op]) == 0;
+                if (same != want_same) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s variant %u image was %s\n",
+                            name, operations[op], variant, same ? "the same" : "different");
+                    ok = 0;
+                }
+            }
+        }
+    }
+    coherence_reset_targets();
+    if (!coherence_run_minmax_routes()) ok = 0;
+    if (ok) printf("gpu coherence selftest: PASS %-22s MIN/MAX reused both factor pairs; ADD and the mask "
+                   "kept separate pipelines and images; destination-read controls matched software\n", name);
+    return ok;
+}
+
 /* ---- the pipeline cache on disk (#2149) ------------------------------------------------
  *
  * Run by the recipe as three processes over one empty folder (`--pipeline-cache DIR`):
@@ -9065,7 +9376,7 @@ static int pcache_scene(uint32_t eq_end, uint64_t *hash) {
         for (uint32_t sfp = 0; sfp <= 10; sfp++)
             for (uint32_t dfp = 0; dfp <= 10; dfp++) {
                 const uint32_t list = parity_list(base, vaddr, sfp | (dfp << 4) | (eq << 8), PARITY_FIXA,
-                                                  PARITY_FIXB, sprites);
+                                                  PARITY_FIXB, sprites, 0);
                 coherence_reset_targets();
                 parity_fill_background(base);
                 ge_run_list(list, 0);
@@ -15391,16 +15702,21 @@ static void mvc_state(void) {
     ge_set_gpu_hooks(&k_hooks);
 }
 
-/* A through-mode sprite over [x0, x1) x [y0, y1): textured 1:1 from the picture, or one colour. */
-static int mvc_sprite(float x0, float y0, float x1, float y1, int textured, uint32_t colour) {
+/* A through-mode sprite over [x0, x1) x [y0, y1), with the first texture row at v0. */
+static int mvc_sprite_at_row(float x0, float y0, float x1, float y1, float v0,
+                             int textured, uint32_t colour) {
     s_ge->tex_enable = textured;
     ge_state_note_external_write();
     s_tmpl_ok = 0;
     GeVtx p0, p1;
     wrap_vtx(&p0, x0, y0, colour);
     wrap_vtx(&p1, x1, y1, colour);
-    p0.u = x0; p0.v = y0; p1.u = x1; p1.v = y1;
+    p0.u = x0; p0.v = v0; p1.u = x1; p1.v = v0 + (y1 - y0);
     return hook_sprite(&p0, &p1, 0);
+}
+
+static int mvc_sprite(float x0, float y0, float x1, float y1, int textured, uint32_t colour) {
+    return mvc_sprite_at_row(x0, y0, x1, y1, y0, textured, colour);
 }
 
 /* Presents the framebuffer and checks the kind the upscale pass was given. */
@@ -15562,6 +15878,308 @@ static int mvc_guest_frame(uint32_t *out) {
     memcpy(out, SR_HOST(MVC_BASE), 512u * FB_H * 4u);
     return 1;
 }
+
+/* A captured sprite draws into a different target from its unrecorded warm-up.
+ * The target starts empty in both live rendering and the fresh replay arena. */
+#define NC_TEXTURE 0x08610FE0u
+#define NC_MIP     0x08630000u
+#define NC_SCRATCH 0x00010300u
+#define NC_VRAM    0x041E0000u
+#define NC_CLUT    0x08740000u
+#define NC_LIST    0x08530000u
+#define NC_VERTS   0x08532000u
+#define NC_PRIME   0x04000000u
+#define NC_TARGET  0x04100000u
+#define NC_COLOUR  0xFF357BC1u
+#define NC_CHANGED 0xFFE1AA47u
+#define NC_LEVEL1  0xFF236BD4u
+#define NC_CLUTFMT (3u | (0xFFu << 8))
+
+extern void ge_set_frame(uint32_t frame);
+
+typedef struct {
+    const char *name;
+    uint32_t wlog, hlog, pitch;
+    int cold, indexed, mip, stale, off, conflict, palette_change, no_shadow;
+    uint32_t address, mip_address;
+    int mixed_vram, dxt1;
+} NgefRamCase;
+
+static uint32_t ngef_texture_addr(const NgefRamCase *c) {
+    return c->address ? c->address : NC_TEXTURE;
+}
+
+static uint32_t ngef_mip_addr(const NgefRamCase *c) {
+    return c->mip_address ? c->mip_address : NC_MIP;
+}
+
+/* PSP DXT1 stores indices first, then its 565 endpoints. All select solid red. */
+static const uint8_t ngef_dxt1_red[8] = {0, 0, 0, 0, 0x1F, 0, 0, 0};
+
+static uint32_t ngef_clut_index(uint32_t x, uint32_t y) {
+    return 0x40u + ((3u * x + 5u * y) & 31u);
+}
+
+static uint32_t ngef_clut_colour(uint32_t index) {
+    return 0xFF000000u | (index * 0x010203u);
+}
+
+static void ngef_load_clut(void) {
+    uint32_t *dl = (uint32_t *)SR_HOST(NC_LIST);
+    dl[0] = 0xB0000000u | (NC_CLUT & 0xFFFFFFu);
+    dl[1] = 0xB1000000u | ((NC_CLUT >> 8) & 0xFF0000u);
+    dl[2] = 0xC5000000u | NC_CLUTFMT;
+    dl[3] = 0xC4000020u; /* 32 blocks, 256 RGBA8888 entries */
+    dl[4] = 0x0F000000u;
+    dl[5] = 0x0C000000u;
+}
+
+static void ngef_ram_list(const NgefRamCase *c, uint32_t framebuffer) {
+    const float w = (float)(1u << c->wlog), h = (float)(1u << c->hlog);
+    const RawSpriteVtx verts[] = {{0, 0, 8, 8, 0}, {w, h, 8 + w, 8 + h, 0}};
+    memcpy(SR_HOST(NC_VERTS), verts, sizeof(verts));
+    uint32_t *dl = (uint32_t *)SR_HOST(NC_LIST);
+    unsigned words = 0;
+#define NC_EMIT(cmd, val) dl[words++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    NC_EMIT(0x10, (NC_VERTS >> 8) & 0xFF0000u);
+    NC_EMIT(0x9C, framebuffer & 0xFFFFFFu);
+    NC_EMIT(0x9D, 512u | ((framebuffer >> 8) & 0xFF0000u));
+    NC_EMIT(0x9E, 0x00090000u); NC_EMIT(0x9F, 512u | (4u << 16));
+    NC_EMIT(0xD2, 3u); NC_EMIT(0xD3, 0);
+    NC_EMIT(0x22, c->palette_change); NC_EMIT(0xDB, 6u | (127u << 8) | (255u << 16));
+    NC_EMIT(0x23, 0); NC_EMIT(0x24, 0);
+    NC_EMIT(0xE7, 1u); NC_EMIT(0xE8, 0); NC_EMIT(0xE9, 0);
+    NC_EMIT(0x4C, 0); NC_EMIT(0x4D, 0);
+    NC_EMIT(0x15, 0); NC_EMIT(0x16, (271u << 10) | 479u);
+    NC_EMIT(0xD4, 0); NC_EMIT(0xD5, (271u << 10) | 479u);
+    const uint32_t texture = ngef_texture_addr(c);
+    NC_EMIT(0xA0, texture & 0xFFFFFFu);
+    NC_EMIT(0xA8, c->pitch | ((texture >> 8) & 0xFF0000u));
+    NC_EMIT(0xB8, c->wlog | (c->hlog << 8));
+    NC_EMIT(0xC0, 0); NC_EMIT(0xC2, c->mip ? 1u << 16 : (unsigned)c->indexed);
+    NC_EMIT(0xC3, c->indexed ? 5u : c->dxt1 ? 8u : 3u);
+    NC_EMIT(0xC6, c->mip ? 4u : 0u); NC_EMIT(0xC7, 0);
+    if (c->mip) {
+        const uint32_t mip = ngef_mip_addr(c);
+        NC_EMIT(0xA1, mip & 0xFFFFFFu);
+        NC_EMIT(0xA9, 16u | ((mip >> 8) & 0xFF0000u));
+        NC_EMIT(0xB9, 4u | (4u << 8));
+        NC_EMIT(0xC8, 1u | (16u << 16)); /* constant LOD 1 */
+    }
+    NC_EMIT(0xC9, 3u | (1u << 8)); NC_EMIT(0x1E, 1u);
+    NC_EMIT(0x12, 3u | (3u << 7) | (1u << 23)); NC_EMIT(0x01, NC_VERTS & 0xFFFFFFu);
+    NC_EMIT(0x04, (6u << 16) | 2u); NC_EMIT(0x0F, 0); NC_EMIT(0x0C, 0);
+#undef NC_EMIT
+}
+
+/* Independent CLUT8 geometry for our 32-byte row width. */
+static uint32_t ngef_c8_offset(uint32_t x, uint32_t y) {
+    return (y / 8u) * 256u + (x / 16u) * 128u + (y % 8u) * 16u + x % 16u;
+}
+
+static void ngef_fill_ram(const NgefRamCase *c) {
+    const uint32_t w = 1u << c->wlog, h = 1u << c->hlog;
+    const uint32_t texture = ngef_texture_addr(c);
+    if (c->dxt1) {
+        for (uint32_t i = 0; i < (w / 4u) * (h / 4u); ++i)
+            memcpy(SR_HOST(texture + i * sizeof(ngef_dxt1_red)), ngef_dxt1_red, sizeof(ngef_dxt1_red));
+        return;
+    }
+    memset(SR_HOST(texture), 0xBD, c->indexed ? 512u : (c->pitch * h * 4u));
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            if (c->indexed)
+                sr_w8(texture + ngef_c8_offset(x, y), (uint8_t)ngef_clut_index(x, y));
+            else
+                sr_w32(texture + (y * c->pitch + x) * 4u, NC_COLOUR);
+        }
+    if (c->mip)
+        for (uint32_t i = 0; i < 16u * 16u; ++i) sr_w32(ngef_mip_addr(c) + i * 4u, NC_LEVEL1);
+}
+
+static unsigned ngef_diff_pixels(const NgefRamCase *c) {
+    const uint32_t w = 1u << c->wlog, h = 1u << c->hlog;
+    unsigned diff = 0;
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            const uint32_t want = c->indexed ? ngef_clut_colour(ngef_clut_index(x, y))
+                                           : c->mip ? NC_LEVEL1 : c->dxt1 ? 0xFF0000FFu : NC_COLOUR;
+            const uint32_t got = sr_r32(NC_TARGET + ((y + 8u) * 512u + x + 8u) * 4u);
+            diff += (got & 0xFFFFFFu) != (want & 0xFFFFFFu);
+        }
+    return diff;
+}
+
+static int ngef_page_byte(const GeCaptureFixture *f, uint32_t addr, uint8_t expected) {
+    if (sr_vram_cpu_aperture(addr))
+        return f->initial_vram[sr_vram_cpu_address(addr) - GE_CAPTURE_VRAM_BASE] == expected;
+    const uint32_t page = addr & ~(GE_CAPTURE_PAGE_SIZE - 1u);
+    for (uint32_t i = 0; i < f->page_count; ++i)
+        if (f->pages[i].addr == page)
+            return f->pages[i].data[addr - page] == expected;
+    return 0;
+}
+
+static int ngef_check_fixture(const NgefRamCase *c, const char *path, const uint8_t *palette) {
+    GeCaptureFixture f;
+    if (!ge_capture_load(path, &f)) return 0;
+    int ok = f.list_count == 1;
+    const uint32_t w = 1u << c->wlog, h = 1u << c->hlog;
+    const uint32_t texture = ngef_texture_addr(c);
+    if (c->dxt1) {
+        for (uint32_t i = 0; i < (w / 4u) * (h / 4u) * sizeof(ngef_dxt1_red); ++i)
+            ok &= ngef_page_byte(&f, texture + i, ngef_dxt1_red[i % sizeof(ngef_dxt1_red)]);
+    } else {
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) {
+                if (c->indexed) {
+                    ok &= ngef_page_byte(&f, texture + ngef_c8_offset(x, y),
+                                         (uint8_t)ngef_clut_index(x, y));
+                } else {
+                    const uint32_t addr = texture + (y * c->pitch + x) * 4u;
+                    for (uint32_t channel = 0; channel < 4u; channel++)
+                        ok &= ngef_page_byte(&f, addr + channel, (uint8_t)(NC_COLOUR >> (8u * channel)));
+                }
+            }
+    }
+    if (c->indexed)
+        ok &= f.initial_state.clut_fmt == NC_CLUTFMT &&
+              memcmp(palette, f.initial_state.clutram, sizeof(f.initial_state.clutram)) == 0;
+    if (c->indexed && c->wlog == 3u) ok &= ngef_page_byte(&f, texture + 8u, 0xFEu);
+    if (c->mip) {
+        for (uint32_t i = 0; i < 16u * 16u; ++i)
+            for (uint32_t channel = 0; channel < 4u; ++channel)
+                ok &= ngef_page_byte(&f, ngef_mip_addr(c) + i * 4u + channel,
+                                     (uint8_t)(NC_LEVEL1 >> (8u * channel)));
+    }
+
+    uint8_t *fresh = (uint8_t *)calloc(0x0C000000u, 1);
+    if (!fresh) { ge_capture_free(&f); return 0; }
+    uint8_t *live = g_mem;
+    const GeState live_state = *s_ge;
+    g_mem = fresh + 0x08000000u;
+    ge_set_gpu_hooks(NULL);
+    static uint16_t depth[GE_CAPTURE_ZBUF_WORDS];
+    if (!ge_capture_apply(&f, ge_state_ptr(), depth)) ok = 0;
+    ge_replay_restore(&f.initial_state, f.initial_zbuf);
+    if (ge_run_list(f.list_addrs[0], 0) != 0) ok = 0;
+    const unsigned diff = ngef_diff_pixels(c);
+    const unsigned pages = f.page_count;
+    g_mem = live;
+    *s_ge = live_state;
+    ge_set_gpu_hooks(&k_hooks);
+    free(fresh);
+    ge_capture_free(&f);
+    printf("NGEF RAM %s: pages=%u byte_match=%d replay_diff=%u\n", c->name, pages, ok, diff);
+    return ok && diff == 0;
+}
+
+static int s_ngef_active_at_draw;
+
+static int ngef_capture_sprite(const GeVtx *a, const GeVtx *b, int perspective) {
+    s_ngef_active_at_draw = ge_capture_active();
+    return hook_sprite(a, b, perspective);
+}
+
+static int coherence_run_ngef_ram(const char *name) {
+    static const NgefRamCase cases[] = {
+        {.name = "ngef-cold",         .wlog = 5, .hlog = 5, .pitch = 64, .cold = 1},
+        {.name = "ngef-warm",         .wlog = 5, .hlog = 5, .pitch = 64},
+        {.name = "ngef-resident",     .wlog = 5, .hlog = 5, .pitch = 64, .stale = 1},
+        {.name = "ngef-no-capture",   .wlog = 5, .hlog = 5, .pitch = 64, .stale = 1, .off = 1},
+        {.name = "ngef-clut8",        .wlog = 5, .hlog = 4, .pitch = 32, .indexed = 1},
+        {.name = "ngef-clut8-masked", .wlog = 3, .hlog = 2, .pitch = 32, .indexed = 1},
+        {.name = "ngef-palette",      .wlog = 5, .hlog = 4, .pitch = 32, .indexed = 1, .palette_change = 1},
+        {.name = "ngef-mip",          .wlog = 5, .hlog = 5, .pitch = 64, .mip = 1},
+        {.name = "ngef-conflict",     .wlog = 5, .hlog = 5, .pitch = 64, .stale = 1, .conflict = 1},
+        {.name = "ngef-no-shadow",    .wlog = 5, .hlog = 5, .pitch = 64, .no_shadow = 1},
+        {.name = "ngef-scratch-cold", .wlog = 3, .hlog = 3, .pitch = 8, .cold = 1,
+         .address = NC_SCRATCH},
+        {.name = "ngef-scratch-warm", .wlog = 3, .hlog = 3, .pitch = 8, .address = NC_SCRATCH},
+        {.name = "ngef-scratch-dxt1", .wlog = 3, .hlog = 3, .pitch = 8, .address = NC_SCRATCH, .dxt1 = 1},
+        {.name = "ngef-scratch-ram",  .wlog = 5, .hlog = 5, .pitch = 32, .mip = 1,
+         .address = NC_SCRATCH},
+        {.name = "ngef-scratch-vram", .wlog = 5, .hlog = 5, .pitch = 32, .mip = 1,
+         .address = NC_SCRATCH, .mip_address = NC_VRAM, .mixed_vram = 1},
+        {.name = "ngef-vram-eager",   .wlog = 3, .hlog = 3, .pitch = 8, .address = NC_VRAM},
+    };
+    const NgefRamCase *c = NULL;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        if (strcmp(cases[i].name, name) == 0) c = &cases[i];
+    const char *path = getenv("SR_GE_CAPTURE_PATH");
+    if (!c || !path || !*path || s_tex_shadow_enabled == c->no_shadow) return 0;
+    ngef_fill_ram(c);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    ge_set_gpu_hooks(&k_hooks);
+    ge_set_frame(1);
+    uint8_t palette[sizeof(s_ge->clutram)];
+    if (c->indexed) {
+        for (uint32_t i = 0; i < 256u; ++i) sr_w32(NC_CLUT + i * 4u, ngef_clut_colour(i));
+        ngef_load_clut();
+        if (ge_run_list(NC_LIST, 0) || s_ge->clut_fmt != NC_CLUTFMT ||
+            memcmp(s_ge->clutram, SR_HOST(NC_CLUT), 1024u) != 0) return 0;
+        memcpy(palette, s_ge->clutram, sizeof(palette));
+    }
+    const unsigned long before_prime = s_cnt_texup;
+    if (!c->cold) {
+        ngef_ram_list(c, NC_PRIME);
+        if (ge_run_list(NC_LIST, 0) || !gegpu_capture_materialize() ||
+            !s_tex_cur || s_cnt_texup != before_prime + 1u) return 0;
+    }
+    TexEnt *const resident = s_tex_cur;
+    if (c->palette_change) {
+        /* Both high bits cancel in the word-wise cache hash. Actual GE_LOADCLUT
+         * replaces a palette that would give different software fragments. */
+        const uint64_t hash = clut_hash();
+        sr_w32(NC_CLUT + 0x41u * 4u, ngef_clut_colour(0x41u) ^ 0x80000000u);
+        sr_w32(NC_CLUT + 0x45u * 4u, ngef_clut_colour(0x45u) ^ 0x80000000u);
+        ngef_load_clut();
+        if (ge_run_list(NC_LIST, 0) || clut_hash() != hash ||
+            memcmp(palette, s_ge->clutram, sizeof(palette)) == 0) return 0;
+    }
+    const uint32_t changed = NC_TEXTURE + 5u * 4u; /* in a sampled-hash gap */
+    if (c->stale) sr_w32(changed, NC_CHANGED);
+    const unsigned long before_draw = s_cnt_texup;
+    const unsigned long long before_fallback = s_replay_stats.fallback_prims;
+    ngef_ram_list(c, NC_TARGET);
+    ge_set_frame(2);
+    GeGpuHooks hooks = k_hooks;
+    hooks.sprite = ngef_capture_sprite;
+    s_ngef_active_at_draw = -1;
+    ge_set_gpu_hooks(&hooks);
+    const uint32_t next = ge_run_list(NC_LIST, 0);
+    ge_set_gpu_hooks(&k_hooks);
+    if (next || s_ngef_active_at_draw != !c->off) return 0;
+    const int hit = s_tex_cur && s_tex_cur == resident && s_cnt_texup == before_draw;
+    const int drop = c->conflict || c->palette_change || c->no_shadow || c->mixed_vram;
+    if (c->conflict && ge_capture_active()) ge_capture_note_memory(changed, 4u);
+    if (c->indexed && c->wlog == 3u && ge_capture_active()) {
+        /* This byte is in the tile but outside the texture's active rows. */
+        sr_w8(NC_TEXTURE + 8u, 0xFEu);
+        ge_capture_note_memory(NC_TEXTURE + 8u, 1u);
+    }
+    const int active = ge_capture_active();
+    ge_set_frame(3);
+    if (!gegpu_capture_materialize()) return 0;
+    const unsigned diff = ngef_diff_pixels(c);
+    const unsigned long uploads = s_cnt_texup - before_draw;
+    if (hit != !c->cold || uploads != (unsigned long)c->cold ||
+        s_replay_stats.fallback_prims != before_fallback || diff != 0 ||
+        active != (!c->off && !drop)) {
+        fprintf(stderr, "NGEF RAM %s: FAIL hit=%d uploads=%lu active=%d live_diff=%u\n",
+                name, hit, uploads, active, diff);
+        return 0;
+    }
+    if (drop || c->off) {
+        FILE *existing = fopen(path, "rb");
+        if (existing) { fclose(existing); return 0; }
+        printf("NGEF RAM %s: PASS hit=%d no fixture, live_diff=%u\n", name, hit, diff);
+        return 1;
+    }
+    return ngef_check_fixture(c, path, palette);
+}
+
 
 static int coherence_run_movie_texture(void) {
     const char *cell = "movie-texture";
@@ -15777,6 +16395,115 @@ static int coherence_run_movie_target(void) {
     coherence_reset_targets();
     if (ok) printf("gpu coherence selftest: PASS %-22s decoded picture found; 5 ways it is not; guest VRAM unchanged\n",
                    cell);
+    return ok;
+}
+
+enum { MVC_STRIP_ROWS = 30, MVC_STRIP_COUNT = 9 };
+enum { MVC_NO_OVERLAY, MVC_SUBTITLE, MVC_OVERWRITE };
+
+typedef struct {
+    const char *step;
+    unsigned int strips;
+    unsigned int last_rows;
+    unsigned int first_draws;
+    int notes;
+    int overlay;
+    int kind;
+} MvcStripCase;
+
+static unsigned int mvc_strip_rows(const MvcStripCase *test, unsigned int strip) {
+    return test->strips >> (strip + 1u) ? MVC_STRIP_ROWS : test->last_rows;
+}
+
+/* This fixture supplies synthetic RGB and notes directly, then uses the real GE draw and present. */
+static int mvc_strip_frame(const MvcStripCase *test, int tracking) {
+    const uint32_t pitch = 512u * sizeof(uint32_t);
+    sr_movie_set_tracking(0);
+    sr_movie_set_tracking(tracking);
+    coherence_reset_targets();
+    mvc_state();
+    if (test->notes) {
+        for (unsigned int i = 0; i < MVC_STRIP_COUNT; i++)
+            sr_movie_note_picture(MVC_OWNER, MVC_PIC + i * MVC_STRIP_ROWS * pitch,
+                                  512u, 3u, DRAW_W, MVC_STRIP_ROWS);
+    }
+    if (!mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF3F5368u)) return 0;
+    for (unsigned int i = 1; i < MVC_STRIP_COUNT; i++) {
+        if (!(test->strips & (1u << i))) continue;
+        const unsigned int top = i * MVC_STRIP_ROWS;
+        s_ge->tex_addr = MVC_PIC + top * pitch;
+        s_ge->tex_h = 32;
+        const unsigned int draws = i == 1u ? test->first_draws : 1u;
+        for (unsigned int draw = 0; draw < draws; draw++)
+            if (!mvc_sprite_at_row(0.0f, (float)top, (float)DRAW_W,
+                                   (float)(top + mvc_strip_rows(test, i)), 0.0f, 1, 0xFFFFFFFFu))
+                return 0;
+    }
+    if (test->overlay == MVC_SUBTITLE) return mvc_sprite(0.0f, 245.0f, 48.0f, 255.0f, 0, 0xFFF09020u);
+    if (test->overlay == MVC_OVERWRITE)
+        return mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF176BADu);
+    return 1;
+}
+
+static int mvc_strip_pixels(const char *cell, const MvcStripCase *test, const uint32_t *frame) {
+    static const unsigned int samples[] = { 40u, 130u, 164u, 165u, 250u };
+    const unsigned int x = 10u;
+    for (unsigned int i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+        const unsigned int y = samples[i];
+        const unsigned int strip = y / MVC_STRIP_ROWS;
+        uint32_t expected = 0xFF3F5368u;
+        if ((test->strips & (1u << strip)) && y % MVC_STRIP_ROWS < mvc_strip_rows(test, strip))
+            expected = mvc_pixel(x, y, 7u);
+        if (test->overlay == MVC_SUBTITLE && y == 250u) expected = 0xFFF09020u;
+        if (test->overlay == MVC_OVERWRITE) expected = 0xFF176BADu;
+        const uint32_t actual = frame[y * 512u + x];
+        if ((actual & 0xFFFFFFu) != (expected & 0xFFFFFFu)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %s: framebuffer pixel at %u,%u differs\n",
+                    cell, test->step, x, y);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int coherence_run_movie_strip_coverage(void) {
+    const char *cell = "movie-strip-coverage";
+    static uint32_t on[512u * FB_H], off[512u * FB_H];
+    enum { SPARSE = (1u << 1) | (1u << 8), FIVE = 0x3eu, SURVIVING = 0x1feu };
+    static const MvcStripCase cases[] = {
+        { "two distant strips", SPARSE, 30u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "overlapping repeated strip", SPARSE, 30u, 4u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "135 covered rows", FIVE, 15u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "136 covered rows", FIVE, 16u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_MOVIE },
+        { "contiguous surviving strips", SURVIVING, 30u, 1u, 1, MVC_NO_OVERLAY, SDL3VK_FRAME_MOVIE },
+        { "same strips without notes", SURVIVING, 30u, 1u, 0, MVC_NO_OVERLAY, SDL3VK_FRAME_GE },
+        { "subtitles over strips", SURVIVING, 30u, 1u, 1, MVC_SUBTITLE, SDL3VK_FRAME_MOVIE },
+        { "opaque overwrite", SURVIVING, 30u, 1u, 1, MVC_OVERWRITE, SDL3VK_FRAME_GE },
+    };
+    int ok = 1;
+    mvc_write_picture(MVC_PIC, 512u, DRAW_W, FB_H, 7u);
+    s_mvc_pass_runs = 0;
+    sdl3vk_set_upscale_pass(mvc_upscale_pass);
+    for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const MvcStripCase *test = &cases[i];
+        if (!mvc_strip_frame(test, 1)) { ok = 0; break; }
+        if (!mvc_present(cell, test->step, test->kind)) ok = 0;
+        if (!mvc_guest_frame(on) || !mvc_strip_pixels(cell, test, on)) { ok = 0; break; }
+        if (!mvc_strip_frame(test, 0) || !mvc_present(cell, "tracking off", SDL3VK_FRAME_GE) ||
+            !mvc_guest_frame(off)) { ok = 0; break; }
+        if (memcmp(on, off, sizeof(on)) != 0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %s: guest framebuffer differs with tracking off\n",
+                    cell, test->step);
+            ok = 0;
+        }
+    }
+    if (!mvc_pass_ran(cell)) ok = 0;
+    sr_movie_set_tracking(0);
+    sdl3vk_set_upscale_pass(NULL);
+    coherence_reset_targets();
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s sparse, overlapping and threshold coverage; framebuffer unchanged\n",
+               cell);
     return ok;
 }
 
@@ -16856,6 +17583,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
         if (strcmp(only, "through-float-z") == 0) return coherence_run_through_float_z();
         if (strcmp(only, "clut-stride-padding") == 0) return coherence_run_clut_stride_padding();
+        if (strcmp(only, "texture-ram-linear-tail") == 0) return coherence_run_texture_ram_linear_tail();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
         if (strcmp(only, "patch-tess") == 0) return coherence_run_patch_tess();
@@ -16880,6 +17608,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
+        if (strcmp(only, "pipeline-minmax") == 0) return coherence_run_pipeline_minmax();
         if (strcmp(only, "pipeline-clear-prewarm-cold") == 0) return coherence_run_pipeline_clear_prewarm(0, 0);
         if (strcmp(only, "pipeline-clear-prewarm-warm") == 0) return coherence_run_pipeline_clear_prewarm(1, 0);
         if (strcmp(only, "pipeline-clear-prewarm-retry") == 0) return coherence_run_pipeline_clear_prewarm(0, 1);
@@ -16900,8 +17629,10 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "fallback-notice") == 0) return coherence_run_fallback_notice();
         if (strcmp(only, "host-depth") == 0) return coherence_run_host_depth();
         if (strcmp(only, "wide-raster") == 0) return coherence_run_wide_raster();
+        if (strncmp(only, "ngef-", 5) == 0) return coherence_run_ngef_ram(only);
         if (strcmp(only, "movie-texture") == 0) return coherence_run_movie_texture();
         if (strcmp(only, "movie-target") == 0) return coherence_run_movie_target();
+        if (strcmp(only, "movie-strip-coverage") == 0) return coherence_run_movie_strip_coverage();
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
         if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();
         if (strcmp(only, "soft-shadow") == 0) return coherence_run_soft_shadow();
@@ -16954,6 +17685,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_wide_raster()) ok = 0;
     if (!coherence_run_movie_texture()) ok = 0;   /* #2111 */
     if (!coherence_run_movie_target()) ok = 0;
+    if (!coherence_run_movie_strip_coverage()) ok = 0;
     if (!coherence_run_linear_sprite()) ok = 0;
     if (!coherence_run_tflt_filters()) ok = 0;
     if (!coherence_run_ring_wrap()) ok = 0;
@@ -16962,6 +17694,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_texture_dirty_same_state()) ok = 0;
     if (!coherence_run_texture_clean_page_index()) ok = 0;
     if (!coherence_run_texture_ram_unnotified_change()) ok = 0;
+    if (!coherence_run_texture_ram_linear_tail()) ok = 0;
     if (!coherence_run_clut_format_same_palette()) ok = 0;
     if (!coherence_run_clut_format_list()) ok = 0;
     if (!coherence_run_through_float_z()) ok = 0;
