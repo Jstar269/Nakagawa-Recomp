@@ -1728,7 +1728,7 @@ static int write_synthetic_libfont_prx(const char *path, uint32_t base) {
     fixture_wr32(entry + 12, base + TABLE_VA);
     fixture_wr32(image + 0x80 + TABLE_VA, 0xd632acdbu);
     fixture_wr32(image + 0x84 + TABLE_VA, SYNTH_LIBFONT_EXPORT_NID);
-    fixture_wr32(image + 0x88 + TABLE_VA, 0xcee05613u);
+    fixture_wr32(image + 0x88 + TABLE_VA, 0xcee8593cu);
     fixture_wr32(image + 0x8c + TABLE_VA, START_OFF);
     fixture_wr32(image + 0x90 + TABLE_VA, SYNTH_LIBFONT_EXPORT_OFF);
     fixture_wr32(image + 0x94 + TABLE_VA, SYNTH_LIBFONT_STOP_OFF);
@@ -2181,7 +2181,7 @@ static int write_fixed_module_prx(const char *path, uint32_t link) {
     fixture_wr16(seg + RT_LIBENT + 26, 1);
     fixture_wr32(seg + RT_LIBENT + 28, link + RT_LIB_TABLE);
     fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xD632ACDBu);
-    fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE05613u);
+    fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE8593Cu);
     fixture_wr32(seg + RT_SYSLIB_TABLE + 8, link + RT_START);
     fixture_wr32(seg + RT_SYSLIB_TABLE + 12, link + RT_STOP);
     fixture_wr32(seg + RT_LIB_TABLE + 0, RT_EXPORT_NID + 1u);
@@ -2302,7 +2302,7 @@ static int write_runtime_module_prx_lib(const char *path, uint8_t flavour, int w
     fixture_wr32(seg + RT_LIBENT + 28, RT_LIB_TABLE);
     if (with_start) {
         fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xD632ACDBu);
-        fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE05613u);
+        fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE8593Cu);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 8, RT_START);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 12, RT_STOP);
     } else {
@@ -2310,7 +2310,7 @@ static int write_runtime_module_prx_lib(const char *path, uint8_t flavour, int w
          * word is the (relocated) stop address; the fourth word stays relocated but
          * unused. */
         fixture_wr16(seg + RT_LIBENT + 10, 1);
-        fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xCEE05613u);
+        fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xCEE8593Cu);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 4, RT_STOP);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 12, RT_STOP);
     }
