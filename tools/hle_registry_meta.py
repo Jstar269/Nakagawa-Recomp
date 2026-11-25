@@ -3096,6 +3096,40 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "as sceKernelAllocateVpl, with callbacks serviced while waiting (#341)",
     },
+    # ---- #2807: single imports a MEASURED oracle record publishes a result for ----
+    "h_GetTlsAddr": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tls-addr-normal, tls-status-normal, tls-addr-high, tls-status-high, tls-addr-high-2, tls-thread)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_tls_20261117",
+        ],
+        "limitation": "this status covers the PSP-SAFE-SCALAR-001 TLS cells only: for a pool of four 0x100-byte blocks in partition 2 with NULL options, created without attribute 0x4000 and (twice) with it, a thread's first call returns a 0x100-aligned block and its second call the same address; the main thread's block lies 0x100 above the low bracket's head in the pool without the attribute, 0x400 below the high bracket's head in the first pool with it, and 0x800 below that head (0x400 below the first pool's block) in the second; a second thread's block is 0x100 above the main thread's in the pool without the attribute and in the first pool with it; and after the main thread's calls the status of each of the first two pools reads 3 of 4 blocks free; PSP-SAFE-SCALAR-001 recorded that on one PSP-3000 (system software 6.61, operator-declared) in one acceptance-eligible launch in the XMB context (boot 221, the probe built from 86279e852, 2026-11-17), and the selftest replays the same calls through sr_syscall in both partition layouts; the record stores distances and low bytes, never an address, and it does not measure the block's contents (the runtime zero-fills a block it hands out), an unknown or deleted pool, a call when every block is held (the runtime returns NULL and names it on stderr, #339; no wait for a block is modelled), another pool shape or partition, a third thread, or a call from interrupt context; those are not reviewed here (#2807)",
+    },
+    "h_WlanOn": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: wlan-state)",
+            "tests/native/hle_thread_selftest.c:test_wlan_state_with_the_switch_on",
+        ],
+        "limitation": "this status covers the PSP-KERNEL-SEM-001 wlan-state cell only: sceWlanGetSwitchState (0xd7763699) and then sceWlanDevIsPowerOn (0x93440b11), the two NIDs this handler serves, each called with no argument, return 1 with the console's WLAN switch on; PSP-KERNEL-SEM-001 recorded that on one PSP-3000 (system software 6.61, ARK-5.1.0) in one acceptance-eligible launch in the game context (boot 84, the probe built from 0c3cf0da, 2026-10-31), and the selftest makes the same two calls in that order through sr_syscall with the default console profile, whose switch is on; the answer with the switch off, which the runtime takes for both calls from the console profile's wlan_switch setting, a switch moved during a run, the power state while a WLAN or network library is running, and the XMB context are not measured by the record and not reviewed here (#2807)",
+    },
+    "h_DcacheWritebackAll": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-CACHE-001: cache-wball)",
+            "tests/native/hle_thread_selftest.c:test_dcache_writeback_all_cached_store_reaches_the_uncached_alias",
+        ],
+        "limitation": "this status covers the PSP-CACHE-001 cache-wball cell only: after 0xDEADBEEF is stored through the cached address of the second word of a 64-byte-aligned buffer, sceKernelDcacheWritebackAll() returns to its caller and the same word read through the uncached alias (the address with 0x40000000 set) is 0xDEADBEEF; PSP-CACHE-001 recorded that on one PSP-3000 (system software 6.61, ARK-5.1.0) in the 2026-10-10 campaign launch of f6ccfb33 and again in the acceptance-eligible 2026-10-15 requalification launch of f2d6c91a, and the selftest makes the same store, call and read through sr_syscall; the probe discards the call's return value, so the 0 the runtime returns is not measured; guest RAM is one coherent array here, so the alias reads the stored word whatever this call does, and the only handler behaviour the selftest can check is that the call comes back without a named stop; the renderer notice the handler sends, lines other than the probe's, and data the cache would have held stale are not measured and not reviewed here (#2807)",
+    },
+    "h_IoIoctl": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*, io-seek-umd-*)",
+            "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
+            "tests/native/hle_thread_selftest.c:test_io_ioctl_disc0_seek_range_and_position",
+        ],
+        "limitation": "this status covers the sceIoIoctl cells of PSP-HLE-IO-SEEK-001 only: on a probe-owned 16-byte Memory Stick file opened read-write, the seek 0x01010005 (a 16-byte record: the offset, a reserved word of 0, SEEK_SET; no output) to -1, 8, 16 and 32 from a position of 0, and the queries 0x01020004, 0x01020003, 0x01020006 and 0x01020007 (no input, an 8-byte output) from a position of 8 and 0x01030008 (no input, a 4-byte output) from a position of 0, each return 0x80020325 and change neither the position, the output nor the file; on disc0:/UMD_DATA.BIN opened read-only, from a position of 8, the same seek to -1 and to the size + 1 returns 0x80010005 and to the size returns 0, and the position query 0x01020004 with an 8-byte output returns 0 and writes only the low out word; PSP-HLE-IO-SEEK-001 recorded that on one PSP-3000 (system software 6.6.0 as reported by pspver) in one acceptance-eligible launch in the XMB context (boot 156, the probe built from 59520eb0, 2026-11-08), and the selftest makes the same calls through sr_syscall (test_io_memory_stick_cells_through_syscall for the Memory Stick file, a synthetic 2048-byte disc file for disc0:); the record publishes neither the low out word's value nor the position after a disc0: seek, so the selftest's positions are runtime checks; the selftest also runs Memory Stick offsets and buffer sizes the probe did not, which the runtime refuses the same way, unmeasured; every other command (the PGD and DRM commands among them, PPSSPP-derived), any other whence, input or buffer size, other devices and files, and the position after a successful Memory Stick seek are not measured by this record and not reviewed here; sceIoIoctlAsync is a separate handler (#2807)",
+    },
 }
 
 # Savedata, the message dialog, netconf, gamedata install and game sharing with no utility dialog
