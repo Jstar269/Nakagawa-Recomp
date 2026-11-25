@@ -2048,14 +2048,15 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         source = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         self.assertIn("package_builder_native_transport_request", source)
         self.assertIn("NK_ACH_HOST", source)
-        # main.c is a native-transport caller for this one request only: every use of the
-        # transport there is the call whose allowed-host argument is NK_ACH_HOST, or
-        # NK_ACH_BADGE_HOST for a badge picture.
+        # The achievements request has an exact API or badge host. The cheat database's
+        # single-request transport has its own tested host and consent actions.
         uses = re.findall(r"package_builder_native_transport\w*", source)
         calls = re.findall(
             r"package_builder_native_transport_request\(\s*&options,\s*job->url,\s*"
             r"job->badge \? NK_ACH_BADGE_HOST : NK_ACH_HOST,", source)
-        self.assertEqual(uses, ["package_builder_native_transport_request"])
+        self.assertCountEqual(uses, ["package_builder_native_transport_request",
+                                     "package_builder_native_transport_request",
+                                     "package_builder_native_transport"])
         self.assertEqual(len(calls), 1)
         # Every request names this player in the form RetroAchievements documents, made once by
         # the bridge (achievements-selftest checks its text): product/version (system) rcheevos.
@@ -2621,6 +2622,15 @@ class TestCheatDatabaseEgress(unittest.TestCase):
         network_use = setup.split("### Network use", 1)[1].split("\n### ", 1)[0]
         self.assertIn(f"`{CHEAT_DB_HOST}`", network_use)
         self.assertIn("Download cheat database", network_use)
+
+    def test_native_get_is_anonymous_and_uses_the_documented_host(self) -> None:
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        header = (REPO_ROOT / "src" / "player" / "cheat_db.h").read_text(encoding="utf-8")
+        self.assertIn('#define NK_CHEAT_DB_USER_AGENT "NakagawaRecomp/CheatDatabase"', header)
+        self.assertRegex(main, r'package_builder_native_transport_request\(\s*options,\s*url,\s*'
+                               r'NK_CHEAT_DB_HOST,\s*"GET",\s*NULL,\s*NULL,\s*0u,\s*response\)')
+        self.assertIn("PackageHttpOptions options = {NK_CHEAT_DB_USER_AGENT, job->http_cancel};",
+                      main)
 
     def test_every_listed_source_is_pinned_on_that_host(self) -> None:
         import json

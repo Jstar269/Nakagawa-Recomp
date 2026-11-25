@@ -271,7 +271,7 @@ The **Where** column of each table names the places a code can appear:
 | `CHEAT_DB_IO_ERROR` | player | The cheat database could not be read or written in the user data folder. |
 | `CHEAT_DB_LIST_INVALID` | player | The list of cheat database sources is not valid, or names a source that is not pinned. |
 | `CHEAT_DB_LIST_VERSION` | player | The list of cheat database sources is a newer version than this player reads. |
-| `CHEAT_DB_NOT_A_DATABASE` | player | The file is not a cheat database the CWCheat reader accepts, or has a cheat outside every game. |
+| `CHEAT_DB_NOT_A_DATABASE` | player | The file is not a usable cheat database. It may contain a cheat outside every game or a cheat that starts enabled. |
 | `CHEAT_DB_NOT_REACHED` | player | The cheat database host did not answer. |
 | `CHEAT_DB_OUT_OF_MEMORY` | player | There was not enough memory to hold the cheat database. |
 | `CHEAT_DB_REDIRECT_REFUSED` | player | The cheat database answer came from a host other than `raw.githubusercontent.com`. |

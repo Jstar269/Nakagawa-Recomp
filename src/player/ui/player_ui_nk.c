@@ -730,7 +730,8 @@ static bool player_ui_settings_view(PlayerView view) {
            view == VIEW_CONFIRM_FACTORY_RESET || view == VIEW_ACCESSIBILITY_SETTINGS ||
            view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT ||
            view == VIEW_ONLINE_PLAY_CARD || view == VIEW_ONLINE_PLAY_SERVERS ||
-           view == VIEW_ACHIEVEMENTS_CARD || view == VIEW_ACHIEVEMENTS_SIGN_IN;
+           view == VIEW_ACHIEVEMENTS_CARD || view == VIEW_ACHIEVEMENTS_SIGN_IN ||
+           view == VIEW_CHEAT_DB || view == VIEW_CHEAT_DB_BUSY || view == VIEW_CHEAT_DB_CONFIRM;
 }
 
 /* The views the next UI draws: the library (router screens), the setup wizard,
@@ -1401,6 +1402,9 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     memset(&model, 0, sizeof(model));
     switch (app->active_view) {
         case VIEW_ONLINE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE; break;
+        case VIEW_CHEAT_DB:
+        case VIEW_CHEAT_DB_BUSY: model.page = PLAYER_UI_SETTINGS_PAGE_CHEAT_DB; break;
+        case VIEW_CHEAT_DB_CONFIRM: model.page = PLAYER_UI_SETTINGS_PAGE_CHEAT_DB_CONFIRM; break;
         case VIEW_ONLINE_PLAY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY; break;
         case VIEW_ONLINE_PLAY_CARD: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD; break;
         case VIEW_ONLINE_PLAY_SERVERS:
@@ -1616,6 +1620,14 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
 #endif
     model.cheats = app->settings.cheats;
+    model.cheat_db_status = app->cheat_db.status;
+    model.cheat_db_source = app->cheat_db.source.name;
+    model.cheat_db_maintainer = app->cheat_db.source.maintainer;
+    model.cheat_db_licence = app->cheat_db.source.licence;
+    model.cheat_db_import = app->cheat_db.import_path[0] != '\0';
+    model.cheat_db_replace = app->cheat_db.replace;
+    model.cheat_db_download_available = app->cheat_db.download_available;
+    model.cheat_db_busy = app->cheat_db.busy || app->cheat_db.picking;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
     /* The build tools and cache page says what its clear button did. */
@@ -2450,10 +2462,20 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                    Coming back from the Online play page returns to its row. */
                 if (player->last_view == VIEW_ONLINE_PLAY_SETTINGS) {
                     focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY;
+                } else if (player->last_view == VIEW_CHEAT_DB) {
+                    focus = PLAYER_UI_ID_SETTINGS_CHEAT_DB;
                 } else {
                     focus = app->settings.online_mode ? PLAYER_UI_ID_SETTINGS_ONLINE_MODE
                                                       : PLAYER_UI_ID_SETTINGS_DEVELOPER;
                 }
+                break;
+            case VIEW_CHEAT_DB:
+                focus = app->cheat_db.download_available && !app->cheat_db.busy
+                    ? PLAYER_UI_ID_CHEAT_DB_DOWNLOAD : PLAYER_UI_ID_CHEAT_DB_IMPORT;
+                break;
+            case VIEW_CHEAT_DB_BUSY:
+            case VIEW_CHEAT_DB_CONFIRM:
+                focus = PLAYER_UI_ID_SETTINGS_BACK;
                 break;
             case VIEW_ONLINE_PLAY_SETTINGS:
                 /* Back from the picker, its Server row; else the switch. */

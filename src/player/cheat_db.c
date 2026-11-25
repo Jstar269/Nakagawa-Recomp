@@ -322,19 +322,26 @@ NkCheatDbStatus nk_cheat_db_fetch_sources(PackageHttpOpen transport, void *trans
 
 /* ---- Checking and writing ---- */
 
-/* _S lines, counted as the reader sees a line start: at the start or after a newline, after
- * blanks. */
-static uint32_t count_games(const char *text, size_t size) {
-    uint32_t games = 0u;
-    size_t i = 0u;
-    while (i < size) {
-        size_t j = i;
-        while (j < size && (text[j] == ' ' || text[j] == '\t')) j++;
-        if (j + 1u < size && text[j] == '_' && text[j + 1u] == 'S' && games < UINT32_MAX) games++;
-        while (i < size && text[i] != '\n') i++;
-        i++;
+/* Inspect every game. The reader's summary counts entries in other games but does
+ * not expose their flags; a database introduced from Settings must start with them off. */
+static bool count_disabled_games(const char *text, size_t size, uint32_t *games) {
+    size_t pos = 0u;
+    *games = 0u;
+    if (size >= 3u && memcmp(text, "\xef\xbb\xbf", 3u) == 0) pos = 3u;
+    while (pos < size) {
+        size_t end = pos;
+        while (end < size && text[end] != '\n') end++;
+        while (pos < end && strchr(" \t\r\f\v", text[pos]) != NULL && text[pos] != '\0') pos++;
+        if (end - pos >= 2u && text[pos] == '_') {
+            if (text[pos + 1u] == 'S') {
+                ++*games;
+            } else if (text[pos + 1u] == 'C' && end - pos >= 5u && text[pos + 2u] != '0') {
+                return false;
+            }
+        }
+        pos = end + 1u;
     }
-    return games;
+    return true;
 }
 
 NkCheatDbStatus nk_cheat_db_check_text(const char *text, size_t size, NkCheatDbCounts *counts,
@@ -372,7 +379,10 @@ NkCheatDbStatus nk_cheat_db_check_text(const char *text, size_t size, NkCheatDbC
                     "it has cheats outside any game's _S line, which would apply to every game");
     }
     nk_cheats_free(set);
-    games = count_games(text, size);
+    if (!count_disabled_games(text, size, &games)) {
+        return fail(NK_CHEAT_DB_NOT_A_DATABASE, error, error_size,
+                    "every cheat in the database must start off (_C0)");
+    }
     if (games == 0u || summary.other_game == 0u) {
         return fail(NK_CHEAT_DB_NOT_A_DATABASE, error, error_size, "it names no game and no cheat");
     }
@@ -395,15 +405,19 @@ static bool ensure_parent_dir(const char *file_path) {
 }
 
 static NkCheatDbStatus write_atomic(const char *dest_path, const char *bytes, size_t size,
-                                    char *error, size_t error_size) {
-    char tmp[NK_MAX_PATH + 16];
+                                    bool overwrite, char *error, size_t error_size) {
+    char tmp[NK_MAX_PATH + 32];
+    uint64_t nonce;
     FILE *f;
     bool ok;
     int n;
     if (!ensure_parent_dir(dest_path)) {
         return fail(NK_CHEAT_DB_IO_ERROR, error, error_size, "the cheats folder could not be made");
     }
-    n = snprintf(tmp, sizeof(tmp), "%s.part", dest_path);
+    if (!nk_platform_random_bytes(&nonce, sizeof(nonce))) {
+        return fail(NK_CHEAT_DB_IO_ERROR, error, error_size, "the temporary file could not be named");
+    }
+    n = snprintf(tmp, sizeof(tmp), "%s.%016llx.part", dest_path, (unsigned long long)nonce);
     if (n < 0 || (size_t)n >= sizeof(tmp)) {
         return fail(NK_CHEAT_DB_IO_ERROR, error, error_size, "the path is too long");
     }
@@ -411,7 +425,16 @@ static NkCheatDbStatus write_atomic(const char *dest_path, const char *bytes, si
     if (!f) return fail(NK_CHEAT_DB_IO_ERROR, error, error_size, "the file could not be written");
     ok = fwrite(bytes, 1u, size, f) == size && nk_platform_sync_file(f);
     if (fclose(f) != 0) ok = false;
-    if (ok) ok = nk_rename_utf8(tmp, dest_path) == 0;
+    if (ok) {
+        int moved = overwrite ? nk_rename_utf8(tmp, dest_path)
+                              : nk_rename_noreplace_utf8(tmp, dest_path);
+        if (!overwrite && moved == 1) {
+            (void)nk_remove_utf8(tmp);
+            return fail(NK_CHEAT_DB_EXISTS, error, error_size,
+                        "a cheat database appeared; confirm to replace it");
+        }
+        ok = moved == 0;
+    }
     if (!ok) {
         (void)nk_remove_utf8(tmp);
         return fail(NK_CHEAT_DB_IO_ERROR, error, error_size, "the file could not be written");
@@ -453,7 +476,9 @@ NkCheatDbStatus nk_cheat_db_download(PackageHttpOpen transport, void *transport_
     if (status == NK_CHEAT_DB_OK && should_cancel && should_cancel(cancel_context)) {
         status = fail(NK_CHEAT_DB_CANCELLED, error, error_size, "cancelled");
     }
-    if (status == NK_CHEAT_DB_OK) status = write_atomic(dest_path, body, size, error, error_size);
+    if (status == NK_CHEAT_DB_OK) {
+        status = write_atomic(dest_path, body, size, overwrite, error, error_size);
+    }
     free(body);
     return status;
 }
@@ -504,7 +529,9 @@ NkCheatDbStatus nk_cheat_db_import_file(const char *source_path, const char *des
     }
     fclose(f);
     status = nk_cheat_db_check_text(body, used, counts, error, error_size);
-    if (status == NK_CHEAT_DB_OK) status = write_atomic(dest_path, body, used, error, error_size);
+    if (status == NK_CHEAT_DB_OK) {
+        status = write_atomic(dest_path, body, used, overwrite, error, error_size);
+    }
     free(body);
     return status;
 }

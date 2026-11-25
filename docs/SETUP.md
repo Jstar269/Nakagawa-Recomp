@@ -1272,7 +1272,7 @@ per-game cheat files and `cheat.db` use, or you ask the player to download a com
 `<user data>/cheats/cheat.db`, a database of many games; the game's own file always wins. Settings >
 Online and developer options > **Cheat database** fills it in either of two ways:
 
-- **DOWNLOAD** asks the project's list of sources (`assets/cheat_db_sources.json` in this
+- **DOWNLOAD** (Windows) asks the project's list of sources (`assets/cheat_db_sources.json` in this
   repository, read from its `main` branch, so the project can change a source without a release)
   which database to fetch, then shows its name, its maintainer and its licence as stated (the
   first and only source, CWCheat-Database-Plus by Saramagrean, states no licence), warns that
@@ -1282,9 +1282,11 @@ Online and developer options > **Cheat database** fills it in either of two ways
   (`CHEAT_DB_SIZE_MISMATCH`, `CHEAT_DB_HASH_MISMATCH`) and nothing is written. The file is also
   read by the cheat reader before it replaces anything; one with a cheat outside every game's
   `_S` line, which would apply to every game, is refused (`CHEAT_DB_NOT_A_DATABASE`).
-- **USE MY OWN FILE** copies a `cheat.db` you already have, with the same checks except the pin.
+- **USE MY OWN FILE** lets you pick a database from disk, then confirm its import. The player
+  checks it the same way without a download pin.
 
-Every code in a database starts off (`_C0`). Turning one on means changing its `_C0` to `_C1` in
+Any downloaded or imported database that contains an enabled code is refused by name
+(`CHEAT_DB_NOT_A_DATABASE`). Turning a code on later means changing its `_C0` to `_C1` in
 the file, or copying the game's section into its own `<DISC_ID>.ini` and editing that.
 
 **Turning them on.** Either of:

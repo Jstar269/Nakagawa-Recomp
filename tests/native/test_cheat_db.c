@@ -263,6 +263,14 @@ static void test_check_text(void) {
         assert(strstr(error, "every game") != NULL);
     }
     {
+        static const char starts_on[] =
+            "\xef\xbb\xbf_S TEST-00001\n_C0 First game\n"
+            "_S TEST-00002\n\t_C3 Enabled elsewhere\n_L 0x20001000 0x00000001\n";
+        assert(nk_cheat_db_check_text(starts_on, sizeof(starts_on) - 1u, &counts, error, sizeof(error)) ==
+               NK_CHEAT_DB_NOT_A_DATABASE);
+        assert(strstr(error, "must start off") != NULL);
+    }
+    {
         static const char empty[] = "just some text\nwith no codes\n";
         assert(nk_cheat_db_check_text(empty, sizeof(empty) - 1u, &counts, error, sizeof(error)) ==
                NK_CHEAT_DB_NOT_A_DATABASE);
@@ -309,6 +317,23 @@ static void test_fetch_sources(void) {
     /* No transport: nothing is fetched at all. */
     assert(nk_cheat_db_fetch_sources(NULL, NULL, &sources, error, sizeof(error)) ==
            NK_CHEAT_DB_BAD_ARGUMENT);
+}
+
+typedef struct {
+    FakeNet *net;
+    const char *destination;
+    bool written;
+} CompetingInstall;
+
+static bool install_during_download(void *context) {
+    CompetingInstall *install = (CompetingInstall *)context;
+    if (!install->written && install->net->request_count == 1u) {
+        FILE *file = nk_fopen_utf8(install->destination, "wb");
+        assert(file && fputs("another install", file) >= 0);
+        assert(fclose(file) == 0);
+        install->written = true;
+    }
+    return false;
 }
 
 static void test_download(const char *root) {
@@ -386,6 +411,19 @@ static void test_download(const char *root) {
     add_answer(&net, DB_URL, kDatabase, db_size);
     assert(nk_cheat_db_download(fake_open, &net, &source, dest, true, NULL, NULL, &counts,
                                 error, sizeof(error)) == NK_CHEAT_DB_OK);
+    assert(remove(dest) == 0);
+
+    /* A database that appears after the start check still needs replacement consent. */
+    memset(&net, 0, sizeof(net));
+    add_answer(&net, DB_URL, kDatabase, db_size);
+    CompetingInstall install = {&net, dest, false};
+    assert(nk_cheat_db_download(fake_open, &net, &source, dest, false,
+                                install_during_download, &install, &counts,
+                                error, sizeof(error)) == NK_CHEAT_DB_EXISTS);
+    assert(install.written);
+    written = read_all(dest, &size);
+    assert(written && strcmp(written, "another install") == 0);
+    free(written);
     assert(remove(dest) == 0);
 }
 

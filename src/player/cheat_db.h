@@ -115,7 +115,8 @@ NkCheatDbStatus nk_cheat_db_fetch_sources(PackageHttpOpen transport, void *trans
 
 /* Whether text is a cheat database the player may use as cheats/cheat.db: within
  * NK_CHEATS_MAX_FILE_BYTES, accepted by the CWCheat reader, with at least one game and every
- * cheat under a game's _S line (a cheat outside one would apply to every game). */
+ * cheat under a game's _S line (a cheat outside one would apply to every game).
+ * Every database entry must start off (_C0). The user's per-disc files are separate. */
 NkCheatDbStatus nk_cheat_db_check_text(const char *text, size_t size, NkCheatDbCounts *counts,
                                        char *error, size_t error_size);
 
