@@ -14165,25 +14165,44 @@ static void offd_main_fn(CpuState *cpu) {
     NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
     NkAdhocTransport *tp = peer_rc ? nk_relay_client_transport(peer_rc) : NULL;
     const uint8_t grp[8] = {'O', 'F', 'F', 'D', 'A', 'T', '1', 0};
-    expect(tp && tp->ops->login(tp, peer_mac, "OffPeer", "TEST00012") == NK_NET_OK &&
-               tp->ops->connect(tp, grp) == NK_NET_OK,
-           "offd: peer logged into OFFDAT1");
-    if (!tp) {
-        s_offd_done = 1;
-        return;
+    const bool peer_started = tp && tp->ops->login(tp, peer_mac, "OffPeer", "TEST00012") == NK_NET_OK &&
+                              tp->ops->connect(tp, grp) == NK_NET_OK;
+    expect(peer_started, "offd: peer logged into OFFDAT1");
+    if (!peer_started) goto cleanup;
+
+    /* Settle the host peer's one reply before sending the guest Create.
+       Otherwise the drop ACK can refer to the host peer alone. */
+    const uint64_t peer_deadline = sr_host_monotonic_ms() + ADH_P2_PEER_WAIT_MS;
+    while (atomic_load(&s_off_srv->joins_answered) == 0 && sr_host_monotonic_ms() < peer_deadline) {
+        tp->ops->pump(tp);
+        d3_step(cpu);
     }
+    const int peer_joins = atomic_load(&s_off_srv->joins_answered);
+    expect(peer_joins == 1, "offd: fixture relay answered the host peer's group join");
+    if (peer_joins != 1) goto cleanup;
+
     const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '1', '2'};
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
     for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
     s_adh_events = 0u;
-    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
-               adh(ADH_NID_WLAN_ETHER, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
-               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
-               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
-               adh(ADH_NID_CREATE, adh_name(0, "OFFDAT1"), 0u, 0u) == 0u,
-           "offd: guest Create");
+    const bool guest_started =
+        net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+        adh(ADH_NID_WLAN_ETHER, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+        adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+        adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+        adh(ADH_NID_CREATE, adh_name(0, "OFFDAT1"), 0u, 0u) == 0u;
+    expect(guest_started, "offd: guest Create");
+    if (!guest_started || !mr_wait_join_answered(cpu, s_off_srv, peer_joins, "offd")) goto cleanup;
     adh_p2_wait_state(cpu, 1u, 1u);
+    const uint32_t guest_state = adh_state();
+    const bool guest_joined = guest_state == 1u && s_adh_events == 1u &&
+                              ADH_AT(0).event == 1 && ADH_AT(0).error == 0u;
+    snprintf(msg, sizeof(msg), "offd: guest in group OFFDAT1 (state=%u events=%u ev=%d err=0x%08x)",
+             guest_state, s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u);
+    expect(guest_joined, msg);
+    if (!guest_joined) goto cleanup;
     expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "offd: AdhocInit");
 
     if (s_offd_case == 0) {
@@ -14318,7 +14337,8 @@ static void offd_main_fn(CpuState *cpu) {
         if (lsn < 0x80000000u) (void)adh(0x157e6225u /* PtpClose */, lsn, 0u, 0u);
         if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
     }
-    tp->ops->logout(tp);
+cleanup:
+    if (tp) tp->ops->logout(tp);
     nk_relay_client_destroy(peer_rc);
     (void)adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u);
     (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
