@@ -33,6 +33,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools"))
+from nk_core import package_cache
 from ge_stat_windows import (WINDOW_VBLANKS, GeStatWindow, GeStatWindowError, first_window,
                              parse_windows)
 from prxload import Prx
@@ -197,6 +198,75 @@ def audit_run_paths(paths: list[Path]) -> list[str]:
         for folder in records[1]:
             if not (folder in ("$ORIGIN", "${ORIGIN}") or folder.startswith(("$ORIGIN/", "${ORIGIN}/"))):
                 problems.append(f"{path}: run path entry '{folder}' is not relative to $ORIGIN")
+    return problems
+
+
+def system_library_files(prefix: str) -> list[Path]:
+    """The real files of the system's copies of a library, from the loader's cache (Linux)."""
+    listing = subprocess.run(["/sbin/ldconfig", "-p"], check=False, capture_output=True, text=True)
+    found = {Path(line.rsplit("=>", 1)[1].strip()).resolve()
+             for line in listing.stdout.splitlines()
+             if line.strip().startswith(prefix) and "=>" in line}
+    return sorted(found)
+
+
+def unresolved_libraries(executable: Path, prefix: str = "libSDL3.so") -> list[str]:
+    """What `ldd` cannot resolve for `executable` with every system copy of a library hidden.
+
+    The system copies are hidden by binding an empty file over each of them inside a private
+    mount namespace (no privileges needed, nothing outside the namespace changes), and the
+    run starts with no LD_LIBRARY_PATH, so what resolves is what the executable's own run
+    path reaches: the library installed beside it, or nothing. Returns the lines `ldd` could
+    not resolve; raises ShowcaseError where the namespace cannot be made.
+    """
+    hidden = [str(path) for path in system_library_files(prefix)]
+    script = ('for f in "$@"; do mount --bind /dev/null "$f" || exit 97; done; '
+              'ldd "$NK_AUDITED" 2>&1')
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NK_AUDITED": str(executable)}
+    run = subprocess.run(["unshare", "-rm", "sh", "-c", script, "sh", *hidden], check=False,
+                         capture_output=True, text=True, env=env)
+    if run.returncode == 97 or "unshare:" in run.stderr:
+        raise ShowcaseError(f"a private mount namespace is not available: {run.stderr.strip()}")
+    return [line.strip() for line in run.stdout.splitlines()
+            if "not found" in line or "file too short" in line or "cannot open" in line
+            or "invalid ELF" in line]
+
+
+def files_naming(root: Path, needles: list[str]) -> list[str]:
+    """The files under `root`, as relative paths, whose bytes spell any of the given folders.
+
+    Each folder is also tried with the other slash and with JSON escaping, so a Windows
+    path matches however a tool wrote it.
+    """
+    spellings: set[bytes] = set()
+    for needle in needles:
+        if not needle:
+            continue
+        forward = needle.replace("\\", "/")
+        backward = forward.replace("/", "\\")
+        for form in (needle, forward, backward, backward.replace("\\", "\\\\")):
+            spellings.add(form.encode("utf-8"))
+    hits = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if any(spelling in data for spelling in spellings):
+            hits.append(path.relative_to(root).as_posix())
+    return hits
+
+
+def audit_demo_root(demo_root: Path) -> list[str]:
+    """What stops the staged demos from being moved to another machine, one line each.
+
+    Every ELF file in a package folder must have only `$ORIGIN`-relative run paths, and no
+    file in the demo folder may name this checkout or the showcase build folder.
+    """
+    executables = [path for path in sorted((demo_root / "packages").glob("*/*")) if path.is_file()]
+    problems = audit_run_paths(executables)
+    needles = [str(ROOT), ROOT.as_posix(), str(BUILD_ROOT), BUILD_ROOT.as_posix()]
+    problems.extend(f"{demo_root / name}: names the build folder"
+                    for name in files_naming(demo_root, needles))
     return problems
 
 
@@ -658,6 +728,45 @@ def _prebuilt_license(prebuilt_dir: Path) -> bytes:
     return notice
 
 
+def trim_to_runtime_package(package_dir: Path, game_name: str) -> int:
+    """Keep only the runtime files of a package, as `nk_cli build-package` does (#306).
+
+    The planner leaves the build's own files beside the runtime: dependency files, objects,
+    the link map and response file, generated C and the build stamps. The compiler and
+    linker wrote the folder the build ran in into them, so a package that carries them names
+    the builder's machine and cannot move. The runtime package (schema 3) declares no
+    generated objects, so none of them is a runtime file; the player's own route removes the
+    same set (nk_cli._remove_package_build_outputs) and writes the completion manifest over
+    what remains. This does the same, then runs the full package check on the result, so
+    the manifest still lists every remaining file and its digest, and a damaged package is
+    refused before and after. Returns how many files were removed.
+    """
+    import nk_cli  # imported here: the module is large and the build route needs it only once
+
+    valid, reason = package_cache.validate_package_cache(package_dir)
+    if not valid:
+        raise ShowcaseError(f"the planner's package is not valid, so it is not trimmed: {reason}")
+    try:
+        package = package_cache.read_bounded_json(package_dir / "package.json")
+        completion = package_cache.read_bounded_json(package_dir / "completion-manifest.json")
+    except (OSError, ValueError) as exc:
+        raise ShowcaseError(f"package metadata is unreadable: {exc}") from exc
+    if package.get("schema_version") != 3 or package.get("generated_objects") != []:
+        raise ShowcaseError("only a runtime package (schema 3, no generated objects) is trimmed")
+    key = package_cache.package_cache_key(package_dir)
+    if key is None:
+        raise ShowcaseError("the package carries no cache key")
+    outputs = nk_cli._package_build_output_paths(package_dir)
+    removed, _ = nk_cli._remove_package_build_outputs(package_dir, game_name, outputs)
+    package_cache.write_completion_manifest(
+        package_dir, key, title_input_identity=package["title_input_identity"],
+        backends=completion.get("backends"), limits=completion.get("limits"))
+    valid, reason = package_cache.validate_package_cache(package_dir, expected_key=key)
+    if not valid:
+        raise ShowcaseError(f"the trimmed package failed its check: {reason}")
+    return int(removed)
+
+
 def _build_one(demo: dict[str, object], license_notice: bytes,
                prebuilt_prx_dir: Path | None = None) -> None:
     title_id = str(demo["id"])
@@ -694,6 +803,7 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     exe = package_stage / package_meta["executable"]["path"]
     if not exe.is_file():
         raise ShowcaseError(f"validated package executable is missing for {title_id}")
+    trim_to_runtime_package(package_stage, exe.stem)
 
     release_dir = DEMO_ROOT / "packages" / str(demo["disc_id"])
     _clear_owned(release_dir, DEMO_ROOT / "packages")
@@ -1345,7 +1455,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action",
                         choices=("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke",
-                                 "audit-run-paths"))
+                                 "audit", "audit-run-paths"))
     parser.add_argument("files", nargs="*", type=Path,
                         help="audit-run-paths: the ELF files whose run paths are audited")
     parser.add_argument("--out-dir", type=Path,
@@ -1373,8 +1483,9 @@ def main(argv: list[str] | None = None) -> int:
             smoke_all()
         elif args.action == "loadexec-smoke":
             loadexec_smoke()
-        elif args.action == "audit-run-paths":
-            problems = audit_run_paths(args.files)
+        elif args.action in ("audit", "audit-run-paths"):
+            problems = (audit_demo_root(DEMO_ROOT) if args.action == "audit"
+                        else audit_run_paths(args.files))
             for problem in problems:
                 print(f"SHOWCASE_AUDIT: {problem}", file=sys.stderr)
             if problems:

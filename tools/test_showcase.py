@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,7 @@ sys.path.insert(0, str(ROOT / "tests" / "fixtures" / "showcase"))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import showcase
+from nk_core import package_cache
 from nk_core.iso_inspect import inspect_iso
 
 
@@ -564,12 +566,15 @@ class ShowcasePrebuiltPrxTests(unittest.TestCase):
                     mock.patch.object(showcase, "_build_prx", side_effect=refused), \
                     mock.patch.object(showcase, "_pspsdk_license", side_effect=refused), \
                     mock.patch.object(showcase, "_check_prx_entry") as entry, \
+                    mock.patch.object(showcase, "trim_to_runtime_package") as trim, \
                     mock.patch.object(showcase, "_package_fingerprint", return_value="0" * 16), \
                     mock.patch.object(showcase.subprocess, "run", side_effect=fake_package):
                 self.assertEqual(
                     showcase.main(["build", "--prebuilt-prx-dir", str(prebuilt)]), 0)
             self.assertEqual(entry.call_count, len(showcase.DEMOS))
             self.assertEqual(len(packaged), len(showcase.DEMOS))
+            # Each package is trimmed to its runtime files before it ships, named by its executable.
+            self.assertEqual([call.args[1] for call in trim.call_args_list], ["demo"] * len(packaged))
             for environment in environments:
                 self.assertEqual(environment["RUNTIME_RUNPATH_ORIGIN"], "../../..")
             for demo, command in zip(showcase.DEMOS, packaged, strict=True):
@@ -757,6 +762,209 @@ class LinuxLinkLineTests(unittest.TestCase):
             self.assertNotRegex(links[0], r"""-Wl,-rpath,["']?/""")
 
 
+BUILD_HOME = "/srv/builder/nk-build-7f3a"
+
+
+def _synthetic_package(root: Path, build_dir: str = BUILD_HOME) -> Path:
+    """A runtime package the way the planner leaves it: runtime files and the build's own.
+
+    The `.d`, `.o` and `.map` files carry the folder the build ran in, as a compiler and
+    linker write it, and the completion manifest lists every file, as the planner's does.
+    """
+    inputs = {"manifest": {"sha256": "1" * 64}, "executable": {"sha256": "2" * 64},
+              "modules": [], "psp_header": None}
+    identity = package_cache.build_title_input_identity(
+        manifest={"id": "synthetic-cache-test", "schema_version": 1},
+        executable_name="EBOOT.BIN", executable_sha256="2" * 64, modules=[],
+        disc_id="TEST00001", region="TEST", disc_version="1.00",
+        param_sfo={"DISC_ID": "TEST00001", "DISC_VERSION": "1.00"},
+        container={"format": "iso9660", "volume_id": "CACHE_TEST", "size_bytes": 2048,
+                   "pvd_sector": 16, "sector_size": 2048})
+    key = package_cache.build_cache_key(
+        input_hashes=inputs, title_input_identity=identity,
+        codegen_options={"profile": "none", "funcs_per_chunk": 2000},
+        analyzer_sha256="3" * 64, codegen_sha256="4" * 64, compiler="gcc:test",
+        target="x86_64-test", runtime_source_digest="5" * 64, compile_flags="-O0",
+        link_flags="-lm")
+    cache = package_cache.cache_metadata(key, {"profile": "none", "funcs_per_chunk": 2000})
+    package_dir = root / "package"
+    package_dir.mkdir()
+    (package_dir / "demo").write_bytes(b"\x7fELF native")
+    (package_dir / "demo_image.bin").write_bytes(b"image")
+    (package_dir / "demo_recomp_0.c").write_text("/* generated */\n", encoding="utf-8")
+    (package_dir / "demo_recomp_0.o").write_bytes(
+        b"\x7fELF\0" + f"{build_dir}/demo_recomp_0.c".encode() + b"\0")
+    (package_dir / "demo_recomp_0.d").write_text(
+        f"{build_dir}/demo_recomp_0.o: {build_dir}/demo_recomp_0.c\n", encoding="utf-8")
+    (package_dir / "demo.map").write_text(f"LOAD {build_dir}/demo_recomp_0.o\n", encoding="utf-8")
+    (package_dir / "link-objects.rsp").write_text(f"{build_dir}/demo_recomp_0.o\n",
+                                                  encoding="utf-8")
+    (package_dir / ".game-inputs").write_text(f"{build_dir}\n", encoding="utf-8")
+    (package_dir / ".runtime-profile-0123456789abcdef").write_text("stamp\n", encoding="utf-8")
+    (package_dir / "sr_title_config.h").write_text("#define X 1\n", encoding="utf-8")
+    package = {
+        "format": "nakagawa-aot-package", "schema_version": 3,
+        "title": {"id": identity["manifest"]["id"], "manifest_sha256": "1" * 64},
+        "title_input_identity": identity, "cache": cache, "inputs": inputs,
+        "executable": {"path": "demo", "sha256": package_cache.sha256_file(package_dir / "demo")},
+        "generated_objects": [],
+    }
+    (package_dir / "package.json").write_text(package_cache.canonical_json(package),
+                                              encoding="utf-8")
+    (package_dir / "build-report.json").write_text(package_cache.canonical_json({"cache": cache}),
+                                                   encoding="utf-8")
+    package_cache.write_completion_manifest(package_dir, key, title_input_identity=identity,
+                                             backends="public", limits=["synthetic"])
+    valid, reason = package_cache.validate_package_cache(package_dir, expected_key=key)
+    assert valid, reason
+    return package_dir
+
+
+class ShowcaseRuntimeOnlyPackageTests(unittest.TestCase):
+    """A showcase package ships its runtime files only, as a package the player builds does (#306)."""
+
+    def test_the_planner_output_names_the_build_folder_in_files_the_manifest_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_dir = _synthetic_package(Path(temp))
+            leaks = showcase.files_naming(package_dir, [BUILD_HOME])
+            self.assertIn("demo_recomp_0.d", leaks)
+            self.assertIn("demo.map", leaks)
+
+    def test_trimming_leaves_a_valid_package_that_names_no_build_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_dir = _synthetic_package(Path(temp))
+            showcase.trim_to_runtime_package(package_dir, "demo")
+            self.assertEqual(showcase.files_naming(package_dir, [BUILD_HOME]), [])
+            kept = sorted(path.name for path in package_dir.iterdir())
+            self.assertEqual(kept, ["build-report.json", "completion-manifest.json", "demo",
+                                    "demo_image.bin", "package.json"])
+            valid, reason = package_cache.validate_package_cache(package_dir)
+            self.assertTrue(valid, reason)
+
+    def test_a_trimmed_package_still_validates_from_another_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_dir = _synthetic_package(Path(temp))
+            showcase.trim_to_runtime_package(package_dir, "demo")
+            elsewhere = Path(temp) / "moved" / "to somewhere"
+            elsewhere.parent.mkdir()
+            shutil.move(str(package_dir), str(elsewhere))
+            valid, reason = package_cache.validate_package_cache(elsewhere)
+            self.assertTrue(valid, reason)
+
+    def test_the_check_still_refuses_a_changed_a_missing_or_an_extra_file(self) -> None:
+        for damage, expected in (
+            (lambda root: (root / "demo").write_bytes(b"\x7fELF changed"), "digest"),
+            (lambda root: (root / "demo_image.bin").write_bytes(b"other image"), "digest"),
+            (lambda root: (root / "demo_image.bin").unlink(), "image is missing"),
+            (lambda root: (root / "demo").unlink(), "executable"),
+            (lambda root: (root / "extra.bin").write_bytes(b"unlisted"), "artifact set"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temp:
+                package_dir = _synthetic_package(Path(temp))
+                showcase.trim_to_runtime_package(package_dir, "demo")
+                damage(package_dir)
+                valid, reason = package_cache.validate_package_cache(package_dir)
+                self.assertFalse(valid)
+                self.assertIn(expected, reason)
+
+    def test_trimming_does_not_hide_a_package_that_was_already_damaged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_dir = _synthetic_package(Path(temp))
+            (package_dir / "demo_image.bin").unlink()
+            with self.assertRaises(showcase.ShowcaseError):
+                showcase.trim_to_runtime_package(package_dir, "demo")
+
+    def test_trimming_a_package_never_touches_files_outside_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            outside = Path(temp) / "neighbour.o"
+            outside.write_bytes(b"keep")
+            package_dir = _synthetic_package(Path(temp))
+            showcase.trim_to_runtime_package(package_dir, "demo")
+            self.assertEqual(outside.read_bytes(), b"keep")
+
+
+@unittest.skipUnless(ON_LINUX and shutil.which("gcc") and _has_system_sdl3(),
+                     "needs Linux, gcc and a system SDL3")
+class ShowcaseRelocationTests(unittest.TestCase):
+    """The real showcase packages, built in one folder and used from another (#306).
+
+    The packages come from the demo folder `showcase.py build` already wrote (`make
+    showcase-linux` runs this right after it), or are built here when
+    NK_SHOWCASE_RELOCATION_BUILD=1 and PSPDEV is installed. Without either the test skips:
+    a PSPDEV build takes minutes and is not started by an ordinary test run.
+    """
+
+    def _built_demos(self, root: Path) -> tuple[Path, Path]:
+        """The demo folder to use and the build folder its files must not name."""
+        if os.environ.get("NK_SHOWCASE_RELOCATION_BUILD") == "1":
+            if not shutil.which("psp-gcc"):
+                self.skipTest("NK_SHOWCASE_RELOCATION_BUILD=1 needs PSPDEV (psp-gcc) on PATH")
+            built = root / "build-site" / "demos"
+            work = root / "build-site" / "work"
+            with mock.patch.object(showcase, "BUILD_ROOT", work),                     mock.patch.object(showcase, "DEMO_ROOT", built):
+                showcase.build_all()
+            return built, work
+        if not (showcase.DEMO_ROOT / "packages").is_dir():
+            self.skipTest("no built demo folder; run `showcase.py build` first")
+        return showcase.DEMO_ROOT, showcase.BUILD_ROOT
+
+    def test_packages_built_in_one_folder_validate_and_run_from_another(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-reloc-") as temp:
+            root = Path(temp)
+            built, work = self._built_demos(root)
+            moved = root / "an install" / "bin" / "demos"
+            moved.parent.mkdir(parents=True)
+            shutil.copytree(built, moved, symlinks=True)
+            needles = [str(ROOT), str(built), str(work), str(Path.home())]
+            self.assertEqual(showcase.files_naming(moved, needles), [])
+            executables = []
+            for demo in showcase.DEMOS:
+                package_dir = moved / "packages" / str(demo["disc_id"])
+                # A smoke run in the build folder leaves its frame captures beside the
+                # package files. They are no part of the package (and were scanned above),
+                # so the validation sees the package as it was built.
+                listed = {entry["path"] for entry in json.loads(
+                    (package_dir / "completion-manifest.json").read_text(encoding="utf-8"))["artifacts"]}
+                for found in sorted(package_dir.rglob("*")):
+                    if found.is_file() and found.relative_to(package_dir).as_posix() not in listed                             and found.name != "completion-manifest.json":
+                        found.unlink()
+                valid, reason = package_cache.validate_package_cache(package_dir)
+                self.assertTrue(valid, f"{demo['disc_id']}: {reason}")
+                executables.append(package_dir / json.loads(
+                    (package_dir / "package.json").read_text(encoding="utf-8"))["executable"]["path"])
+            self.assertEqual(showcase.audit_run_paths(executables), [])
+            # The player folder holds the SDL3 library (the install's bin/, where a Windows
+            # install holds SDL3.dll). With every system copy hidden, each demo finds it
+            # through its own run path, from the moved folder, with no wrapper.
+            copies = showcase.system_library_files("libSDL3.so")
+            self.assertTrue(copies, "no system SDL3 to copy beside the player")
+            shutil.copy2(copies[0], moved.parent / "libSDL3.so.0")
+            for executable in executables:
+                try:
+                    unresolved = showcase.unresolved_libraries(executable)
+                except showcase.ShowcaseError as exc:
+                    self.skipTest(str(exc))
+                self.assertEqual(unresolved, [], executable.name)
+            # A change to a file the manifest lists is still refused after the move.
+            victim = executables[0]
+            original = victim.read_bytes()
+            victim.write_bytes(original + b"\0")
+            valid, reason = package_cache.validate_package_cache(victim.parent)
+            victim.write_bytes(original)
+            self.assertFalse(valid)
+            self.assertIn("digest", reason)
+            image = victim.parent / f"{victim.stem}_image.bin"
+            image.rename(image.with_suffix(".moved"))
+            valid, reason = package_cache.validate_package_cache(victim.parent)
+            image.with_suffix(".moved").rename(image)
+            self.assertFalse(valid)
+            # Both demos run from the moved folder and present real frames there, captured
+            # through the runtime's own SR_FBSNAP_WINDOWS facility.
+            smoke = root / "smoke"
+            smoke.mkdir()
+            with mock.patch.object(showcase, "BUILD_ROOT", root / "work"),                     mock.patch.object(showcase, "DEMO_ROOT", moved):
+                for demo in showcase.DEMOS:
+                    self.assertTrue(showcase._smoke_headless_capture(demo, None, smoke))
 
 
 if __name__ == "__main__":
