@@ -9498,6 +9498,7 @@ class FirstRunRouteTests(unittest.TestCase):
                     self.assertNotIn("HEADLESS_ACCEPTANCE status=PASS", output)
                     self.assertEqual(settings.read_bytes(), saved_settings)
 
+            # A fresh process reloads the saved Ace setting and still needs the timing package.
             ordinary = self.run_route(scratch, [*args, "--launch-index=0"])
             output = ordinary.stdout + ordinary.stderr
             self.assertEqual(ordinary.returncode, 3, output)

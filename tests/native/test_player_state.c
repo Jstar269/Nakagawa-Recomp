@@ -14463,7 +14463,7 @@ static void test_acceptance_launch_uses_stock_package(const char *self_executabl
         {true, 0, true, false}, {true, 3, false, true},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
-        player_app_set_title_60hz(app, 0, cases[i].saved_timing);
+        if (i == 1) player_app_set_title_60hz(app, 0, true);
         if (cases[i].missing_declaration) {
             assert(remove(declaration) == 0);
             player_app_refresh_title_enhancements(app);
