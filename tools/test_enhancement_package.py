@@ -930,6 +930,14 @@ class _SynthTimingElfFixture(unittest.TestCase):
 class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
     """Verify authentic byte-identity, all 6 transform classes, fail-closed digest rejection, and AOT cache epoch."""
 
+    def test_timing_identity_preserves_positional_codegen_options(self) -> None:
+        from codegen import CodegenOptions
+
+        options = CodegenOptions(True, True)
+        self.assertTrue(options.lle_cpu)
+        self.assertTrue(options.lle_import_seam)
+        self.assertIsNone(options.timing_run_identity)
+
     def test_timing_run_identity_observes_generated_startup(self) -> None:
         """Run separately compiled synthetic startup registrations and the real diagnostic."""
         if GCC is None:

@@ -75,7 +75,7 @@ class CodegenOptions:
 
     # The validated disc identity from the normal native package builder. An absent
     # option preserves existing codegen callers' original output.
-    timing_run_identity: tuple[str, str] | None = None
+    timing_run_identity: tuple[str, str] | None = dataclass_field(default=None, kw_only=True)
 
     # LLE import seam (PR 3): when True, generated import stubs route through
     # sr_import_call(s, nid, stub_pc) instead of calling sr_syscall(s, nid)
