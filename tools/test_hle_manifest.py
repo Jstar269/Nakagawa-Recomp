@@ -778,8 +778,9 @@ class LiveManifestTests(unittest.TestCase):
         limitation = meta.HANDLER_LIMITATIONS[handler]
         for needle in (
             "one cell only", "0x80020064", "VBLANK sub-interrupt handler", "20 of 20",
-            "one acceptance-eligible launch", "on no thread", "callback delivery", "mutex-timeout-quanta",
-            "not cited", "runtime check", "unmeasured", "not reviewed here",
+            "one acceptance-eligible launch", "callback delivery", "mutex-timeout-quanta",
+            "discards the return code", "timeout word and elapsed time", "slots 13 and 14",
+            "does not qualify timeout behavior", "runtime check",
         ):
             self.assertIn(needle, limitation)
         # The guest handler enters the NID through sr_syscall with its named constant, and the

@@ -54779,13 +54779,12 @@ static void test_psp_mutex(void) {
  * is a host function bound at its guest entry, standing in for the generated translation of the
  * probe's handler; every call it makes enters the NID through sr_syscall.
  *
- * What this cell does not show. The record measures LockMutexCB only here, so the cell says
- * nothing about it on a thread: acquisition, a contended wait, who wakes it and with what result,
- * its timeout write-back, and callback delivery while it waits are all outside the record. (The
- * record's mutex-timeout-quanta case also calls LockMutexCB once, with a 250 us timeout on a mutex
- * the main thread holds, but the probe discards that call's result and the record publishes none
- * of its words.) The mutex state checked after the handler runs is the runtime's own consistency
- * check, not a measured cell: the probe reads no mutex status in this case. */
+ * This cell covers the interrupt-context refusal. In the separate mutex-timeout-quanta case,
+ * the probe calls LockMutexCB with a 250 us timeout on a mutex the main thread holds. It
+ * discards the return code and emits the timeout word and elapsed time in slots 13 and 14.
+ * The public summary does not qualify timeout behavior. Thread-context acquisition, wake
+ * outcomes and callback delivery remain outside this cell. The post-call mutex-state
+ * assertion checks runtime consistency. The interrupt probe reads no mutex status. */
 #define NID_MUTEX_INTR_LOCK_MUTEX     0xb011b11fu
 #define NID_MUTEX_INTR_LOCK_MUTEX_CB  0x5bf4dd27u
 #define NID_MUTEX_INTR_TRY_LOCK_MUTEX 0x0ddcd2c9u
