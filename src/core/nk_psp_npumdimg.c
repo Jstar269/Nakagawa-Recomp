@@ -686,14 +686,17 @@ static int file_read_at(void *user, uint64_t offset, void *buf, size_t len)
 
 static int open_source(NkPspCtx *ctx, const char *path, FILE **f, NkPsarSource *src)
 {
+    /* Keep the status explicit so success always proves the source was initialized. */
     *f = nk_fopen_utf8(path, "rb");
     if (*f == NULL) {
-        return nk_psp_fail(ctx, NK_PSP_ERR_INPUT, NULL, "the file could not be opened");
+        nk_psp_fail(ctx, NK_PSP_ERR_INPUT, NULL, "the file could not be opened");
+        return NK_PSP_ERR_INPUT;
     }
     if (file_size(*f, &src->size) != 0) {
         fclose(*f);
         *f = NULL;
-        return nk_psp_fail(ctx, NK_PSP_ERR_INPUT, NULL, "the file's size could not be read");
+        nk_psp_fail(ctx, NK_PSP_ERR_INPUT, NULL, "the file's size could not be read");
+        return NK_PSP_ERR_INPUT;
     }
     src->read_at = file_read_at;
     src->user = *f;
