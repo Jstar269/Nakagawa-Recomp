@@ -39,6 +39,7 @@
 #include "psp_seal_fixture.h"
 #include "pgf_golden_vectors.h"
 #include "../../src/rt/recomp.h"
+#include "../../src/ui/nk_ui_text.h"
 /* The runtime's SR_ACE parser, built into this test by source (it uses the C library only),
  * so every line the player writes is checked against the parser that reads it (#2054). */
 #include "../../src/rt/ace.c"
@@ -12572,6 +12573,20 @@ static void test_graphics_preset_fsr1_refusal(void) {
     const char *refusal =
         "BOOT_EVENT phase=present_upscale_refused mode=fsr1 reason=queue_no_compute t_ns=90\n";
     const char *supported = "BOOT_EVENT phase=present_upscale mode=fsr1 t_ns=90\n";
+#if NK_UI_ALTERNATE_CATALOG
+    char queue_note[192], startup_note[192];
+    const int queue_len = snprintf(queue_note, sizeof(queue_note),
+                                   NK_UI_STR(SETTINGS_PRESET_FSR1_QUEUE_REFUSED), "Medium");
+    const int startup_len = snprintf(startup_note, sizeof(startup_note),
+                                     NK_UI_STR(SETTINGS_PRESET_FSR1_STARTUP_REFUSED), "Medium");
+    assert(queue_len > 0 && (size_t)queue_len < sizeof(queue_note));
+    assert(startup_len > 0 && (size_t)startup_len < sizeof(startup_note));
+#else
+    const char *queue_note = "Medium stays selected. The graphics queue has no compute for FSR 1."
+                             " This session uses normal scaling.";
+    const char *startup_note = "Medium stays selected. FSR 1 could not start."
+                               " This session uses normal scaling.";
+#endif
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(*app));
     PlayerApp *loaded = (PlayerApp *)calloc(1, sizeof(*loaded));
     PlayerLaunchWork *work = (PlayerLaunchWork *)calloc(1, sizeof(*work));
@@ -12589,8 +12604,7 @@ static void test_graphics_preset_fsr1_refusal(void) {
     assert(player_app_graphics_preset_note(app, note, sizeof(note)) && strcmp(note, normal) == 0);
 
     graphics_preset_boot_fixture(app, work, PLAYER_PLAY_ENHANCED, refusal);
-    if (!player_app_graphics_preset_note(app, note, sizeof(note)) ||
-        !strstr(note, "graphics queue has no compute") || !strstr(note, "normal scaling")) {
+    if (!player_app_graphics_preset_note(app, note, sizeof(note)) || strcmp(note, queue_note) != 0) {
         fprintf(stderr, "[PLAYER_STATE_TEST] FSR 1 selected-queue refusal did not reach the preset note\n");
         exit(1);
     }
@@ -12606,8 +12620,7 @@ static void test_graphics_preset_fsr1_refusal(void) {
 
     graphics_preset_boot_fixture(app, work, PLAYER_PLAY_ENHANCED,
         "BOOT_EVENT phase=present_upscale_refused mode=fsr1 reason=startup_failed t_ns=90\n");
-    assert(player_app_graphics_preset_note(app, note, sizeof(note)) &&
-           strstr(note, "FSR 1 could not start") && !strstr(note, "no compute"));
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)) && strcmp(note, startup_note) == 0);
     player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
     assert(player_app_graphics_preset_note(app, note, sizeof(note)) &&
            strstr(note, "Ultra is used") && !strstr(note, "normal scaling"));

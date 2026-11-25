@@ -2854,11 +2854,11 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (row->part[PLAYER_PART_UPSCALE] == 1 &&
         app->fsr1_session_preset == player_app_graphics_preset(app) &&
         app->fsr1_session_refusal != NK_FSR1_REFUSAL_NONE) {
-        const char *why = app->fsr1_session_refusal == NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE
-            ? "The graphics queue has no compute for FSR 1."
-            : "FSR 1 could not start.";
-        const int n = snprintf(out, cap, "%s stays selected. %s This session uses normal scaling.",
-                               row->label, why);
+        const int n = snprintf(out, cap,
+            app->fsr1_session_refusal == NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE
+                ? NK_UI_STR(SETTINGS_PRESET_FSR1_QUEUE_REFUSED)
+                : NK_UI_STR(SETTINGS_PRESET_FSR1_STARTUP_REFUSED),
+            row->label);
         if (n > 0 && (size_t)n < cap) return true;
         out[0] = '\0';
         return false;
