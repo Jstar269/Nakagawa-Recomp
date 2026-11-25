@@ -54881,6 +54881,40 @@ static void test_kernel_pool_bounds_measured(void) {
  * ascending msgPriority, waitType 5.
  * ========================================================================= */
 
+/* pspautotests tests/threads/mbx/send/send.expected, "Send twice" (PSP-recorded):
+ * sending a packet that is already queued fails with 0x800201C9 and leaves the
+ * mailbox as it was (count=1, the packet still links to itself); the packet is
+ * then received once, and a second receive times out. */
+static void test_mbx_send_already_queued_packet(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x160u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    uint32_t out = MBX_OUTPTR;
+    uint32_t mbx = selftest_mbx_create(0);
+    expect(mbx != 0 && (mbx >> 31) == 0, "MBX dup: CreateMbx returns a UID");
+    uint32_t m0 = MBX_MSG_BASE;
+    mbx_init_packet(m0, 0);
+    expect(selftest_mbx_send(mbx, m0) == 0, "MBX dup: Send twice #1 succeeds");
+    expect(selftest_mbx_send(mbx, m0) == 0x800201c9u,
+           "MBX dup: Send twice #2 fails with 0x800201C9");
+    MEM_W32(MBX_INFO, 52u);
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 44) == 1u &&
+           MEM_R32(MBX_INFO + 48) == m0 && MEM_R32(m0) == m0,
+           "MBX dup: the refused send leaves one packet linked to itself");
+    MEM_W32(out, 0u);
+    expect(selftest_mbx_poll(mbx, out) == 0 && MEM_R32(out) == m0,
+           "MBX dup: the packet is received once");
+    MEM_W32(out, 0xfeedfaceu);
+    MEM_W32(MBX_TIMEOUT_PTR, 0u);
+    expect(selftest_mbx_recv(mbx, out, MBX_TIMEOUT_PTR) == MBX_WAIT_TIMEOUT_ERR &&
+           MEM_R32(out) == 0xfeedfaceu,
+           "MBX dup: a second receive finds the mailbox empty");
+    expect(selftest_mbx_delete(mbx) == 0, "MBX dup: DeleteMbx succeeds");
+    s_cur = -1;
+}
+
 static void test_mbx_lifecycle_and_ordering(void) {
     extern void sr_hle_test_partition_reset(void);
     reset_fixture();
@@ -71796,6 +71830,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_std_handles_unmeasured_are_named();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
+    test_mbx_send_already_queued_packet();
     test_mbx_has_no_host_table_limits();
     test_mbx_send_wakes_a_blocked_receiver();
     test_mbx_receive_cb_takes_callback_message();

@@ -810,6 +810,7 @@ void hle_register_msgpipe_handlers(void) {
     sr_hle_register(0x33be4024, "sceKernelReferMsgPipeStatus", h_ReferMsgPipeStatus);
 }
 #define PSP_MBX_ATTR_PRIORITY          0x400u
+#define PSP_MBX_ERROR_DUPLICATE_MSG    0x800201c9u
 
 /* Rewrite guest-visible circular next links so first->...->last->first matches
  * host delivery order (HARDWARE_ORACLE.md: FIFO mailboxes link packets circularly). */
@@ -914,6 +915,10 @@ static uint32_t h_SendMbx(CpuState *s) {
     /* Validate the whole accessed packet span: the circular relink writes
      * next@0 and priority mailboxes read msgPriority@4. */
     if (!msg || !sr_guest_span_writable(msg, 8u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    /* pspautotests tests/threads/mbx/send/send.expected, "Send twice" (PSP-recorded):
+     * a packet that is already queued is refused and the queue is left unchanged. */
+    for (int i = 0; i < m->nmsgs; i++)
+        if (m->msgs[i] == msg) return PSP_MBX_ERROR_DUPLICATE_MSG;
     mbx_enqueue(m, msg);
     /* The first waiter still blocked on the mailbox is woken. One that is not (running its
      * callbacks in ReceiveMbxCB, or timed out and not yet back) is passed over: it finds the
