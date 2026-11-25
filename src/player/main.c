@@ -7075,6 +7075,10 @@ static int player_command_line_launch(PlayerRun *run) {
                 fprintf(stderr, "[PLAYER] Launch index %d has no prepared runtime; PLAY NOW is unavailable.\n",
                         run->launch_index);
             }
+            if (app->headless_accept_presented_frames > 0u) {
+                fprintf(stderr,
+                        "[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable\n");
+            }
             if (run->launch_title) {
                 char message[320];
                 (void)snprintf(message, sizeof(message),

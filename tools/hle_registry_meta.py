@@ -769,7 +769,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_umd_io_console_model",
             "tests/native/hle_thread_selftest.c:test_io_async_and_path_imports",
         ],
-        "limitation": "the measured cells establish close result 0 for one freshly written host0 file and for the eleven successful fixed UMD/disc/msstor0p1 opens; double close, directory descriptors, standard descriptors and error precedence are not hardware measured, and the refusal while an asynchronous request is pending (ASYNC_BUSY) is covered by the host selftest only (#341)",
+        "limitation": "the measured cells establish close result 0 for one freshly written host0 file and for the eleven successful fixed UMD/disc/msstor0p1 opens; PSP-HLE-STDIO-001 measures sceIoClose of the Stdout handle as refused with nothing closed in both launch contexts, 0x800200d1 from the XMB and 0x80020325 in the game context (one launch); the runtime answers the game context's 0x80020325 because it starts its programs as games, and the Stdin and Stderr handles answer that refusal as a modelled, unmeasured result; double close, directory descriptors, the descriptors 0, 1 and 2 named by number and error precedence are not hardware measured, and the refusal while an asynchronous request is pending (ASYNC_BUSY) is covered by the host selftest only (#341)",
     },
     "h_IoDclose": {
         "status": "partial",
@@ -924,7 +924,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
             "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
         ],
-        "limitation": "PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; PSP-HLE-IO-SEEK-001 measures a write through a PSP_O_RDONLY Memory Stick descriptor as 0x80020323 with the file unchanged (#1380); PSP-HLE-IO-SEEK-002 measures sceIoWriteAsync on an idle PSP_O_RDONLY ms0: descriptor returning 0x80020323 at once with nothing queued; with a request pending both calls answer the busy error first (unmeasured), and a fatms0: sceIoWriteAsync queues and completes with this write's refusal (unmeasured); read-only descriptors on other devices, short writes, zero-length writes, unreadable source buffers, raw devices and standard-stream writes remain unmeasured (#341); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)",
+        "limitation": "PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; PSP-HLE-IO-SEEK-001 measures a write through a PSP_O_RDONLY Memory Stick descriptor as 0x80020323 with the file unchanged (#1380); PSP-HLE-IO-SEEK-002 measures sceIoWriteAsync on an idle PSP_O_RDONLY ms0: descriptor returning 0x80020323 at once with nothing queued; with a request pending both calls answer the busy error first (unmeasured), and a fatms0: sceIoWriteAsync queues and completes with this write's refusal (unmeasured); read-only descriptors on other devices, short writes, zero-length writes, unreadable source buffers and raw devices remain unmeasured (#341); PSP-HLE-STDIO-001 measures a one-byte write through the Stdout and the Stderr handle returning 1 in both launch contexts, a larger standard-stream write and a write to descriptor 0, 1 or 2 named by number return the count unmeasured, and a write through the Stdin handle is unmeasured and stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)",
     },
     # Async IoFileMgr requests retain per-fd results and callbacks. Their
     # deterministic import-boundary service interval is synthetic timing, not
@@ -978,7 +978,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     "h_IoCloseAsync": {
         "status": "partial",
         "evidence": ["tests/native/hle_thread_selftest.c:test_fd_namespace"],
-        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; close callback timing remains unmeasured",
+        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; close callback timing remains unmeasured; sceIoCloseAsync of a standard handle (sceKernelStdin, sceKernelStdout, sceKernelStderr) is unmeasured and stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) with nothing queued or closed (#341)",
     },
     "h_IoWaitAsync": {
         "status": "partial",
@@ -1037,6 +1037,32 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "public C library contract (memset)",
         ],
         "description": "Fills a fully validated guest span and returns the guest destination.",
+    },
+    "h_KernelStdin": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles)",
+            "tests/native/hle_thread_selftest.c:test_std_handles_measured",
+        ],
+        "limitation": "this status covers the returned handle value only, 0x0093a513; PSP-HLE-STDIO-001 recorded this kernel UID on one PSP-3000 in both measured launch contexts, which agree on it (from the XMB on boots 135 and 222, in the game context on boot 200; ARK-5 5.1.0 and 5.2.0), every launch through PSPLink, whose tty the handle is; its value on a launch without PSPLink, on another console and on other system software is unmeasured; a read from Stdin is UNMEASURED and unclaimed (the probe runs none): sceIoRead and sceIoReadAsync through the handle still give the runtime's earlier standard-stream error 0x80010009, which is not a PSP result and is not reviewed here; no other call on the Stdin handle is measured either: sceIoClose answers the refusal modelled from the Stdout close and closes nothing, and sceIoWrite, sceIoWriteAsync and sceIoCloseAsync stop at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) (#341)",
+    },
+    "h_KernelStdout": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles, stdio-write-stdout, stdio-close-stdout)",
+            "tests/native/hle_thread_selftest.c:test_std_handles_measured",
+            "tests/native/hle_thread_selftest.c:test_std_handles_unmeasured_are_named",
+        ],
+        "limitation": "returns 0x00938a15; PSP-HLE-STDIO-001 recorded this kernel UID on one PSP-3000 in both measured launch contexts, which agree on it (from the XMB on boots 135 and 222, in the game context on boot 200; ARK-5 5.1.0 and 5.2.0), every launch through PSPLink, whose tty the handle is; its value on a launch without PSPLink, on another console and on other system software is unmeasured; measured in both contexts and reproduced through the handle: a one-byte sceIoWrite returns 1 and the import returns the same handle after the write and after the close; sceIoClose is refused and closes nothing in both contexts, with 0x800200d1 from the XMB and 0x80020325 in the game context (one launch); the runtime answers the game context's 0x80020325 because it starts its programs as games; unmeasured in either context: a write of more than one byte and sceIoWriteAsync (both return the count), sceIoRead, sceIoLseek, sceIoLseek32 and sceIoIoctl (the runtime's earlier standard-stream error 0x80010009, not a PSP result), and sceIoCloseAsync, which stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) (#341)",
+    },
+    "h_KernelStderr": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-STDIO-001: stdio-handles, stdio-write-stderr)",
+            "tests/native/hle_thread_selftest.c:test_std_handles_measured",
+            "tests/native/hle_thread_selftest.c:test_std_handles_unmeasured_are_named",
+        ],
+        "limitation": "returns 0x00936f17; PSP-HLE-STDIO-001 recorded this kernel UID on one PSP-3000 in both measured launch contexts, which agree on it (from the XMB on boots 135 and 222, in the game context on boot 200; ARK-5 5.1.0 and 5.2.0), every launch through PSPLink, whose tty the handle is; its value on a launch without PSPLink, on another console and on other system software is unmeasured; measured in both contexts and reproduced through the handle: a one-byte sceIoWrite returns 1 and the import returns the same handle afterwards; unmeasured in either context: sceIoClose, which answers the refusal modelled from the Stdout close (0x80020325) and closes nothing, a write of more than one byte and sceIoWriteAsync (both return the count), sceIoRead, sceIoLseek, sceIoLseek32 and sceIoIoctl (the runtime's earlier standard-stream error 0x80010009, not a PSP result), and sceIoCloseAsync, which stops at the named boundary IO_STD_HANDLE_OPERATION (0x80010086) (#341)",
     },
     "h_Strlen": {
         "status": "complete",
@@ -1280,6 +1306,38 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1",
         ],
         "limitation": "the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers, and error precedence are unmeasured; a channel of 8 or more (0x80260003) and an unreserved channel (0x80260001) are refused following PPSSPP caa91b54b535, corroborated by PSPAutotests output.expected for channel -1 and unreserved channel 5 (#341)",
+    },
+    # sceAudioOutputPannedBlocking (#341): no PSP record measures this API. The refusal codes
+    # follow PPSSPP as a behaviour reference; PSPAutotests output.expected corroborates the
+    # volume cells and the reserved-channel length it records for this NID, and nothing more.
+    "h_AudioOutputPannedBlocking": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_audio_output_panned_blocking_unreserved_channel",
+            "tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_channels",
+            "tests/native/hle_thread_selftest.c:test_audio_regular_output_refuses_bad_volumes",
+            "PPSSPP caa91b54b53585811b0fd84405ea04aec72a952b Core/HLE/sceAudio.cpp "
+            "sceAudioOutputPannedBlocking and `Core/HLE/__sceAudio.cpp` `__AudioEnqueue` (a behaviour "
+            "reference; derived, not PSP-measured): the two volumes ORed and compared unsigned above "
+            "0xFFFF give 0x8026000b first, a channel of 8 or more 0x80260003, a channel not reserved "
+            "0x80260001",
+            "PSPAutotests tests/audio/sceaudio/output.expected "
+            "(ea71108f00933712c4662276261b39cd42249b1e, a third-party expectation file; corroboration "
+            "only): for this API, equal left and right volumes on a reserved channel with NULL data "
+            "give 0x8026000b for -256, -2, -1, -2147483648 and 65536 and up and the length for 0 to "
+            "65535, and a reserved channel at 0x8000 returns its length (0x1040); the bad-channel "
+            "(0x80260003, channel -1) and unreserved-channel (0x80260001, channel 5) cells are "
+            "recorded for sceAudioOutputBlocking only",
+        ],
+        "limitation": "PPSSPP-derived, not PSP-measured: a volume above 0xFFFF or a negative one "
+        "(0x8026000b, checked first), a channel of 8 or more (0x80260003) and a channel 0 to 7 that "
+        "is not reserved (0x80260001, nothing played, the caller not parked, the first refusal of "
+        "a run reported by name) follow PPSSPP caa91b54b535; PSPAutotests output.expected (ea71108f) "
+        "records this API's volume refusals and its length on a reserved channel, but records the "
+        "bad-channel and unreserved-channel cells for sceAudioOutputBlocking only; there is no PSP "
+        "measurement of this API (no docs/HARDWARE_ORACLE.md or tools/psp_oracle/manifest.json "
+        "record); the blocking duration and wake timing, the mixer result, a busy channel, unequal "
+        "left and right volumes and the volume-before-channel order stay unmeasured (#341)",
     },
     "h_GeEdramGetAddr": {
         "status": "complete",
@@ -3261,11 +3319,7 @@ WAIVERS: tuple[FindingWaiver, ...] = ()
 # Never add an entry to make that gate pass: review the handler instead.
 PROFILE_ZERO_ISSUE = "https://github.com/Jstar269/nakagawa-recomp/issues/341"
 PROFILE_ZERO_UNREVIEWED_IMPORTS = {
-    0x13F592BC: {"name": "sceAudioOutputPannedBlocking", "issue": PROFILE_ZERO_ISSUE},  # h_AudioOutputPannedBlocking: output.expected records bad channel 0x80260003, unreserved 0x80260001 (both refused now) and volume over 0xFFFF 0x8026000b (refused now, as by h_AudioOutputBlocking and h_AudioOutputPanned; a negative volume is refused here alone)
-    0x172D316E: {"name": "sceKernelStdin", "issue": PROFILE_ZERO_ISSUE},  # h_StdFd: PSP-HLE-STDIO-001 measured three distinct handles, none of them 1, where all three return 1 here (#2397), so a close through the Stdin or Stderr handle answers as Stdout's does; the measured Stdout write and close results are reproduced, sceIoCloseAsync of a std stream is unmeasured
-    0xA6BAB2E9: {"name": "sceKernelStdout", "issue": PROFILE_ZERO_ISSUE},  # h_StdFd: same reason as sceKernelStdin
     0xD675EBB8: {"name": "sceKernelSelfStopUnloadModule", "issue": PROFILE_ZERO_ISSUE},  # h_SelfStopUnloadModule: PSP-HLE-SELFSTOP-001 measured (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM) from a helper thread; the first two are reproduced (a first argument of 1 only with no argument block), the third is refused with ILLEGAL_ADDR here where the PSP ran module_stop with an argp it chose (#2397)
-    0xF78BA90A: {"name": "sceKernelStderr", "issue": PROFILE_ZERO_ISSUE},  # h_StdFd: same reason as sceKernelStdin
 }
 
 # Runtime subsystem that owns each registration (issue #307). The split of

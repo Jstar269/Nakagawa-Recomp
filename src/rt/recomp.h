@@ -376,6 +376,11 @@ extern volatile int g_sr_vram_read_pending;
 void sr_ge_vram_read_prepare(uint32_t physical_addr, uint32_t width);
 void sr_ge_vram_write_prepare(uint32_t physical_addr, uint32_t width);
 void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width);
+/* Watch CPU stores in the visible rows of one validated GPU scanout.
+ * first/end are canonical VRAM addresses, end exclusive. Zero disables it.
+ * Rearming after an accepted present clears the previous write indication. */
+void ge_watch_cpu_scanout(uint32_t first, uint32_t end, uint32_t pitch, uint32_t visible_row);
+int ge_scanout_cpu_written(void);
 static inline void sr_guest_vram_read_prepare_bytes(uint32_t addr, uint32_t width);
 
 /* --- Guest-memory span validation (issue #15) --------------------------------
@@ -2433,6 +2438,8 @@ int      gui_stick_dead_zone(void);              /* the input profile's stick de
                                                     counts (ace_stick_host_counts); 0 without one */
 int      gui_pad_present(void);                  /* 1 when a game controller is connected */
 void     gui_ace_vblank(uint32_t vcount);        /* Ace Mode's smooth motion: a held frame's VBLANK */
+/* The GPU presenter reports an accepted image that bypassed guest CPU bytes. */
+void     sr_display_note_gpu_present(void);
 /* Returns 1 only when the selected presenter accepted the validated frame. */
 int      gui_present(uint32_t fbaddr, int fmt, uint32_t stride);
 void     gui_pump(void);                         /* service the window's pending events */

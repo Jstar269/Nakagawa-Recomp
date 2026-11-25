@@ -757,19 +757,21 @@ and ignored. Keeping a future removed spelling for a notice release is a
 The runtime's variables have the same single source: `src/rt/env_registry.h`
 declares every name, its kind, its default, the file that reads it and its
 purpose (`src/rt/env_registry.h:7-24`). The classes below are a reading of that
-table and `docs/SETUP.md` at this commit. `tools/test_env_registry.py` fails on a
-name read in `src/rt` or linked `src/core` but missing from the table, on a row
-nothing reads, and on a malformed row.
+table and `docs/SETUP.md`. List each name explicitly so a new member of a prefix
+group receives its own classification. `tools/test_env_registry.py` checks for
+missing and malformed registry rows and checks the option and environment classes
+below against the option table and the variables in `docs/SETUP.md`.
 
-| Class | Examples | Contract and source |
+| Class | Variables | Contract and source |
 | --- | --- | --- |
-| Build and toolchain inputs | `NK_POWERSHELL`, `NK_PACKAGE_JOBS`, `NK_BUILD_ROOT`, `NK_INSTALL_ROOT` | Read by the build and player setup, not by a running title; documented in `docs/SETUP.md:41`, `:82-86`, `:1104`, `:1454-1465`. |
-| Documented runtime overrides | `SR_USER_DATA_ROOT`, `SR_MEMSTICK`, `SR_FPS_CAP`, `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_ACE`, `SR_TEX_*`, `SR_PRESENT_*`, `SR_RECORD`, `SR_REPLAY`, `SR_HEADLESS_*`, `SR_WATCHDOG_EXIT`, `SR_VIDEOREC_DIR`, `SR_SYSTEM_REGISTRY` | User-facing where `docs/SETUP.md` or `docs/DEBUGGING.md` gives a rule; each row in `src/rt/env_registry.h` carries its kind and default. `SR_USER_DATA_ROOT`, for example, is refused by name when invalid rather than silently replaced (`src/rt/env_registry.h:271`); other path variables keep their own row's default and validation. `SR_SYSTEM_REGISTRY` overrides the registry overlay path (`src/rt/hle_data.c:107-144`; `docs/DEBUGGING.md:1759`): an empty value falls back to the default, and a configured file that cannot be read leaves the change in memory only (`src/rt/hle.c:2190-2200`). |
-| Launcher-owned, not user knobs | `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_DISC_ID`, `SR_GAME_TITLE`, `SR_USER_DATA_ROOT`, `NK_INPUT_PROFILE`, `PSP_ISO` | The player always exports the switch and file so an inherited value cannot opt a launch in, and masks a stale title or data root (`src/core/nk_launch.c:1891-1929`; `src/rt/env_registry.h:34`). `NK_INPUT_PROFILE` is the path the launcher exports for the child; when it has none, it exports the bare name so an inherited value is removed (`src/core/nk_launch.c:1869-1873`, `:1998-2006`). |
+| Build and toolchain inputs | `BUILD_DIR`, `BUILD_ROOT`, `CC`, `GAME_NAME`, `MSYS_PATH`, `NK_BUILD_ROOT`, `NK_INSTALL_ROOT`, `NK_PACKAGE_JOBS`, `NK_POWERSHELL`, `PYTHON`, `SDL3_DIR`, `SDL3_DLL`, `SDL3_PATH`, `SDL3_TTF_DLL`, `TITLE_MANIFEST`, `VULKAN_SDK` | These inputs select compilers, interpreters, dependency paths, or build inputs and outputs. The Vulkan tool uses `VULKAN_SDK` after an explicit SDK path (`tools/vulkan_sdk.py`). SDL discovery consults `SDL3_DIR`, then `SDL3_PATH`, when no explicit path was given (`tools/nk_doctor_checks.py`). The staged SDL library overrides are `SDL3_DLL` and `SDL3_TTF_DLL`. |
+| Documented runtime overrides | `SR_ACE`, `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_FPS_CAP`, `SR_GPU_PIPELINE_CACHE`, `SR_MEMSTICK`, `SR_MOVIE_UPSCALE`, `SR_PRESENT_SCALING`, `SR_PRESENT_UPSCALE`, `SR_RECORD`, `SR_REPLAY`, `SR_SYSTEM_REGISTRY`, `SR_TEX_SCALE_BUDGET_MB`, `SR_USER_DATA_ROOT`, `SR_VIDEO`, `SR_VIDEOREC_DIR`, `SR_WATCHDOG_EXIT` | These names describe current runtime behavior. A registry row or a mention in setup or debugging does not confer a stability guarantee. The registry carries each name's kind and default. An invalid `SR_USER_DATA_ROOT` is refused by name. `SR_SYSTEM_REGISTRY` overrides the registry overlay path (`src/rt/hle_data.c:107-144`): an empty value falls back to the default, and a configured file that cannot be read leaves the change in memory only (`src/rt/hle.c:2190-2200`). |
+| Launcher-owned, not user knobs | `NK_INPUT_PROFILE`, `PSP_ISO`, `SR_ADHOC_ENABLED`, `SR_ADHOC_OFF_FILE`, `SR_ADHOC_PORT_OFFSET`, `SR_ADHOC_SERVER`, `SR_CHEATS`, `SR_CHEATS_FILE`, `SR_DATAROOT`, `SR_DISC_ID`, `SR_GAME_TITLE`, `SR_MODULE_DIR`, `SR_TEX_REPLACE`, `SR_USER_DATA_ROOT` | For player starts, settings and validated launch paths determine the child values for cheats, online ad hoc, guest modules, texture packs and the data directories (`src/core/nk_launch.c`). `NK_INPUT_PROFILE` is the path the launcher exports for the child. When it has none, it exports the bare name so an inherited value is removed (`src/core/nk_launch.c:1869-1873`, `:1998-2006`). The direct-runtime uses of these variables do not change the player launch contract. |
 | Inherited fallback, not a launcher export | `SR_INPUT_PROFILE` | The runtime reads it only when `NK_INPUT_PROFILE` is unset or empty (`src/core/nk_input_profile.c:2491-2493`; `src/rt/env_registry.h:173`). It is the older name and a fallback, not an alias the launcher writes; an inherited value can reach a launch whose `NK_INPUT_PROFILE` is unset. |
-| Diagnostic and developer-only | `SR_*LOG`, `SR_GE*`, `SR_FLIGHT*`, `SR_*SNAP`, self-test fixture names | Registered and read, but not part of the player contract; `docs/DEBUGGING.md` documents their present meaning. |
-| Host and system | `HOME`, `PATH`, `TEMP`, `SDL_VIDEODRIVER`, `SDL_VIDEO_DRIVER` | Set by the host and read for their value; Nakagawa does not define their format (`src/rt/env_registry.h:10-16`, `:30`, `:36`, `:40-41`, `:304`). |
-| Test-only | `FUZZ_*`, `ATRAC3P_FIXTURE`, `NK_VIDEOREC_FAKE_FFMPEG` | Read only by a self-test tool; never needed to play. |
+| Retired runtime overrides | `SR_GLYPHS`, `SR_SMART_2D`, `SR_TEX_SCALE` | Nonempty inherited values are masked on player starts. A directly started runtime refuses nonempty values by name. These controls now use keys in `SR_ACE` (`src/rt/ace.c`). |
+| Diagnostic and developer-only | `SR_DEBUG`, `SR_GE_TIMING`, `SR_HEADLESS_ACCEPT_PRESENTED_FRAMES` | Diagnostic logging, the GE timing model and the frame-acceptance checkpoint are developer controls. `docs/DEBUGGING.md` describes other registry families, including log, flight recorder and snapshot controls. |
+| Host and system | `APPDATA`, `HOME`, `LOCALAPPDATA`, `MSYS_NO_PATHCONV`, `PATH`, `SDL_VIDEO_DRIVER`, `SDL_VIDEODRIVER`, `TEMP`, `USERPROFILE`, `WINDIR`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | Set by the host and read for their value. The runtime registry excludes `APPDATA` and `LOCALAPPDATA`, which are launcher and tooling inputs, and `MSYS_NO_PATHCONV`, which controls Git Bash path conversion. |
+| Test-only | `ATRAC3P_FIXTURE`, `CODEGEN_ORACLE`, `FUZZ_CONSTRAINT`, `FUZZ_SEED`, `FUZZ_TRIALS`, `LOCAL_COSIM_TRACE`, `MICROTEST_MODULE`, `MICROTEST_ORACLE`, `NK_VIDEOREC_FAKE_FFMPEG`, `PSP_HARDWARE_TRACE` | Inputs to self-tests and verification tools. The oracle, microtest and trace inputs belong to build and test commands outside the runtime registry. |
 
 The classes overlap by design: the launcher sets documented variables
 (`SR_CHEATS`, `SR_USER_DATA_ROOT`) as well as its own, and a hand-started
@@ -866,12 +868,6 @@ the declaration's SemVer (`docs/ENHANCEMENT_CONTRACT.md:247`). That
 `schema_version` is not the built runtime package's package schema (3 written;
 v2/v3 read, the table above), and that `version` is not the release asset set's
 SemVer. The file name and `id` are names, not versions.
-
-**Follow-up.** The drift test is deliberately not built here. It would fail
-when a player flag or a `SETUP.md`-documented variable is added without a
-class; `tools/test_env_registry.py` covers the `env_registry.h` rows, not the
-player-flag or `docs/SETUP.md` classification. That remains recorded for issue #2745. The shared writer's 1,000,000
-probe bound is documented above, not deferred; this change does not alter it.
 
 Logs, the update download (kept only when its SHA-256 matches) and the
 content-addressed package cache (section 6) hold no state a user could lose.

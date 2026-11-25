@@ -2744,6 +2744,64 @@ static int check_vus2i_vs2i_measured_words(void) {
     return bad;
 }
 
+/* PSP-VFPU-RESERVED-001, vus2i-t-p0: exact word, registers and identity prefixes. */
+static int check_vus2i_t_measured(void) {
+    const uint32_t word = 0xd03a8008u;
+    static const uint32_t source[8] = {
+        0x80017fffu, 0x0000ffffu, 0x12345678u, 0xfedcba98u,
+        0x11112222u, 0x33334444u, 0x55556666u, 0x77778888u,
+    };
+    static const uint32_t destination[4] = {0x3fff8000u, 0x40008000u, 0x7fff8000u, 0u};
+    int generated_case = -1;
+    for (int i = 0; i < SWEEP_NCASES; i++) {
+        if (sweep_cases[i].w == word) {
+            generated_case = i;
+            break;
+        }
+    }
+    CHECK(generated_case >= 0, "measured vus2i.t word is in the generated sweep");
+    if (generated_case < 0) return 1;
+
+    CpuState before;
+    setup_identity_compute(&before);
+    before.vfpuCtrl[3] = 0x15u;
+    for (int i = 0; i < 128; i++) before.vi[i] = 0x7a5a5a5au;
+    memcpy(before.vi, source, sizeof source);
+    CpuState want = before, aot = before, interp = before;
+    memcpy(&want.vi[32], destination, sizeof destination);
+
+    int bad = 0;
+    sweep_run_codegen(&aot, generated_case);
+    CHECKB(bad, !sweep_stopped && memcmp(aot.vi, want.vi, sizeof want.vi) == 0,
+           "vus2i.t AOT writes the published C200 quartet only");
+    CHECKB(bad, sr_vfpu_interp(&interp, word) == SR_VFPU_COMPUTE &&
+                 memcmp(interp.vi, want.vi, sizeof want.vi) == 0,
+           "vus2i.t interpreter writes the published C200 quartet only");
+
+    static const uint32_t nonidentity[3] = {0xf00e4u, 0x1bu, 0x100u};
+    for (unsigned i = 0u; i < 3u; i++) {
+        CpuState prefixed = before;
+        prefixed.vfpuCtrl[i] = nonidentity[i];
+        aot = interp = prefixed;
+        sweep_run_codegen(&aot, generated_case);
+        CHECKB(bad, sweep_stopped && memcmp(aot.vi, prefixed.vi, sizeof prefixed.vi) == 0 &&
+                     memcmp(aot.vfpuCtrl, prefixed.vfpuCtrl, sizeof prefixed.vfpuCtrl) == 0,
+               "vus2i.t AOT stops before modifying registers or prefixes");
+        CHECKB(bad, sr_vfpu_interp(&interp, word) == SR_VFPU_OTHER &&
+                     memcmp(&interp, &prefixed, sizeof prefixed) == 0,
+               "vus2i.t interpreter refuses each nonidentity prefix without changing state");
+    }
+
+    static const uint32_t refused[] = {0xd03a8108u, 0xd03a8009u, 0xd03a8088u};
+    for (size_t i = 0u; i < sizeof refused / sizeof refused[0]; i++) {
+        interp = before;
+        CHECKB(bad, sr_vfpu_interp(&interp, refused[i]) == SR_VFPU_OTHER &&
+                     memcmp(&interp, &before, sizeof before) == 0,
+               "other vus2i.t operands and vus2i.q still refuse without changing state");
+    }
+    return bad;
+}
+
 /* RCX0-7 image of a random-unit state as probe_hle_issues.c writes it: Ck split into
  * the low halves of RCXk and RCX(k+4), carry nibble k in bits 16-19 of RCXk, 0x3f8 above. */
 static void vrndi_probe_image(uint32_t *rcx, const uint32_t c[4], uint32_t carry) {
@@ -3852,6 +3910,7 @@ int main(void) {
     bad |= check_psp_measured_sort();
     bad |= check_psp_measured_forms2();
     bad |= check_vus2i_vs2i_measured_words();
+    bad |= check_vus2i_t_measured();
     bad |= check_vfpu_basic_arith_measured();
     bad |= check_vfpu_unary_arith_measured();
     bad |= check_vfpu_dprefix_saturation_signed_zero();
