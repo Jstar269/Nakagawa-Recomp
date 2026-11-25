@@ -187,6 +187,11 @@ int module_stop(SceSize args, void *argp)
     if (sceKernelWaitThreadEnd(main_thread, &timeout) < 0) {
         return 1;
     }
+#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE
+    /* The worker could enter the draw before it observed the stop request.
+       Its exit does not release the GE's references to the PRX. */
+    if (s_solid_restore_pending) return 1;
+#endif
     if (sceKernelDeleteThread(main_thread) < 0) {
         return 1;
     }

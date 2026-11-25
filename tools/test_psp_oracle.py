@@ -1410,6 +1410,73 @@ class GeCorpusGateTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolError, "pinned case input changed"):
                 protocol.ge_solid_triangle_header(altered)
 
+    def _solid_module_stop_control(self, probe: str, compiler: str) -> subprocess.CompletedProcess[str]:
+        start = probe.index("int module_stop(SceSize")
+        stop = probe[start:probe.index("\n/* ---", start)]
+        source = r"""
+#include <assert.h>
+typedef unsigned SceSize;
+typedef unsigned SceUInt;
+typedef int SceUID;
+#define GE_CASE_SOLID_TRIANGLE 193
+#define PSP_ORACLE_CASE GE_CASE_SOLID_TRIANGLE
+#define HLE_MAIN_STOP_TIMEOUT_US 1000000u
+static volatile int s_solid_restore_pending;
+static volatile SceUID s_hle_main_thread = 7;
+static volatile int s_hle_stop_requested;
+static int joined_with_pending;
+static int wakes, waits, deletes;
+static int sceKernelWakeupThread(SceUID thread) {
+    assert(thread == 7);
+    wakes++;
+    return 0;
+}
+static int sceKernelWaitThreadEnd(SceUID thread, SceUInt *timeout) {
+    assert(thread == 7 && *timeout == HLE_MAIN_STOP_TIMEOUT_US);
+    assert(s_hle_stop_requested == 1);
+    waits++;
+    s_solid_restore_pending = joined_with_pending;
+    return 0;
+}
+static int sceKernelDeleteThread(SceUID thread) {
+    assert(thread == 7);
+    deletes++;
+    return 0;
+}
+""" + stop + r"""
+int main(void) {
+    s_solid_restore_pending = 1;
+    assert(module_stop(0, 0) != 0 && wakes == 0 && waits == 0 && deletes == 0);
+    /* The worker acquired the reservation after the first pending check,
+       before observing the stop request, and exited with restoration unresolved. */
+    s_solid_restore_pending = 0;
+    joined_with_pending = 1;
+    if (module_stop(0, 0) == 0 || deletes != 0 || s_hle_main_thread != 7)
+        return 19;
+    assert(wakes == 1 && waits == 1);
+    s_solid_restore_pending = 0;
+    joined_with_pending = 0;
+    assert(module_stop(0, 0) == 0 && deletes == 1 && s_hle_main_thread == -1);
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="solid-stop-control-") as scratch:
+            harness = Path(scratch) / "stop.c"
+            executable = Path(scratch) / "stop.exe"
+            harness.write_text(source, encoding="utf-8")
+            subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            str(harness), "-o", str(executable)], check=True)
+            return subprocess.run([str(executable)], capture_output=True, text=True, check=False)
+
+    def test_solid_triangle_refuses_unload_when_worker_stops_with_pending_restore(self) -> None:
+        compiler = shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("host GCC is required for the module-stop mock")
+        probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe_ge_sample.c").read_text(
+            encoding="utf-8")
+        result = self._solid_module_stop_control(probe, compiler)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_measured_hardware_case_rederives_identity_digest_case_and_pixels(self) -> None:
         document, raw = self._measured_case_record()
         completed = self._run_gate(document, {"ge/run.txt": raw})
