@@ -94,6 +94,10 @@ int sr_prx_guest_write(uint32_t guest_addr, const void *src, uint32_t n);
  */
 #define SR_PRX_NID_MODULE_START 0xD632ACDBu
 #define SR_PRX_NID_MODULE_BOOTSTART 0xD3744BE0u
+/* The syslib module_stop export the module manager runs on StopModule. A NID is the first
+ * four bytes of the SHA-1 of the name, read little-endian: SHA-1("module_stop") begins
+ * 3c 59 e8 ce, so 0xCEE8593C (the value PSPSDK's psp-build-exports writes). */
+#define SR_PRX_NID_MODULE_STOP 0xCEE8593Cu
 #define SR_PRX_START_ENTRY_MAX_LIBRARIES 256u
 #define SR_PRX_START_ENTRY_MAX_EXPORTS 4096u
 

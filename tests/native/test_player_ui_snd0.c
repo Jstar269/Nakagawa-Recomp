@@ -271,9 +271,11 @@ static size_t g_clip_size;
 static uint8_t g_silent[4096];
 static size_t g_silent_size;
 static SDL_AtomicInt g_reads_started;
+static SDL_Semaphore *g_slow_read_entered;
+static SDL_AtomicInt g_slow_cancel_observed;
 
 static PlayerUiSnd0ReadResult test_reader(const char *iso_path, uint8_t **bytes, size_t *size,
-                                          void *user) {
+                                          void *user, bool (*cancel)(void *), void *cancel_user) {
     const uint8_t *src = NULL;
     size_t n = 0u;
     (void)user;
@@ -281,7 +283,16 @@ static PlayerUiSnd0ReadResult test_reader(const char *iso_path, uint8_t **bytes,
     *size = 0u;
     SDL_AddAtomicInt(&g_reads_started, 1);
     if (strcmp(iso_path, "clip.iso") == 0 || strcmp(iso_path, "slow.iso") == 0) {
-        if (strcmp(iso_path, "slow.iso") == 0) SDL_Delay(300);
+        if (strcmp(iso_path, "slow.iso") == 0) {
+            uint64_t deadline = SDL_GetTicks() + WAIT_LIMIT_MS;
+            SDL_SignalSemaphore(g_slow_read_entered);
+            if (!cancel) return PLAYER_UI_SND0_READ_FAILED;
+            while (!cancel(cancel_user) && SDL_GetTicks() < deadline) SDL_Delay(1);
+            if (cancel(cancel_user)) {
+                SDL_SetAtomicInt(&g_slow_cancel_observed, 1);
+                return PLAYER_UI_SND0_READ_FAILED;
+            }
+        }
         src = g_clip;
         n = g_clip_size;
     } else if (strcmp(iso_path, "silent.iso") == 0) {
@@ -460,17 +471,25 @@ static int test_player(void) {
           "nothing is read while a game runs");
 
     /* A game starts while a read runs: the worker is joined on that frame. */
+    g_slow_read_entered = SDL_CreateSemaphore(0);
+    CHECK(g_slow_read_entered != NULL, "allocate reader start barrier");
     request = request_for("slow.iso");
     t0 = SDL_GetTicks();
     player_ui_snd0_update(snd0, &request, t0);
     player_ui_snd0_update(snd0, &request, t0);
     CHECK(player_ui_snd0_decoding(snd0) && player_ui_snd0_quiets_music(snd0),
           "the slow clip is being read");
+    CHECK(SDL_WaitSemaphoreTimeout(g_slow_read_entered, WAIT_LIMIT_MS),
+          "the reader reached its barrier before launch");
     request.in_launcher = false;
     player_ui_snd0_update(snd0, &request, t0 + 1u);
     CHECK(!player_ui_snd0_decoding(snd0) && !player_ui_snd0_holds_audio(snd0) &&
-              player_ui_snd0_state(snd0) == PLAYER_UI_SND0_STOPPED,
+              player_ui_snd0_state(snd0) == PLAYER_UI_SND0_STOPPED &&
+              player_ui_snd0_test_pcm_frames(snd0) == 0u,
           "a game start joins the read before the game may start");
+    CHECK(SDL_GetAtomicInt(&g_slow_cancel_observed) == 1,
+          "the active reader observes launch cancellation");
+    SDL_DestroySemaphore(g_slow_read_entered);
 
     /* Turned off while playing: a short fade, then off. */
     request = request_for("clip.iso");
