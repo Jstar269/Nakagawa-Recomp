@@ -1122,7 +1122,9 @@ class LiveManifestTests(unittest.TestCase):
                 "__sceSasCoreWithMix", "h_SasCoreWithMix", "NID_SAS_MIX_CORE_WITH_MIX", "sas_mix_with_mix",
                 "test_sas_mix_psp_sas_003_withmix_cells",
                 ("0x80420018", "0x80000004", "0xcf80", "0xa65f", "untouched", "0x1001 to 0x1fff",
-                 "-0xfff to -1", "order of the raw-mode, gain", "until #2807"),
+                 "-0xfff to -1", "order of the raw-mode, gain", "until #2807", "only the right side's lower one",
+                 "a bad left gain with a good right one", "a right gain above 0x1000 with a good left one",
+                 "the SetOutputmode export", "voices that are playing", "first refusal of each kind"),
             ),
             0x440CA7D8: (
                 "__sceSasSetVolume", "h_SasSetVolume", "NID_SAS_MIX_SET_VOLUME", "sas_mix_set_volume",
@@ -1140,6 +1142,13 @@ class LiveManifestTests(unittest.TestCase):
         self.assertEqual(record["evidence_cases"], ["sas-mix-*"])
         self.assertIn("acceptance-eligible", record["measurement_note"])
         self.assertIn("3872796c", record["measurement_note"])
+        # The row names exports the runtime registers: the probe calls __sceSasCoreWithMix, and no NID
+        # table has an __sceSasSetMix.
+        self.assertIn("__sceSasCoreWithMix", record["apis"])
+        self.assertNotIn("__sceSasSetMix", record["apis"])
+        registered = {registration["name"] for registration in self.regs.values()}
+        for api in record["apis"]:
+            self.assertIn(api, registered)
         # Every value a limitation cites is one the document publishes for PSP-SAS-003.
         doc = (hle_manifest.ROOT / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
         published = doc.split("### PSP-SAS-003 capture 2026-11-07", 1)[1].split("\n### ", 1)[0]
@@ -1214,6 +1223,14 @@ class LiveManifestTests(unittest.TestCase):
         self.assertLess(handler_body.index("return SAS_ERROR_WITHMIX_RAW_MODE;"), mix_at)
         self.assertLess(handler_body.index("return SAS_ERROR_VOLUME_VAL;"), mix_at)
         self.assertRegex(audio, r"(?m)^#define SAS_ERROR_WITHMIX_RAW_MODE[ \t]+0x80000004u")
+        # Each refusal is reported by name once per run (AGENTS.md section 6), and the selftest checks it.
+        for note, flag in (("HLE: __sceSasCoreWithMix refuses raw output mode", "s_sas_withmix_raw_noted"),
+                           ("HLE: __sceSasCoreWithMix refuses volumes ", "s_sas_withmix_gain_noted")):
+            with self.subTest(note=note):
+                self.assertIn(note, handler_body)
+                self.assertIn(f"if (!{flag}) {{", handler_body)
+                self.assertIn(note, source)
+        self.assertRegex(source, r"(?m)^    test_sas_core_with_mix_reports_each_refusal_once\(\);$")
         # The record also names these handlers, or the probe calls them. They stay unreviewed: the mixer's
         # values differ from the record (no key-on delay, no in-between sample, the PCM pitch, the rounding
         # of a negative volume) and the document publishes no SetVoice, SetVoicePCM or SetPitch answer. The

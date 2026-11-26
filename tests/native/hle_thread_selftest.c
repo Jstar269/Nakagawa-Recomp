@@ -46803,7 +46803,11 @@ static void test_sas_noise_restarts_on_guest_reset(void) {
  * no volume; the PSP refuses one below 0 or above 0x1000 with 0x80420018 and leaves the buffer
  * untouched (PSP-SAS-003, #2807; test_sas_mix_psp_sas_003_withmix_cells replays the measured cells).
  * The refusals of 0x1001 and -1 below are this runtime's range between the measured points
- * (0x1000 and 0x2000, 0 and -0x1000), not PSP-measured. */
+ * (0x1000 and 0x2000, 0 and -0x1000), not PSP-measured: of the four bounds the record isolates
+ * only the right side's lower one, at (0, -0x1000).
+ *
+ * MUTANT: drop the left side's lower bound -- (-1, 0x1000) is accepted.
+ * MUTANT: drop the right side's upper bound -- (0x1000, 0x1001) is accepted. */
 static void test_sas_core_with_mix_scales_caller_pcm(void) {
     CpuState cpu;
     const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
@@ -46812,6 +46816,7 @@ static void test_sas_core_with_mix_scales_caller_pcm(void) {
         { 0x800, 0x800, 0u }, { 0, 0x1000, 0u },
         { 0, -0x1000, 0x80420018u }, { 0x2000, 0x3000, 0x80420018u },        /* PSP-SAS-003 */
         { 0x1001, 0x1000, 0x80420018u }, { 0x1000, -1, 0x80420018u },        /* not PSP-measured */
+        { -1, 0x1000, 0x80420018u }, { 0x1000, 0x1001, 0x80420018u },        /* not PSP-measured */
     };
     reset_fixture(); sr_hle_init(); sas_test_init(&cpu, core, 0);
     for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
@@ -46855,6 +46860,103 @@ static void test_sas_core_with_mix_scales_caller_pcm(void) {
     for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) if (voice_only[i]) audible = 1;
     expect(audible && memcmp(got, voice_only, sizeof(got)) == 0,
            "__sceSasCoreWithMix at 0/0 drops the caller PCM and keeps the voices at their own volume (#2135)");
+}
+
+/* #2807: a refused __sceSasCoreWithMix is reported by name, once per run for each kind of refusal
+ * (volume, raw mode), and an accepted call reports nothing. A refused call advances no voice: the
+ * grain after it is the voice's first. HOST_TESTED: the notes and the voice rule are this runtime's
+ * (PSP-SAS-003 does not say what a refused call does to playing voices), and raw mode is set here by
+ * __sceSasSetOutputmode, which the record does not measure.
+ *
+ * MUTANT: drop the raw-mode refusal's once flag -- its note appears twice.
+ * MUTANT: mix the grain before the volume check -- the voice advances and the next grain differs. */
+#define NID_SAS_SET_OUTPUTMODE 0xe855bf76u
+static void sas_with_mix_note_voice(CpuState *cpu, uint32_t core, uint32_t vag) {
+    sas_test_init(cpu, core, 0);   /* clears the once-per-run notes too */
+    sas_test_vag(vag, 4u, 0u);
+    cpu->r[4] = core; cpu->r[5] = 0; cpu->r[6] = vag; cpu->r[7] = 64; cpu->r[8] = 0;
+    expect(sr_syscall(cpu, NID_SAS_SET_VOICE) == 0, "WithMix note fixture sets voice 0");
+    cpu->r[4] = core; cpu->r[5] = 0;
+    expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "WithMix note fixture keys voice 0 on");
+}
+
+static uint32_t sas_with_mix_note_call(CpuState *cpu, uint32_t core, uint32_t out, int32_t left, int32_t right) {
+    cpu->r[4] = core; cpu->r[5] = out; cpu->r[6] = (uint32_t)left; cpu->r[7] = (uint32_t)right;
+    return sr_syscall(cpu, NID_SAS_CORE_WITH_MIX);
+}
+
+static void test_sas_core_with_mix_reports_each_refusal_once(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
+    static const char gain_note[] = "HLE: __sceSasCoreWithMix refuses volumes ";
+    static const char raw_note[] = "HLE: __sceSasCoreWithMix refuses raw output mode ";
+    int16_t first_grain[SAS_TEST_GRAIN * 2], got[SAS_TEST_GRAIN * 2];
+    char log[4096];
+    FILE *capture = NULL;
+    int saved_fd = -1;
+
+    /* The voice's first grain, with no WithMix call before it. */
+    reset_fixture(); sr_hle_init();
+    sas_with_mix_note_voice(&cpu, core, vag);
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu.r[4] = core; cpu.r[5] = out;
+    expect(sr_syscall(&cpu, NID_SAS_CORE) == 0, "WithMix note fixture mixes the voice's first grain");
+    sas_read_pcm(out, first_grain, SAS_TEST_GRAIN);
+    int audible = 0;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) if (first_grain[i]) audible = 1;
+    expect(audible, "WithMix note fixture: the voice's first grain is audible");
+
+    /* Two refusals of each kind, then the next grain. */
+    sas_with_mix_note_voice(&cpu, core, vag);
+    if (!hle_data_stderr_capture_begin(&capture, &saved_fd)) {
+        expect(0, "WithMix refusal notes: stderr can be captured");
+        return;
+    }
+    const uint32_t neg_left = sas_with_mix_note_call(&cpu, core, out, -1, 0x1000);
+    const uint32_t over_right = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1001);
+    cpu.r[4] = core; cpu.r[5] = 1;
+    const uint32_t raw_set = sr_syscall(&cpu, NID_SAS_SET_OUTPUTMODE);
+    const uint32_t raw_first = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1000);
+    const uint32_t raw_second = sas_with_mix_note_call(&cpu, core, out, 0x800, 0x800);
+    cpu.r[4] = core; cpu.r[5] = 0;
+    const uint32_t normal_set = sr_syscall(&cpu, NID_SAS_SET_OUTPUTMODE);
+    (void)hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    fputs(log, stderr);
+    expect(neg_left == 0x80420018u && over_right == 0x80420018u,
+           "__sceSasCoreWithMix refuses (-1, 0x1000) and (0x1000, 0x1001) with 0x80420018 (#2807)");
+    expect(raw_set == 0u && normal_set == 0u && raw_first == 0x80000004u && raw_second == 0x80000004u,
+           "__sceSasCoreWithMix refuses raw output mode set by __sceSasSetOutputmode with 0x80000004 (#2807)");
+    expect(count_occurrences(log, gain_note) == 1,
+           "the first volume refusal of a run is reported once by name, the second not again (#2807)");
+    expect(count_occurrences(log, raw_note) == 1,
+           "the first raw-mode refusal of a run is reported once by name, the second not again (#2807)");
+    expect(strstr(log, "refuses volumes 0xffffffff, 0x00001000 with 0x80420018") != NULL,
+           "the volume refusal note names the offending volumes and the code (#2807)");
+    expect(strstr(log, "refuses raw output mode with 0x80000004 (volumes 0x00001000, 0x00001000)") != NULL,
+           "the raw-mode refusal note names the code and the volumes (#2807)");
+    expect(count_occurrences(log, "the grain is not mixed") == 2,
+           "each refusal note says the grain is not mixed (#2807)");
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu.r[4] = core; cpu.r[5] = out;
+    expect(sr_syscall(&cpu, NID_SAS_CORE) == 0, "WithMix note fixture mixes the grain after the refusals");
+    sas_read_pcm(out, got, SAS_TEST_GRAIN);
+    expect(memcmp(got, first_grain, sizeof(got)) == 0,
+           "a refused __sceSasCoreWithMix advances no voice: the next grain is the voice's first (#2807)");
+
+    /* An accepted call, in a run with no refusal yet, reports nothing. */
+    sas_with_mix_note_voice(&cpu, core, vag);
+    if (!hle_data_stderr_capture_begin(&capture, &saved_fd)) {
+        expect(0, "WithMix accepted call: stderr can be captured");
+        return;
+    }
+    const uint32_t unity = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1000);
+    const uint32_t silent = sas_with_mix_note_call(&cpu, core, out, 0, 0);
+    (void)hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    fputs(log, stderr);
+    expect(unity == 0u && silent == 0u, "__sceSasCoreWithMix accepts (0x1000, 0x1000) and (0, 0)");
+    expect(strstr(log, "__sceSasCoreWithMix refuses") == NULL,
+           "an accepted __sceSasCoreWithMix reports no refusal (#2807)");
+    sr_hle_test_sas_reset();
 }
 
 /* pspsascore.h: "On real hardware, the end flags are refreshed only AFTER __sceSasCore is
@@ -71625,6 +71727,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_voice_volume_defaults();
     test_sas_noise_restarts_on_guest_reset();
     test_sas_core_with_mix_scales_caller_pcm();
+    test_sas_core_with_mix_reports_each_refusal_once();
     test_sas_band_limited_resampling();
     test_sas_end_flags_refresh_per_cycle();
     test_sas_reinit_is_a_fresh_init();
