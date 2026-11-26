@@ -572,6 +572,30 @@ attached to a release. `tools/test_stage_install.py` keeps the rule from driftin
 Wine and Proton: the Windows ZIP is the build used there. The smoke run and its known limits are in
 [`SETUP.md`](SETUP.md#wine-and-proton).
 
+## Record the candidate performance baseline
+
+From v0.1.0 onward, measure the frozen candidate on the reference PC using the
+[two gameplay windows and reporting convention](COMPATIBILITY.md#release-performance-baselines).
+Build each title's runtime package from the same candidate as the launcher. Verify both route
+landmarks with a private input replay for that runtime and mode. `SR_REPLAY` requires the
+recording's executable and uses the unpaced deterministic clock. For frame-delivery measurements,
+repeat the qualified inputs from the same starting state with normal real-time pacing. Verify
+both landmarks each time, in Authentic and in Ace where the title has a timing package. Use the
+[guarded benchmark runs from #2574, stage 4](https://github.com/Jstar269/Nakagawa-Recomp/issues/2574).
+
+For each title and mode, match the flip observations and wall-clock intervals from the same
+paced run to both guarded edges. Preserve the order of events that share a VBlank. The ordered
+`SR_PRESENT_TRACE` log can place observed flips relative to the guard records, and the matching
+`SR_PERF_FRAMES` rows give the wall-clock intervals. Exclude runs if the guard is unavailable or
+refuses the run, if the flip count or interval endpoints cannot be matched to the window, or if
+there are no complete intervals. Record the reason privately and keep results pending until a
+run qualifies.
+
+Add the accepted aggregate results to the compatibility document and link that section from
+the release notes. Compare releases on the same route, PC, mode and presentation settings.
+When conditions change, identify the change and start a new series. Replays, saves, captures
+and per-frame logs stay private.
+
 ## Clean-VM offline acceptance
 
 This is the acceptance run for the bundled prerequisites ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)) and a release gate: an ordinary user, on a machine that has never seen a development tool and has no network, goes from the release ZIP to playing their own game with no download prompt. Run it on the exact ZIP that will be published, after the package script and the checks above.

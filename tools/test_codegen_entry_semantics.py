@@ -1396,6 +1396,128 @@ class EntryCatalogInvariantTests(unittest.TestCase):
         self.assertNotIn("hst-profile", catalog[0x08800000].provenance)
 
 
+class DelaySlotAddressTakenEntryTests(unittest.TestCase):
+    """An `la` finished in a delay slot keeps its target a callable entry.
+
+    The image holds three functions. `registrar` hands a callee a pointer to `target`.
+    `owner` opens a 0x20 frame and reaches `target` by one direct edge. `target` is `jr ra`
+    with that frame's release in its delay slot: the stack signature of a continuation.
+
+    With no pointer to it, the continuation audits make `target` the owner's resume (`r_`,
+    no entry-`$sp` contract). A pointer means an indirect dispatch may enter it with a
+    contract the audits cannot see, so it stays a callable entry (`f_`). Compilers put the
+    low half of that `la` in the delay slot of the call it is an argument of; the audits'
+    evidence census (`analyze.code_pointer_evidence`) dropped its high halves one word
+    early, at the transfer, and so made a resume of a target the analyzer's own sweep had
+    made an entry from that very `la`.
+
+    Evidence tier: production path (`codegen.main`, both profiles) on a synthetic image.
+    """
+
+    REGISTRAR = 0x00001000
+    OWNER = 0x00001028
+    TARGET = 0x00001038
+    SINK = 0x00001048
+    LUI_A1 = 0x3C050000                              # lui a1, 0
+    ADDIU_A1_TARGET = 0x24A50000 | TARGET            # addiu a1, a1, target
+    ORI_A1_TARGET = 0x34A50000 | TARGET              # ori a1, a1, target
+    JAL_SINK = 0x0C000000 | (SINK >> 2)
+    J_SINK = 0x08000000 | (SINK >> 2)
+    JALR_T9 = 0x0320F809                             # jalr ra, t9
+    BNE_A0_OVER = 0x14800002                         # bne a0, zero, +2 (inside registrar)
+
+    @classmethod
+    def words(cls, before=(0, 0), transfer=JAL_SINK, slot=0, after=0, edge="j"):
+        """The image, by the five words of `registrar` around its transfer and `owner`'s edge."""
+        to_target = (0x08000000 | (cls.TARGET >> 2)) if edge == "j" else 0x14800001
+        return {
+            cls.REGISTRAR: 0x27BDFFF0,       # addiu sp, sp, -0x10
+            cls.REGISTRAR + 4: 0xAFBF0000,   # sw ra, 0(sp)
+            cls.REGISTRAR + 8: before[0],
+            cls.REGISTRAR + 12: before[1],
+            cls.REGISTRAR + 16: transfer,
+            cls.REGISTRAR + 20: slot,        # its delay slot
+            cls.REGISTRAR + 24: after,
+            cls.REGISTRAR + 28: 0x8FBF0000,  # lw ra, 0(sp)
+            cls.REGISTRAR + 32: 0x03E00008,  # jr ra
+            cls.REGISTRAR + 36: 0x27BD0010,  # addiu sp, sp, 0x10
+            cls.OWNER: 0x27BDFFE0,           # addiu sp, sp, -0x20
+            cls.OWNER + 4: 0x00000000,
+            cls.OWNER + 8: to_target,        # j target / bne a0, zero, target
+            cls.OWNER + 12: 0x00000000,
+            cls.TARGET: 0x03E00008,          # jr ra
+            cls.TARGET + 4: 0x27BD0020,      # addiu sp, sp, 0x20
+            cls.TARGET + 8: 0x00000000,
+            cls.TARGET + 12: 0x00000000,
+            cls.SINK: 0x03E00008,            # jr ra
+            cls.SINK + 4: 0x00000000,
+        }
+
+    def entry_symbols(self, words):
+        """The symbols `codegen.main` emits a body for at `target`, under each profile."""
+        found = {}
+        for profile in ("none", "hst"):
+            with scratch_dir.TemporaryDirectory(prefix="slot_la_") as tmp:
+                work = Path(tmp)
+                elf = work / "slot_la.elf"
+                elf.write_bytes(_synthetic_elf(words, self.REGISTRAR))
+                result = _codegen_in_process(
+                    [str(elf), str(work / "slot_la.c"), f"--profile={profile}"])
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                text = "\n".join(
+                    path.read_text(encoding="ascii")
+                    for path in sorted(work.glob("slot_la_*.c"))
+                )
+            symbols = [
+                symbol for symbol in (f"f_{self.TARGET:08x}", f"r_{self.TARGET:08x}")
+                if f"void {symbol}(CpuState *s)" in text
+            ]
+            for symbol in symbols:
+                self.assertIn(f"sr_register(0x{self.TARGET:08x}u, {symbol});", text)
+            found[profile] = symbols
+        return found
+
+    def assert_entry(self, words, expected):
+        self.assertEqual(self.entry_symbols(words), {"none": expected, "hst": expected})
+
+    CALLABLE: ClassVar[list[str]] = [f"f_{TARGET:08x}"]
+    RESUME: ClassVar[list[str]] = [f"r_{TARGET:08x}"]
+
+    def test_low_half_in_a_delay_slot_keeps_the_target_callable(self):
+        for name, transfer in (
+            ("jal", self.JAL_SINK),
+            ("jalr", self.JALR_T9),
+            ("j", self.J_SINK),
+            ("bne", self.BNE_A0_OVER),
+        ):
+            for low_name, low in (("addiu", self.ADDIU_A1_TARGET), ("ori", self.ORI_A1_TARGET)):
+                with self.subTest(transfer=name, low=low_name):
+                    self.assert_entry(
+                        self.words(before=(0, self.LUI_A1), transfer=transfer, slot=low),
+                        self.CALLABLE,
+                    )
+
+    def test_target_entered_by_a_branch_is_an_entry_only_through_the_slot_la(self):
+        # Nothing but the owner's branch names the target: it is no entry, the owner's
+        # own code. The `la` is what makes it one, so the `la` must also keep it callable.
+        self.assert_entry(self.words(edge="branch"), [])
+        self.assert_entry(
+            self.words(before=(0, self.LUI_A1), slot=self.ADDIU_A1_TARGET, edge="branch"),
+            self.CALLABLE,
+        )
+
+    def test_the_fixture_is_a_resume_without_the_pointer(self):
+        # The control: every other fact the audits need holds, so only the `la` decides.
+        self.assert_entry(self.words(), self.RESUME)
+        # A high half the slot did not complete is no pointer: the pair is broken after it.
+        self.assert_entry(
+            self.words(before=(0, self.LUI_A1), after=self.ADDIU_A1_TARGET), self.RESUME)
+
+    def test_la_ahead_of_the_call_keeps_the_target_callable(self):
+        self.assert_entry(
+            self.words(before=(self.LUI_A1, self.ADDIU_A1_TARGET)), self.CALLABLE)
+
+
 # A synthetic guest symbol map for the fixture above: names and addresses only, in the
 # `name = 0xADDR; // type:func size:0xNN` form tools/codegen.py --symbol-map reads.
 OWNER_SIZE = RESUME + 16 - OWNER
@@ -1750,6 +1872,7 @@ def _sb(rt, offset, rs): return _itype(0x28, rs, rt, offset)
 def _sw(rt, offset, rs): return _itype(0x2B, rs, rt, offset)
 def _addu(rd, rs, rt): return _rtype(rs, rt, rd, 0x21)
 def _subu(rd, rs, rt): return _rtype(rs, rt, rd, 0x23)
+def _and(rd, rs, rt): return _rtype(rs, rt, rd, 0x24)
 def _sll(rd, rt, shamt): return _rtype(0, rt, rd, 0x00, shamt)
 def _jr(rs): return _rtype(rs, 0, 0, 0x08)
 
@@ -1786,7 +1909,10 @@ FORMATTER = 0x000143B0
 #: their address, so they are no entry now: they end the run of padding after the formatter.
 FORMATTER_LEAF = 0x00014430
 FORMATTER_CORE = 0x00014438
-FORMATTER_CASES = ("case_char", "case_string", "case_nibble", "case_skip")
+FORMATTER_CASES = (
+    "case_char", "case_string", "case_nibble", "case_skip",
+    "case_fallthrough", "case_call", "case_wide", "case_stack",
+)
 
 # int format(char *dst, const char *fmt, ...), PSP EABI: the variable arguments arrive in
 # a2, a3 and t0..t3, the entry spills them to its frame and passes their address on. After
@@ -1808,11 +1934,11 @@ _FORMATTER_ENTRY = [
     _jr(_RA),
     _addiu(_SP, _SP, 0x30),
 ]
-# The core walks the format. A byte '0'..'3' selects a conversion through a jump table,
-# inside the loop and with the core's frame live: '0' stores the next argument's low byte,
-# '1' copies the string it points to, '2' stores 'A' plus its low nibble, '3' skips it.
-# Any other byte is copied. It returns the length written, like sprintf, and leaves the
-# terminator to its caller.
+# The core walks the format through a jump table with its frame live. Cases 0–3 store a
+# byte, copy a string, print a nibble or skip a word. Case 4 emits '+' and falls through
+# to case 2. Case 5 calls a helper with the next argument. Case 6 aligns the cursor and
+# consumes a pair of words. Case 7 copies a string from the incoming stack. Literals are
+# copied. The caller writes the terminator.
 _FORMATTER_CORE = [
     "core",
     _addiu(_SP, _SP, -0x20),
@@ -1826,7 +1952,7 @@ _FORMATTER_CORE = [
     _beq(_T4, _ZERO, "done"),
     0,
     _addiu(_T5, _T4, -0x30),
-    _sltiu(_T6, _T5, 4),
+    _sltiu(_T6, _T5, len(FORMATTER_CASES)),
     _beq(_T6, _ZERO, "literal"),
     _sll(_T5, _T5, 2),
     _lui_hi(_T6, "table"),
@@ -1855,6 +1981,13 @@ _FORMATTER_CORE = [
     _sb(_T8, 0, _A0),
     _beq(_ZERO, _ZERO, "copy"),
     _addiu(_A0, _A0, 1),
+    "case_fallthrough",
+    _addiu(_T7, _ZERO, 0x2B),
+    _sb(_T7, 0, _A0),
+    _addiu(_A0, _A0, 1),
+    "fallthrough_edge",
+    0,
+    0,
     "case_nibble",
     _lw(_T7, 0, _S0),
     _addiu(_S0, _S0, 4),
@@ -1866,6 +1999,36 @@ _FORMATTER_CORE = [
     "case_skip",
     _beq(_ZERO, _ZERO, "loop"),
     _addiu(_S0, _S0, 4),
+    "case_call",
+    _sw(_A0, 0x08, _SP),
+    _sw(_A1, 0x0C, _SP),
+    _lw(_A0, 0, _S0),
+    "nested_call",
+    _jal("case_helper"),
+    _addiu(_S0, _S0, 4),
+    _lw(_A0, 0x08, _SP),
+    _lw(_A1, 0x0C, _SP),
+    _sb(_V0, 0, _A0),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 1),
+    "case_wide",
+    _addiu(_T8, _ZERO, -8),
+    "align_add",
+    _addiu(_S0, _S0, 7),
+    "align_mask",
+    _and(_S0, _S0, _T8),
+    _lw(_T7, 0, _S0),
+    _lw(_T8, 4, _S0),
+    _sb(_T7, 0, _A0),
+    _sb(_T8, 1, _A0),
+    _addiu(_S0, _S0, 8),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 2),
+    "case_stack",
+    "stack_load",
+    _lw(_T7, 0, _S0),
+    _beq(_ZERO, _ZERO, "copy"),
+    _addiu(_S0, _S0, 4),
     "done",
     _lw(_T9, 0x10, _SP),
     _subu(_V0, _A0, _T9),
@@ -1873,12 +2036,19 @@ _FORMATTER_CORE = [
     _lw(_S0, 0x18, _SP),
     _jr(_RA),
     _addiu(_SP, _SP, 0x20),
+    "case_helper",
+    _lui_hi(_T8, "helper_word"),
+    _ori_lo(_T8, _T8, "helper_word"),
+    _sw(_A0, 0, _T8),
+    _addiu(_V0, _A0, 1),
+    _jr(_RA),
+    _addiu(_A1, _ZERO, -1),  # a caller-saved register the case must restore
 ]
 
 
-def _formatter_fixture() -> tuple[dict[int, int], dict[str, int]]:
-    """The formatter's words and its labels; `table` is where _synthetic_elf puts .data."""
-    at = {"core": FORMATTER_CORE, "table": 0}
+def _formatter_fixture(mutant: str | None = None) -> tuple[dict[int, int], dict[str, int]]:
+    """The formatter's words and labels, with optional test-only guest instruction faults."""
+    at = {"core": FORMATTER_CORE, "table": 0, "helper_word": _FORMATTER_HELPER_WORD}
     words: dict[int, int] = {}
     for _ in range(2):   # the second pass sees the table's address
         words = _assemble(FORMATTER, _FORMATTER_ENTRY, at)
@@ -1887,6 +2057,15 @@ def _formatter_fixture() -> tuple[dict[int, int], dict[str, int]]:
         for addr in range(FORMATTER, max(words), 4):
             words.setdefault(addr, 0)
         at["table"] = (max(words) + 4 + 0xFF) & ~0xFF
+    if mutant is not None:
+        variants = {
+            "fallthrough": {"fallthrough_edge": _beq(_ZERO, _ZERO, "loop")},
+            "nested_call": {"nested_call": _addiu(_V0, _ZERO, 0x58)},
+            "stack_varargs": {"stack_load": _lw(_T7, 4, _S0)},
+            "aligned_pair": {"align_add": 0, "align_mask": 0},
+        }
+        for label, value in variants[mutant].items():
+            words[at[label]] = value(at[label], at) if callable(value) else value
     return words, at
 
 
@@ -1924,8 +2103,27 @@ void sr_unimplemented(uint32_t addr, const char *reason);
 _FORMATTER_DST = 0x0001D000
 _FORMATTER_TEXT = 0x0001E000
 _FORMATTER_STACK = 0x0001F000
-_FORMATTER_OUTCOME = (
-    "out=[Aserve|q|L|set|match] ret=20 sp=0x0001f000 ra=0x12345678 s0=0x5a5a5a5a")
+_FORMATTER_HELPER_WORD = _FORMATTER_DST + 0x100
+
+
+def _formatter_outcome(case: str, text: str, helper_word: int = 0) -> str:
+    return (f"{case}: out=[{text}] ret={len(text)} sp=0x0001f000 ra=0x12345678 "
+            f"s0=0x5a5a5a5a helper=0x{helper_word:08x} terminator=00 guard=7e")
+
+
+_FORMATTER_OUTCOMES = {
+    "original": _formatter_outcome("original", "Aserve|q|L|set|match"),
+    "fallthrough": _formatter_outcome("fallthrough", "+L|E"),
+    "nested_call": _formatter_outcome("nested_call", "R|s", 0x51),
+    "stack_varargs": _formatter_outcome("stack_varargs", "abcdef|stack|Z"),
+    "aligned_pair": _formatter_outcome("aligned_pair", "abcdefg|LH|z"),
+}
+_FORMATTER_MUTANT_OUTCOMES = {
+    "fallthrough": _formatter_outcome("fallthrough", "+|L"),
+    "nested_call": _formatter_outcome("nested_call", "X|s"),
+    "stack_varargs": _formatter_outcome("stack_varargs", "abcdef|decoy|Z"),
+    "aligned_pair": _formatter_outcome("aligned_pair", "abcdefg|pL|H"),
+}
 
 
 def _executing_harness_support(funcs_header: str) -> str:
@@ -1999,26 +2197,53 @@ static uint32_t put(uint32_t addr, const char *text) {{
     return addr;
 }}
 
-int main(void) {{
+static void run_case(const char *name, const char *format,
+                     const uint32_t args[6], const uint32_t stack[5]) {{
     CpuState cpu = {{0}};
-    sr_register_all();
-{table}
-    memset(at(0x{_FORMATTER_DST:08x}u, 48u), '~', 48u);   /* an unterminated text shows */
+    memset(at(0x{_FORMATTER_DST:08x}u, 64u), '~', 64u);
+    test_mem_w8(0x{_FORMATTER_DST+64:08x}u, 0u);
+    test_mem_w32(0x{_FORMATTER_HELPER_WORD:08x}u, 0u);
     cpu.r[4] = 0x{_FORMATTER_DST:08x}u;
-    cpu.r[5] = put(0x{_FORMATTER_TEXT:08x}u, "A1|0|2|31|1");
-    cpu.r[6] = put(0x{_FORMATTER_TEXT + 0x40:08x}u, "serve");   /* a2: '1' */
-    cpu.r[7] = 0x00000171u;                                     /* a3: '0', low byte 'q' */
-    cpu.r[8] = 0x0000002bu;                                     /* t0: '2', nibble 11 */
-    cpu.r[9] = 0xdeadbeefu;                                     /* t1: '3', skipped */
-    cpu.r[10] = put(0x{_FORMATTER_TEXT + 0x80:08x}u, "set");    /* t2: '1' */
-    cpu.r[11] = put(0x{_FORMATTER_TEXT + 0xc0:08x}u, "match");  /* t3: '1' */
+    cpu.r[5] = put(0x{_FORMATTER_TEXT:08x}u, format);
+    for (unsigned i = 0; i < 6u; ++i) cpu.r[6u+i] = args[i];
+    for (unsigned i = 0; i < 5u; ++i)
+        test_mem_w32(0x{_FORMATTER_STACK:08x}u + 4u*i, stack[i]);
     cpu.r[16] = 0x5a5a5a5au;
     cpu.r[29] = 0x{_FORMATTER_STACK:08x}u;
     cpu.r[31] = 0x12345678u;
     f_{FORMATTER:08x}(&cpu); sr_tail_drain(&cpu);
-    printf("out=[%s] ret=%u sp=0x%08x ra=0x%08x s0=0x%08x\\n",
+    if (cpu.r[2] >= 63u) abort();
+    printf("%s: out=[%s] ret=%u sp=0x%08x ra=0x%08x s0=0x%08x "
+           "helper=0x%08x terminator=%02x guard=%02x\\n", name,
            (const char *)at(0x{_FORMATTER_DST:08x}u, 64u), cpu.r[2], cpu.r[29], cpu.r[31],
-           cpu.r[16]);
+           cpu.r[16], test_mem_r32(0x{_FORMATTER_HELPER_WORD:08x}u),
+           test_mem_r8(0x{_FORMATTER_DST:08x}u + cpu.r[2]),
+           test_mem_r8(0x{_FORMATTER_DST:08x}u + cpu.r[2] + 1u));
+}}
+
+int main(void) {{
+    sr_register_all();
+{table}
+    const uint32_t no_stack[5] = {{0}};
+    const uint32_t original[6] = {{
+        put(0x{_FORMATTER_TEXT + 0x40:08x}u, "serve"), 0x171u, 0x2bu, 0xdeadbeefu,
+        put(0x{_FORMATTER_TEXT + 0x80:08x}u, "set"),
+        put(0x{_FORMATTER_TEXT + 0xc0:08x}u, "match"),
+    }};
+    const uint32_t fallthrough[6] = {{0xBu, 4u}};
+    const uint32_t nested_call[6] = {{0x51u, 's'}};
+    const uint32_t letters[6] = {{'a', 'b', 'c', 'd', 'e', 'f'}};
+    const uint32_t stack_varargs[5] = {{
+        put(0x{_FORMATTER_TEXT + 0x100:08x}u, "stack"),
+        put(0x{_FORMATTER_TEXT + 0x140:08x}u, "decoy"), 'Z',
+    }};
+    /* After g, the cursor points at padding. The pair starts at the next 8-byte boundary. */
+    const uint32_t aligned_pair[5] = {{'g', 'p', 'L', 'H', 'z'}};
+    run_case("original", "A1|0|2|31|1", original, no_stack);
+    run_case("fallthrough", "4|2", fallthrough, no_stack);
+    run_case("nested_call", "5|0", nested_call, no_stack);
+    run_case("stack_varargs", "000000|7|30", letters, stack_varargs);
+    run_case("aligned_pair", "0000000|6|0", letters, aligned_pair);
     return 0;
 }}
 """
@@ -2035,14 +2260,16 @@ class FormatterAtRetiredSprintfBridgeTests(unittest.TestCase):
     its loop while its own frame is live, so every conversion is a computed transfer that
     owes the core's frame, and the entry then reads its own frame again. It fails while the
     profile emits anything but the guest's words there, and if the text, its terminator, the
-    return value, $ra or a callee-saved register come back wrong. The generated entry
+    return value, $ra or a callee-saved register come back wrong. Separate rows cover
+    lexical fall-through, a nested call, caller-stack arguments after the register spills,
+    and an aligned pair after a padding word. The generated entry
     rebalances $sp itself on every exit, so a lost frame shows in the terminator and $ra,
     not in $sp. The drain is this harness's stand-in, so the fixture checks the generated
     code, not the runtime's own drain (src/rt/guest_interp.c)."""
 
-    def _run(self, profile: str, work: Path) -> tuple[str, str]:
+    def _run(self, profile: str, work: Path, mutant: str | None = None) -> tuple[str, list[str]]:
         assert CC is not None
-        words, at = _formatter_fixture()
+        words, at = _formatter_fixture(mutant)
         elf = work / "formatter.elf"
         generated = work / "formatter.c"
         elf.write_bytes(_synthetic_elf(
@@ -2072,7 +2299,7 @@ class FormatterAtRetiredSprintfBridgeTests(unittest.TestCase):
         self.assertEqual(compiled.returncode, 0, compiled.stderr + compiled.stdout)
         ran = subprocess.run([str(exe)], capture_output=True, text=True)
         self.assertEqual(ran.returncode, 0, ran.stderr + ran.stdout)
-        return body, ran.stdout.strip()
+        return body, ran.stdout.splitlines()
 
     def test_the_guest_formatter_runs_and_formats_under_both_profiles(self):
         bodies = {}
@@ -2080,9 +2307,22 @@ class FormatterAtRetiredSprintfBridgeTests(unittest.TestCase):
             with self.subTest(profile=profile), \
                     scratch_dir.TemporaryDirectory(prefix="formatter_") as tmp:
                 bodies[profile], outcome = self._run(profile, Path(tmp))
-                self.assertEqual(outcome, _FORMATTER_OUTCOME)
+                self.assertEqual(outcome, list(_FORMATTER_OUTCOMES.values()))
         self.assertEqual(bodies.get("hst"), bodies.get("none"),
                          "the formatter's entry diverged between profiles")
+
+    def test_each_compiled_guest_fault_changes_only_its_regression_witness(self):
+        for profile in ("hst", "none"):
+            for mutant, expected in _FORMATTER_MUTANT_OUTCOMES.items():
+                with self.subTest(profile=profile, mutant=mutant), \
+                        scratch_dir.TemporaryDirectory(prefix="formatter_mutant_") as tmp:
+                    _, outcome = self._run(profile, Path(tmp), mutant)
+                    # A real semantic mismatch is required from a successful executable.
+                    self.assertNotEqual(expected, _FORMATTER_OUTCOMES[mutant])
+                    self.assertEqual(outcome, [
+                        expected if case == mutant else result
+                        for case, result in _FORMATTER_OUTCOMES.items()
+                    ])
 
 if __name__ == "__main__":
     unittest.main()

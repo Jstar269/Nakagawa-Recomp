@@ -78,7 +78,7 @@ POSIX_ENV_COMMAND_RE = re.compile(
 )
 CLI_CLASSES = {
     "Stable user-facing, printed in `--help`",
-    "Documented QA, capture and scripted-run flags (**Proposal**)",
+    "Documented QA, capture and scripted-run flags",
     "Hidden but accepted",
     "Removed, kept as a tombstone",
     "Compile-gated test options",
@@ -369,7 +369,7 @@ class EnvRegistryTests(unittest.TestCase):
                          "a player option has multiple stability classes")
 
         stable = classes["Stable user-facing, printed in `--help`"]
-        qa = classes["Documented QA, capture and scripted-run flags (**Proposal**)"]
+        qa = classes["Documented QA, capture and scripted-run flags"]
         self.assertEqual(qa, set(QA_HELP), "documented QA options need explicit classification")
         self.assertIn("--runtime-bin", classes["Hidden but accepted"], "old runtime-root spelling")
         self.assertEqual(classes["Removed, kept as a tombstone"], {"--ui"})

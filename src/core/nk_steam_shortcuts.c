@@ -942,12 +942,18 @@ bool nk_steam_client_running(void) {
 
 #else
 
+static bool steam_root_has_accounts(const char *root) {
+    NkSteamAccount account;
+    size_t count;
+    return nk_steam_list_accounts(root, &account, 1u, &count) == NK_STEAM_OK;
+}
+
 NkSteamStatus nk_steam_find_root(char *root, size_t root_cap) {
     if (!root || root_cap == 0u) return NK_STEAM_ERR_ARGUMENT;
     root[0] = '\0';
     if (nk_platform_host_kind() != NK_HOST_LINUX) return NK_STEAM_ERR_UNSUPPORTED;
-    return nk_platform_linux_steam_find_root(root, root_cap) ? NK_STEAM_OK
-                                                             : NK_STEAM_ERR_NOT_FOUND;
+    return nk_platform_linux_steam_find_root(root, root_cap, steam_root_has_accounts)
+               ? NK_STEAM_OK : NK_STEAM_ERR_NOT_FOUND;
 }
 
 bool nk_steam_client_running(void) {

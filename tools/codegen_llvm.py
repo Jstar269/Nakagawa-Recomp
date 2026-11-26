@@ -491,7 +491,7 @@ class FunctionLowering:
         quotient, remainder = b.sdiv(x, divisor), b.srem(x, divisor)
         by_zero_lo = b.select(b.icmp("slt", x, self.c32(0)), self.c32(1), self.c32(0xFFFFFFFF))
         lo = b.select(overflow, self.c32(0x80000000), b.select(zero, by_zero_lo, quotient))
-        hi = b.select(overflow, self.c32(0xFFFFFFFF), b.select(zero, x, remainder))
+        hi = b.select(overflow, self.c32(0), b.select(zero, x, remainder))
         self.store_field("lo", lo)
         self.store_field("hi", hi)
 
