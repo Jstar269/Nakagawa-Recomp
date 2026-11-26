@@ -28776,6 +28776,57 @@ static void test_lwmutex_waiter_order(void) {
     }
 }
 
+/* ---- DeleteLwMutex lets a stronger waiter it releases run before it returns ---------
+ * pspautotests tests/threads/lwmutex/delete.expected "Delete same: A1B1C2D1E2F1
+ * (thread=800201B5, main=00000000)" (2ed7c9c5, recorded on a PSP; waiter 0x12, caller
+ * 0x20): when DeleteLwMutex releases a waiter of higher priority than the caller, the
+ * waiter runs (D) with WAIT_DELETE before the caller's call returns 0 (E). An equal or
+ * weaker waiter is readied but does not run before the call returns: the PSP record does
+ * not cover that case; it is the scheduler's strict-priority rule (sched_preempt), as for
+ * DeleteMutex (#3145). PPSSPP-derived, not PSP-measured.
+ * MUTANT: drop the scheduling point in h_DeleteLwMutex -- the higher-priority waiter has
+ * not run when the call returns. MUTANT: reschedule before the waiters are woken -- the
+ * waiter is not ready yet, so it does not run inside the call either. */
+static void test_lwmutex_delete_schedules_released_waiter(int waiter_priority) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    const char *rank = waiter_priority < 32 ? "higher" : waiter_priority == 32 ? "equal" : "lower";
+    char msg[192];
+    TCB *self = wsv_begin();
+    snprintf(msg, sizeof msg, "DeleteLwMutex %s-priority fixture: CreateLwMutex held by the caller",
+             rank);
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 1u), 0u, msg);
+    RvCall cw = { NID_B1_LOCK_LWMUTEX, { wa, 1u, 0u, 0u }, 0u, 0 };
+    TCB *w = rv_spawn(&cw, 0x1f7u, waiter_priority);
+    snprintf(msg, sizeof msg, "DeleteLwMutex: a %s-priority thread waits on the held LwMutex", rank);
+    expect(!cw.returned && w->state == TH_WAIT_OBJ, msg);
+
+    RvCall cd = { NID_B1_DELETE_LWMUTEX, { wa, 0u, 0u, 0u }, 0u, 0 };
+    cd.ret = 0xFFFFFFFFu;
+    self->coro = sr_coro_create(rv_call_body, &cd, (size_t)1 << 20);
+    expect(self->coro != NULL, "DeleteLwMutex: caller coroutine created");
+    if (!self->coro) { rv_end(w); s_cur = -1; return; }
+    rv_resume(self);
+    if (waiter_priority < 32) {
+        expect(!cd.returned && !cw.returned && w->state == TH_READY,
+               "DeleteLwMutex yields to the higher-priority waiter it releases before returning");
+    } else {
+        snprintf(msg, sizeof msg,
+                 "DeleteLwMutex returns 0 before the %s-priority waiter it releases runs", rank);
+        expect(cd.returned && cd.ret == 0u && !cw.returned && w->state == TH_READY, msg);
+    }
+    if (!cw.returned) rv_resume(w);
+    snprintf(msg, sizeof msg, "DeleteLwMutex releases the %s-priority waiter with WAIT_DELETE", rank);
+    expect(cw.returned && cw.ret == 0x800201b5u, msg);
+    if (!cd.returned) rv_resume(self);
+    snprintf(msg, sizeof msg, "DeleteLwMutex then returns 0 to its caller (%s-priority waiter)",
+             rank);
+    expect(cd.returned && cd.ret == 0u, msg);
+    snprintf(msg, sizeof msg, "DeleteLwMutex removed the LwMutex (%s-priority waiter)", rank);
+    expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u) == 0x800201cau, msg); /* NOT_FOUND */
+    rv_end(w); rv_end(self);
+    s_cur = -1;
+}
+
 /* ---- LockLwMutexCB runs the thread's callbacks while it waits ----------------------
  * PPSSPP-derived, not PSP-measured: a callback pending when the lock would block runs
  * before the block, the wait is callback-capable, and the lock is still granted after.
@@ -71640,6 +71691,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_terminate_from_interrupt_handler();
     test_sema_timed_wait_writes_time_left();
     test_lwmutex_waiter_order();
+    test_lwmutex_delete_schedules_released_waiter(18); /* stronger */
+    test_lwmutex_delete_schedules_released_waiter(32); /* equal */
+    test_lwmutex_delete_schedules_released_waiter(40); /* weaker */
     test_lock_lwmutex_cb_runs_callbacks();
     test_umd_cancel_wait_drive_stat();
     test_evf_cb_immediate();
