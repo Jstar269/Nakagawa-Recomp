@@ -2112,6 +2112,62 @@ static void append_window_ready_after_live_read(PlayerApp *app) {
 }
 #endif /* NK_PLAYER_STATE_TEST_SEAMS */
 
+/* Rewrites the repeat-launch package with `source_record` as its runtime source
+ * commit record (#2875), in package.json and in its build report; NULL writes a
+ * package from before the record. */
+static void write_repeat_launch_package(const char *user_root, const char *disc_id,
+                                        const char *self_path, const char *source_media_json,
+                                        const char *source_record) {
+    char runtime_extra[512] = "";
+    char report_extra[512] = "";
+    if (source_record) {
+        snprintf(runtime_extra, sizeof(runtime_extra), ",\"source_commit\":%s", source_record);
+        snprintf(report_extra, sizeof(report_extra), ",\"runtime_source\":%s", source_record);
+    }
+    g_fixture_runtime_extra = runtime_extra;
+    g_fixture_report_extra = report_extra;
+    write_runtime_package_fixture_with_source_media(
+        user_root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+        "synthetic-allegrex-v1.exe", FIXTURE_SHA256, self_path, source_media_json);
+    g_fixture_runtime_extra = "";
+    g_fixture_report_extra = "";
+}
+
+/* Fills the library's package status for game 0 the way the launcher's status
+ * check does (player_package_status_thread_main and its completion in main.c). */
+static void repeat_launch_cache_from_status_check(PlayerApp *app, const char *user_root) {
+    NkRuntimePackageInfo info;
+    char reason[1024] = "";
+    char identity[65] = "";
+    NkRuntimePackageStatus status = player_runtime_package_status_check(
+        user_root, &app->games[0], &info, reason, sizeof(reason));
+    assert(status == NK_RUNTIME_PACKAGE_OK);
+    assert(nk_launch_runtime_package_cache_identity(user_root, &app->games[0], identity));
+    player_app_runtime_package_cache_store(app, 0, &app->games[0], true, identity, status,
+                                           true, 1u);
+    player_app_runtime_package_cache_set_runtime_source(app, 0, info.runtime_source_commit,
+                                                        info.runtime_source_origin,
+                                                        info.runtime_source_reason);
+}
+
+/* Lets the child exit with code 7 before 500 ms and copies the resulting card. */
+static void repeat_launch_copy_early_exit(PlayerApp *app, uint64_t launch_tick,
+                                          char *report, size_t report_size) {
+    app->launch_time_ms = launch_tick;
+    assert(nk_launch_wait(&app->launch_session, 10000) == 7);
+    assert(player_app_monitor_game_session(app, launch_tick + 100u));
+    assert(!app->is_game_running);
+    assert(strcmp(app->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+    assert(player_app_format_error_report(app, "test", report, report_size) > 0);
+}
+
+static void repeat_launch_exit_early(PlayerApp *app, uint64_t launch_tick, char *report,
+                                     size_t report_size) {
+    set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+    assert(player_app_launch_game(app, 0));
+    repeat_launch_copy_early_exit(app, launch_tick, report, report_size);
+}
+
 /* Catalog-epoch coherence probe (#670). Built only with the test seam macro,
  * like the SR_CD_TEST_HOOKS selftests. The checkpoint runs inside
  * nk_title_manifest_validate_aot_package at the package-validation cache
@@ -2491,7 +2547,10 @@ static void test_report_this_game(void) {
 
         /* #2875: the report names the runtime source commit the package records, beside
            the player commit; an unknown one says why; a package without the record shows
-           no line, and a store for the same title keeps the line. */
+           no line, and a store for the same title keeps the line. A card that is not about
+           a launch, such as the check after a build, reads the library's stored status; a
+           stop card reads only what its own launch recorded (#2998), and this app launched
+           nothing. */
         {
             int subject = player_app_error_subject_index(app, &app->last_error);
             assert(subject == 0);
@@ -2503,7 +2562,20 @@ static void test_report_this_game(void) {
                 app, subject, "89abcdef0123456789abcdef0123456789abcdef", "install-record", "");
             assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
                                                       RP_HOME, user, report, sizeof(report)) > 0);
-            assert(strstr(report, "Package: ") != NULL);
+            assert(strstr(report, "Package: ") == NULL);
+            assert(strstr(report, "Runtime source: ") == NULL);
+            ErrorState stop_card = app->last_error;
+            snprintf(app->build_session.disc_id, sizeof(app->build_session.disc_id), "%s",
+                     app->games[subject].disc_id);
+            snprintf(app->build_session.iso_path, sizeof(app->build_session.iso_path), "%s",
+                     app->games[subject].iso_path);
+            player_app_set_package_revalidation_error(app, "synthetic check", NULL);
+            app->build_session.disc_id[0] = '\0';
+            app->build_session.iso_path[0] = '\0';
+            assert(player_app_error_subject_index(app, &app->last_error) == subject);
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Package: ready, identity 0123456789ab\n") != NULL);
             assert(strstr(report, "Runtime source: 89abcdef0123456789abcdef0123456789abcdef"
                                   " (install record)\n") != NULL);
             player_app_runtime_package_cache_store(app, subject, &app->games[subject], true,
@@ -2532,6 +2604,7 @@ static void test_report_this_game(void) {
             assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
                                                       RP_HOME, user, report, sizeof(report)) > 0);
             assert(strstr(report, "Runtime source: ") == NULL);
+            app->last_error = stop_card;
         }
 
         /* A crash with no boundary: no known issue, its exit code in the
@@ -14119,6 +14192,22 @@ static void test_play_mode_texpack_settings(void) {
         assert(!player_app_launch_begin(app, 0, work));
         assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
         assert(strcmp(app->last_error.title, "Texture pack not used") == 0);
+        /* #2998: the launch was refused before a child started, so Copy details names no
+           package, whatever the library has stored for the title. */
+        {
+            static char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+            player_app_runtime_package_cache_store(app, 0, &app->games[0], true,
+                                                   "0123456789abcdef0123456789abcdef"
+                                                   "0123456789abcdef0123456789abcdef",
+                                                   NK_RUNTIME_PACKAGE_OK, true, 1u);
+            player_app_runtime_package_cache_set_runtime_source(
+                app, 0, "89abcdef0123456789abcdef0123456789abcdef", "install-record", "");
+            assert(player_app_format_error_report(app, "test", report, sizeof(report)) > 0);
+            assert(strstr(report, "Disc ID: TEST95001\n") != NULL);
+            assert(strstr(report, "Package: ") == NULL);
+            assert(strstr(report, "Runtime source: ") == NULL);
+            memset(&app->runtime_package_cache[0], 0, sizeof(app->runtime_package_cache[0]));
+        }
         /* The card offers to play this run without the pack: that launch leaves the pack out of
            its copy of the settings (no folder, no texpack on the line), the stored choice stays,
            and the launch after it reads the pack again. */
@@ -21031,6 +21120,9 @@ int main(int argc, char **argv) {
     (void)run_log_contains;
     (void)append_runtime_event;
     (void)repeat_launch_and_settle;
+    (void)write_repeat_launch_package;
+    (void)repeat_launch_cache_from_status_check;
+    (void)repeat_launch_exit_early;
     (void)dev_log_count;
     (void)write_sparse_event_file;
 #else
@@ -21439,6 +21531,145 @@ int main(int argc, char **argv) {
         set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", "");
         memset(&rep->last_error, 0, sizeof(rep->last_error));
         rep->active_view = VIEW_LIBRARY;
+
+        /* #2998: Copy details for a run that started and exited early names the package
+           that run validated and spawned, never the library's current status for the
+           title: package B with an empty status, B with package A's status still stored,
+           a package from before the source record, an explicit unknown origin, and a
+           launch refused before a child starts. */
+        {
+            static const char record_a[] =
+                "{\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+                "\"origin\":\"install-record\",\"reason\":null}";
+            static const char record_b[] =
+                "{\"commit\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+                "\"origin\":\"git\",\"reason\":null}";
+            static const char record_unknown[] =
+                "{\"commit\":null,\"origin\":\"unknown\","
+                "\"reason\":\"the source tree has no install record and no git metadata\"}";
+            static char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            char identity_a[65], identity_run[65], expected[96];
+            char completion_path[1100];
+            snprintf(completion_path, sizeof(completion_path),
+                     "%s%cpackages%c%s%c" NK_AOT_COMPLETION_MANIFEST, user_root, sep,
+                     sep, disc_id, sep);
+
+            /* A rebuild keeps the executable and image paths. Split the core
+               calls the launch worker uses to replace A with B at that boundary. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_a);
+            fixture_sha_file(completion_path, identity_a);
+            PlayerLaunchWork *work = (PlayerLaunchWork *)malloc(sizeof(*work));
+            assert(work != NULL);
+            assert(player_app_launch_begin(rep, 0, work));
+            assert(nk_launch_prepare_session(&work->session, &work->game, user_root) == NK_OK);
+            snprintf(work->session.boot_event_file_path,
+                     sizeof(work->session.boot_event_file_path), "%s", work->boot_event_file_path);
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_b);
+            fixture_sha_file(completion_path, identity_run);
+            assert(strncmp(identity_a, identity_run, 12) != 0);
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+            work->result = nk_launch_start(&work->session);
+            assert(work->result == NK_OK);
+            assert(player_app_launch_finish(rep, work));
+            free(work);
+            repeat_launch_copy_early_exit(rep, 6400, report_text, sizeof(report_text));
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+            NkRuntimePackageInfo cached_b;
+            assert(nk_launch_validate_runtime_package(user_root, &rep->games[0], &cached_b,
+                                                       NULL, 0) == NK_RUNTIME_PACKAGE_OK);
+            assert(cached_b.validation_cache_hit);
+            assert(strcmp(cached_b.completion_digest, identity_run) == 0);
+
+            /* Copy the same card after the library validates a rebuilt A. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_a);
+            fixture_sha_file(completion_path, identity_a);
+            repeat_launch_cache_from_status_check(rep, user_root);
+            assert(rep->runtime_package_cache[0].identity_valid);
+            assert(strstr(rep->runtime_package_cache[0].runtime_source, "aaaaaaaaaa") != NULL);
+            assert(strncmp(rep->runtime_package_cache[0].package_identity, identity_run, 12) != 0);
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* B with no status stored: the run's own identity and source. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_b);
+            fixture_sha_file(completion_path, identity_run);
+            assert(strcmp(identity_run, identity_a) != 0);
+            memset(&rep->runtime_package_cache[0], 0, sizeof(rep->runtime_package_cache[0]));
+            repeat_launch_exit_early(rep, 6600, report_text, sizeof(report_text));
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+
+            /* B launched while A's status is still stored: nothing of A. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_a);
+            repeat_launch_cache_from_status_check(rep, user_root);
+            fixture_sha_file(completion_path, identity_a);
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_b);
+            fixture_sha_file(completion_path, identity_run);
+            repeat_launch_exit_early(rep, 6800, report_text, sizeof(report_text));
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            snprintf(expected, sizeof(expected), "%.12s", identity_a);
+            assert(strstr(report_text, expected) == NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* A package from before the record, A's status still stored: no source line. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json, NULL);
+            fixture_sha_file(completion_path, identity_run);
+            repeat_launch_exit_early(rep, 7000, report_text, sizeof(report_text));
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: ") == NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* An explicit unknown origin keeps the package's own reason. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_unknown);
+            repeat_launch_exit_early(rep, 7200, report_text, sizeof(report_text));
+            assert(strstr(report_text, "Runtime source: unknown (the source tree has no install "
+                                       "record and no git metadata)\n") != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* A launch refused before a child starts names no package: neither the run
+               before it nor the stored status. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        "{\"commit\":\"0123456789abcdef\",\"origin\":\"git\","
+                                        "\"reason\":null}");
+            assert(!player_app_launch_game(rep, 0));
+            assert(!rep->is_game_running);
+            assert(strcmp(rep->last_error.error_code, "RUNTIME_PACKAGE_NOT_READY") == 0);
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Package: ") == NULL);
+            assert(strstr(report_text, "Runtime source: ") == NULL);
+
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json, NULL);
+            memset(&rep->runtime_package_cache[0], 0, sizeof(rep->runtime_package_cache[0]));
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+            repeat_launch_and_settle(rep, 0, 7400, 7900, memstick1);
+            printf("PASS: Copy details names the package the early-exit run spawned (#2998)\n");
+        }
 
         /* Failure C: a longer-lived child exiting non-zero is classified as
            RUNTIME_ERROR_EXIT. */
