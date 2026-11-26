@@ -1037,8 +1037,9 @@ typedef struct {
 static SasVoice s_sasv[SAS_VOICES];
 static SasCoreState s_sas_core;
 static int s_sas_max_voices = SAS_VOICES;
-/* __sceSasCoreWithMix reports its first raw-mode refusal and its first gain refusal of a run by name
- * (#2807). */
+/* __sceSasCoreWithMix reports its first gain refusal and its first raw-mode refusal of a process by
+ * name (#2807). As with s_audio_output_refusal_noted, a guest reset does not clear the flags: a
+ * program started by sceKernelLoadExec in the same process does not repeat a note. */
 static int s_sas_withmix_raw_noted, s_sas_withmix_gain_noted;
 /* The noise voices' shared generator. A guest reset starts it again, so a program's noise does not
  * depend on how much noise the program before it mixed (audit 2026-11-17). */
@@ -1128,7 +1129,7 @@ void hle_sas_guest_reset(void) {
  * registration or dispatch paths. */
 void sr_hle_test_sas_reset(void) {
     hle_sas_guest_reset();
-    s_sas_withmix_raw_noted = s_sas_withmix_gain_noted = 0;   /* observe the once-per-run notes */
+    s_sas_withmix_raw_noted = s_sas_withmix_gain_noted = 0;   /* observe the once-per-process notes */
 }
 #endif
 
@@ -1859,42 +1860,52 @@ static uint32_t h_SasCore(CpuState *s) {
  * measures what PPSSPP does not check. With no voice keyed, (0x1000, 0x1000) returns 0 and leaves
  * the caller's PCM unchanged and (0x800, 0x800) returns 0 and halves it, while (0, -0x1000),
  * (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return 0x80420018 and leave the buffer untouched.
- * In raw output mode (1), (0x1000, 0x1000) returns 0x80000004 and leaves the buffer untouched.
- * This handler refuses a volume below 0 or above 0x1000 on either side, and raw mode whatever the
- * volumes; both refusals come before any write. Only part of that rule is measured. The one cell
- * with a single bad side is (0, -0x1000), which isolates the right side's lower bound; over and
- * extreme are bad on both sides. Unmeasured: a bad left volume with a good right one, a right volume
- * above 0x1000 with a good left one, the volumes 0x1001 to 0x1fff and -0xfff to -1 on either side,
- * the order of the raw-mode and volume checks (raw-unity uses good volumes) and their order against
- * the core, address and dispatch checks, raw mode set by __sceSasSetOutputmode rather than by
- * __sceSasInit, and what a refused call does to voices that are playing (here none advances).
- * The first refusal of each kind in a run is reported by name. */
+ * In raw output mode (1, set at __sceSasInit), (0x1000, 0x1000) returns 0x80000004 and leaves the
+ * buffer untouched. Of the four volume bounds that record isolates only the right side's lower one,
+ * at (0, -0x1000); over and extreme are bad on both sides, and raw-unity uses good volumes.
+ * This handler refuses a volume below 0 or above 0x1000 on either side with 0x80420018, and after
+ * that raw mode with 0x80000004; both refusals come before any write and advance no voice. What
+ * the record leaves open follows a later capture on the same console (2026-11-26, one boot, one
+ * run of a sas-mix probe extension that is not in this tree yet: CAPTURED, not a manifest record;
+ * docs/HARDWARE_ORACLE.md, "PSP-SAS-003 extension capture 2026-11-26"). There each bound alone is
+ * refused: (-1, 0x1000), (0x1000, -1), (0x1001, 0x1000), (0x1000, 0x1001) and six more pairs with
+ * one bad side return 0x80420018. The volume check answers before the raw-mode check: in raw mode
+ * (0x2000, 0x3000) and (0, -0x1000) return 0x80420018, and (0x800, 0x800) and (0, 0) return
+ * 0x80000004. Raw mode set by __sceSasSetOutputmode(1) is refused like raw mode set at init. A
+ * refused call of either kind leaves a playing voice where it was, and an accepted one advances it
+ * by one grain. Each side scales to floor(in * vol / 4096). Neither measured nor captured: the
+ * order of these two checks against the core, address and dispatch checks.
+ * The first refusal of each kind in a process is reported by name. */
 static uint32_t h_SasCoreWithMix(CpuState *s) {
     uint32_t e = sas_require_core(A0);
     int32_t left_gain = (int32_t)A2, right_gain = (int32_t)A3;
     if (e) return e;
     e = sas_output_validate(A1, 1);
     if (e) return e;
+    if (left_gain < 0 || left_gain > SAS_VOLUME_MAX || right_gain < 0 || right_gain > SAS_VOLUME_MAX) {
+        if (!s_sas_withmix_gain_noted) {
+            s_sas_withmix_gain_noted = 1;
+            fprintf(stderr, "HLE: __sceSasCoreWithMix refuses volumes 0x%08x, 0x%08x with 0x%08x (each side "
+                            "takes 0 to 0x1000, in raw output mode too): the grain is not mixed, the buffer "
+                            "is left as it is and no voice advances (PSP-SAS-003 measures (0, -0x1000), "
+                            "(0x2000, 0x3000) and (0x7fffffff, 0x80000000); each bound alone and the raw-mode "
+                            "order are a 2026-11-26 PSP capture, CAPTURED, not a manifest record)\n",
+                    (uint32_t)left_gain, (uint32_t)right_gain, SAS_ERROR_VOLUME_VAL);
+        }
+        return SAS_ERROR_VOLUME_VAL;
+    }
     if (s_sas_core.output_mode) {
         if (!s_sas_withmix_raw_noted) {
             s_sas_withmix_raw_noted = 1;
             fprintf(stderr, "HLE: __sceSasCoreWithMix refuses raw output mode with 0x%08x (volumes 0x%08x, "
                             "0x%08x): the grain is not mixed, the buffer is left as it is and no voice "
-                            "advances (PSP-SAS-003 measures this code at volumes 0x1000, 0x1000 only)\n",
+                            "advances (PSP-SAS-003 measures this code at volumes 0x1000, 0x1000 with raw "
+                            "mode set at __sceSasInit; (0x800, 0x800), (0, 0) and raw mode set by "
+                            "__sceSasSetOutputmode are a 2026-11-26 PSP capture, CAPTURED, not a manifest "
+                            "record)\n",
                     SAS_ERROR_WITHMIX_RAW_MODE, (uint32_t)left_gain, (uint32_t)right_gain);
         }
         return SAS_ERROR_WITHMIX_RAW_MODE;
-    }
-    if (left_gain < 0 || left_gain > SAS_VOLUME_MAX || right_gain < 0 || right_gain > SAS_VOLUME_MAX) {
-        if (!s_sas_withmix_gain_noted) {
-            s_sas_withmix_gain_noted = 1;
-            fprintf(stderr, "HLE: __sceSasCoreWithMix refuses volumes 0x%08x, 0x%08x with 0x%08x (this runtime "
-                            "takes 0 to 0x1000 on each side): the grain is not mixed, the buffer is left as "
-                            "it is and no voice advances (PSP-SAS-003 measures (0, -0x1000), (0x2000, "
-                            "0x3000) and (0x7fffffff, 0x80000000) only)\n",
-                    (uint32_t)left_gain, (uint32_t)right_gain, SAS_ERROR_VOLUME_VAL);
-        }
-        return SAS_ERROR_VOLUME_VAL;
     }
     if (!sched_wait_permitted()) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
     sas_mix_stateful(A1, 1, left_gain, right_gain); return 0;

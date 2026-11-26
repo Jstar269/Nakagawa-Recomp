@@ -47136,9 +47136,10 @@ static void test_sas_noise_restarts_on_guest_reset(void) {
  * 0b30638e6571: Core/HW/SasAudio.cpp WriteMixedOutput scales inp by leftVol/rightVol). PPSSPP checks
  * no volume; the PSP refuses one below 0 or above 0x1000 with 0x80420018 and leaves the buffer
  * untouched (PSP-SAS-003, #2807; test_sas_mix_psp_sas_003_withmix_cells replays the measured cells).
- * The refusals of 0x1001 and -1 below are this runtime's range between the measured points
- * (0x1000 and 0x2000, 0 and -0x1000), not PSP-measured: of the four bounds the record isolates
- * only the right side's lower one, at (0, -0x1000).
+ * Of the four bounds that record isolates only the right side's lower one, at (0, -0x1000). The
+ * refusals of 0x1001 and -1 on one side alone, and (0x1000, 0) accepted, are cells of the
+ * 2026-11-26 extension capture: CAPTURED on the same console, not a manifest record
+ * (test_sas_core_with_mix_capture_20261126_cells replays that capture).
  *
  * MUTANT: drop the left side's lower bound -- (-1, 0x1000) is accepted.
  * MUTANT: drop the right side's upper bound -- (0x1000, 0x1001) is accepted. */
@@ -47149,8 +47150,9 @@ static void test_sas_core_with_mix_scales_caller_pcm(void) {
     static const struct { int32_t l, r; uint32_t rc; } gains[] = {
         { 0x800, 0x800, 0u }, { 0, 0x1000, 0u },
         { 0, -0x1000, 0x80420018u }, { 0x2000, 0x3000, 0x80420018u },        /* PSP-SAS-003 */
-        { 0x1001, 0x1000, 0x80420018u }, { 0x1000, -1, 0x80420018u },        /* not PSP-measured */
-        { -1, 0x1000, 0x80420018u }, { 0x1000, 0x1001, 0x80420018u },        /* not PSP-measured */
+        { 0x1001, 0x1000, 0x80420018u }, { 0x1000, -1, 0x80420018u },        /* CAPTURED 2026-11-26 */
+        { -1, 0x1000, 0x80420018u }, { 0x1000, 0x1001, 0x80420018u },        /* CAPTURED 2026-11-26 */
+        { 0x1000, 0, 0u },                                                   /* CAPTURED 2026-11-26 */
     };
     reset_fixture(); sr_hle_init(); sas_test_init(&cpu, core, 0);
     for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
@@ -47196,17 +47198,21 @@ static void test_sas_core_with_mix_scales_caller_pcm(void) {
            "__sceSasCoreWithMix at 0/0 drops the caller PCM and keeps the voices at their own volume (#2135)");
 }
 
-/* #2807: a refused __sceSasCoreWithMix is reported by name, once per run for each kind of refusal
- * (volume, raw mode), and an accepted call reports nothing. A refused call advances no voice: the
- * grain after it is the voice's first. HOST_TESTED: the notes and the voice rule are this runtime's
- * (PSP-SAS-003 does not say what a refused call does to playing voices), and raw mode is set here by
- * __sceSasSetOutputmode, which the record does not measure.
+/* #2807: a refused __sceSasCoreWithMix is reported by name, once per process for each kind of
+ * refusal (volume, raw mode), and an accepted call reports nothing. A bad volume in raw mode is a
+ * volume refusal: the volume check comes first. A refused call advances no voice: the grain after
+ * it is the voice's first. HOST_TESTED: the notes are this runtime's. PSP-SAS-003 does not measure
+ * the order of the two checks, raw mode set by __sceSasSetOutputmode, or what a refused call does
+ * to a playing voice; the 2026-11-26 extension capture shows all three (CAPTURED, not a manifest
+ * record; test_sas_core_with_mix_capture_20261126_cells).
  *
  * MUTANT: drop the raw-mode refusal's once flag -- its note appears twice.
- * MUTANT: mix the grain before the volume check -- the voice advances and the next grain differs. */
+ * MUTANT: mix the grain before the volume check -- the voice advances and the next grain differs.
+ * MUTANT: check raw mode before the volumes -- (0x2000, 0x3000) in raw mode returns 0x80000004 and
+ * the raw-mode note names those volumes. */
 #define NID_SAS_SET_OUTPUTMODE 0xe855bf76u
 static void sas_with_mix_note_voice(CpuState *cpu, uint32_t core, uint32_t vag) {
-    sas_test_init(cpu, core, 0);   /* clears the once-per-run notes too */
+    sas_test_init(cpu, core, 0);   /* clears the once-per-process notes too */
     sas_test_vag(vag, 4u, 0u);
     cpu->r[4] = core; cpu->r[5] = 0; cpu->r[6] = vag; cpu->r[7] = 64; cpu->r[8] = 0;
     expect(sr_syscall(cpu, NID_SAS_SET_VOICE) == 0, "WithMix note fixture sets voice 0");
@@ -47250,6 +47256,7 @@ static void test_sas_core_with_mix_reports_each_refusal_once(void) {
     const uint32_t over_right = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1001);
     cpu.r[4] = core; cpu.r[5] = 1;
     const uint32_t raw_set = sr_syscall(&cpu, NID_SAS_SET_OUTPUTMODE);
+    const uint32_t raw_over = sas_with_mix_note_call(&cpu, core, out, 0x2000, 0x3000);
     const uint32_t raw_first = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1000);
     const uint32_t raw_second = sas_with_mix_note_call(&cpu, core, out, 0x800, 0x800);
     cpu.r[4] = core; cpu.r[5] = 0;
@@ -47258,12 +47265,15 @@ static void test_sas_core_with_mix_reports_each_refusal_once(void) {
     fputs(log, stderr);
     expect(neg_left == 0x80420018u && over_right == 0x80420018u,
            "__sceSasCoreWithMix refuses (-1, 0x1000) and (0x1000, 0x1001) with 0x80420018 (#2807)");
+    expect(raw_over == 0x80420018u,
+           "__sceSasCoreWithMix in raw output mode refuses (0x2000, 0x3000) with 0x80420018: the volume check "
+           "comes before the raw-mode check (#2807)");
     expect(raw_set == 0u && normal_set == 0u && raw_first == 0x80000004u && raw_second == 0x80000004u,
            "__sceSasCoreWithMix refuses raw output mode set by __sceSasSetOutputmode with 0x80000004 (#2807)");
     expect(count_occurrences(log, gain_note) == 1,
-           "the first volume refusal of a run is reported once by name, the second not again (#2807)");
+           "the first volume refusal of a process is reported once by name, later ones not again (#2807)");
     expect(count_occurrences(log, raw_note) == 1,
-           "the first raw-mode refusal of a run is reported once by name, the second not again (#2807)");
+           "the first raw-mode refusal of a process is reported once by name, the second not again (#2807)");
     expect(strstr(log, "refuses volumes 0xffffffff, 0x00001000 with 0x80420018") != NULL,
            "the volume refusal note names the offending volumes and the code (#2807)");
     expect(strstr(log, "refuses raw output mode with 0x80000004 (volumes 0x00001000, 0x00001000)") != NULL,
@@ -48438,6 +48448,213 @@ static void test_sas_mix_psp_sas_003_withmix_cells(void) {
                    "(0x9f61 + 0x06fe = 0xa65f)");
         }
     }
+}
+
+/* ---- __sceSasCoreWithMix: the 2026-11-26 extension capture, cell by cell through production dispatch (#2807)
+ * ----
+ *
+ * CAPTURED, not PSP-SAS-003 and not a manifest record: one run, on one boot of the same PSP-3000 (system software
+ * 6.61, game context), of a sas-mix probe extension that is not in tests/fixtures/psp_oracle/probe.c yet
+ * (docs/HARDWARE_ORACLE.md, "PSP-SAS-003 extension capture 2026-11-26", publishes the values). The public stream
+ * registers none of these cells, so each is named here by what it passes and none is a case id. Like the measured
+ * cells, each starts from a fresh core of grain 256 and 32 voices; the caller's ramp is (i - 256) * 97, whose
+ * shorts 0, 254 and 480 are the three samples the capture publishes (-24832, -194, 21728).
+ *
+ * What the capture shows, and these cells assert:
+ * - One bad side refuses the call with 0x80420018 and leaves the buffer untouched; each of the four bounds alone.
+ * - An accepted call scales each side to floor(in * volume / 4096), odd samples included.
+ * - In raw output mode a bad volume answers 0x80420018 and a good one 0x80000004: volumes first.
+ * - Raw mode set by __sceSasSetOutputmode(1) is refused like raw mode set at init, and mode 0 set that way mixes.
+ * - With a voice playing, (0x800, 0x800) gives floor(in / 2) plus the voice's sample and (0x2000, 0x3000) is
+ *   refused. The voice here is the measured keyed cells' (flat VAG, four warm-up grains, 0x06fe = 1790).
+ * The untouched and scaled claims are the capture's in the three windows it reads; over the rest of the buffer
+ * they are this runtime's own property.
+ *
+ * MUTANT: check raw mode before the volumes -- the two raw-mode cells with a bad volume return 0x80000004. */
+enum { SAS_CAPTURE_PLAIN, SAS_CAPTURE_RAW, SAS_CAPTURE_KEYED, SAS_CAPTURE_SET_RAW, SAS_CAPTURE_SET_STEREO };
+static const struct {
+    const char *name;
+    uint32_t setup;
+    int32_t l, r;
+    uint32_t result;
+} k_sas_withmix_capture_cells[] = {
+    {"left -0x1000", SAS_CAPTURE_PLAIN, -0x1000, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"left -1", SAS_CAPTURE_PLAIN, -1, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right -1", SAS_CAPTURE_PLAIN, 0x1000, -1, SAS_MIX_VOLUME_VAL},
+    {"left -0xfff", SAS_CAPTURE_PLAIN, -0xfff, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right -0x2000", SAS_CAPTURE_PLAIN, 0, -0x2000, SAS_MIX_VOLUME_VAL},
+    {"left 0x1001", SAS_CAPTURE_PLAIN, 0x1001, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right 0x1001", SAS_CAPTURE_PLAIN, 0x1000, 0x1001, SAS_MIX_VOLUME_VAL},
+    {"right 0x1fff", SAS_CAPTURE_PLAIN, 0x1000, 0x1fff, SAS_MIX_VOLUME_VAL},
+    {"left 0x2000", SAS_CAPTURE_PLAIN, 0x2000, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right 0x2000", SAS_CAPTURE_PLAIN, 0x1000, 0x2000, SAS_MIX_VOLUME_VAL},
+    {"odd volumes", SAS_CAPTURE_PLAIN, 0x555, 0xfff, 0u},
+    {"volume 1", SAS_CAPTURE_PLAIN, 1, 0xaab, 0u},
+    {"left only", SAS_CAPTURE_PLAIN, 0x1000, 0, 0u},
+    {"raw mode, half", SAS_CAPTURE_RAW, 0x800, 0x800, SAS_MIX_RAW_REFUSED},
+    {"raw mode, zero", SAS_CAPTURE_RAW, 0, 0, SAS_MIX_RAW_REFUSED},
+    {"raw mode, both over", SAS_CAPTURE_RAW, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    {"raw mode, right -0x1000", SAS_CAPTURE_RAW, 0, -0x1000, SAS_MIX_VOLUME_VAL},
+    {"voice playing, half", SAS_CAPTURE_KEYED, 0x800, 0x800, 0u},
+    {"voice playing, both over", SAS_CAPTURE_KEYED, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    {"SetOutputmode(1), unity", SAS_CAPTURE_SET_RAW, 0x1000, 0x1000, SAS_MIX_RAW_REFUSED},
+    {"SetOutputmode(0), unity", SAS_CAPTURE_SET_STEREO, 0x1000, 0x1000, 0u},
+};
+#define SAS_WITHMIX_CAPTURE_CELL_COUNT \
+    (sizeof(k_sas_withmix_capture_cells) / sizeof(k_sas_withmix_capture_cells[0]))
+
+static void sas_mix_write_ramp(int16_t *before) {
+    sas_mix_fill(SAS_MIX_SENTINEL);
+    for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++)
+        MEM_W16(SAS_MIX_OUT + s * 2u, (uint16_t)(int16_t)(((int)s - 256) * 97));
+    for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) before[s] = sas_mix_short(s);
+}
+
+static int sas_mix_buffer_is(const int16_t *want) {
+    for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) if (sas_mix_short(s) != want[s]) return 0;
+    return 1;
+}
+
+static void test_sas_core_with_mix_capture_20261126_cells(void) {
+    CpuState cpu;
+    char what[200];
+    static int16_t before[SAS_MIX_SHORTS];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_WITHMIX_CAPTURE_CELL_COUNT; i++) {
+        const char *name = k_sas_withmix_capture_cells[i].name;
+        const uint32_t kind = k_sas_withmix_capture_cells[i].setup;
+        const int32_t l = k_sas_withmix_capture_cells[i].l, r = k_sas_withmix_capture_cells[i].r;
+        const uint32_t want = k_sas_withmix_capture_cells[i].result;
+        int setup = sas_mix_init(&cpu, kind == SAS_CAPTURE_RAW || kind == SAS_CAPTURE_SET_STEREO) == 0u;
+        if (kind == SAS_CAPTURE_KEYED) {
+            setup = setup && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u &&
+                    sas_mix_set_volume(&cpu, 0x1000, 0x1000, 0, 0) == 0u && sas_mix_envelope(&cpu) == 0u &&
+                    sas_adsr_key_on(&cpu) == 0u;
+            for (uint32_t g = 0; g < SAS_MIX_WARM; g++) setup = setup && sas_mix_core(&cpu) == 0u;
+        }
+        if (kind == SAS_CAPTURE_SET_RAW || kind == SAS_CAPTURE_SET_STEREO) {
+            const uint32_t mode = kind == SAS_CAPTURE_SET_RAW ? 1u : 0u;
+            cpu.r[4] = SAS_MIX_CORE; cpu.r[5] = mode;
+            const uint32_t set = sr_syscall(&cpu, NID_SAS_SET_OUTPUTMODE);
+            cpu.r[4] = SAS_MIX_CORE;
+            const uint32_t get = sr_syscall(&cpu, NID_SAS_GET_OUTPUTMODE);
+            snprintf(what, sizeof(what), "WithMix capture, %s: __sceSasSetOutputmode(%u) returns 0 and "
+                     "__sceSasGetOutputmode %u", name, (unsigned)mode, (unsigned)mode);
+            expect(set == 0u && get == mode, what);
+        }
+        snprintf(what, sizeof(what), "WithMix capture, %s: the core (and voice) set up (runtime precondition)",
+                 name);
+        expect(setup, what);
+        sas_mix_write_ramp(before);
+        const uint32_t rc = sas_mix_with_mix(&cpu, l, r);
+        snprintf(what, sizeof(what), "WithMix capture, %s: __sceSasCoreWithMix(0x%x, 0x%x) returns 0x%08x", name,
+                 (unsigned)l, (unsigned)r, (unsigned)want);
+        expect(rc == want, what);
+        if (want != 0u) {
+            snprintf(what, sizeof(what), "WithMix capture, %s: the refused call leaves the caller's buffer "
+                     "untouched", name);
+            expect(sas_mix_buffer_is(before), what);
+            continue;
+        }
+        /* An accepted call: floor(in * volume / 4096) per side, plus the playing voice's sample. */
+        const int32_t voice = kind == SAS_CAPTURE_KEYED ? (int32_t)SAS_MIX_FULL : 0;
+        int scaled = 1;
+        for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++) {
+            const int32_t in = before[s], volume = (s & 1u) ? r : l;
+            int32_t floored = in * volume / 4096;
+            if (in * volume % 4096 < 0) floored--;
+            if (sas_mix_short(s) != sas_clamp16(floored + voice)) scaled = 0;
+        }
+        snprintf(what, sizeof(what), "WithMix capture, %s: every sample is floor(in * volume / 4096) for its "
+                 "side%s", name, voice ? " plus the voice's 1790" : "");
+        expect(scaled, what);
+        if (strcmp(name, "volume 1") == 0)
+            expect(sas_mix_short(0u) == -7 && sas_mix_short(254u) == -1 && sas_mix_short(480u) == 5,
+                   "WithMix capture, volume 1: -24832 gives -7, -194 gives -1 and 21728 gives 5");
+    }
+    sr_hle_test_sas_reset();
+}
+
+/* The 2026-11-26 capture's voice-advance cells (CAPTURED, as above): a voice playing, two __sceSasCore grains,
+ * one __sceSasCoreWithMix, then one more __sceSasCore. An accepted call gives the ramp plus the voice's grain 2
+ * and the next grain is grain 3; after a refusal for a volume (mode 0) or for raw mode (mode 1, good volumes)
+ * the buffer is untouched and the next grain is grain 2. The capture's last cell here, a bad volume in raw mode,
+ * was captured without a voice; that it advances none is this runtime's property and follows from the other two.
+ * The grains are this mixer's own (it has no key-on delay, #1296), taken from a control run in the same mode:
+ * the stepped VAG at pitch 0x1000, so each grain differs from the next.
+ *
+ * MUTANT: check raw mode before the volumes -- in raw mode (0x2000, 0x3000) returns 0x80000004. */
+static int sas_capture_voice_begin(CpuState *cpu, uint32_t raw) {
+    return sas_mix_init(cpu, raw) == 0u && sas_mix_set_voice(cpu, SAS_MIX_STEPS) == 0u &&
+           sas_mix_set_volume(cpu, 0x1000, 0x1000, 0, 0) == 0u && sas_mix_set_pitch(cpu, 0x1000) == 0u &&
+           sas_mix_envelope(cpu) == 0u && sas_adsr_key_on(cpu) == 0u;
+}
+
+static uint32_t sas_capture_grain(CpuState *cpu, int16_t *grain) {
+    sas_mix_fill(SAS_MIX_SENTINEL);
+    const uint32_t rc = sas_mix_core(cpu);
+    for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) grain[s] = sas_mix_short(s);
+    return rc;
+}
+
+static void test_sas_core_with_mix_capture_20261126_voice_advance(void) {
+    CpuState cpu;
+    char what[200];
+    static int16_t control[2][4][SAS_MIX_SHORTS], before[SAS_MIX_SHORTS], next[SAS_MIX_SHORTS];
+    static const struct {
+        const char *name;
+        uint32_t raw;
+        int32_t l, r;
+        uint32_t result;
+    } cells[] = {
+        {"accepted (0x1000, 0x1000)", 0u, 0x1000, 0x1000, 0u},
+        {"volume refusal (0x2000, 0x3000)", 0u, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+        {"raw-mode refusal (0x1000, 0x1000)", 1u, 0x1000, 0x1000, SAS_MIX_RAW_REFUSED},
+        {"volume refusal in raw mode (0x2000, 0x3000)", 1u, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    };
+    sas_mix_cell_begin(&cpu);
+    for (uint32_t raw = 0; raw < 2u; raw++) {
+        int ok = sas_capture_voice_begin(&cpu, raw);
+        for (uint32_t g = 0; g < 4u; g++) ok = ok && sas_capture_grain(&cpu, control[raw][g]) == 0u;
+        ok = ok && memcmp(control[raw][1], control[raw][2], sizeof(control[raw][1])) != 0 &&
+             memcmp(control[raw][2], control[raw][3], sizeof(control[raw][2])) != 0;
+        expect(ok, raw ? "WithMix capture, voice advance: the raw-mode control run gives four grains that differ"
+                       : "WithMix capture, voice advance: the mode-0 control run gives four grains that differ");
+    }
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
+        const uint32_t raw = cells[i].raw;
+        int ok = sas_capture_voice_begin(&cpu, raw);
+        for (uint32_t g = 0; g < 2u; g++) ok = ok && sas_capture_grain(&cpu, next) == 0u;
+        snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the voice plays grains 0 and 1 (runtime "
+                 "precondition)", cells[i].name);
+        expect(ok && memcmp(next, control[raw][1], sizeof(next)) == 0, what);
+        sas_mix_write_ramp(before);
+        const uint32_t rc = sas_mix_with_mix(&cpu, cells[i].l, cells[i].r);
+        snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the call returns 0x%08x", cells[i].name,
+                 (unsigned)cells[i].result);
+        expect(rc == cells[i].result, what);
+        if (cells[i].result != 0u) {
+            snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the buffer is untouched",
+                     cells[i].name);
+            expect(sas_mix_buffer_is(before), what);
+            snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the envelope height is still "
+                     "0x3ff00000", cells[i].name);
+            expect(sas_adsr_height(&cpu) == SAS_MIX_TOP_HEIGHT, what);
+        } else {
+            int summed = 1;
+            for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++)
+                if (sas_mix_short(s) != sas_clamp16((int32_t)before[s] + control[raw][2][s])) summed = 0;
+            snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the buffer is the ramp plus the "
+                     "voice's grain 2", cells[i].name);
+            expect(summed, what);
+        }
+        const uint32_t expected = cells[i].result != 0u ? 2u : 3u;
+        const uint32_t core_rc = sas_capture_grain(&cpu, next);
+        snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the next __sceSasCore grain is grain %u",
+                 cells[i].name, (unsigned)expected);
+        expect(core_rc == 0u && memcmp(next, control[raw][expected], sizeof(next)) == 0, what);
+    }
+    sr_hle_test_sas_reset();
 }
 
 /* k_sas_mix_pitch in probe.c: the stepped VAG (pcm 0) or the PCM ramp (pcm 1) at one pitch, the left channel of
@@ -72206,6 +72423,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_adsr_psp_sas_002_curve_runs();
     test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule();
     test_sas_mix_psp_sas_003_withmix_cells();
+    test_sas_core_with_mix_capture_20261126_cells();
+    test_sas_core_with_mix_capture_20261126_voice_advance();
     test_sas_mix_psp_sas_003_volume_cells();
     test_sas_mix_psp_sas_003_pitch_cells();
     test_msgpipe_rendezvous();

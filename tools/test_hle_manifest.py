@@ -1121,10 +1121,16 @@ class LiveManifestTests(unittest.TestCase):
             0x50A14DFC: (
                 "__sceSasCoreWithMix", "h_SasCoreWithMix", "NID_SAS_MIX_CORE_WITH_MIX", "sas_mix_with_mix",
                 "test_sas_mix_psp_sas_003_withmix_cells",
-                ("0x80420018", "0x80000004", "0xcf80", "0xa65f", "untouched", "0x1001 to 0x1fff",
-                 "-0xfff to -1", "order of the raw-mode, gain", "until #2807", "only the right side's lower one",
-                 "a bad left gain with a good right one", "a right gain above 0x1000 with a good left one",
-                 "the SetOutputmode export", "voices that are playing", "first refusal of each kind"),
+                ("0x80420018", "0x80000004", "0xcf80", "0xa65f", "untouched", "until #2807",
+                 "only the right side's lower one", "its one raw-mode cell uses good gains",
+                 "CAPTURED, not measured, and no manifest record", "not in the public tree",
+                 "PSP-SAS-003 extension capture 2026-11-26", "each bound alone is refused",
+                 "the gain check answers before the raw-mode check", "the SetOutputmode export",
+                 "voices that are playing", "the floor of the sample times the gain over 4096",
+                 "first refusal of each kind in a process",
+                 "order of the gain and raw-mode checks against the core, address and dispatch checks",
+                 "test_sas_core_with_mix_capture_20261126_cells",
+                 "test_sas_core_with_mix_capture_20261126_voice_advance"),
             ),
             0x440CA7D8: (
                 "__sceSasSetVolume", "h_SasSetVolume", "NID_SAS_MIX_SET_VOLUME", "sas_mix_set_volume",
@@ -1222,8 +1228,54 @@ class LiveManifestTests(unittest.TestCase):
         mix_at = handler_body.index("sas_mix_stateful(")
         self.assertLess(handler_body.index("return SAS_ERROR_WITHMIX_RAW_MODE;"), mix_at)
         self.assertLess(handler_body.index("return SAS_ERROR_VOLUME_VAL;"), mix_at)
+        # The volumes are checked before raw mode (the 2026-11-26 capture; the selftest's raw-mode cells with
+        # a bad volume are the behaviour check).
+        self.assertLess(handler_body.index("return SAS_ERROR_VOLUME_VAL;"),
+                        handler_body.index("return SAS_ERROR_WITHMIX_RAW_MODE;"))
         self.assertRegex(audio, r"(?m)^#define SAS_ERROR_WITHMIX_RAW_MODE[ \t]+0x80000004u")
-        # Each refusal is reported by name once per run (AGENTS.md section 6), and the selftest checks it.
+        # The capture is labelled as what it is. The document calls it CAPTURED and says no manifest record
+        # cites it; the manifest row and the probe's stream still hold the eight measured WithMix cells only;
+        # the capture's cells carry no sas-mix case id; and the document publishes the values the limitation
+        # and the replay cite.
+        capture = " ".join(
+            doc.split("### PSP-SAS-003 extension capture 2026-11-26", 1)[1].split("\n### ", 1)[0].split()
+        )
+        for claim in ("`CAPTURED`, not `MEASURED`", "no manifest record cites it", "on no public branch",
+                      "one console, one boot and one run"):
+            self.assertIn(claim, capture)
+        self.assertNotIn("2026-11-26", published)
+        self.assertNotIn("2026-11-26", record["measurement_note"])
+        self.assertEqual(len(parse_golden.SAS_MIX_WITHMIX_CELLS), 8)
+        self.assertNotRegex(capture, r"sas-mix-[a-z0-9]")
+        for value in ("(-0x1000, 0x1000), (-1, 0x1000), (0x1000, -1), (-0xfff, 0x1000), (0, -0x2000), "
+                      "(0x1001, 0x1000), (0x1000, 0x1001), (0x1000, 0x1fff), (0x2000, 0x1000) and "
+                      "(0x1000, 0x2000) each returned `0x80420018`",
+                      "(0x555, 0xfff) and (1, 0xaab) returned 0", "floor(in * volume / 4096)",
+                      "-24832 gives -7, -194 gives -1 and 21728 gives 5",
+                      "(0x800, 0x800) and (0, 0) returned `0x80000004`",
+                      "(0x2000, 0x3000) and (0, -0x1000) returned `0x80420018`",
+                      "the volume check answers before the raw-mode check",
+                      "`__sceSasSetOutputmode(1)` returned 0", "`__sceSasSetOutputmode(0)` returned 0",
+                      "floor(in / 2) plus the voice's sample (1790)",
+                      "an accepted call advances the voice by one grain",
+                      "a refused call of either kind does not advance the voice"):
+            self.assertIn(value, capture)
+        capture_table = _matched(
+            re.search(r"^\} k_sas_withmix_capture_cells\[\] = \{\n(.*?)^\};$", source, re.MULTILINE | re.DOTALL)
+        ).group(1)
+        capture_cells = re.findall(r'^    \{"([^"]+)", SAS_CAPTURE_[A-Z_]+, ', capture_table, re.MULTILINE)
+        self.assertEqual(len(capture_cells), 21)
+        self.assertFalse(set(capture_cells) & set(parse_golden.SAS_MIX_WITHMIX_CELLS))
+        for replay in ("test_sas_core_with_mix_capture_20261126_cells",
+                       "test_sas_core_with_mix_capture_20261126_voice_advance"):
+            with self.subTest(capture_replay=replay):
+                replay_body = _matched(
+                    re.search(rf"^static void {replay}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+                ).group(0)
+                self.assertIn("sas_mix_cell_begin(&cpu);", replay_body)
+                self.assertIn("sas_mix_with_mix(&cpu, ", replay_body)
+                self.assertRegex(source, rf"(?m)^    {replay}\(\);$")
+        # Each refusal is reported by name once per process (AGENTS.md section 6), and the selftest checks it.
         for note, flag in (("HLE: __sceSasCoreWithMix refuses raw output mode", "s_sas_withmix_raw_noted"),
                            ("HLE: __sceSasCoreWithMix refuses volumes ", "s_sas_withmix_gain_noted")):
             with self.subTest(note=note):
