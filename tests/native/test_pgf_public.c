@@ -793,7 +793,8 @@ static void test_maps_pointers_and_metrics(void) {
         test_reset_dirty();
         test_set_image(2u, 0, 0, 1u, 1u, 1u, TEST_BUFFER_ADDR);
         CHECK(pgf_draw_glyph_by_id(pgf, 0, TEST_IMAGE_ADDR));
-        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 5u);
+        /* Format 2 holds 8-bit coverage: 17 times the packed nibble 5. */
+        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 85u);
         pgf_close(pgf);
     }
 
@@ -1114,12 +1115,31 @@ static void test_composite_config(TestConfig *config) {
 }
 
 static void test_composite_glyphs(void) {
-    static const uint8_t expected[4] = {7u, 6u, 0u, 3u};
-    static const uint8_t expected_half[6] = {3u, 3u, 3u, 0u, 1u, 1u};
+    /* Format 2 holds 8-bit coverage, 17 times the packed nibble (PGF_SPEC.md 3.10), and
+       the later components maximise on that byte. The component coverage rows are
+       (68,17)/(0,0), (0,102)/(0,51) and (119,0)/(0,34). */
+    static const uint8_t expected[4] = {119u, 102u, 0u, 51u};
+    /* fx = 32: the component rows become (34,43,8)/(0,0,0), (0,51,51)/(0,26,25) and
+       (60,59,0)/(0,17,17), each the preceding column's half rounded down plus the
+       current column's half rounded up. */
+    static const uint8_t expected_half[6] = {60u, 59u, 51u, 0u, 26u, 25u};
+    /* The larger-area variant: its second component is 3 by 2 with coverage rows
+       (0,102,153)/(0,51,0), drawn over a destination prefilled with 16. */
+    static const uint8_t expected_wide[16] = {119u, 102u, 153u, 16u,
+                                              0u, 51u, 16u, 16u,
+                                              16u, 16u, 16u, 16u,
+                                              16u, 16u, 16u, 16u};
+    /* The same variant at fx = fy = 32: the second component's rows become
+       (0,51,128,76)/(0,26,25,0), and the vertical fraction adds no row. */
+    static const uint8_t expected_wide_half[20] = {60u, 59u, 128u, 76u, 16u,
+                                                   0u, 26u, 25u, 16u, 16u,
+                                                   16u, 16u, 16u, 16u, 16u,
+                                                   16u, 16u, 16u, 16u, 16u};
     TestConfig config;
     TestFont font;
     PGF *pgf;
     uint8_t *buffer = test_guest(TEST_BUFFER_ADDR);
+    unsigned span;
 
     test_composite_config(&config);
     CHECK(test_build_font(&font, &config));
@@ -1149,16 +1169,66 @@ static void test_composite_glyphs(void) {
     CHECK(dirty_spans[0].address == TEST_BUFFER_ADDR && dirty_spans[0].size == 2u);
     CHECK(dirty_spans[1].address == TEST_BUFFER_ADDR + 2u && dirty_spans[1].size == 2u);
     CHECK(dirty_spans[2].address == TEST_BUFFER_ADDR && dirty_spans[2].size == 2u);
+    CHECK(dirty_spans[3].address == TEST_BUFFER_ADDR + 2u && dirty_spans[3].size == 2u);
     CHECK(dirty_spans[4].address == TEST_BUFFER_ADDR && dirty_spans[4].size == 2u);
+    CHECK(dirty_spans[5].address == TEST_BUFFER_ADDR + 2u && dirty_spans[5].size == 2u);
+    CHECK(buffer[4] == 0xeeu && buffer[5] == 0xeeu);
 
     /* fx = 32: every component grows one footprint column. */
-    memset(buffer, 0xee, sizeof(expected_half));
+    memset(buffer, 0xee, 12u);
     test_reset_dirty();
     test_set_image(2u, 32, 0, 3u, 2u, 3u, TEST_BUFFER_ADDR);
     CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
     CHECK(memcmp(buffer, expected_half, sizeof(expected_half)) == 0);
+    CHECK(buffer[6] == 0xeeu && buffer[7] == 0xeeu && buffer[8] == 0xeeu);
     CHECK(dirty_count == 6u);
-    CHECK(dirty_spans[0].size == 3u);
+    for (span = 0; span < 6u; ++span) {
+        CHECK(dirty_spans[span].address == TEST_BUFFER_ADDR + (span & 1u) * 3u &&
+              dirty_spans[span].size == 3u);
+    }
+
+    /* fy = 32 in format 2: every component keeps the integer source row and its own
+       height, so the bytes and the six dirty rows are those of the integer draw and the
+       third buffer row is not reached. */
+    memset(buffer, 0xee, 12u);
+    test_reset_dirty();
+    test_set_image(2u, 0, 32, 2u, 3u, 2u, TEST_BUFFER_ADDR);
+    CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
+    CHECK(memcmp(buffer, expected, sizeof(expected)) == 0);
+    CHECK(buffer[4] == 0xeeu && buffer[5] == 0xeeu && buffer[6] == 0xeeu);
+    CHECK(dirty_count == 6u);
+    for (span = 0; span < 6u; ++span) {
+        CHECK(dirty_spans[span].address == TEST_BUFFER_ADDR + (span & 1u) * 2u &&
+              dirty_spans[span].size == 2u);
+    }
+
+    /* Both fractions: the widened column of fx = 32 and the unchanged height. */
+    memset(buffer, 0xee, 12u);
+    test_reset_dirty();
+    test_set_image(2u, 32, 32, 3u, 3u, 3u, TEST_BUFFER_ADDR);
+    CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
+    CHECK(memcmp(buffer, expected_half, sizeof(expected_half)) == 0);
+    CHECK(buffer[6] == 0xeeu && buffer[7] == 0xeeu && buffer[8] == 0xeeu);
+    CHECK(dirty_count == 6u);
+    for (span = 0; span < 6u; ++span) {
+        CHECK(dirty_spans[span].address == TEST_BUFFER_ADDR + (span & 1u) * 3u &&
+              dirty_spans[span].size == 3u);
+    }
+
+    /* A negative position: -32 floors to pixel -1 with remainder 32 on both axes. Each
+       component's second row lands on buffer row 0 and its footprint columns 1 and 2 on
+       x = 0 and 1; a reader truncating toward zero would draw both rows from x = 0. */
+    memset(buffer, 0xee, 12u);
+    test_reset_dirty();
+    test_set_image(2u, -32, -32, 3u, 2u, 3u, TEST_BUFFER_ADDR);
+    CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
+    CHECK(buffer[0] == 26u && buffer[1] == 25u && buffer[2] == 0xeeu);
+    CHECK(buffer[3] == 0xeeu && buffer[4] == 0xeeu && buffer[5] == 0xeeu);
+    CHECK(dirty_count == 3u);
+    for (span = 0; span < 3u; ++span) {
+        CHECK(dirty_spans[span].address == TEST_BUFFER_ADDR &&
+              dirty_spans[span].size == 2u);
+    }
 
     /* A packed 4-bit destination keeps partner nibbles through both rules. */
     memset(buffer, 0x6bu, 2u);
@@ -1166,6 +1236,44 @@ static void test_composite_glyphs(void) {
     test_set_image(1u, 0, 0, 2u, 2u, 1u, TEST_BUFFER_ADDR);
     CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
     CHECK(buffer[0] == 0x76u && buffer[1] == 0x03u);
+    pgf_close(pgf);
+
+    /* A component of larger area, over a destination prefilled with a distinguishable
+       value: the first component overwrites its whole 2-by-2 footprint, transparent
+       samples included; the later components keep whichever of their coverage and the
+       destination byte is larger; and the prefill survives wherever no component writes.
+       The dirty spans are each component's own, in component order. These overlay and
+       prefill results are the project rule of PGF_SPEC.md 3.10, not a [C12] measurement. */
+    test_composite_config(&config);
+    config.glyphs[2].width = 3u;
+    config.glyphs[2].bitmap[0] = 0x08u; /* eight-literal control, then 0 */
+    config.glyphs[2].bitmap[1] = 0x96u; /* 6, 9 */
+    config.glyphs[2].bitmap[2] = 0x30u; /* 0, 3 */
+    config.glyphs[2].bitmap[3] = 0x00u; /* 0 */
+    config.glyphs[2].bitmap_size = 4u;
+    CHECK(test_build_font(&font, &config));
+    pgf = test_open(&font);
+    CHECK(pgf != NULL);
+    memset(buffer, 0x10, sizeof(expected_wide_half));
+    test_reset_dirty();
+    test_set_image(2u, 0, 0, 4u, 3u, 4u, TEST_BUFFER_ADDR);
+    CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
+    CHECK(memcmp(buffer, expected_wide, sizeof(expected_wide)) == 0);
+    CHECK(dirty_count == 6u);
+    for (span = 0; span < 6u; ++span) {
+        CHECK(dirty_spans[span].address == TEST_BUFFER_ADDR + (span & 1u) * 4u &&
+              dirty_spans[span].size == (span / 2u == 1u ? 3u : 2u));
+    }
+    memset(buffer, 0x10, sizeof(expected_wide_half));
+    test_reset_dirty();
+    test_set_image(2u, 32, 32, 5u, 3u, 5u, TEST_BUFFER_ADDR);
+    CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
+    CHECK(memcmp(buffer, expected_wide_half, sizeof(expected_wide_half)) == 0);
+    CHECK(dirty_count == 6u);
+    for (span = 0; span < 6u; ++span) {
+        CHECK(dirty_spans[span].address == TEST_BUFFER_ADDR + (span & 1u) * 5u &&
+              dirty_spans[span].size == (span / 2u == 1u ? 4u : 3u));
+    }
     pgf_close(pgf);
 
     /* A composite is invalid when its payload, components, or reference graph
@@ -1387,11 +1495,13 @@ static void test_draw_rle_formats_and_placement(void) {
     PGF *pgf;
     uint8_t *buffer = test_guest(TEST_BUFFER_ADDR);
     static const uint8_t rle_bytes[6] = {0x11u, 0x21u, 0x30u, 0x02u, 0xf2u, 0x50u};
-    static const uint8_t row_major[12] = {1u, 1u, 2u, 2u, 3u, 0u,
-                                          0u, 0u, 15u, 15u, 15u, 5u};
-    static const uint8_t column_major[12] = {1u, 2u, 0u, 15u,
-                                             1u, 3u, 0u, 15u,
-                                             2u, 0u, 15u, 5u};
+    /* The decoded nibbles are (1,1,2,2,3,0,0,0,15,15,15,5); both tables hold their
+       format-2 coverage, 17 times each nibble (PGF_SPEC.md 3.10). */
+    static const uint8_t row_major[12] = {17u, 17u, 34u, 34u, 51u, 0u,
+                                          0u, 0u, 255u, 255u, 255u, 85u};
+    static const uint8_t column_major[12] = {17u, 34u, 0u, 255u,
+                                             17u, 51u, 0u, 255u,
+                                             34u, 0u, 255u, 85u};
     uint32_t format;
     test_default_config(&config);
     config.glyph_count = 1u;
@@ -1432,8 +1542,9 @@ static void test_draw_rle_formats_and_placement(void) {
     CHECK(pgf_draw_glyph_by_id(pgf, 0, TEST_IMAGE_ADDR));
     {
         unsigned i;
-        for (i = 0; i < 8u; ++i) CHECK(buffer[i] == 3u);
-        CHECK(buffer[8] == 9u);
+        for (i = 0; i < 8u; ++i) CHECK(buffer[i] == 51u);
+        CHECK(buffer[8] == 153u);
+        CHECK(buffer[9] == 0xeeu);
     }
     pgf_close(pgf);
 
@@ -1452,7 +1563,7 @@ static void test_draw_rle_formats_and_placement(void) {
     memset(buffer, 0xee, 8u);
     test_set_image(2u, 0, 0, 4u, 1u, 4u, TEST_BUFFER_ADDR);
     CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-    CHECK(buffer[0] == 10u && buffer[1] == 0u && buffer[2] == 0u && buffer[3] == 0u);
+    CHECK(buffer[0] == 170u && buffer[1] == 0u && buffer[2] == 0u && buffer[3] == 0u);
     pgf_close(pgf);
 
     test_default_config(&config);
@@ -1471,7 +1582,7 @@ static void test_draw_rle_formats_and_placement(void) {
     memset(buffer, 0xee, 16u);
     test_set_image(2u, 0, 0, 10u, 1u, 10u, TEST_BUFFER_ADDR);
     CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-    CHECK(buffer[0] == 1u && buffer[1] == 2u);
+    CHECK(buffer[0] == 17u && buffer[1] == 34u);
     {
         unsigned i;
         for (i = 2; i < 10u; ++i) CHECK(buffer[i] == 0u);
@@ -1518,7 +1629,9 @@ static void test_draw_rle_formats_and_placement(void) {
         CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
         if (format == 0u) CHECK(pixel[0] == 0xbau);
         if (format == 1u) CHECK(pixel[0] == 0xa6u);
-        if (format == 2u) CHECK(pixel[0] == 10u);
+        /* Format 2 is 8-bit coverage, 17 times the nibble; formats 3 and 4 repeat the
+           raw 4-bit sample. */
+        if (format == 2u) CHECK(pixel[0] == 170u && pixel[1] == 0xb6u);
         if (format == 3u) CHECK(pixel[0] == 10u && pixel[1] == 10u && pixel[2] == 10u);
         if (format == 4u) CHECK(pixel[0] == 10u && pixel[1] == 10u &&
                                 pixel[2] == 10u && pixel[3] == 10u);
@@ -1543,14 +1656,17 @@ static void test_draw_rle_formats_and_placement(void) {
     test_reset_dirty();
     test_set_image(2u, 32, 0, 5u, 1u, 5u, TEST_BUFFER_ADDR);
     CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-    CHECK(buffer[0] == 5u && buffer[1] == 7u && buffer[2] == 2u &&
+    /* Source coverage (170,85,0,0) at fx = 32: the PGF_SPEC.md section 8 vector. */
+    CHECK(buffer[0] == 85u && buffer[1] == 128u && buffer[2] == 42u &&
           buffer[3] == 0u && buffer[4] == 0u);
+    CHECK(buffer[5] == 0xeeu);
     CHECK(dirty_count == 1u && dirty_spans[0].size == 5u);
     memset(buffer, 0xee, 16u);
     test_reset_dirty();
     test_set_image(2u, -32, 0, 5u, 1u, 5u, TEST_BUFFER_ADDR);
     CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-    CHECK(buffer[0] == 7u && buffer[1] == 2u && buffer[2] == 0u);
+    /* -32 floors to pixel -1 with remainder 32: footprint columns 1..4 are visible. */
+    CHECK(buffer[0] == 128u && buffer[1] == 42u && buffer[2] == 0u);
     CHECK(buffer[3] == 0u && buffer[4] == 0xeeu && dirty_count == 1u);
     pgf_close(pgf);
 
@@ -1570,8 +1686,242 @@ static void test_draw_rle_formats_and_placement(void) {
     test_reset_dirty();
     test_set_image(2u, 0, 0, 4u, 2u, 4u, TEST_BUFFER_ADDR);
     CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-    CHECK(buffer[0] == 5u && buffer[1] == 0u && buffer[2] == 0u &&
+    CHECK(buffer[0] == 85u && buffer[1] == 0u && buffer[2] == 0u &&
           buffer[3] == 0u && buffer[4] == 0u);
+    pgf_close(pgf);
+}
+
+#define TEST_F2_WIDTH 6u
+#define TEST_F2_HEIGHT 5u
+#define TEST_F2_GUARD 6u
+#define TEST_F2_SENTINEL 0xa5u
+
+/* Draw glyph 0 in format 2 into a 6-by-5 one-byte-per-pixel window prefilled with a
+   sentinel no expected value uses, then compare every byte of the window and of the six
+   bytes after it. `expected` is the footprint, `columns` wide and `rows` high in row
+   order, whose first sample belongs at window (left, top); either may be negative.
+   Bytes outside the footprint must still hold the sentinel, and there must be exactly
+   one dirty span per visible footprint row, covering the clipped footprint columns.
+   Returns 1 when the draw succeeds and all of that holds. */
+static int test_format2_window(const PGF *pgf, int32_t x, int32_t y, int left, int top,
+                               unsigned columns, unsigned rows, const uint8_t *expected) {
+    uint8_t *buffer = test_guest(TEST_BUFFER_ADDR);
+    int first_column = left < 0 ? 0 : left;
+    int end_column = left + (int)columns;
+    unsigned visible_rows = 0u;
+    int matched = 1;
+    int wx;
+    int wy;
+
+    if (end_column > (int)TEST_F2_WIDTH) end_column = (int)TEST_F2_WIDTH;
+    memset(buffer, TEST_F2_SENTINEL, TEST_F2_WIDTH * TEST_F2_HEIGHT + TEST_F2_GUARD);
+    /* The recorded format-2 ordinary glyph captures used cleared destination buffers
+       (PGF_SPEC.md 3.10), so the draw starts from zero inside the expected clipped
+       footprint: the visible rows of [top, top + rows) by the columns
+       [first_column, end_column). Every byte outside it, and the guard bytes, keep the
+       sentinel. */
+    for (wy = 0; wy < (int)TEST_F2_HEIGHT; ++wy) {
+        int source_row = wy - top;
+        if (source_row < 0 || source_row >= (int)rows) continue;
+        for (wx = first_column; wx < end_column; ++wx) {
+            buffer[(unsigned)wy * TEST_F2_WIDTH + (unsigned)wx] = 0u;
+        }
+    }
+    test_reset_dirty();
+    test_set_image(2u, x, y, (uint16_t)TEST_F2_WIDTH, (uint16_t)TEST_F2_HEIGHT,
+                   (uint16_t)TEST_F2_WIDTH, TEST_BUFFER_ADDR);
+    if (!pgf_draw_glyph_by_id(pgf, 0, TEST_IMAGE_ADDR)) return 0;
+    for (wy = 0; wy < (int)TEST_F2_HEIGHT; ++wy) {
+        int source_row = wy - top;
+        int in_rows = source_row >= 0 && source_row < (int)rows;
+        for (wx = 0; wx < (int)TEST_F2_WIDTH; ++wx) {
+            int source_column = wx - left;
+            uint8_t want = TEST_F2_SENTINEL;
+            if (in_rows && source_column >= 0 && source_column < (int)columns) {
+                want = expected[(unsigned)source_row * columns + (unsigned)source_column];
+            }
+            if (buffer[(unsigned)wy * TEST_F2_WIDTH + (unsigned)wx] != want) matched = 0;
+        }
+        if (in_rows) {
+            if (visible_rows >= dirty_count ||
+                dirty_spans[visible_rows].address !=
+                    TEST_BUFFER_ADDR + (uint32_t)wy * TEST_F2_WIDTH +
+                    (uint32_t)first_column ||
+                dirty_spans[visible_rows].size != (uint32_t)(end_column - first_column)) {
+                matched = 0;
+            }
+            ++visible_rows;
+        }
+    }
+    for (wx = 0; wx < (int)TEST_F2_GUARD; ++wx) {
+        if (buffer[TEST_F2_WIDTH * TEST_F2_HEIGHT + (unsigned)wx] != TEST_F2_SENTINEL) {
+            matched = 0;
+        }
+    }
+    if (dirty_count != visible_rows) matched = 0;
+    return matched;
+}
+
+/* Format 2 (PGF_SPEC.md 3.10, [C12]). The source coverage is 17 times the packed
+   nibble. At a horizontal fraction the preceding column gives fx/64 of its coverage
+   rounded down and the current column (64 - fx)/64 of its coverage rounded up, so the
+   last source column reaches one more output column. A positive vertical fraction keeps
+   the integer source row and the height h. Fractions 32 and 63 are the measured ones;
+   the fixed tables below are worked by hand from that rule, not taken from the reader. */
+static void test_format2_coverage_and_footprint(void) {
+    /* Literal control 8 twice: the sixteen nibbles 0..15 in one row. */
+    static const uint8_t ramp_bytes[9] = {0x08u, 0x21u, 0x43u, 0x65u, 0x87u,
+                                          0x98u, 0xbau, 0xdcu, 0xfeu};
+    static const int32_t ramp_x[5] = {0, 32, 63, 0, 63};
+    static const int32_t ramp_y[5] = {0, 0, 0, 63, 32};
+    /* The PGF_SPEC.md section 8 source (10,5,0,0), coverage (170,85,0,0). */
+    static const uint8_t vector_integer[4] = {170u, 85u, 0u, 0u};
+    static const uint8_t vector_half[5] = {85u, 128u, 42u, 0u, 0u};
+    static const uint8_t vector_last[5] = {3u, 169u, 83u, 0u, 0u};
+    /* Literal control 10: the six nibbles (15,1,9,0,7,3). Row order 1 reads them as
+       rows (15,1,9)/(0,7,3), coverage (255,17,153)/(0,119,51); the last column is not
+       zero, so the extra column of a fractional draw is visible. */
+    static const uint8_t shape_bytes[4] = {0xfau, 0x91u, 0x70u, 0x03u};
+    static const uint8_t rows_integer[6] = {255u, 17u, 153u, 0u, 119u, 51u};
+    /* fx = 32: (0+128, 127+9, 8+77, 76+0) and (0+0, 0+60, 59+26, 25+0). */
+    static const uint8_t rows_half[8] = {128u, 136u, 85u, 76u, 0u, 60u, 85u, 25u};
+    /* fx = 63: (0+4, 251+1, 16+3, 150+0) and (0+0, 0+2, 117+1, 50+0). */
+    static const uint8_t rows_last[8] = {4u, 252u, 19u, 150u, 0u, 2u, 118u, 50u};
+    /* Row order 2 reads the same nibbles as columns (15,1), (9,0), (7,3): rows
+       (15,9,7)/(1,0,3), coverage (255,153,119)/(17,0,51). */
+    static const uint8_t columns_integer[6] = {255u, 153u, 119u, 17u, 0u, 51u};
+    /* fx = 32: (0+128, 127+77, 76+60, 59+0) and (0+9, 8+0, 0+26, 25+0). */
+    static const uint8_t columns_half[8] = {128u, 204u, 136u, 59u, 9u, 8u, 26u, 25u};
+    TestConfig config;
+    TestFont font;
+    PGF *pgf;
+    uint8_t *buffer = test_guest(TEST_BUFFER_ADDR);
+    unsigned pass;
+
+    /* 8-bit source scaling across the complete nibble range, at the integer position,
+       at both measured horizontal fractions, and under a vertical fraction. The image
+       is 18 by 2: the row holds the 16 source columns, the one a fraction adds, and an
+       untouched column, and the second row is never reached. */
+    test_default_config(&config);
+    config.glyph_count = 1u;
+    config.char_map_count = 1u;
+    config.map_values[0] = 0u;
+    config.glyphs[0].width = 16u;
+    config.glyphs[0].height = 1u;
+    config.glyphs[0].bitmap_size = sizeof(ramp_bytes);
+    memcpy(config.glyphs[0].bitmap, ramp_bytes, sizeof(ramp_bytes));
+    CHECK(test_build_font(&font, &config));
+    pgf = test_open(&font);
+    CHECK(pgf != NULL);
+    for (pass = 0; pass < 5u; ++pass) {
+        uint32_t fx = (uint32_t)ramp_x[pass];
+        unsigned written = 16u + (fx != 0u ? 1u : 0u);
+        unsigned column;
+        memset(buffer, TEST_F2_SENTINEL, 40u);
+        memset(buffer, 0, written);
+        test_reset_dirty();
+        test_set_image(2u, ramp_x[pass], ramp_y[pass], 18u, 2u, 18u, TEST_BUFFER_ADDR);
+        CHECK(pgf_draw_glyph_by_id(pgf, 0, TEST_IMAGE_ADDR));
+        for (column = 0; column < written; ++column) {
+            uint32_t previous = column != 0u ? 17u * (column - 1u) : 0u;
+            uint32_t current = column < 16u ? 17u * column : 0u;
+            uint32_t rising = (64u - fx) * current;
+            CHECK(buffer[column] == (fx * previous) / 64u + rising / 64u +
+                                    (rising % 64u != 0u ? 1u : 0u));
+        }
+        for (column = written; column < 40u; ++column) {
+            CHECK(buffer[column] == TEST_F2_SENTINEL);
+        }
+        /* Fixed anchors beside the rule above. */
+        if (fx == 0u) {
+            CHECK(buffer[0] == 0u && buffer[1] == 17u && buffer[10] == 170u &&
+                  buffer[15] == 255u);
+        } else if (fx == 32u) {
+            CHECK(buffer[0] == 0u && buffer[1] == 9u && buffer[12] == 195u &&
+                  buffer[15] == 247u && buffer[16] == 127u);
+        } else {
+            CHECK(buffer[0] == 0u && buffer[1] == 1u && buffer[8] == 120u &&
+                  buffer[15] == 238u && buffer[16] == 251u);
+        }
+        CHECK(dirty_count == 1u && dirty_spans[0].address == TEST_BUFFER_ADDR &&
+              dirty_spans[0].size == written);
+    }
+    pgf_close(pgf);
+
+    /* The section 8 vector: integer coordinates leave the next byte untouched, fx = 32
+       and fx = 63 add one column, and fy = 32 keeps the source row and the one-row
+       height, alone and together with fx = 32. */
+    test_default_config(&config);
+    config.glyph_count = 1u;
+    config.char_map_count = 1u;
+    config.map_values[0] = 0u;
+    config.glyphs[0].width = 4u;
+    config.glyphs[0].height = 1u;
+    config.glyphs[0].bitmap[0] = 0xa8u; /* literal control 8, then 10 */
+    config.glyphs[0].bitmap[1] = 0x05u;
+    config.glyphs[0].bitmap[2] = 0x00u;
+    config.glyphs[0].bitmap_size = 3u;
+    CHECK(test_build_font(&font, &config));
+    pgf = test_open(&font);
+    CHECK(pgf != NULL);
+    CHECK(test_format2_window(pgf, 0, 0, 0, 0, 4u, 1u, vector_integer));
+    CHECK(test_format2_window(pgf, 32, 0, 0, 0, 5u, 1u, vector_half));
+    CHECK(test_format2_window(pgf, 63, 0, 0, 0, 5u, 1u, vector_last));
+    CHECK(test_format2_window(pgf, 0, 32, 0, 0, 4u, 1u, vector_integer));
+    CHECK(test_format2_window(pgf, 32, 32, 0, 0, 5u, 1u, vector_half));
+    pgf_close(pgf);
+
+    /* A 3-by-2 shape in row order 1, placed one pixel in from the window's top-left
+       corner so every side of the footprint has sentinel bytes beside it. */
+    test_default_config(&config);
+    config.glyph_count = 1u;
+    config.char_map_count = 1u;
+    config.map_values[0] = 0u;
+    config.glyphs[0].width = 3u;
+    config.glyphs[0].height = 2u;
+    config.glyphs[0].bitmap_size = sizeof(shape_bytes);
+    memcpy(config.glyphs[0].bitmap, shape_bytes, sizeof(shape_bytes));
+    CHECK(test_build_font(&font, &config));
+    pgf = test_open(&font);
+    CHECK(pgf != NULL);
+    CHECK(test_format2_window(pgf, 64, 64, 1, 1, 3u, 2u, rows_integer));
+    /* Positive vertical fractions: the integer-Y image, two rows, nothing below. */
+    CHECK(test_format2_window(pgf, 64, 64 + 32, 1, 1, 3u, 2u, rows_integer));
+    CHECK(test_format2_window(pgf, 64, 64 + 63, 1, 1, 3u, 2u, rows_integer));
+    /* Horizontal fractions: exact rounding and the one extra column. */
+    CHECK(test_format2_window(pgf, 64 + 32, 64, 1, 1, 4u, 2u, rows_half));
+    CHECK(test_format2_window(pgf, 64 + 63, 64, 1, 1, 4u, 2u, rows_last));
+    /* Both fractions: the horizontal result at the unchanged height. */
+    CHECK(test_format2_window(pgf, 64 + 32, 64 + 32, 1, 1, 4u, 2u, rows_half));
+    CHECK(test_format2_window(pgf, 64 + 63, 64 + 63, 1, 1, 4u, 2u, rows_last));
+    CHECK(test_format2_window(pgf, 64 + 32, 64 + 63, 1, 1, 4u, 2u, rows_half));
+    CHECK(test_format2_window(pgf, 64 + 63, 64 + 32, 1, 1, 4u, 2u, rows_last));
+    /* Negative coordinates floor: -32 is pixel -1 with remainder 32 and -1 is pixel -1
+       with remainder 63, on both axes. Footprint columns 1..3 land on x = 0..2 and the
+       second source row on row 0; truncation toward zero would start both at 0. */
+    CHECK(test_format2_window(pgf, -32, -32, -1, -1, 4u, 2u, rows_half));
+    CHECK(test_format2_window(pgf, -1, -1, -1, -1, 4u, 2u, rows_last));
+    CHECK(test_format2_window(pgf, -1, 0, -1, 0, 4u, 2u, rows_last));
+    /* The extra column clipped at the last addressable column, and the first source
+       row alone on the last buffer row. */
+    CHECK(test_format2_window(pgf, 3 * 64 + 32, 64, 3, 1, 4u, 2u, rows_half));
+    CHECK(test_format2_window(pgf, 64, 4 * 64 + 32, 1, 4, 3u, 2u, rows_integer));
+    /* -96 is pixel -2 with remainder 32: both rows are above the buffer because the
+       fraction adds none, so the draw succeeds with no write and no dirty span. The
+       same holds wholly below. */
+    CHECK(test_format2_window(pgf, 64, -96, 1, -2, 3u, 2u, rows_integer));
+    CHECK(test_format2_window(pgf, 64, 5 * 64, 1, 5, 3u, 2u, rows_integer));
+    pgf_close(pgf);
+
+    /* The same nibbles in row order 2. */
+    config.glyphs[0].row_order = 2u;
+    CHECK(test_build_font(&font, &config));
+    pgf = test_open(&font);
+    CHECK(pgf != NULL);
+    CHECK(test_format2_window(pgf, 64, 64, 1, 1, 3u, 2u, columns_integer));
+    CHECK(test_format2_window(pgf, 64, 64 + 32, 1, 1, 3u, 2u, columns_integer));
+    CHECK(test_format2_window(pgf, 64 + 32, 64 + 32, 1, 1, 4u, 2u, columns_half));
+    CHECK(test_format2_window(pgf, -32, -32, -1, -1, 4u, 2u, columns_half));
     pgf_close(pgf);
 }
 
@@ -1820,8 +2170,9 @@ static void test_revision_and_shadow_variants(void) {
    exercised for metrics, drawing, and fail-closed rejection. */
 static void test_production_file_path_metrics_and_render(void) {
     static const uint8_t rle_bytes[6] = {0x11u, 0x21u, 0x30u, 0x02u, 0xf2u, 0x50u};
-    static const uint8_t expected_row_major[12] = {1u, 1u, 2u, 2u, 3u, 0u,
-                                                  0u, 0u, 15u, 15u, 15u, 5u};
+    /* Format-2 coverage: 17 times the nibbles (1,1,2,2,3,0,0,0,15,15,15,5). */
+    static const uint8_t expected_row_major[12] = {17u, 17u, 34u, 34u, 51u, 0u,
+                                                  0u, 0u, 255u, 255u, 255u, 85u};
     static const char *const good_path = SR_SELFTEST_BUILD_ROOT "/synthetic-converter-output.pgf";
     static const char *const bad_magic_path = SR_SELFTEST_BUILD_ROOT "/synthetic-converter-output-badmagic.pgf";
     static const char *const short_path = SR_SELFTEST_BUILD_ROOT "/synthetic-converter-output-short.pgf";
@@ -1904,7 +2255,7 @@ static void test_production_file_path_metrics_and_render(void) {
         test_reset_dirty();
         test_set_image(2u, 0, 0, 2u, 2u, 2u, TEST_BUFFER_ADDR);
         CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-        CHECK(memcmp(buffer, (uint8_t[4]){7u, 6u, 0u, 3u}, 4u) == 0);
+        CHECK(memcmp(buffer, (uint8_t[4]){119u, 102u, 0u, 51u}, 4u) == 0);
         CHECK(dirty_count == 6u);
         pgf_close(pgf);
     }
@@ -1921,7 +2272,7 @@ static void test_production_file_path_metrics_and_render(void) {
         memset(buffer, 0xee, 4u);
         test_set_image(2u, 0, 0, 2u, 2u, 2u, TEST_BUFFER_ADDR);
         CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-        CHECK(memcmp(buffer, (uint8_t[4]){4u, 6u, 0u, 3u}, 4u) == 0);
+        CHECK(memcmp(buffer, (uint8_t[4]){68u, 102u, 0u, 51u}, 4u) == 0);
         pgf_close(pgf);
     }
     test_composite_config(&config);
@@ -1935,7 +2286,7 @@ static void test_production_file_path_metrics_and_render(void) {
         memset(buffer, 0xee, 4u);
         test_set_image(2u, 0, 0, 2u, 2u, 2u, TEST_BUFFER_ADDR);
         CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-        CHECK(memcmp(buffer, (uint8_t[4]){7u, 6u, 0u, 3u}, 4u) == 0);
+        CHECK(memcmp(buffer, (uint8_t[4]){119u, 102u, 0u, 51u}, 4u) == 0);
         pgf_close(pgf);
     }
     /* All three parts absent, or a nonzero code the map does not hold, is refused. */
@@ -2007,12 +2358,13 @@ static void test_sparse_character_maps(void) {
         CHECK(!pgf_has_char(pgf, 64));
         CHECK(!pgf_has_char(pgf, 91));
         test_set_image(2u, 0, 0, 1u, 1u, 1u, TEST_BUFFER_ADDR);
+        /* Format-2 coverage: 17 times the samples 5, 7 and 3. */
         CHECK(pgf_draw_glyph(pgf, 65, 0, TEST_IMAGE_ADDR));
-        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 5u);
+        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 85u);
         CHECK(pgf_draw_glyph(pgf, 67, 0, TEST_IMAGE_ADDR));
-        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 7u);
+        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 119u);
         CHECK(pgf_draw_glyph(pgf, 90, 0, TEST_IMAGE_ADDR));
-        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 3u);
+        CHECK(test_guest(TEST_BUFFER_ADDR)[0] == 51u);
         CHECK(!pgf_draw_glyph(pgf, 66, 0, TEST_IMAGE_ADDR));
         pgf_close(pgf);
     }
@@ -2280,6 +2632,7 @@ int main(int argc, char **argv) {
     test_revision_and_shadow_variants();
     test_font_information_and_lifetime();
     test_draw_rle_formats_and_placement();
+    test_format2_coverage_and_footprint();
     test_draw_rejections_and_dirty_spans();
     test_fallback_and_guest_boundaries();
     test_production_file_path_metrics_and_render();

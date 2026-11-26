@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import bisect
 from collections.abc import Collection, Mapping
+from itertools import pairwise
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -1242,6 +1243,72 @@ def _split_ternary(expr: str) -> tuple[str, str] | None:
     return None
 
 
+def _selftest_parameter_names(params: str) -> list[str]:
+    return [idents[-1] if (idents := _C_IDENT_RE.findall(param)) else "" for param in params.split(",")]
+
+
+def _coalesce_selftest_heads(lines: list[str], boundaries: list[int]) -> None:
+    """Keep one brace for equivalent conditional function heads sharing a body."""
+    alternatives: list[tuple[int, int]] = []
+    signature: tuple[str, list[str]] | None = None
+    for start, end in pairwise(boundaries):
+        branch = "\n".join(lines[start + 1 : end]).rstrip()
+        if not branch:
+            continue
+        branch = re.sub(r"\A(?:[ \t\r]*\n)+", "", branch)
+        head = _SELFTEST_FUNC_HEAD_RE.fullmatch(branch)
+        if not head:
+            return
+        current = head["name"], _selftest_parameter_names(head["params"])
+        if signature is not None and signature != current:
+            return
+        signature = current
+        alternatives.append((start + 1, end))
+    for start, end in alternatives[1:]:
+        lines[start:end] = [" " * len(line) for line in lines[start:end]]
+
+
+def _selftest_source(source: str) -> str:
+    """Blank impossible literal branches and fold equivalent function heads.
+
+    Unknown preprocessor conditions retain their possible variants. Literal
+    0 and 1 cannot contribute dead code, including nested branches and elif.
+    Only branches consisting of equivalent standalone function heads can
+    share a brace. Keep source offsets and preserve other directive text.
+    """
+    lines = hle_sources.blank_comments_and_literals(source).split("\n")
+    directives: dict[int, str] = {}
+    # Each frame keeps parent activity, whether another arm is reachable, and arm boundaries.
+    groups: list[tuple[bool, bool, list[int]]] = []
+    active = True
+    for index, line in enumerate(lines):
+        directive = _PP_IF_RE.match(line)
+        if not directive:
+            if not active:
+                lines[index] = " " * len(line)
+            continue
+        directives[index] = line
+        lines[index] = " " * len(line)
+        kind, expr = directive.groups()
+        if kind in ("if", "ifdef", "ifndef"):
+            literal = expr if kind == "if" else ""
+            groups.append((active, literal != "1", [index]))
+            active = active and literal != "0"
+        elif groups and kind in ("else", "elif"):
+            parent, more, boundaries = groups[-1]
+            literal = expr if kind == "elif" else "1"
+            active = parent and more and literal != "0"
+            boundaries.append(index)
+            groups[-1] = (parent, more and literal != "1", boundaries)
+        elif groups and kind == "endif":
+            active, _, boundaries = groups.pop()
+            if len(boundaries) > 1:
+                _coalesce_selftest_heads(lines, boundaries + [index])
+    for index, line in directives.items():
+        lines[index] = line
+    return "\n".join(lines)
+
+
 def selftest_dispatched_nids(selftest_text: str) -> set[int]:
     """NIDs the executable HLE selftest enters through ``sr_syscall``.
 
@@ -1265,7 +1332,7 @@ def selftest_dispatched_nids(selftest_text: str) -> set[int]:
     nothing.
     """
     nids: set[int] = set()
-    text = hle_sources.blank_comments_and_literals(selftest_text)
+    text = _selftest_source(selftest_text)
     for m in _SELFTEST_LITERAL_DISPATCH_RE.finditer(text):
         nids.add(int(m.group("nid"), 16))
 
@@ -1288,11 +1355,7 @@ def selftest_dispatched_nids(selftest_text: str) -> set[int]:
                 if depth == 0:
                     end = i + 1
                     break
-        names = []
-        for param in head.group("params").split(","):
-            idents = _C_IDENT_RE.findall(param)
-            names.append(idents[-1] if idents else "")
-        spans.append((head.start(), end, head.group("name"), names))
+        spans.append((head.start(), end, head["name"], _selftest_parameter_names(head["params"])))
         pos = end
     starts = [s[0] for s in spans]
 

@@ -399,6 +399,28 @@ else
 HOST_KIND := $(shell uname -s 2>/dev/null)
 endif
 endif
+# Run paths of a Linux link (#306). The loader finds a shared library through a run path
+# recorded in the executable, and a run path that names a folder of the machine that linked it
+# (SDL3's pkg-config file would write /usr/local/lib) is wrong on every other machine. Both
+# variables list folders relative to the executable, as `$ORIGIN`-relative entries, so an
+# install keeps working wherever it is moved to; no entry is ever absolute.
+#   PLAYER_RUNPATH_ORIGIN   the player looks beside itself: the install's bin/ folder holds
+#                           the SDL3 libraries the way it holds the DLLs on Windows. An
+#                           ordinary build finds SDL3 in the system folders as before.
+#   RUNTIME_RUNPATH_ORIGIN  a title runtime's own list, empty (no run path) unless the caller
+#                           names one: the showcase demos shipped under <player folder>/demos/
+#                           packages/<disc> pass ../../.. (tests/fixtures/showcase/showcase.py).
+# A value is `.` for the executable's own folder or a relative folder such as `../../..`.
+PLAYER_RUNPATH_ORIGIN ?= .
+RUNTIME_RUNPATH_ORIGIN ?=
+ifeq ($(NK_TARGET_OS)-$(HOST_KIND),posix-Linux)
+NK_RUNPATH_FLAGS = $(foreach d,$(1),-Wl,-rpath,'$$ORIGIN$(if $(filter-out .,$(d)),/$(d))')
+PLAYER_RUNPATH_FLAGS = $(call NK_RUNPATH_FLAGS,$(PLAYER_RUNPATH_ORIGIN))
+RUNTIME_RUNPATH_FLAGS = $(call NK_RUNPATH_FLAGS,$(RUNTIME_RUNPATH_ORIGIN))
+else
+PLAYER_RUNPATH_FLAGS :=
+RUNTIME_RUNPATH_FLAGS :=
+endif
 # Unused-section removal for the selftest links. GNU ld, lld and the MinGW linker spell it
 # --gc-sections; Apple's ld64 rejects that option and spells it -dead_strip (#329). ld64 links
 # only a build for the Mac itself: a Mac building for Android links with the NDK's lld, so the

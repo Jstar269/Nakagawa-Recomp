@@ -158,20 +158,39 @@ static const ScalarOpVector kScalarOpVectors[] = {
     {"add FS=0 tiny sum",   SR_FP_OP_ADD, 0x00800000u, 0x80000001u, 0u,          0x007fffffu},
     {"sub FS=1 tiny diff",  SR_FP_OP_SUB, 0x00000003u, 0x00000001u, 0x01000002u, 0x00000000u},
     /* Invalid operations with no NaN operand give 0x7FC00000 on every host (x86 SSE itself
-     * writes 0xFFC00000, AArch64 0x7FC00000), the word mul.s gives for Inf * 0. Project
-     * semantics, not PSP-measured. A NaN operand still propagates as the host returns it. */
+     * writes 0xFFC00000, AArch64 0x7FC00000), the word mul.s gives for Inf * 0. It is the
+     * PSP's word: pspautotests tests/cpu/fpu/fpu_nan.expected at e37443a6 (recorded on a PSP)
+     * has it for the RM 0 rows -inf + inf, inf - inf, -0 / 0, inf / inf, -inf / inf and
+     * 0 * -inf below; the other rows put the same rule under other signs and modes. */
     {"add inf + -inf NaN",  SR_FP_OP_ADD, 0x7f800000u, 0xff800000u, 0u,          0x7fc00000u},
     {"add -inf + inf NaN",  SR_FP_OP_ADD, 0xff800000u, 0x7f800000u, 0x01000003u, 0x7fc00000u},
+    {"add -inf + inf RN",   SR_FP_OP_ADD, 0xff800000u, 0x7f800000u, 0u,          0x7fc00000u},
     {"sub inf - inf NaN",   SR_FP_OP_SUB, 0x7f800000u, 0x7f800000u, 0u,          0x7fc00000u},
     {"sub -inf - -inf NaN", SR_FP_OP_SUB, 0xff800000u, 0xff800000u, 2u,          0x7fc00000u},
     {"div 0 / 0 NaN",       SR_FP_OP_DIV, 0x00000000u, 0x80000000u, 0u,          0x7fc00000u},
+    {"div -0 / 0 NaN",      SR_FP_OP_DIV, 0x80000000u, 0x00000000u, 0u,          0x7fc00000u},
     {"div inf / -inf NaN",  SR_FP_OP_DIV, 0x7f800000u, 0xff800000u, 1u,          0x7fc00000u},
+    {"div inf / inf NaN",   SR_FP_OP_DIV, 0x7f800000u, 0x7f800000u, 0u,          0x7fc00000u},
+    {"div -inf / inf NaN",  SR_FP_OP_DIV, 0xff800000u, 0x7f800000u, 0u,          0x7fc00000u},
     {"mul inf * 0 NaN",     SR_FP_OP_MUL, 0xff800000u, 0x00000000u, 0u,          0x7fc00000u},
+    {"mul 0 * -inf NaN",    SR_FP_OP_MUL, 0x00000000u, 0xff800000u, 0u,          0x7fc00000u},
+    /* A NaN operand gives the first NaN operand, quieted, with its sign and payload, on every
+     * host and at every optimization level: the words the same commit's roundmode.expected
+     * has under each RM. GCC -O0 had add.s and mul.s of two NaNs return ft's. */
+    {"add fs -qNaN kept",   SR_FP_OP_ADD, 0xffc00000u, 0x3f800000u, 0u,          0xffc00000u},
+    {"sub fs sNaN quieted", SR_FP_OP_SUB, 0x7f800001u, 0x3f800000u, 1u,          0x7fc00001u},
+    {"mul ft qNaN kept",    SR_FP_OP_MUL, 0x3f800000u, 0x7fc00000u, 2u,          0x7fc00000u},
+    {"div ft -qNaN kept",   SR_FP_OP_DIV, 0x3f800000u, 0xffc00000u, 3u,          0xffc00000u},
+    {"add two NaNs fs",     SR_FP_OP_ADD, 0x7fc00000u, 0xffc00000u, 0u,          0x7fc00000u},
+    {"sub two NaNs fs",     SR_FP_OP_SUB, 0x7fc00000u, 0xffc00000u, 1u,          0x7fc00000u},
+    {"mul two NaNs fs",     SR_FP_OP_MUL, 0x7fc00000u, 0xffc00000u, 2u,          0x7fc00000u},
+    {"div two NaNs fs",     SR_FP_OP_DIV, 0x7fc00000u, 0xffc00000u, 3u,          0x7fc00000u},
     {"add NaN operand kept",SR_FP_OP_ADD, 0x7fc00123u, 0x3f800000u, 0u,          0x7fc00123u},
     {"div qNaN by 0 kept",  SR_FP_OP_DIV, 0xffc00000u, 0x00000000u, 0u,          0xffc00000u},
     /* sqrt.s runs in the same scoped window: the result follows the guest RM whatever the host
-     * mode is. sqrt(2) lies between 0x3FB504F3 and 0x3FB504F4, nearer the first. The directed
-     * rows are the helper's IEEE contract; PSP sqrt.s under RM other than RN is unmeasured. */
+     * mode is. sqrt(2) lies between 0x3FB504F3 and 0x3FB504F4, nearer the first; the four
+     * sqrt 2 words are the ones pspautotests tests/cpu/fpu/roundmode.expected at e37443a6
+     * (recorded on a PSP) has under each RM. */
     {"sqrt 2 RN",           SR_FP_OP_SQRT, 0x40000000u, 0u,         0u,          0x3fb504f3u},
     {"sqrt 2 RZ",           SR_FP_OP_SQRT, 0x40000000u, 0u,         1u,          0x3fb504f3u},
     {"sqrt 2 RP",           SR_FP_OP_SQRT, 0x40000000u, 0u,         2u,          0x3fb504f4u},
@@ -184,6 +203,20 @@ static const ScalarOpVector kScalarOpVectors[] = {
     {"sqrt min subnormal RP",SR_FP_OP_SQRT, 0x00000001u, 0u,        0x01000002u, 0x1a3504f4u},
     {"sqrt -0 keeps sign",  SR_FP_OP_SQRT, 0x80000000u, 0u,         0x01000003u, 0x80000000u},
     {"sqrt +inf",           SR_FP_OP_SQRT, 0x7f800000u, 0u,         1u,          0x7f800000u},
+    /* The square root of a number below -0 is 0x7FC00000 under every RM, as the same
+     * roundmode.expected has for -1.0 and -inf; x86 SSE writes 0xFFC00000 (#3030). A NaN
+     * operand still propagates as the host returns it, the three words that file records. */
+    {"sqrt -1 RN NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         0u,          0x7fc00000u},
+    {"sqrt -1 RZ NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         1u,          0x7fc00000u},
+    {"sqrt -1 RP NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         2u,          0x7fc00000u},
+    {"sqrt -1 RM NaN",      SR_FP_OP_SQRT, 0xbf800000u, 0u,         3u,          0x7fc00000u},
+    {"sqrt -inf RN NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         0u,          0x7fc00000u},
+    {"sqrt -inf RZ NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         1u,          0x7fc00000u},
+    {"sqrt -inf RP NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         2u,          0x7fc00000u},
+    {"sqrt -inf RM NaN",    SR_FP_OP_SQRT, 0xff800000u, 0u,         3u,          0x7fc00000u},
+    {"sqrt qNaN kept",      SR_FP_OP_SQRT, 0x7fc00000u, 0u,         0u,          0x7fc00000u},
+    {"sqrt -qNaN kept",     SR_FP_OP_SQRT, 0xffc00000u, 0u,         2u,          0xffc00000u},
+    {"sqrt sNaN quieted",   SR_FP_OP_SQRT, 0x7f800001u, 0u,         3u,          0x7fc00001u},
 };
 
 /* CVT.S.W honors guest RM near the binary32 precision boundary. */
@@ -332,8 +365,8 @@ int main(void) {
                    sr_float_bits(third), baseline_third_bits);
     }
 
-    /* Non-finite inputs pass through as NaN results under a directed mode;
-     * payload selection is host-dependent and deliberately unasserted. */
+    /* Non-finite inputs pass through as NaN results under a directed mode; the NaN-operand
+     * rows above fix the exact words. */
     {
         uint32_t got = apply_scalar_op(SR_FP_OP_MUL, float_from_bits(0x7fc00001u),
                                        float_from_bits(0x3f800000u), 1u);

@@ -8,7 +8,7 @@ Layer 1 (behavioural): convert the pinned public fixture font
 ``tests/fixtures/fonts/gudea/Gudea-Regular.ttf`` and open the result through the
 public C reader ``src/rt/pgf_public.c`` with the harness
 ``tests/native/test_pgf_writer_roundtrip.c``.  Every guest record and every
-drawn sample must equal the converter's own raster, the source-owned ``H``
+drawn byte must match the 8-bit expansion of the converter's raster, the source-owned ``H``
 shape must render as two stems plus a crossbar, the space must stay a
 zero-area glyph, and a composite-glyph range must round-trip as well.
 
@@ -134,6 +134,11 @@ def _cli(*args: object) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def _format2_pixels(glyph: Glyph) -> bytes:
+    """Expected integer-position coverage for a converter glyph in row order."""
+    return bytes(sample * 17 for sample in glyph.samples)
 
 
 def _glyph_map(glyphs: tuple[Glyph, ...]) -> dict[int, Glyph]:
@@ -1479,7 +1484,7 @@ class ReaderRoundTripTests(unittest.TestCase):
             pin=load_pin(PIN, data),
         )
 
-    def test_every_drawn_sample_equals_the_converter_raster(self) -> None:
+    def test_every_drawn_byte_matches_the_expanded_converter_raster(self) -> None:
         conversion = self._convert()
         glyphs = _glyph_map(conversion.glyphs)
         probe = [0x48, 0x67, 0x32, 0x20, 0xE9]  # H, g, 2, space, absent U+00E9
@@ -1516,9 +1521,9 @@ class ReaderRoundTripTests(unittest.TestCase):
             self.assertEqual(struct.unpack_from("<i", info, 0x18)[0], glyph.y_base)
             self.assertEqual(struct.unpack_from("<i", info, 0x30)[0], glyph.advance_x)
             self.assertEqual(draw_line[2:4], [str(glyph.width), str(glyph.height)])
-            drawn = list(bytes.fromhex(draw_line[4]))
+            drawn = bytes.fromhex(draw_line[4])
             self.assertEqual(len(drawn), glyph.width * glyph.height)
-            self.assertEqual(drawn, list(glyph.samples), f"U+{code:04X} drawn samples")
+            self.assertEqual(drawn, _format2_pixels(glyph), f"U+{code:04X} drawn coverage")
 
     def test_source_owned_h_renders_as_two_stems_and_a_crossbar(self) -> None:
         conversion = self._convert()
@@ -1547,8 +1552,8 @@ class ReaderRoundTripTests(unittest.TestCase):
         draw_line = lines[3].split(" ")
         self.assertEqual(char_line[2], "1")
         self.assertEqual(
-            list(bytes.fromhex(draw_line[4])),
-            list(glyph.samples),
+            bytes.fromhex(draw_line[4]),
+            _format2_pixels(glyph),
             "composited outlines survive the writer and the reader bit-exactly",
         )
         self.assertTrue(any(glyph.samples), "the composite glyph has ink")
@@ -1702,7 +1707,7 @@ class ReaderRoundTripTests(unittest.TestCase):
                 self.assertEqual(draw_line[:3], ["draw", str(code), "none"])
                 continue
             self.assertEqual(char_line[2], "1", f"U+{code:04X} presence")
-            self.assertEqual(list(bytes.fromhex(draw_line[4])), list(glyphs[code].samples))
+            self.assertEqual(bytes.fromhex(draw_line[4]), _format2_pixels(glyphs[code]))
 
     def test_japanese_sparse_subset_round_trips_through_native_reader(self) -> None:
         data = JAPANESE_FONT.read_bytes()
@@ -1737,7 +1742,7 @@ class ReaderRoundTripTests(unittest.TestCase):
             glyph = glyphs[code]
             self.assertEqual(char_line[2], "1")
             self.assertEqual(draw_line[2:4], [str(glyph.width), str(glyph.height)])
-            self.assertEqual(list(bytes.fromhex(draw_line[4])), list(glyph.samples))
+            self.assertEqual(bytes.fromhex(draw_line[4]), _format2_pixels(glyph))
 
     def test_korean_sparse_map_round_trips_through_native_reader(self) -> None:
         data = KOREAN_FONT.read_bytes()

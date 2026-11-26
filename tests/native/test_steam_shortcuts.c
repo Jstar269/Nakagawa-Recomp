@@ -619,6 +619,33 @@ static void test_linux_steam_paths_and_pid(void) {
     CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
                  "prefer the root that contains userdata");
     CHECK(strstr(root, "/.steam/steam") != NULL, "use the root with Steam accounts");
+    /* A partially initialized standard install can have userdata/ but no accounts.
+     * The other supported install still contains the actual shortcut target. */
+    snprintf(path, sizeof(path), "%s/.local/share/Steam/userdata/0", home);
+    CHECK(nk_platform_mkdir_p(path), "create anonymous standard account, not a shortcut target");
+    snprintf(path, sizeof(path), "%s/.steam/steam/userdata/456", home);
+    CHECK(nk_platform_mkdir_p(path), "create signed-in alternate account");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find Steam with login data in only the alternate root");
+    CHECK(strstr(root, "/.steam/steam") != NULL, "anonymous account must not shadow real account");
+    NkSteamAccount choice;
+    size_t count = 0u;
+    CHECK_STATUS(nk_steam_list_accounts(root, &choice, 1u, &count), NK_STEAM_OK,
+                 "the selected root lists a signed-in account");
+    CHECK(count == 1u && strcmp(choice.id, "456") == 0, "find the alternate signed-in account");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam/userdata/789", home);
+    CHECK(nk_platform_mkdir_p(path), "create signed-in standard account");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find Steam when both roots have signed-in accounts");
+    CHECK(strstr(root, "/.local/share/Steam") != NULL, "prefer standard when both have accounts");
+    CHECK(rmdir(path) == 0, "remove signed-in standard account fixture");
+    snprintf(path, sizeof(path), "%s/.steam/steam/userdata/456", home);
+    CHECK(rmdir(path) == 0, "remove alternate account fixture");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam/userdata/0", home);
+    CHECK(rmdir(path) == 0, "remove anonymous standard account fixture");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam/userdata", home);
+    CHECK(rmdir(path) == 0, "remove standard userdata fixture");
+    snprintf(path, sizeof(path), "%s/.steam/steam/userdata", home);
     CHECK(rmdir(path) == 0, "remove alternate userdata fixture");
     CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
                  "fall back to standard root without userdata");
