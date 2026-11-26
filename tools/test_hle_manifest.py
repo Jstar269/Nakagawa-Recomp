@@ -1113,6 +1113,129 @@ class LiveManifestTests(unittest.TestCase):
         self.assertIn("KNOWN DEVIATION expatk height at grain 0", source)
         self.assertRegex(source, r"(?m)^#define SAS_ADSR_EXPATK_GRAIN0[ \t]+0x00a76d9du$")
 
+    def test_sas_mix_group_is_partial_on_its_psp_sas_003_cells(self) -> None:
+        """#2807: CoreWithMix and SetVolume are reviewed on the PSP-SAS-003 cells they reproduce only."""
+        from psp_oracle import parse_golden
+
+        graduated = {
+            0x50A14DFC: (
+                "__sceSasCoreWithMix", "h_SasCoreWithMix", "NID_SAS_MIX_CORE_WITH_MIX", "sas_mix_with_mix",
+                "test_sas_mix_psp_sas_003_withmix_cells",
+                ("0x80420018", "0x80000004", "0xcf80", "0xa65f", "untouched", "0x1001 to 0x1fff",
+                 "-0xfff to -1", "order of the raw-mode, gain", "until #2807"),
+            ),
+            0x440CA7D8: (
+                "__sceSasSetVolume", "h_SasSetVolume", "NID_SAS_MIX_SET_VOLUME", "sas_mix_set_volume",
+                "test_sas_mix_psp_sas_003_volume_cells",
+                ("0x06fe", "0x037f", "0x80420018", "keep the previous volume", "second __sceSasInit",
+                 "inverted value is not claimed", "0xf901", "0xf902"),
+            ),
+        }
+        record = next(
+            row
+            for row in json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))["tests"]
+            if row["id"] == "PSP-SAS-003"
+        )
+        self.assertEqual(record["hardware_evidence"], "MEASURED")
+        self.assertEqual(record["evidence_cases"], ["sas-mix-*"])
+        self.assertIn("acceptance-eligible", record["measurement_note"])
+        self.assertIn("3872796c", record["measurement_note"])
+        # Every value a limitation cites is one the document publishes for PSP-SAS-003.
+        doc = (hle_manifest.ROOT / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        published = doc.split("### PSP-SAS-003 capture 2026-11-07", 1)[1].split("\n### ", 1)[0]
+        for value in ("0x80420018", "0x80000004", "`0x9f00` becomes `0xcf80`", "`0x9f61` + `0x06fe` = `0xa65f`",
+                      "(0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000)", "`0x037f`", "`0xf901`",
+                      "keep the\n  previous volume (0x800)", "33 zero samples", "-1663"):
+            self.assertIn(value, published)
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        dispatched = hle_manifest.selftest_dispatched_nids(source)
+        for nid, (name, handler, constant, helper, cell, needles) in graduated.items():
+            with self.subTest(handler=handler):
+                registration = self.regs[nid]
+                self.assertEqual(registration["name"], name)
+                self.assertEqual(registration["handler"], handler)
+                self.assertEqual(registration["classification"], "dedicated")
+                self.assertEqual(registration["status"], "partial")
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertEqual(
+                    evidence,
+                    ["docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)", f"tests/native/hle_thread_selftest.c:{cell}"],
+                )
+                self._assert_cited_cells_are_manifest_cells(evidence)
+                limitation = meta.HANDLER_LIMITATIONS[handler]
+                for needle in (
+                    "measured cells only", "acceptance-eligible launch", "PSP-3000", "6.61", "3872796c",
+                    "game context", "unmeasured", "not reviewed here", "(#2807)", *needles,
+                ):
+                    self.assertIn(needle, limitation)
+                # Every case id the limitation names is one the sas-mix stream registers.
+                for case in re.findall(r"sas-mix-[a-z0-9-]*[a-z0-9]", limitation):
+                    self.assertIn(case, parse_golden.SAS_MIX_CASES)
+                # The NID is entered through sr_syscall with its named constant, in the helper the replay
+                # uses, and the selftest credits it.
+                define = _matched(
+                    re.search(rf"^#define {constant}[ \t]+0x{nid:08x}u$", source, re.MULTILINE)
+                ).group(0)
+                body = _matched(
+                    re.search(rf"^static uint32_t {helper}\(CpuState \*cpu, .*?^\}}\n", source,
+                              re.MULTILINE | re.DOTALL)
+                ).group(0)
+                self.assertIn(f"sr_syscall(cpu, {constant})", body)
+                self.assertEqual(hle_manifest.selftest_dispatched_nids(f"{define}\n{body}"), {nid})
+                self.assertIn(nid, dispatched)
+                cell_body = _matched(
+                    re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+                ).group(0)
+                self.assertIn("sas_mix_cell_begin(&cpu);", cell_body)
+                self.assertIn(f"{helper}(&cpu, ", cell_body)
+                self.assertRegex(source, rf"(?m)^    {cell}\(\);$")
+        self.assertIn("sr_hle_init();", _matched(
+            re.search(r"^static void sas_mix_cell_begin\(CpuState \*cpu\) \{\n.*?^\}\n", source,
+                      re.MULTILINE | re.DOTALL)
+        ).group(0))
+        # The replay's tables are the probe's, cell for cell and in its order.
+        for table, cells in (
+            ("k_sas_mix_volume_cells", parse_golden.SAS_MIX_VOLUME_CELLS),
+            ("k_sas_mix_withmix_cells", parse_golden.SAS_MIX_WITHMIX_CELLS),
+            ("k_sas_mix_pitch_cells", tuple(cell for cell, _grains in parse_golden.SAS_MIX_PITCH_CELLS)),
+        ):
+            with self.subTest(table=table):
+                block = _matched(
+                    re.search(rf"^\}} {table}\[\] = \{{\n(.*?)^\}};$", source, re.MULTILINE | re.DOTALL)
+                ).group(1)
+                self.assertEqual(tuple(re.findall(r'^    \{"([a-z0-9-]+)",', block, re.MULTILINE)), cells)
+        # The refusals come before the mix in the handler, so a refused call leaves the buffer alone.
+        audio = (hle_manifest.ROOT / "src" / "rt" / "hle_audio.c").read_text(encoding="utf-8")
+        handler_body = _matched(
+            re.search(r"^static uint32_t h_SasCoreWithMix\(CpuState \*s\) \{\n.*?^\}\n", audio,
+                      re.MULTILINE | re.DOTALL)
+        ).group(0)
+        mix_at = handler_body.index("sas_mix_stateful(")
+        self.assertLess(handler_body.index("return SAS_ERROR_WITHMIX_RAW_MODE;"), mix_at)
+        self.assertLess(handler_body.index("return SAS_ERROR_VOLUME_VAL;"), mix_at)
+        self.assertRegex(audio, r"(?m)^#define SAS_ERROR_WITHMIX_RAW_MODE[ \t]+0x80000004u")
+        # The record also names these handlers, or the probe calls them. They stay unreviewed: the mixer's
+        # values differ from the record (no key-on delay, no in-between sample, the PCM pitch, the rounding
+        # of a negative volume) and the document publishes no SetVoice, SetVoicePCM or SetPitch answer. The
+        # selftest prints each difference as a named deviation.
+        for nid, name, handler in (
+            (0x99944089, "__sceSasSetVoice", "h_SasSetVoice"),
+            (0xAD84D37F, "__sceSasSetPitch", "h_SasSetPitch"),
+            (0xA3589D81, "__sceSasCore", "h_SasCore"),
+            (0xE1CD9561, "__sceSasSetVoicePCM", "h_SasSetVoicePCM"),
+        ):
+            with self.subTest(left_unreviewed=handler):
+                self.assertNotIn(handler, meta.HANDLER_METADATA)
+                self.assertEqual(self.regs[nid]["name"], name)
+                self.assertEqual(self.regs[nid]["handler"], handler)
+                self.assertEqual(self.regs[nid]["status"], "unreviewed")
+        for deviation in (
+            "KNOWN DEVIATION -0x1000 volume", "KNOWN DEVIATION %s starts with %u zero samples",
+            "KNOWN DEVIATION %s plays no in-between sample", "KNOWN DEVIATION %s rises %d per output sample",
+        ):
+            self.assertIn(deviation, source)
+        self.assertRegex(source, r"(?m)^#define SAS_MIX_INVERTED[ \t]+0xf901u")
+
     def test_iofilemgr_sweep_imports_have_named_production_handlers(self) -> None:
         """Common file-manager NIDs must resolve to named live handlers."""
         expected = {

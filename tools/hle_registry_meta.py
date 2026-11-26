@@ -748,6 +748,26 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "this status covers the measured cells only: in PSP-SAS-002 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 06a6c942c) __sceSasSetSL on voice 0 before KeyOn returns 0 for the level 0x20000000 (all 32 rows of sas-adsr-m00-calls..sas-adsr-m31-calls and the expatk runs), 0x30000000 (bound) and 0x30080000 (bound-half); the selftest replays those calls and asserts those words, and that in both bound runs a linear decay of 0x00100000 per step from the top stops at 0x30000000, so a linear decay ends at the first step at or below the level and keeps that height (sas_envelope.h ended it only below the level and held 0x2ff00000 until #2807); the exponential and DIRECT decays keep PPSSPP's rule of ending only below the level, because no PSP row measures them at the level; other levels, the refusal of a negative level or one above 0x40000000, and the level's effect under the other decay curves are unmeasured and not reviewed here (#2807)",
     },
+    # The SAS mix group's handlers that PSP-SAS-003 (sas-mix) measures and this runtime reproduces (#2807).
+    # The record also calls __sceSasSetVoice, __sceSasSetVoicePCM, __sceSasSetPitch and __sceSasCore; they stay
+    # unreviewed: the document publishes no SetVoice, SetVoicePCM or SetPitch answer, and the mixer's output
+    # differs from the record (no key-on delay, no in-between sample, the PCM pitch, a negative volume's rounding).
+    "h_SasCoreWithMix": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)",
+            "tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_withmix_cells",
+        ],
+        "limitation": "this status covers the measured cells only: PSP-SAS-003 is one acceptance-eligible launch on a PSP-3000 (system software 6.61, game context) of the probe built from 3872796c, 204 cells and the done record all PASS, and it calls __sceSasCoreWithMix once per cell on a core of grain 256 initialised fresh, over caller PCM (i - 256) * 97 in shorts 0..511; the selftest replays those calls and asserts the published words in the three windows the probe reads: with no voice keyed, (0x1000, 0x1000) returns 0 and leaves the buffer unchanged, (0x800, 0x800) returns 0 and halves it (0x9f00 becomes 0xcf80), and (0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return 0x80420018 and leave it untouched (sas-mix-w-zero-neg-calls, sas-mix-w-over-calls, sas-mix-w-extreme-calls); with voice 0 keyed at 0x1000, (0, 0) returns 0 and leaves the voice alone (0x06fe) and (0x1000, 0x1000) adds it to the caller's PCM (0x9f61 + 0x06fe = 0xa65f); in raw output mode (1), (0x1000, 0x1000) returns 0x80000004 and leaves the buffer untouched (sas-mix-w-raw-unity-calls); the handler accepted every gain and mixed in raw mode until #2807; it now refuses a gain below 0 or above 0x1000 on either side, a range the measured points bound but do not pin: 0x1001 to 0x1fff and -0xfff to -1 are unmeasured, as are the rounding of an odd sample at a gain below 0x1000, raw mode with other gains, the order of the raw-mode, gain, core, address and dispatch checks against each other, the XMB context and other consoles; they are not reviewed here (#2807)",
+    },
+    "h_SasSetVolume": {
+        "status": "partial",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)",
+            "tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_volume_cells",
+        ],
+        "limitation": "this status covers the measured cells only: in PSP-SAS-003 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 3872796c) __sceSasSetVolume sets voice 0 of a fresh core of grain 256, which plays a flat VAG held at the envelope's top, and the probe reads the grain after four warm-up grains; the selftest replays those calls and asserts the published words: with no __sceSasSetVolume after __sceSasInit every plane peaks at 0x06fe (output mode 0 and raw mode 1), 0 on all four sides is silent, 0x800 gives 0x037f, (0, 0, 0x1000, 0x1000) in raw mode leaves the dry planes 0 and the send planes at 0x06fe, -0x1000 on any side returns 0 and plays that side inverted, +0x1001 and -0x1001 on any side return 0x80420018 and keep the previous volume (0x800, so 0x037f on every plane), and a second __sceSasInit after it restores 0x06fe; the handler already answered all of these, so #2807 changes no code here; the inverted value is not claimed: the PSP plays 0xf901 and this runtime 0xf902, because its mixer (__sceSasCore, unreviewed) applies the envelope to the sample before the volume; other volumes, the core and voice-index refusals, a call on a sounding voice, the XMB context and other consoles are unmeasured and not reviewed here (#2807)",
+    },
     # sceDmacMemcpy / sceDmacTryMemcpy. The measured contract is implemented and
     # regression-tested through production dispatch: the illegal-size and
     # illegal-address classes, whole-span validation with overflow-safe

@@ -46798,16 +46798,20 @@ static void test_sas_noise_restarts_on_guest_reset(void) {
 }
 
 /* #2135: __sceSasCoreWithMix's two volumes scale the caller's PCM already in the buffer, not the
- * SAS voice mix, and no value is refused: out = clamp_s16(in * vol >> 12 + voices). This is the
- * reference behaviour (PPSSPP, hrydgard/ppsspp 0b30638e6571: Core/HLE/sceSas.cpp
- * _sceSasCoreWithMix checks no volume; Core/HW/SasAudio.cpp WriteMixedOutput scales inp by
- * leftVol/rightVol). It is unmeasured on a PSP. */
+ * SAS voice mix: out = clamp_s16(in * vol >> 12 + voices), the scaling of PPSSPP (hrydgard/ppsspp
+ * 0b30638e6571: Core/HW/SasAudio.cpp WriteMixedOutput scales inp by leftVol/rightVol). PPSSPP checks
+ * no volume; the PSP refuses one below 0 or above 0x1000 with 0x80420018 and leaves the buffer
+ * untouched (PSP-SAS-003, #2807; test_sas_mix_psp_sas_003_withmix_cells replays the measured cells).
+ * The refusals of 0x1001 and -1 below are this runtime's range between the measured points
+ * (0x1000 and 0x2000, 0 and -0x1000), not PSP-measured. */
 static void test_sas_core_with_mix_scales_caller_pcm(void) {
     CpuState cpu;
     const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
     int16_t bgm[SAS_TEST_GRAIN * 2], got[SAS_TEST_GRAIN * 2], voice_only[SAS_TEST_GRAIN * 2];
-    static const int32_t gains[][2] = {
-        { 0x800, 0x800 }, { 0, -0x1000 }, { 0x2000, 0x3000 }, { -0x1800, 0x1001 },
+    static const struct { int32_t l, r; uint32_t rc; } gains[] = {
+        { 0x800, 0x800, 0u }, { 0, 0x1000, 0u },
+        { 0, -0x1000, 0x80420018u }, { 0x2000, 0x3000, 0x80420018u },        /* PSP-SAS-003 */
+        { 0x1001, 0x1000, 0x80420018u }, { 0x1000, -1, 0x80420018u },        /* not PSP-measured */
     };
     reset_fixture(); sr_hle_init(); sas_test_init(&cpu, core, 0);
     for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
@@ -46816,14 +46820,22 @@ static void test_sas_core_with_mix_scales_caller_pcm(void) {
     }
     for (size_t g = 0; g < sizeof(gains) / sizeof(gains[0]); g++) {
         sas_write_pcm(out, bgm, SAS_TEST_GRAIN);
-        cpu.r[4] = core; cpu.r[5] = out; cpu.r[6] = (uint32_t)gains[g][0]; cpu.r[7] = (uint32_t)gains[g][1];
+        cpu.r[4] = core; cpu.r[5] = out; cpu.r[6] = (uint32_t)gains[g].l; cpu.r[7] = (uint32_t)gains[g].r;
         uint32_t rc = sr_syscall(&cpu, NID_SAS_CORE_WITH_MIX);
         sas_read_pcm(out, got, SAS_TEST_GRAIN);
+        if (gains[g].rc != 0u) {
+            expect(rc == gains[g].rc && memcmp(got, bgm, sizeof(got)) == 0,
+                   "__sceSasCoreWithMix refuses a volume below 0 or above 0x1000 with 0x80420018 and leaves "
+                   "the buffer untouched (#2807)");
+            continue;
+        }
         int exact = 1;
-        for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++)
-            if (got[i] != sas_clamp16((int32_t)(((int64_t)bgm[i] * gains[g][i & 1u]) >> 12))) exact = 0;
+        for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) {
+            const int32_t gain = (i & 1u) ? gains[g].r : gains[g].l;
+            if (got[i] != sas_clamp16((int32_t)(((int64_t)bgm[i] * gain) >> 12))) exact = 0;
+        }
         expect(rc == 0 && exact,
-               "__sceSasCoreWithMix accepts any volume and scales the caller PCM by vol >> 12 (#2135)");
+               "__sceSasCoreWithMix scales the caller PCM by vol >> 12 for a volume in 0..0x1000 (#2135)");
     }
 
     /* The volumes leave the voices alone: at 0/0 the output is the voice mix and nothing else. */
@@ -47661,6 +47673,428 @@ static void test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule(void) {
             heights[g] = sas_adsr_height(&cpu);
         }
         expect(heights[0] == controls[i].held && heights[1] == controls[i].held, controls[i].what);
+    }
+}
+
+/* ---- PSP-SAS-003 (sas-mix): the probe's WithMix, voice-volume and pitch cells through production dispatch
+ * (#2807) ----
+ *
+ * The record is one acceptance-eligible launch of the probe built from 3872796c on a PSP-3000 (system software
+ * 6.61), boot 197, in the game context, on 2026-11-12 (UTC): 204 cells and the done record, all PASS, with the
+ * same result and out words as the boot 146 and boot 191 captures (tools/psp_oracle/manifest.json PSP-SAS-003;
+ * docs/HARDWARE_ORACLE.md, "PSP-SAS-003 capture 2026-11-07", which publishes the values). These cells replay
+ * run_sas_mix in tests/fixtures/psp_oracle/probe.c with its arguments and in its order: one core (grain 256, 32
+ * voices, 44100 Hz) initialised again for every cell, output mode 0 unless a cell is raw (mode 1: four planes,
+ * dry L, dry R, send L, send R), and voice 0's envelope held at its top (every curve linear, attack 0x40000000,
+ * decay 0x00100000, sustain rate 0, release 0x00040000, sustain level 0x40000000). Voice 0 plays one of three
+ * synthetic sources: a looping VAG whose every sample is 0x0700 (full scale 0x06fe after the envelope), a looping
+ * VAG whose block b holds ((b % 15) - 7) << 8, or the PCM ramp 8 * i. Each call the probe records enters its
+ * NID through sr_syscall with a named constant.
+ *
+ * The document publishes these values, and the cells assert them as measured:
+ * - __sceSasCoreWithMix, output mode 0, caller PCM (i - 256) * 97 in shorts 0..511, no voice keyed:
+ *   (0x1000, 0x1000) returns 0 and leaves the buffer unchanged; (0x800, 0x800) returns 0 and halves it (0x9f00
+ *   becomes 0xcf80); (0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return 0x80420018 and leave it
+ *   untouched. With voice 0 keyed at 0x1000/0x1000/0/0, (0, 0) returns 0 and leaves the voice alone (0x06fe),
+ *   and (0x1000, 0x1000) gives the sum (0x9f61 + 0x06fe = 0xa65f). In output mode 1, (0x1000, 0x1000) returns
+ *   0x80000004 and leaves the buffer untouched. The probe reads the buffer in three windows (shorts 0..31,
+ *   240..271 and 480..511), so "unchanged" and "untouched" are asserted there; the whole buffer is also
+ *   checked as this runtime's own property.
+ * - __sceSasSetVolume (the grain after four warm-up grains): with no SetVolume after __sceSasInit every plane
+ *   peaks at 0x06fe (mode 0 and raw mode 1); 0 on all four sides is silent; 0x800 gives 0x037f; (0, 0, 0x1000,
+ *   0x1000) in raw mode leaves the dry planes 0 and the send planes at 0x06fe; -0x1000 on any side returns 0
+ *   and plays that side inverted; +0x1001 and -0x1001 on any side return 0x80420018 and keep the previous
+ *   volume (0x800, so 0x037f on every plane); a second __sceSasInit after SetVolume 0x800 restores 0x06fe.
+ * - Pitch: every __sceSasCore returns 0, the envelope height is 0x3ff00000 and __sceSasGetEndFlag returns
+ *   0xfffffffe; the stepped VAG gives 28 output samples per block at pitch 0x1000 and 10 or 11 at 0x2a00, and
+ *   the PCM ramp rises 8 per output sample at 0x2000.
+ *
+ * Published values this runtime does not reproduce. The cells print each as a named KNOWN DEVIATION line and
+ * do not assert it; all of them belong to the mixer (__sceSasCore), which is not reviewed here:
+ * - -0x1000 on a side plays 0xf901 (-1791) on the PSP and 0xf902 (-1790) here: this mixer applies the envelope
+ *   to the sample first (0x0700 * 0x3ff00000 >> 30 = 1790) and the volume after it, where the PSP's value is
+ *   what the floor of -1790.25 gives.
+ * - The PSP's output starts with 33 zero samples after KeyOn; this runtime has no key-on delay (#1296).
+ * - At pitch 0x1800 the PSP plays an in-between sample at some block ends (-1663 between -1791 and -1535);
+ *   this mixer holds each sample (zero-order hold) and never plays one.
+ * - The PCM ramp rises 4 per output sample on average at pitch 0x0800 on the PSP; this mixer plays a PCM voice
+ *   at one sample per output sample whatever its pitch, so it rises 8. */
+#define NID_SAS_MIX_CORE_WITH_MIX 0x50a14dfcu
+#define NID_SAS_MIX_SET_VOLUME    0x440ca7d8u
+#define NID_SAS_MIX_SET_VOICE     0x99944089u
+#define NID_SAS_MIX_SET_VOICE_PCM 0xe1cd9561u
+#define NID_SAS_MIX_SET_PITCH     0xad84d37fu
+#define NID_SAS_MIX_GET_END       0x68a46b95u
+#define SAS_MIX_CORE        0x08030000u
+#define SAS_MIX_OUT         0x08010000u
+#define SAS_MIX_FLAT        0x08020000u
+#define SAS_MIX_STEPS       0x08020400u
+#define SAS_MIX_PCM         0x08040000u
+#define SAS_MIX_GRAIN       256u
+#define SAS_MIX_VAG_BLOCKS  64u
+#define SAS_MIX_PCM_SAMPLES 2048u
+#define SAS_MIX_WARM        4u
+#define SAS_MIX_SHORTS      (SAS_MIX_GRAIN * 8u)
+#define SAS_MIX_SENTINEL    0x5a5au
+#define SAS_MIX_FULL        0x06feu      /* the flat voice at volume 0x1000 */
+#define SAS_MIX_HALF        0x037fu      /* the flat voice at volume 0x800 */
+#define SAS_MIX_INVERTED    0xf901u      /* the flat voice at volume -0x1000 on the PSP */
+#define SAS_MIX_VOLUME_VAL  0x80420018u
+#define SAS_MIX_RAW_REFUSED 0x80000004u
+#define SAS_MIX_TOP_HEIGHT  0x3ff00000u
+#define SAS_MIX_PSP_ZEROS   33u          /* zero samples after KeyOn on the PSP (no key-on delay here, #1296) */
+/* The envelope helpers of the PSP-SAS-002 cells above address this core and voice 0. */
+_Static_assert(SAS_MIX_CORE == SAS_ADSR_CORE, "the sas-mix cells share the sas-adsr envelope helpers' core");
+
+/* The probe's two VAGs and PCM ramp (run_sas_mix), written once per test. */
+static void sas_mix_cell_begin(CpuState *cpu) {
+    reset_fixture(); sr_hle_init(); sr_hle_test_sas_reset();
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    for (uint32_t b = 0; b < SAS_MIX_VAG_BLOCKS; b++) {
+        const uint8_t flag = b == 0u ? 0x06u : (b + 1u == SAS_MIX_VAG_BLOCKS ? 0x03u : 0x00u);
+        const uint8_t nibble = (uint8_t)(((int)(b % 15u) - 7) & 0xf);
+        MEM_W8(SAS_MIX_FLAT + b * 16u, 0x04u);
+        MEM_W8(SAS_MIX_FLAT + b * 16u + 1u, flag);
+        MEM_W8(SAS_MIX_STEPS + b * 16u, 0x04u);
+        MEM_W8(SAS_MIX_STEPS + b * 16u + 1u, flag);
+        for (uint32_t i = 2; i < 16u; i++) {
+            MEM_W8(SAS_MIX_FLAT + b * 16u + i, 0x77u);
+            MEM_W8(SAS_MIX_STEPS + b * 16u + i, (uint8_t)(nibble | (nibble << 4)));
+        }
+    }
+    for (uint32_t i = 0; i < SAS_MIX_PCM_SAMPLES; i++) MEM_W16(SAS_MIX_PCM + i * 2u, (uint16_t)(8u * i));
+}
+
+static uint32_t sas_mix_init(CpuState *cpu, uint32_t raw) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = SAS_MIX_GRAIN; cpu->r[6] = 32u; cpu->r[7] = raw; cpu->r[8] = 44100u;
+    return sr_syscall(cpu, NID_SAS_INIT);
+}
+
+static uint32_t sas_mix_set_voice(CpuState *cpu, uint32_t vag) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = vag;
+    cpu->r[7] = SAS_MIX_VAG_BLOCKS * 16u; cpu->r[8] = 1u;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_VOICE);
+}
+
+static uint32_t sas_mix_set_voice_pcm(CpuState *cpu) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = SAS_MIX_PCM;
+    cpu->r[7] = SAS_MIX_PCM_SAMPLES; cpu->r[8] = 0xffffffffu;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_VOICE_PCM);
+}
+
+static uint32_t sas_mix_set_volume(CpuState *cpu, int32_t l, int32_t r, int32_t sl, int32_t sr) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = (uint32_t)l; cpu->r[7] = (uint32_t)r;
+    cpu->r[8] = (uint32_t)sl; cpu->r[9] = (uint32_t)sr;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_VOLUME);
+}
+
+static uint32_t sas_mix_set_pitch(CpuState *cpu, int32_t pitch) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = (uint32_t)pitch;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_PITCH);
+}
+
+static uint32_t sas_mix_core(CpuState *cpu) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = SAS_MIX_OUT;
+    return sr_syscall(cpu, NID_SAS_CORE);
+}
+
+static uint32_t sas_mix_with_mix(CpuState *cpu, int32_t l, int32_t r) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = SAS_MIX_OUT; cpu->r[6] = (uint32_t)l; cpu->r[7] = (uint32_t)r;
+    return sr_syscall(cpu, NID_SAS_MIX_CORE_WITH_MIX);
+}
+
+static uint32_t sas_mix_end_flag(CpuState *cpu) {
+    cpu->r[4] = SAS_MIX_CORE;
+    return sr_syscall(cpu, NID_SAS_MIX_GET_END);
+}
+
+/* The probe's sas_mix_envelope: the first answer that is not 0, or 0. */
+static uint32_t sas_mix_envelope(CpuState *cpu) {
+    uint32_t rc = sas_adsr_set_mode(cpu, SAS_ADSR_EVERYTHING, SAS_ADSR_CURVE_LINEAR_INC, SAS_ADSR_CURVE_LINEAR_DEC,
+                                    SAS_ADSR_CURVE_LINEAR_DEC, SAS_ADSR_CURVE_LINEAR_DEC);
+    if (rc == 0u) rc = sas_adsr_set_rates(cpu, SAS_ADSR_EVERYTHING, 0x40000000u, 0x00100000u, 0u, 0x00040000u);
+    if (rc == 0u) rc = sas_adsr_set_level(cpu, 0x40000000u);
+    return rc;
+}
+
+static void sas_mix_fill(uint16_t value) {
+    for (uint32_t i = 0; i < SAS_MIX_SHORTS; i++) MEM_W16(SAS_MIX_OUT + i * 2u, value);
+}
+
+static int16_t sas_mix_short(uint32_t i) {
+    return (int16_t)MEM_R16(SAS_MIX_OUT + i * 2u);
+}
+
+/* Plane p's sample s: interleaved stereo in mode 0 (planes 0 and 1), four planes of a grain each in raw mode. */
+static int16_t sas_mix_plane(uint32_t raw, uint32_t p, uint32_t s) {
+    return sas_mix_short(raw ? p * SAS_MIX_GRAIN + s : 2u * s + p);
+}
+
+/* k_sas_mix_volume in probe.c. vol_set: 0 none, 1 SetVolume(l, r, sl, sr), 2 SetVolume(0x800 x4) then the edge
+ * call SetVolume(l, r, sl, sr), 3 SetVolume(0x800 x4), __sceSasInit again, SetVoice, no SetVolume. `want` is the
+ * peak the document publishes for every plane the mode has (SAS_MIX_ANY: none published), `inverted` the side
+ * the edge call inverts (-1: none), and `edge` the edge call's published answer. */
+#define SAS_MIX_ANY 0xffffffffu
+static const struct {
+    const char *name;
+    uint32_t raw, vol_set;
+    int32_t l, r, sl, sr;
+    uint32_t want_dry, want_send, edge;
+    int inverted;
+} k_sas_mix_volume_cells[] = {
+    {"def-m0", 0u, 0u, 0, 0, 0, 0, SAS_MIX_FULL, SAS_MIX_FULL, 0u, -1},
+    {"def-m1", 1u, 0u, 0, 0, 0, 0, SAS_MIX_FULL, SAS_MIX_FULL, 0u, -1},
+    {"zero", 0u, 1u, 0, 0, 0, 0, 0u, 0u, 0u, -1},
+    {"half", 0u, 1u, 0x800, 0x800, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, 0u, -1},
+    {"full-m1", 1u, 1u, 0x1000, 0x1000, 0x1000, 0x1000, SAS_MIX_ANY, SAS_MIX_ANY, 0u, -1},
+    {"send-only-m1", 1u, 1u, 0, 0, 0x1000, 0x1000, 0u, SAS_MIX_FULL, 0u, -1},
+    {"e-l-m1000", 0u, 2u, -0x1000, 0x800, 0x800, 0x800, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 0},
+    {"e-r-m1000", 0u, 2u, 0x800, -0x1000, 0x800, 0x800, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 1},
+    {"e-sl-m1000", 1u, 2u, 0x800, 0x800, -0x1000, 0x800, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 2},
+    {"e-sr-m1000", 1u, 2u, 0x800, 0x800, 0x800, -0x1000, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 3},
+    {"e-l-1001", 0u, 2u, 0x1001, 0x800, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-r-1001", 0u, 2u, 0x800, 0x1001, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sl-1001", 1u, 2u, 0x800, 0x800, 0x1001, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sr-1001", 1u, 2u, 0x800, 0x800, 0x800, 0x1001, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-l-m1001", 0u, 2u, -0x1001, 0x800, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-r-m1001", 0u, 2u, 0x800, -0x1001, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sl-m1001", 1u, 2u, 0x800, 0x800, -0x1001, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sr-m1001", 1u, 2u, 0x800, 0x800, 0x800, -0x1001, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"reinit", 0u, 3u, 0, 0, 0, 0, SAS_MIX_FULL, SAS_MIX_FULL, 0u, -1},
+};
+#define SAS_MIX_VOLUME_CELL_COUNT (sizeof(k_sas_mix_volume_cells) / sizeof(k_sas_mix_volume_cells[0]))
+
+static void test_sas_mix_psp_sas_003_volume_cells(void) {
+    CpuState cpu;
+    char what[160];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_MIX_VOLUME_CELL_COUNT; i++) {
+        const uint32_t raw = k_sas_mix_volume_cells[i].raw, vol_set = k_sas_mix_volume_cells[i].vol_set;
+        const int32_t l = k_sas_mix_volume_cells[i].l, r = k_sas_mix_volume_cells[i].r;
+        const int32_t sl = k_sas_mix_volume_cells[i].sl, sr = k_sas_mix_volume_cells[i].sr;
+        const char *name = k_sas_mix_volume_cells[i].name;
+        /* Runtime preconditions: the calls whose answers the document does not publish. */
+        int setup = sas_mix_init(&cpu, raw) == 0u && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u;
+        uint32_t edge = 0u;
+        if (vol_set == 1u) {
+            setup = setup && sas_mix_set_volume(&cpu, l, r, sl, sr) == 0u;
+        } else if (vol_set == 2u) {
+            setup = setup && sas_mix_set_volume(&cpu, 0x800, 0x800, 0x800, 0x800) == 0u;
+            edge = sas_mix_set_volume(&cpu, l, r, sl, sr);
+        } else if (vol_set == 3u) {
+            setup = setup && sas_mix_set_volume(&cpu, 0x800, 0x800, 0x800, 0x800) == 0u;
+            setup = setup && sas_mix_init(&cpu, raw) == 0u && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u;
+        }
+        setup = setup && sas_mix_envelope(&cpu) == 0u && sas_adsr_key_on(&cpu) == 0u;
+        for (uint32_t g = 0; g < SAS_MIX_WARM; g++) setup = setup && sas_mix_core(&cpu) == 0u;
+        sas_mix_fill(SAS_MIX_SENTINEL);
+        setup = setup && sas_mix_core(&cpu) == 0u;
+        snprintf(what, sizeof(what), "sas-mix-v-%s: init, voice, envelope, KeyOn and __sceSasCore return 0 "
+                 "(runtime precondition)", name);
+        expect(setup, what);
+        uint32_t peak[4] = {0u, 0u, 0u, 0u};
+        const uint32_t planes = raw ? 4u : 2u;
+        for (uint32_t p = 0; p < planes; p++)
+            for (uint32_t s = 0; s < SAS_MIX_GRAIN; s++) {
+                const int v = sas_mix_plane(raw, p, s);
+                const uint32_t mag = (uint32_t)(v < 0 ? -v : v);
+                if (mag > peak[p]) peak[p] = mag;
+            }
+        if (vol_set == 2u) {
+            snprintf(what, sizeof(what), "sas-mix-v-%s-calls: the edge __sceSasSetVolume returns 0x%08x",
+                     name, (unsigned)k_sas_mix_volume_cells[i].edge);
+            expect(edge == k_sas_mix_volume_cells[i].edge, what);
+        }
+        for (uint32_t p = 0; p < planes; p++) {
+            const uint32_t want = p < 2u ? k_sas_mix_volume_cells[i].want_dry : k_sas_mix_volume_cells[i].want_send;
+            if (want == SAS_MIX_ANY) continue;
+            snprintf(what, sizeof(what), "sas-mix-v-%s-out: plane %u peaks at 0x%04x", name, (unsigned)p,
+                     (unsigned)want);
+            expect(peak[p] == want, what);
+        }
+        const int side = k_sas_mix_volume_cells[i].inverted;
+        if (side >= 0) {
+            const int16_t at64 = sas_mix_plane(raw, (uint32_t)side, 64u);
+            snprintf(what, sizeof(what), "sas-mix-v-%s-out: plane %d plays inverted", name, side);
+            expect(at64 < 0 && peak[side] >= SAS_MIX_FULL && peak[side] <= SAS_MIX_FULL + 1u, what);
+            if ((uint16_t)at64 != SAS_MIX_INVERTED)
+                printf("sas-mix: KNOWN DEVIATION -0x1000 volume (%s plane %d) sample 64 got=0x%04x want=0x%04x "
+                       "(PSP-SAS-003 sas-mix-v-%s-out; the envelope is applied before the volume here)\n",
+                       name, side, (unsigned)(uint16_t)at64, (unsigned)SAS_MIX_INVERTED, name);
+        }
+    }
+}
+
+/* k_sas_mix_withmix in probe.c, with the answer the document publishes for each. */
+static const struct {
+    const char *name;
+    uint32_t raw, keyed;
+    int32_t l, r;
+    uint32_t result;
+} k_sas_mix_withmix_cells[] = {
+    {"unity", 0u, 0u, 0x1000, 0x1000, 0u},
+    {"half", 0u, 0u, 0x800, 0x800, 0u},
+    {"zero-neg", 0u, 0u, 0, -0x1000, SAS_MIX_VOLUME_VAL},
+    {"over", 0u, 0u, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    {"extreme", 0u, 0u, 0x7fffffff, (int32_t)0x80000000u, SAS_MIX_VOLUME_VAL},
+    {"keyed-zero", 0u, 1u, 0, 0, 0u},
+    {"keyed-unity", 0u, 1u, 0x1000, 0x1000, 0u},
+    {"raw-unity", 1u, 0u, 0x1000, 0x1000, SAS_MIX_RAW_REFUSED},
+};
+#define SAS_MIX_WITHMIX_CELL_COUNT (sizeof(k_sas_mix_withmix_cells) / sizeof(k_sas_mix_withmix_cells[0]))
+static const uint32_t k_sas_mix_windows[3] = {0u, 240u, 480u};   /* 32 shorts each */
+
+static void test_sas_mix_psp_sas_003_withmix_cells(void) {
+    CpuState cpu;
+    char what[160];
+    static int16_t before[SAS_MIX_SHORTS];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_MIX_WITHMIX_CELL_COUNT; i++) {
+        const char *name = k_sas_mix_withmix_cells[i].name;
+        int setup = sas_mix_init(&cpu, k_sas_mix_withmix_cells[i].raw) == 0u;
+        if (k_sas_mix_withmix_cells[i].keyed) {
+            setup = setup && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u &&
+                    sas_mix_set_volume(&cpu, 0x1000, 0x1000, 0, 0) == 0u && sas_mix_envelope(&cpu) == 0u &&
+                    sas_adsr_key_on(&cpu) == 0u;
+            for (uint32_t g = 0; g < SAS_MIX_WARM; g++) setup = setup && sas_mix_core(&cpu) == 0u;
+        }
+        snprintf(what, sizeof(what), "sas-mix-w-%s: the core (and keyed voice) set up (runtime precondition)", name);
+        expect(setup, what);
+        sas_mix_fill(SAS_MIX_SENTINEL);
+        for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++)
+            MEM_W16(SAS_MIX_OUT + s * 2u, (uint16_t)(int16_t)(((int)s - 256) * 97));
+        for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) before[s] = sas_mix_short(s);
+        const uint32_t rc = sas_mix_with_mix(&cpu, k_sas_mix_withmix_cells[i].l, k_sas_mix_withmix_cells[i].r);
+        snprintf(what, sizeof(what), "sas-mix-w-%s-calls: __sceSasCoreWithMix(0x%x, 0x%x) returns 0x%08x", name,
+                 (unsigned)k_sas_mix_withmix_cells[i].l, (unsigned)k_sas_mix_withmix_cells[i].r,
+                 (unsigned)k_sas_mix_withmix_cells[i].result);
+        expect(rc == k_sas_mix_withmix_cells[i].result, what);
+        /* The three windows the probe records (sas-mix-w-<name>-s0..s2). */
+        int unchanged = 1, halved = 1, voice_alone = 1, summed = 1;
+        for (uint32_t w = 0; w < 3u; w++)
+            for (uint32_t k = 0; k < 32u; k++) {
+                const uint32_t s = k_sas_mix_windows[w] + k;
+                const int16_t got = sas_mix_short(s), was = before[s];
+                if (got != was) unchanged = 0;
+                if ((was & 1) == 0 && got != was / 2) halved = 0;   /* odd samples' rounding is unpublished */
+                if (got != (int16_t)SAS_MIX_FULL) voice_alone = 0;
+                if (got != (int16_t)(was + (int16_t)SAS_MIX_FULL)) summed = 0;
+            }
+        int whole = 1;
+        for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) if (sas_mix_short(s) != before[s]) whole = 0;
+        const int unity = strcmp(name, "unity") == 0;
+        if (k_sas_mix_withmix_cells[i].result != 0u || unity) {
+            snprintf(what, sizeof(what), "sas-mix-w-%s-s0..s2: the call leaves the caller's buffer %s", name,
+                     unity ? "unchanged" : "untouched");
+            expect(unchanged, what);
+            snprintf(what, sizeof(what), "sas-mix-w-%s: no short of the buffer changes (runtime property beyond "
+                     "the three windows)", name);
+            expect(whole, what);
+        } else if (strcmp(name, "half") == 0) {
+            expect(sas_mix_short(0u) == (int16_t)0xcf80 && halved,
+                   "sas-mix-w-half-s0..s2: (0x800, 0x800) halves the caller's PCM (0x9f00 becomes 0xcf80)");
+        } else if (strcmp(name, "keyed-zero") == 0) {
+            expect(voice_alone, "sas-mix-w-keyed-zero-s0..s2: (0, 0) leaves the keyed voice alone (0x06fe)");
+        } else if (strcmp(name, "keyed-unity") == 0) {
+            expect(sas_mix_short(1u) == (int16_t)0xa65f && summed,
+                   "sas-mix-w-keyed-unity-s0..s2: (0x1000, 0x1000) adds the voice to the caller's PCM "
+                   "(0x9f61 + 0x06fe = 0xa65f)");
+        }
+    }
+}
+
+/* k_sas_mix_pitch in probe.c: the stepped VAG (pcm 0) or the PCM ramp (pcm 1) at one pitch, the left channel of
+ * the first `grains` grains after KeyOn. */
+static const struct {
+    const char *name;
+    uint32_t pcm;
+    int32_t pitch;
+    uint32_t grains;
+} k_sas_mix_pitch_cells[] = {
+    {"vag-1000", 0u, 0x1000, 4u},
+    {"vag-1800", 0u, 0x1800, 4u},
+    {"vag-2a00", 0u, 0x2a00, 4u},
+    {"pcm-2000", 1u, 0x2000, 2u},
+    {"pcm-0800", 1u, 0x0800, 2u},
+};
+#define SAS_MIX_PITCH_CELL_COUNT (sizeof(k_sas_mix_pitch_cells) / sizeof(k_sas_mix_pitch_cells[0]))
+
+static void test_sas_mix_psp_sas_003_pitch_cells(void) {
+    CpuState cpu;
+    char what[160];
+    static int16_t left[4u * SAS_MIX_GRAIN];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_MIX_PITCH_CELL_COUNT; i++) {
+        const char *name = k_sas_mix_pitch_cells[i].name;
+        const uint32_t grains = k_sas_mix_pitch_cells[i].grains, n = grains * SAS_MIX_GRAIN;
+        int setup = sas_mix_init(&cpu, 0u) == 0u &&
+                    (k_sas_mix_pitch_cells[i].pcm ? sas_mix_set_voice_pcm(&cpu)
+                                                  : sas_mix_set_voice(&cpu, SAS_MIX_STEPS)) == 0u &&
+                    sas_mix_set_volume(&cpu, 0x1000, 0x1000, 0, 0) == 0u &&
+                    sas_mix_set_pitch(&cpu, k_sas_mix_pitch_cells[i].pitch) == 0u &&
+                    sas_mix_envelope(&cpu) == 0u && sas_adsr_key_on(&cpu) == 0u;
+        snprintf(what, sizeof(what), "sas-mix-p-%s: the voice sets up (runtime precondition)", name);
+        expect(setup, what);
+        int cores = 1;
+        for (uint32_t g = 0; g < grains; g++) {
+            if (sas_mix_core(&cpu) != 0u) cores = 0;
+            for (uint32_t f = 0; f < SAS_MIX_GRAIN; f++) left[g * SAS_MIX_GRAIN + f] = sas_mix_short(2u * f);
+        }
+        const uint32_t height = sas_adsr_height(&cpu), end_flag = sas_mix_end_flag(&cpu);
+        snprintf(what, sizeof(what), "sas-mix-p-%s-calls: every __sceSasCore returns 0, the height is 0x3ff00000 "
+                 "and the end flag 0xfffffffe", name);
+        expect(cores && height == SAS_MIX_TOP_HEIGHT && end_flag == 0xfffffffeu, what);
+        /* Counted on the VAG cells only: the PCM ramp's own first sample is 0. */
+        uint32_t zeros = 0;
+        while (zeros < n && left[zeros] == 0) zeros++;
+        if (!k_sas_mix_pitch_cells[i].pcm && zeros != SAS_MIX_PSP_ZEROS)
+            printf("sas-mix: KNOWN DEVIATION %s starts with %u zero samples, the PSP with %u "
+                   "(PSP-SAS-003 sas-mix-p-%s-g00; no key-on delay, #1296)\n",
+                   name, (unsigned)zeros, (unsigned)SAS_MIX_PSP_ZEROS, name);
+        if (!k_sas_mix_pitch_cells[i].pcm) {
+            /* Runs of one value between two value changes, from the second sample of the voice on (its first
+             * sample is the envelope's first step), so the runs cut by the start and the end are left out. */
+            uint32_t runs = 0, shortest = n, longest = 0, prev = 0, in_between = 0;
+            int have = 0;
+            for (uint32_t s = zeros + 2u; s < n; s++) {
+                if (left[s] == left[s - 1u]) continue;
+                if (have) {
+                    const uint32_t len = s - prev;
+                    runs++;
+                    if (len < shortest) shortest = len;
+                    if (len > longest) longest = len;
+                }
+                if (s + 1u < n && left[s] == -1663 && left[s - 1u] == -1791 && left[s + 1u] == -1535)
+                    in_between++;
+                prev = s;
+                have = 1;
+            }
+            if (k_sas_mix_pitch_cells[i].pitch == 0x1000) {
+                expect(runs > 0u && shortest == 28u && longest == 28u,
+                       "sas-mix-p-vag-1000-g*: the stepped VAG gives 28 output samples per block at pitch 0x1000");
+            } else if (k_sas_mix_pitch_cells[i].pitch == 0x2a00) {
+                expect(runs > 0u && shortest >= 10u && longest <= 11u,
+                       "sas-mix-p-vag-2a00-g*: the stepped VAG gives 10 or 11 output samples per block at pitch "
+                       "0x2a00");
+            } else if (in_between == 0u) {
+                printf("sas-mix: KNOWN DEVIATION %s plays no in-between sample at a block end (the PSP plays -1663 "
+                       "between -1791 and -1535; this mixer holds each sample) (PSP-SAS-003 sas-mix-p-%s-g*)\n",
+                       name, name);
+            }
+        } else {
+            /* The mean rise per output sample over the second grain, after any start-up. */
+            const int rise = left[2u * SAS_MIX_GRAIN - 1u] - left[SAS_MIX_GRAIN];
+            const int per_sample = (rise + (int)(SAS_MIX_GRAIN - 1u) / 2) / (int)(SAS_MIX_GRAIN - 1u);
+            if (k_sas_mix_pitch_cells[i].pitch == 0x2000) {
+                expect(per_sample == 8, "sas-mix-p-pcm-2000-g*: the PCM ramp 8 * i rises 8 per output sample at "
+                       "pitch 0x2000");
+            } else if (per_sample != 4) {
+                printf("sas-mix: KNOWN DEVIATION %s rises %d per output sample, the PSP 4 on average "
+                       "(PSP-SAS-003 sas-mix-p-%s-g*; this mixer plays a PCM voice at one sample per output "
+                       "sample)\n", name, per_sample, name);
+            }
+        }
     }
 }
 
@@ -71200,6 +71634,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_adsr_mode_psp_sas_002_table();
     test_sas_adsr_psp_sas_002_curve_runs();
     test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule();
+    test_sas_mix_psp_sas_003_withmix_cells();
+    test_sas_mix_psp_sas_003_volume_cells();
+    test_sas_mix_psp_sas_003_pitch_cells();
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();
