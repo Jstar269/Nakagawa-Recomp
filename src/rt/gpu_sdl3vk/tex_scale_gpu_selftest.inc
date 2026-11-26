@@ -2044,18 +2044,22 @@ static int xst_cell_dump_redump(int f) {
         goto done;
     }
 
-    /* 5. A level 1 at the level's size that another program saved (the dump's own bytes for lb with
-     * a tEXt chunk after IHDR, which decodes to the same pixels): kept byte for byte. */
+    /* 5. A level 1 at the level's size that another program saved (the dump's own bytes for lc with
+     * a tEXt chunk after IHDR, which decodes to the same pixels): kept byte for byte. lc's bytes are
+     * all below 144, each a fixed-Huffman literal of 8 bits, so the file stays within what the
+     * dump can write for the level (sr_png_encode_bound): the size alone does not keep it, only
+     * the check that its bytes are not the dump's. */
     free(mine);
     mine = NULL;
+    uint32_t lc[XST_MIP1_N];
+    for (int i = 0; i < XST_MIP1_N; i++) lc[i] = 0x40302010u + (uint32_t)(i & 0x0F) * 0x01010101u;
     {
         uint8_t *enc = NULL;
         size_t enc_n = 0;
-        static const unsigned char text[] = { 't', 'E', 'X', 't', 'S', 'o', 'f', 't', 'w', 'a', 'r', 'e', 0,
-                                              'P', 'a', 'i', 'n', 't' };
+        static const unsigned char text[] = { 't', 'E', 'X', 't', 'S', 'o', 'f', 't', 'w', 'a', 'r', 'e', 0, 'x' };
         const uint32_t text_len = (uint32_t)sizeof(text) - 4u;
         const size_t ihdr_end = 8u + 12u + 13u;
-        if (sr_png_encode_rgba(lb, XST_W / 2, XST_H / 2, &enc, &enc_n) && enc_n > ihdr_end &&
+        if (sr_png_encode_rgba(lc, XST_W / 2, XST_H / 2, &enc, &enc_n) && enc_n > ihdr_end &&
             (mine = (uint8_t *)malloc(enc_n + 12u + text_len)) != NULL) {
             const uint32_t crc = xst_crc32(text, sizeof(text));
             memcpy(mine, enc, ihdr_end);
@@ -2070,8 +2074,9 @@ static int xst_cell_dump_redump(int f) {
         }
         free(enc);
     }
-    if (!mine || !xst_png_is_level1(mine, mine_n, lb) || !xst_dump_write(dir, name1, mine, mine_n)) {
-        why = "the test could not make another program's level 1 image (it must decode to lb)";
+    if (!mine || !xst_png_is_level1(mine, mine_n, lc) || mine_n > sr_png_encode_bound(XST_W / 2, XST_H / 2) ||
+        !xst_dump_write(dir, name1, mine, mine_n)) {
+        why = "the test could not make another program's level 1 image (it must decode to lc, within the bound)";
         goto done;
     }
     written = s_dump.written;
