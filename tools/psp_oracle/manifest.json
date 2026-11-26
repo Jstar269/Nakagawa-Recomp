@@ -270,6 +270,9 @@
       "apis": ["sceKernelSysClock2USecWide", "sceCtrlGetSamplingMode", "sceKernelReferThreadProfiler", "sceKernelReferGlobalProfiler", "sceKernelCreateVTimer", "sceKernelGetVTimerTime", "sceKernelStartVTimer", "sceKernelStopVTimer", "sceKernelDeleteVTimer", "sceDisplaySetHoldMode", "sceDisplayWaitVblankStartMultiCB", "sceImposeGetBatteryIconStatus", "sceImposeSetUMDPopup"],
       "case_ids": ["sysclock-wide", "ctrl-sampling-mode", "thread-profiler", "global-profiler", "vtimer-basic", "display-basic", "impose-basic", "kernel-misc-done"],
       "case_apis": {
+        "sysclock-wide": [
+          {"call": "sceKernelSysClock2USecWide(clock, &usec_low, &usec_high)", "cell": "clock is 1234567890 microseconds with valid outputs. Returns 0 and writes 1234 seconds and 567890 remaining microseconds (public confirmation in PR #3078)"}
+        ],
         "display-basic": [
           {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0 from a user thread"},
           {"call": "sceDisplayWaitVblankStartMultiCB(1u)", "cell": "argument 1 from a user thread"}

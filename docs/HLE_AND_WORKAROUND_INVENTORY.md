@@ -1068,9 +1068,14 @@ Semantic handler census: **650** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_suspended_waiter_keeps_wait_semantics
   - Evidence: tests/native/sched_selftest.c:test_suspended_wait_still_completes
 - **`h_SysClock2USec`** (`sceKernel`): `sceKernelSysClock2USec` (0xba6b92e2)
-  - Limitation: uses the runtime's microsecond system-clock representation and splits it into low/high outputs; hardware conversion and error-precedence cells are not measured
+  - Limitation: PPSSPP-derived, not PSP-measured. Splits the unsigned 64-bit clock bit pattern into 32-bit seconds and remaining microseconds. Both output spans are required by the runtime safety policy. Null, alias, signed-input and error behavior on PSP remain unmeasured.
+  - Evidence: PPSSPP 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 Core/HLE/sceKernelTime.cpp sceKernelSysClock2USec, unsigned split with 32-bit outputs
+  - Evidence: tests/native/hle_thread_selftest.c:test_kernel_import_sweep_sysclock_conversion
 - **`h_SysClock2USecWide`** (`sceKernel`): `sceKernelSysClock2USecWide` (0xe1619d7c)
-  - Limitation: takes the 64-bit clock as the $a0/$a1 pair and writes its low/high words through $a2/$a3 on the same microsecond representation as h_SysClock2USec; invalid-output-pointer error code and hardware conversion are not measured
+  - Limitation: PSP-KERNEL-MISC-001 measures only by-value 1234567890 us with valid outputs. It returns 0 and writes seconds 1234 and remaining microseconds 567890. Other clock arithmetic is PPSSPP-derived, not PSP-measured. Required output spans and ordered alias writes are runtime policy. Null, alias, signed-input and error behavior on PSP remain unmeasured.
+  - Evidence: PSP-KERNEL-MISC-001 sysclock-wide, public confirmation in PR #3078: by-value 1234567890 us returned 0 and wrote 1234 and 567890 to valid outputs
+  - Evidence: PPSSPP 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 Core/HLE/sceKernelTime.cpp sceKernelSysClock2USecWide, unsigned arithmetic outside the measured value
+  - Evidence: tests/native/hle_thread_selftest.c:test_unregistered_batch_sysclock_wide
 - **`h_TerminateDeleteThread`** (`sceKernel`): `sceKernelTerminateDeleteThread` (0x383f7bcc)
   - Limitation: as sceKernelTerminateThread; the release of the thread's stack partition is not observed by any cell (#341)
   - Evidence: PSPAutotests tests/threads/threads/terminate.expected (sceKernelTerminateDeleteThread: created, ready, finished, suspended and waiting threads 0; 0 and the current thread 0x80020197; the id answers 0x80020198 afterwards)
