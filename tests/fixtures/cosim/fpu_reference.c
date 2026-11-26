@@ -28,8 +28,17 @@
  * (recorded on a PSP): under each of the four RM values the finite positive
  * results are the correctly rounded roots, and -1.0 and -inf give 0x7fc00000.
  *
- * Exact NaN payload propagation, signaling-NaN quieting, FS behavior for an
- * exact subnormal result, and COP1 exception/flag/enable behavior have no PSP
+ * PSPAutotests commit e37443a681c6a4d562f32b6b48e1f4e36cd69c97 (recorded on a
+ * PSP) gives the NaN words checked here. tests/cpu/fpu/fpu_nan.expected has
+ * 0x7fc00000 for Inf - Inf, Inf * 0, 0 / 0 and Inf / Inf under RM 0; the
+ * default NaN of an invalid operation is not rounded (IEEE 754-2008 clause
+ * 7.2), so every RM gets that word. roundmode.expected has, under each RM, the
+ * NaN-operand words of nan_operand_result() and 0x7fffffff for each conversion
+ * of a positive signaling NaN (its operand is 0x7f800001). Neither file sets
+ * FS, which gates only tiny results.
+ *
+ * A signaling NaN in ft, a negative signaling NaN, FS behavior for an exact
+ * subnormal result, and COP1 exception/flag/enable behavior have no PSP
  * measurement in that evidence. Such cases return EXPECTED_UNKNOWN for #312
  * and are excluded from pass/fail comparison rather than guessed.
  */
@@ -268,6 +277,20 @@ static int float_is_subnormal(uint32_t bits) {
 
 static int float_is_signaling_nan(uint32_t bits) {
     return float_is_nan(bits) && (bits & 0x00400000u) == 0u;
+}
+
+/* The first NaN operand with its quiet bit set, sign and payload kept: what
+ * roundmode.expected has for a quiet NaN of either sign or a positive
+ * signaling NaN in fs beside a number, and for a quiet NaN in ft beside a
+ * number or a quiet NaN. A unary operation passes a number as b_bits. */
+static uint32_t nan_operand_result(uint32_t a_bits, uint32_t b_bits,
+                                   enum FpuReferenceStatus *status) {
+    if (float_is_signaling_nan(b_bits) ||
+        (float_is_signaling_nan(a_bits) &&
+         ((a_bits >> 31) != 0u || float_is_nan(b_bits)))) {
+        ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
+    }
+    return (float_is_nan(a_bits) ? a_bits : b_bits) | 0x00400000u;
 }
 
 static int float_unpack_finite(uint32_t bits, RefFinite *value) {
@@ -537,7 +560,6 @@ static uint32_t binary_div(uint32_t a_bits, uint32_t b_bits, unsigned mode,
         return 0x7fc00000u;
     }
     if ((a_inf && b_inf) || (a_zero && b_zero)) {
-        ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
         return 0x7fc00000u;
     }
     if (a_inf) {
@@ -590,8 +612,7 @@ uint32_t fpu_reference_binary(unsigned op, uint32_t a_bits, uint32_t b_bits,
     const unsigned fs = (fcr31 & REF_FS) != 0u ? 1u : 0u;
     ref_status(status, COSIM_FPU_REFERENCE_OK);
     if (float_is_nan(a_bits) || float_is_nan(b_bits)) {
-        ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
-        return 0x7fc00000u;
+        return nan_operand_result(a_bits, b_bits, status);
     }
     switch (op) {
     case COSIM_FPU_REFERENCE_ADD:
@@ -600,7 +621,6 @@ uint32_t fpu_reference_binary(unsigned op, uint32_t a_bits, uint32_t b_bits,
         }
         if (float_is_inf(a_bits) && float_is_inf(b_bits) &&
             (a_bits >> 31) != (b_bits >> 31)) {
-            ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
             return 0x7fc00000u;
         }
         if (float_is_inf(a_bits)) {
@@ -616,7 +636,6 @@ uint32_t fpu_reference_binary(unsigned op, uint32_t a_bits, uint32_t b_bits,
         }
         if (float_is_inf(a_bits) && float_is_inf(b_bits) &&
             (a_bits >> 31) == (b_bits >> 31)) {
-            ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
             return 0x7fc00000u;
         }
         if (float_is_inf(a_bits)) {
@@ -640,8 +659,7 @@ static uint32_t unary_sqrt(uint32_t bits, unsigned mode, unsigned fs,
                            enum FpuReferenceStatus *status) {
     RefFinite value;
     if (float_is_nan(bits)) {
-        ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
-        return 0x7fc00000u;
+        return nan_operand_result(bits, 0u, status);
     }
     if (float_is_zero(bits)) {
         return bits;
@@ -675,7 +693,7 @@ uint32_t fpu_reference_unary(unsigned op, uint32_t a_bits, uint32_t fcr31,
     const unsigned mode = fcr31 & 3u;
     const unsigned fs = (fcr31 & REF_FS) != 0u ? 1u : 0u;
     ref_status(status, COSIM_FPU_REFERENCE_OK);
-    if (float_is_nan(a_bits)) {
+    if (float_is_nan(a_bits) && op != COSIM_FPU_REFERENCE_SQRT) {
         ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
     }
     switch (op) {
@@ -720,7 +738,7 @@ uint32_t fpu_reference_to_word(uint32_t bits, unsigned funct, uint32_t fcr31,
     uint32_t fraction_nonzero;
     uint32_t rounded;
     ref_status(status, COSIM_FPU_REFERENCE_OK);
-    if (float_is_signaling_nan(bits)) {
+    if (float_is_signaling_nan(bits) && (bits >> 31) != 0u) {
         ref_status(status, COSIM_FPU_REFERENCE_EXPECTED_UNKNOWN);
     }
     if (float_is_nan(bits)) {

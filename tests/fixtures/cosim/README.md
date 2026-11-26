@@ -364,7 +364,7 @@ There is no scalar FPU madd/msub implementation to claim: the similarly named
 instructions in the fixture are integer HI/LO `madd`/`msub`.
 
 The 38-value corpus is the Cartesian product of both operands, four FCR31 rounding
-modes and FS clear/set: 11,552 contexts and 901,056 exact result checks per run.
+modes and FS clear/set: 11,552 contexts and 912,608 exact result checks per run.
 It includes signed zero, both infinities, quiet/signaling NaNs, both subnormal
 edges, the inexact subnormal-to-minimum-normal tie, conversion limits,
 directed-rounding ties, maximum finite values and the repository's PSP rounding
@@ -379,6 +379,14 @@ guessed or counted as a pass. `sqrt.s` of a non-NaN operand is checked under all
 four rounding modes, a negative operand other than -0 giving `0x7fc00000`: the
 pspautotests `tests/cpu/fpu/roundmode.expected` words at `e37443a6`, recorded on a
 PSP, include `sqrt.s` under each mode (#3030).
+
+The NaN words in pspautotests `tests/cpu/fpu/fpu_nan.expected` and `roundmode.expected`
+at `e37443a6`, recorded on a PSP, are checked: `0x7fc00000` for an invalid `add.s`,
+`sub.s`, `mul.s` or `div.s` under every rounding mode; for those and `sqrt.s`, the
+first NaN operand with its quiet bit set, for a quiet NaN of either sign or a positive
+signaling NaN in `fs` and a quiet NaN in `ft`; and `0x7fffffff` from each conversion of
+a positive signaling NaN. A signaling NaN in `ft` and a negative signaling NaN stay
+`EXPECTED_UNKNOWN`.
 
 ### A constraint the fixture had to obey
 
@@ -429,9 +437,10 @@ and the default `build/` trees are left untouched.
 Mutating both sides matters. A differential proven against one lane is half
 proven, so one mutant restores the **generator** to its pre-fix
 computed-transfer emission order — the exact production defect this fixture was
-built to find — and `jrslot`/`jrtail` must both diverge. Four additional
+built to find — and `jrslot`/`jrtail` must both diverge. Further
 `fp-convert` mutants break nearest-even ties, positive conversion saturation,
-infinity-times-zero canonicalization and the unordered `C.cond` predicate.
+infinity-times-zero canonicalization, the invalid-operation NaN word, the choice of
+the first NaN operand and the unordered `C.cond` predicate.
 The branch-likely and Allegrex bit-operation cells carry their own interpreter
 mutants (an unannulled slot, an inverted `bc1` sense, an inverted `movn`, an
 off-by-one `ext` size, an `ins` that ORs instead of replacing, a `seb` that does not

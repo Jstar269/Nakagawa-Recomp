@@ -1935,6 +1935,16 @@ static int repeat_launch_child_mode(void) {
         if (fclose(events) != 0) ok = 0;
         if (!ok) return 6;
     }
+    const char *window_ready = getenv("NK_REPEAT_LAUNCH_BOOT_PHASE");
+    if (window_ready && *window_ready && boot_event_path && *boot_event_path) {
+        /* One boot event of the runtime's own form, such as window_ready or
+           first_frame (src/rt/gui.c). */
+        FILE *events = fopen(boot_event_path, "ab");
+        if (!events) return 6;
+        ok = fprintf(events, "BOOT_EVENT phase=%s source=cpu\n", window_ready) >= 0;
+        if (fclose(events) != 0) ok = 0;
+        if (!ok) return 6;
+    }
     if (stop_reason && strcmp(stop_reason, "hold-without-boot-event") == 0) {
         /* A child that runs but never reaches the runtime's first boot event
            (#1290): it writes none and stays alive until the player stops it.
@@ -2059,6 +2069,48 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
     assert(app->last_error.error_code[0] == '\0');
     assert(app->active_view != VIEW_ERROR);
 }
+
+/* #306: launch the repeat-launch child with `exit_code`, after it writes the
+ * BOOT_EVENT phase `boot_phase` (empty: none), let it exit, and settle the session
+ * 82 ms in, from no error and the Library. `hook` (may be NULL) runs between the
+ * monitor's live read of the session file and its exit check. */
+static void short_exit_run(PlayerApp *app, const char *exit_code, const char *boot_phase,
+                           int expected_code, uint64_t launch_tick,
+                           void (*hook)(PlayerApp *)) {
+    memset(&app->last_error, 0, sizeof(app->last_error));
+    app->active_view = VIEW_LIBRARY;
+    set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", exit_code);
+    set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", boot_phase);
+    assert(player_app_launch_game(app, 0));
+    assert(app->is_game_running);
+    app->launch_time_ms = launch_tick;
+    assert(nk_launch_wait(&app->launch_session, 10000) == expected_code);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+    g_player_state_test_after_live_read = hook;
+#else
+    assert(hook == NULL);
+#endif
+    assert(player_app_monitor_game_session(app, launch_tick + 82u));
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+    g_player_state_test_after_live_read = NULL;
+#endif
+    assert(!app->is_game_running);
+    assert_session_released(&app->launch_session);
+}
+
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+static void append_boot_event_to_session(PlayerApp *app, const char *line) {
+    assert(append_runtime_event(app->boot_event_file_path, line));
+}
+
+static void append_first_frame_after_live_read(PlayerApp *app) {
+    append_boot_event_to_session(app, "BOOT_EVENT phase=first_frame source=cpu\n");
+}
+
+static void append_window_ready_after_live_read(PlayerApp *app) {
+    append_boot_event_to_session(app, "BOOT_EVENT phase=window_ready backend=offscreen\n");
+}
+#endif /* NK_PLAYER_STATE_TEST_SEAMS */
 
 /* Rewrites the repeat-launch package with `source_record` as its runtime source
  * commit record (#2875), in package.json and in its build report; NULL writes a
@@ -10833,6 +10885,52 @@ static void test_play_mode_settings(void) {
         assert_cull_build_matches_line(app, 2);
         assert(!player_app_title_cull_problem(app, 2)[0]);
         assert(!app->games[0].enhancement_package_id[0]);             /* no package: authentic */
+        /* Both manifests accept IDs of this size. Their joined ID fits exactly. */
+        const char timing_id[] = "timing-0123456789012345678901234";
+        const char cull_id[] = "cull-01234567890123456789012345";
+        char timing_file[820], declaration[256], joined[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+        snprintf(timing_file, sizeof(timing_file), "%s%cenhancements%ctest90003-60hz.json",
+                 root, sep, sep);
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s\",\"target_title_id\":\"fixture-title\"}", timing_id);
+        write_text_file(timing_file, declaration);
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s\",\"target_title_id\":\"fixture-title\","
+                 "\"category\":\"guest_memory_code_hook\"}", cull_id);
+        write_text_file(cull_file, declaration);
+        player_app_refresh_title_enhancements(app);
+        assert(snprintf(joined, sizeof(joined), "%s+%s", timing_id, cull_id) == 64);
+        const GameRecord *game = &app->games[2];
+        assert(strcmp(game->enhancement_package_id, joined) == 0 && !game->enhancement_hook_only);
+        player_app_runtime_package_cache_mark_pending(app, 2);
+        assert(player_app_runtime_package_check_pending(app, game));
+        GameRecord combined_game = *game;
+        player_app_runtime_package_cache_store(app, 2, &combined_game, true, "prior-identity",
+                                               NK_RUNTIME_PACKAGE_OK, true, 100);
+        assert(player_app_cached_game_has_runtime(app, game));
+        player_app_runtime_package_worker_start_failed_record(app, game, 100);
+        assert(player_app_runtime_package_worker_start_failed(app, game));
+
+        /* A single extra byte falls back to the timing build and misses the old key. */
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s6\",\"target_title_id\":\"fixture-title\","
+                 "\"category\":\"guest_memory_code_hook\"}", cull_id);
+        write_text_file(cull_file, declaration);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[2].cull_available);
+        assert(strstr(player_app_title_cull_problem(app, 2), "too long together") != NULL);
+        assert(strcmp(game->enhancement_package_id, timing_id) == 0 && !game->enhancement_hook_only);
+        assert(!player_app_cached_game_has_runtime(app, game));
+        assert(!player_app_runtime_package_worker_start_failed(app, game));
+        player_app_runtime_package_cache_mark_explicit_retry(app, 2);
+        const PlayerRuntimePackageCacheEntry *cache = &app->runtime_package_cache[2];
+        assert(player_runtime_package_cache_entry_is_for(cache, game));
+        assert(cache->explicit_retry_pending && !cache->status_valid && !cache->identity_valid);
+        assert(!player_runtime_package_cache_entry_is_for(cache, &combined_game));
+        player_app_runtime_package_worker_start_failed_clear(app, &combined_game);
+        player_app_runtime_package_cache_invalidate(app);
+        write_text_file(timing_file,
+                        "{\"id\":\"fixture-60hz\",\"target_title_id\":\"fixture-title\"}");
         /* A culling package that cannot ride: not a code-hook package, another game's, the
            timing package's own id, or one whose joined name is too long. The timing build
            stays, and the reason is kept. */
@@ -21211,6 +21309,41 @@ int main(int argc, char **argv) {
         set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
         repeat_launch_and_settle(rep, 0, 6000, 6500, memstick1);
 
+        /* #306: inside 500 ms a clean exit 0 is a short successful run only after
+           the runtime's first frame. window_ready alone (written before guest code
+           runs), no report, and a non-zero exit all stay RUNTIME_PREMATURE_EXIT.
+           Every case starts from no error and the Library, so none can pass on
+           what an earlier case left behind. */
+        short_exit_run(rep, "0", "first_frame", 0, 7000u, NULL);
+        assert(rep->last_error.error_code[0] == '\0');
+        assert(rep->active_view != VIEW_ERROR);
+        assert(!rep->child_first_frame);
+        /* Right after the success above, so a flag left by it would show here. */
+        short_exit_run(rep, "0", "", 0, 7200u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+        short_exit_run(rep, "0", "window_ready", 0, 7400u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+        short_exit_run(rep, "7", "first_frame", 7, 7600u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+        /* The child writes nothing; the first frame lands in the session file
+           between the tick's live read and its exit check, so only the final
+           drain can see it. */
+        short_exit_run(rep, "0", "", 0, 7800u, append_first_frame_after_live_read);
+        assert(rep->last_error.error_code[0] == '\0');
+        assert(rep->active_view != VIEW_ERROR);
+        /* The same seam appending only window_ready is still a premature exit. */
+        short_exit_run(rep, "0", "", 0, 8000u, append_window_ready_after_live_read);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+#endif /* NK_PLAYER_STATE_TEST_SEAMS */
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+        set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", "");
+        memset(&rep->last_error, 0, sizeof(rep->last_error));
+        rep->active_view = VIEW_LIBRARY;
+
         /* #2998: Copy details for a run that started and exited early names the package
            that run validated and spawned, never the library's current status for the
            title: package B with an empty status, B with package A's status still stored,
@@ -22651,7 +22784,7 @@ int main(int argc, char **argv) {
         snprintf(cache_state->games[0].title_id,
                  sizeof(cache_state->games[0].title_id), "cache-title-a");
         snprintf(cache_state->games[0].selected_executable,
-                 sizeof(cache_state->games[0].selected_executable), "EBOOT.BIN");
+                 sizeof(cache_state->games[0].selected_executable), "MAXLENGTH15.BIN");
         GameRecord cache_game = cache_state->games[0];
 
         player_app_runtime_package_cache_mark_pending(cache_state, 0);

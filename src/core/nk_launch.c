@@ -554,10 +554,9 @@ static bool find_candidate_executable(
                 if (rel[k] == '/') rel[k] = sep;
             }
             int w = snprintf(cand, sizeof(cand), "%s%c%s", root, sep, rel);
-            if (w > 0 && (size_t)w < sizeof(cand) &&
-                nk_platform_file_exists(cand)) {
-                if ((size_t)w >= max_len) return false;
-                snprintf(out_path, max_len, "%s", cand);
+            if (w <= 0 || (size_t)w >= sizeof(cand) || (size_t)w >= max_len) continue;
+            if (nk_platform_file_exists(cand)) {
+                memcpy(out_path, cand, (size_t)w + 1u);
                 return true;
             }
         }
