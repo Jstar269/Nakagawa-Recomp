@@ -2338,6 +2338,9 @@ bool player_app_should_attempt_window_handoff(bool interactive_window,
 void player_app_next_boot_event_path(char *out, size_t out_size);
 
 /* Process launch integration */
+/* Select the runtime for this launch without changing the library or its saved play mode. */
+void player_app_select_launch_game(const PlayerApp *app, const GameRecord *game,
+                                   GameRecord *launch_game);
 bool player_app_launch_game(PlayerApp *app, int game_index);
 void player_app_stop_game(PlayerApp *app);
 void player_app_stop_stalled_game(PlayerApp *app);
