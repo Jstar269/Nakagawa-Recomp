@@ -28777,16 +28777,29 @@ static void test_lwmutex_waiter_order(void) {
 }
 
 /* ---- DeleteLwMutex lets a stronger waiter it releases run before it returns ---------
- * pspautotests tests/threads/lwmutex/delete.expected "Delete same: A1B1C2D1E2F1
- * (thread=800201B5, main=00000000)" (2ed7c9c5, recorded on a PSP; waiter 0x12, caller
- * 0x20): when DeleteLwMutex releases a waiter of higher priority than the caller, the
- * waiter runs (D) with WAIT_DELETE before the caller's call returns 0 (E). An equal or
- * weaker waiter is readied but does not run before the call returns: the PSP record does
- * not cover that case; it is the scheduler's strict-priority rule (sched_preempt), as for
- * DeleteMutex (#3145). PPSSPP-derived, not PSP-measured.
+ * Higher-priority cell: PSP-recorded. pspautotests tests/threads/lwmutex/delete.expected
+ * "Delete same: A1B1C2D1E2F1 (thread=800201B5, main=00000000)" (2ed7c9c5, recorded on a
+ * PSP; waiter 0x12, caller 0x20): when DeleteLwMutex releases a waiter of higher priority
+ * than the caller, the waiter runs (D) with WAIT_DELETE before the caller's call returns 0
+ * (E). The recorded waiter blocks in sceKernelLockLwMutexCB with a 1 us timeout, retried in
+ * a loop (tests/threads/lwmutex/shared.h scheduleTestFunc); this test's waiter uses an
+ * untimed sceKernelLockLwMutex. The record supports the order (waiter before the delete
+ * returns) and the WAIT_DELETE result; "D1" shows no timeout retry ran between C and the
+ * delete, so the timeout plays no part in that order. It does not cover the timeout or
+ * callback handling of a deleted wait.
+ * Equal- and lower-priority cells: the runtime's strict-priority rule in sched_preempt
+ * (the waiter is readied but does not run before the call returns), not PSP-measured for
+ * this call; PPSSPP 38d92884 sceKernelDeleteLwMutex (hleReSchedule) agrees. Same rule as
+ * DeleteMutex (#3145).
+ * Order inside the call: the workarea is poisoned (level 0, owner and uid 0xFFFFFFFF)
+ * before the reschedule, so the released waiter already sees a deleted workarea when it
+ * runs; PPSSPP clears the workarea before hleReSchedule as well. The PSP order a waiter
+ * observes is not measured.
  * MUTANT: drop the scheduling point in h_DeleteLwMutex -- the higher-priority waiter has
  * not run when the call returns. MUTANT: reschedule before the waiters are woken -- the
- * waiter is not ready yet, so it does not run inside the call either. */
+ * waiter is not ready yet, so it does not run inside the call either. MUTANT: reschedule
+ * before the workarea is poisoned -- the waiter runs while the workarea still names the
+ * caller as owner and the live uid. */
 static void test_lwmutex_delete_schedules_released_waiter(int waiter_priority) {
     const uint32_t wa = B1_LW_WORKAREA;
     const char *rank = waiter_priority < 32 ? "higher" : waiter_priority == 32 ? "equal" : "lower";
@@ -28809,6 +28822,9 @@ static void test_lwmutex_delete_schedules_released_waiter(int waiter_priority) {
     if (waiter_priority < 32) {
         expect(!cd.returned && !cw.returned && w->state == TH_READY,
                "DeleteLwMutex yields to the higher-priority waiter it releases before returning");
+        expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0xffffffffu
+               && MEM_R32(wa + 16u) == 0xffffffffu,
+               "DeleteLwMutex poisons the workarea before the released waiter runs");
     } else {
         snprintf(msg, sizeof msg,
                  "DeleteLwMutex returns 0 before the %s-priority waiter it releases runs", rank);
