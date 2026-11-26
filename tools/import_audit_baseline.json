@@ -1768,7 +1768,7 @@
     "classification": "dedicated",
     "handler": "h_IoIoctl",
     "name": "sceIoIoctl",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x63f2889c": {
     "classification": "dedicated",
@@ -1834,7 +1834,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogShutdown",
     "name": "sceUtilityMsgDialogShutdownStart",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x67f17ed7": {
     "classification": "dedicated",
@@ -2142,7 +2142,7 @@
     "classification": "dedicated",
     "handler": "h_DcacheWritebackAll",
     "name": "sceKernelDcacheWritebackAll",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x7a20e7af": {
     "classification": "dedicated",
@@ -2389,7 +2389,7 @@
     "classification": "dedicated",
     "handler": "h_DlgGetStatus",
     "name": "sceUtilitySavedataGetStatus",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x8916c003": {
     "classification": "dedicated",
@@ -2553,7 +2553,7 @@
     "classification": "dedicated",
     "handler": "h_WlanOn",
     "name": "sceWlanDevIsPowerOn",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x93ef3843": {
     "classification": "dedicated",
@@ -2589,7 +2589,7 @@
     "classification": "dedicated",
     "handler": "h_MsgDialogUpdate",
     "name": "sceUtilityMsgDialogUpdate",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x95fd0c2d": {
     "classification": "dedicated",
@@ -2607,7 +2607,7 @@
     "classification": "dedicated",
     "handler": "h_DlgShutdown",
     "name": "sceUtilitySavedataShutdownStart",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x980f4895": {
     "classification": "dedicated",
@@ -3581,7 +3581,7 @@
     "classification": "dedicated",
     "handler": "h_SavedataUpdate",
     "name": "sceUtilitySavedataUpdate",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xd59ead2f": {
     "classification": "dedicated",
@@ -3635,7 +3635,7 @@
     "classification": "dedicated",
     "handler": "h_WlanOn",
     "name": "sceWlanGetSwitchState",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xd7a29f46": {
     "classification": "dedicated",
@@ -4270,7 +4270,7 @@
     "classification": "dedicated",
     "handler": "h_GetTlsAddr",
     "name": "sceKernelGetTlsAddr",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xfa8a5739": {
     "classification": "dedicated",
