@@ -415,6 +415,19 @@ MUTANTS: tuple[Mutant, ...] = (
         )],
         target="generator",
     ),
+    # A branch onto the delay slot of a call whose link is another entry (#3128): the
+    # labelled copy of the slot loses the continuation into that entry, so the body
+    # returns to its caller after it. Cell `cslot_call` must diverge.
+    Mutant(
+        "codegen-walk-labelled-slot-loses-entry",
+        "GENERATOR: a branch onto a call's delay slot before another entry returns instead of entering it",
+        [(
+            "        elif pc in seen and continuations.get(pc - 4) == pc + 4:\n",
+            "        elif False and pc in seen and continuations.get(pc - 4) == pc + 4:\n",
+            1,
+        )],
+        target="generator",
+    ),
     # The body walk's straight-line ends (#1730). Each kill is a guest-visible
     # divergence in a cell, never a build failure.
     Mutant(
@@ -585,6 +598,20 @@ MUTANTS: tuple[Mutant, ...] = (
             "    _emit_slot_exit(ctx, out, addr, \"slot already ran inline (or was annulled)\")\n",
             "    if addr in ctx.dup_slot_skips:\n"
             "        out.append(f\"    goto L_{ctx.dup_slot_skips[addr]:08x}; /* slot already ran inline (or was annulled); skip its labelled duplicate */\")\n",
+            1,
+        )],
+        target="split-generator",
+    ),
+    Mutant(
+        # The call form keeps its continuation, so `cslot_call` still passes and the kill
+        # is `cslot_branch`, whose conditional stops at the next entry only when split.
+        "split-labelled-branch-slot-loses-entry",
+        "SPLIT GENERATOR: a branch onto a conditional branch's delay slot before another entry "
+        "does not continue into it",
+        [(
+            "        elif pc in seen and continuations.get(pc - 4) == pc + 4:\n",
+            "        elif (pc in seen and continuations.get(pc - 4) == pc + 4\n"
+            "              and ((read32(elf, pc - 4) or 0) >> 26) == 3):\n",
             1,
         )],
         target="split-generator",

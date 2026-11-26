@@ -368,6 +368,9 @@ class FixtureLayoutTests(unittest.TestCase):
           xing_fall_a, xing_fall_b
                     end by falling into the next cell, another entry: the
                     entry crossing is what they test (FALL_INTO_CELLS).
+          cslot_call, cslot_branch
+                    end in a delay slot that a branch lands on, and fall into
+                    the next cell from it (#3128).
 
         Anything else without a defined exit has no synchronization point in
         either lane.
@@ -571,6 +574,29 @@ class FixtureSemanticTests(unittest.TestCase):
             self.assertIn(slot >> 26, (0x0D, 0x2B, 0x11),
                           "the delay slot must have an observable register, memory, or FPU effect")
         self.assertEqual(counts, {name: 2 for name in counts})
+
+    def test_labelled_slot_cells_end_in_a_branched_to_delay_slot_before_an_entry(self):
+        """The shape #3128 needs, or the cells compare ordinary straight-line code.
+
+        The last word of each cell is the delay slot of a transfer that can fall through
+        (`jal`; a conditional branch), a taken branch earlier in the cell lands on it, and
+        the next cell, an entry, starts right after it.
+        """
+        for name, transfer_ops in (("cslot_call", (0x03,)), ("cslot_branch", (0x04, 0x05))):
+            with self.subTest(cell=name):
+                offset, words = self.layout[name]
+                slot = len(words) - 1
+                following = cosim.FALL_INTO_CELLS[name]
+                self.assertEqual(self.layout[following][0], offset + 4 * len(words))
+                self.assertNotIn(following, cosim.UNDISCOVERED_CELLS)
+                self.assertIn(words[slot - 1] >> 26, transfer_ops,
+                              "the word before the last must be the slot's transfer")
+                landing = [index for index in range(slot - 1)
+                           if (words[index] >> 26) in (0x04, 0x05)
+                           and branch_target_index(index, words[index]) == slot]
+                self.assertEqual(len(landing), 1, "one earlier branch must land on the slot")
+                self.assertEqual(words[slot] >> 26, 0x09, "the slot must be an addiu")
+                self.assertEqual((words[slot] >> 16) & 0x1F, cosim.V0)
 
     def test_integer_branch_likely_cell_has_no_cop1_code(self):
         # The COP1-free copy of the integer cases: a backend that keeps COP1 code in

@@ -754,7 +754,10 @@ emitter, the stale-code records, the LLVM backend's lowering plan) gets the same
 the LLVM backend lowers a crossing as the same TAIL transfer. Bodies within the threshold are
 byte-identical to the unsplit output. `mingw32-make cosim-selftest-split` runs the cosimulation
 with every body split (`xing_*` cells), and the split-generator mutants show it catches a crossing
-that drops or misplaces its delay slot, ignores its condition or loses its fall-through.
+that drops or misplaces its delay slot, ignores its condition or loses its fall-through. A branch
+may land on the delay slot of a call, or of a split body's conditional branch, whose next word is
+another entry: on that path the slot is an ordinary instruction and the body takes the same
+continuation into that entry after it (#3128; `cslot_call` in both lanes, `cslot_branch` when split).
 
 Some paths still nest:
 
