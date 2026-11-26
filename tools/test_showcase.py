@@ -698,7 +698,8 @@ def _link_probe(directory: Path, name: str, *flags: str) -> Path:
     return target
 
 
-@unittest.skipUnless(ON_LINUX and HAS_GCC, "ELF run paths are a Linux link-time property")
+@unittest.skipUnless(ON_LINUX, "ELF run paths are a Linux link-time property")
+@unittest.skipUnless(HAS_GCC, "TOOLCHAIN_MISSING: no gcc on PATH to link the run-path fixtures")
 class LinuxRunPathAuditTests(unittest.TestCase):
     """The audit that keeps a shipped Linux executable from naming the builder's folders (#306)."""
 
@@ -786,7 +787,8 @@ def _sdl_probe(directory: Path, name: str, *flags: str) -> Path:
     return target
 
 
-@unittest.skipUnless(ON_LINUX and HAS_GCC, "ELF run paths are a Linux link-time property")
+@unittest.skipUnless(ON_LINUX, "ELF run paths are a Linux link-time property")
+@unittest.skipUnless(HAS_GCC, "TOOLCHAIN_MISSING: no gcc on PATH to link the run-path fixtures")
 class LinuxRequiredRunPathTests(unittest.TestCase):
     """A demo executable must search the player's folder for SDL3, not merely be well formed.
 
@@ -857,7 +859,8 @@ def _arm64_library(directory: Path, name: str, *flags: str) -> Path:
     return target
 
 
-@unittest.skipUnless(ON_LINUX and HAS_GCC, "ELF run paths are a Linux link-time property")
+@unittest.skipUnless(ON_LINUX, "ELF run paths are a Linux link-time property")
+@unittest.skipUnless(HAS_GCC, "TOOLCHAIN_MISSING: no gcc on PATH to link the run-path fixtures")
 class AndroidDemoAuditTests(unittest.TestCase):
     """The audit refuses a Linux demo without its run path but not a correct Android package (#360)."""
 
@@ -1178,8 +1181,9 @@ class ShowcaseRuntimeOnlyPackageTests(unittest.TestCase):
             self.assertEqual(outside.read_bytes(), b"keep")
 
 
-@unittest.skipUnless(ON_LINUX and shutil.which("gcc") and _has_system_sdl3(),
-                     "needs Linux, gcc and a system SDL3")
+@unittest.skipUnless(ON_LINUX, "the relocation check runs a Linux install")
+@unittest.skipUnless(_has_system_sdl3(), "needs a system SDL3")
+@unittest.skipUnless(HAS_GCC, "TOOLCHAIN_MISSING: no gcc on PATH to build the showcase")
 class ShowcaseRelocationTests(unittest.TestCase):
     """The real showcase packages, built in one folder and used from another (#306).
 
