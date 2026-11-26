@@ -756,9 +756,10 @@ def canonical_cfg_state(image, ranges=None, entries=None):
         state.edge_details.append(-1 if detail is None else _CFG_DETAIL_IDS[detail])
         edge_counts[source_index] += 1
 
-    # Words a direct jump, call or branch lands on. Landing on a delay slot runs it as an
-    # ordinary instruction, and execution continues at the word after it.
-    landed = set()
+    # Words a direct jump, call or branch lands on, and the entries (dispatch lands on an
+    # entry however it is reached: a pointer, an export, a computed call). Landing on a delay
+    # slot runs it as an ordinary instruction, and execution continues at the word after it.
+    landed = set(entry_set)
     for address, word in zip(state.addresses, state.words, strict=True):
         if word >> 26 in (2, 3):
             landed.add(((address + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2))

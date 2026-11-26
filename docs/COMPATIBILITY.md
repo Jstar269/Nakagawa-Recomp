@@ -137,6 +137,32 @@ Hot Shots Tennis runs with 0 title-specific compatibility patches today, as `pyt
 
 That does not mean the profile names no title address. It still lists three entry roles for the analyzer (`HST_ENTRY_ROLES` in `tools/compat_overrides.py`), down from nine: each marks an address inside a function as a point the game can resume at and names the function that owns it, and the code there is translated from the game's own instructions. The other six marked small functions that the game reaches only through a pointer as callable. They are gone because the analyzer finds such a function from the game's code on its own; a private analysis of the title with the nine roles turned off found all six that way and none of the three resume points, so those three stay until there is evidence about whether the game reaches them while it runs. That list and the rest of the retirement work are tracked in [#363](https://github.com/Jstar269/nakagawa-recomp/issues/363). This is the live count; the release notes keep the count each release shipped with.
 
+## Release performance baselines
+
+Starting with v0.1.0, this section holds the frame rates and frame delivery times measured on
+each release candidate. The [first candidate measurements](https://github.com/Jstar269/Nakagawa-Recomp/issues/2750)
+are pending.
+
+| Game | Timed gameplay window |
+| --- | --- |
+| Hot Shots Tennis: Get a Grip (USA) | From the first controllable serve of a fixed exhibition to the settled score after the third point. |
+| LittleBigPlanet (USA, disc version 2.00) | From first control in Walkabout to its level-completion scoreboard. |
+
+Record Authentic and each Ace timing package under test separately. Each result identifies the
+release and commit, disc revision, route, mode and timing package, CPU, GPU, OS and driver,
+display refresh rate, resolution, VSync and other presentation settings. Include host load,
+cache condition and the number of accepted runs.
+
+Report game FPS as measured by [framebuffer flips](DEBUGGING.md#sr_perf-subsystem-attribution).
+The counter counts the first guest framebuffer presented and each later present with a changed
+guest framebuffer address. A repeated address adds no flip, so draws that reuse one buffer can
+go uncounted. For each run, divide the number of flips in the window by the wall-clock seconds
+between its guarded start and end. Include the start and exclude the end. Use only intervals
+between successive flips with both endpoints inside the window. Report the range of per-run FPS
+and each run's median and 95th-percentile interval in milliseconds. For the median, average the
+middle pair when the count is even. For p95, sort the intervals and use rank
+`ceil(0.95 × count)`, starting at one.
+
 ## Whole library
 
 The maintainer builds a whole library of their own discs with `tools/library_build.py` (see

@@ -77,12 +77,17 @@ static SDL_Renderer *paint_make_renderer(SDL_Surface *surface) {
 /* SDL refused a surface or renderer after the probe passed, so the keyboard cannot be drawn on
  * this host any more. Fail closed: one stderr line names the SDL error, the painter reports
  * itself unavailable and the presenter's host goes with it, and the open request is dropped.
- * The next poll then answers through the native input path (osk_text_entry.c), and the title's
- * pad is no longer masked by a keyboard nobody can see. Called before anything is drawn, so the
- * caller's frame is untouched and it must not read the session after this returns. */
+ * The next poll uses the native input path on Windows. Other desktops report that the live
+ * keyboard is unavailable. The caller's frame is untouched and it must not read the session
+ * after this returns. */
 static void paint_fail_closed(const char *what) {
-    fprintf(stderr, "osk: the in-window keyboard cannot be drawn (%s: %s); the field falls back "
-                    "to the native input path\n", what, SDL_GetError());
+#ifdef _WIN32
+    const char *next = "the field falls back to the native input path";
+#else
+    const char *next = "the live keyboard is unavailable";
+#endif
+    fprintf(stderr, "osk: the in-window keyboard cannot be drawn (%s: %s); %s\n",
+            what, SDL_GetError(), next);
     s_probe = 0;
     sr_osk_overlay_set_host(0);
     sr_osk_overlay_abandon();

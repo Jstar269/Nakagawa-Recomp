@@ -4,8 +4,8 @@
 /* Round-trip harness for the deterministic PGF writer (issue #313).
  *
  * Opens one generated font through the public reader ABI and prints every guest
- * record and every drawn sample, so tools/test_pgf_writer.py can compare the
- * reader's answers bit-exactly with the glyph set the writer was given.  This
+ * record and every format-2 pixel, so tools/test_pgf_writer.py can check
+ * the 8-bit coverage of the 4-bit samples given to the writer. This
  * harness reads only the generated file named on its command line; it never
  * reads a font, a title, or any private input. */
 
@@ -122,7 +122,8 @@ static void helper_probe(const PGF *pgf, int code) {
         return;
     }
     buffer = helper_guest(HELPER_BUFFER_ADDR);
-    memset(buffer, 0xff, pixels);
+    /* No valid expanded nibble equals this byte, so any unwritten pixel is visible. */
+    memset(buffer, 0x5a, pixels);
     helper_set_image(2u, width, height, width, HELPER_BUFFER_ADDR);
     drawn = pgf_draw_glyph(pgf, code, 0, HELPER_IMAGE_ADDR);
     if (!drawn) {

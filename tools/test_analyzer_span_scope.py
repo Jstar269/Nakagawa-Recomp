@@ -2521,7 +2521,7 @@ class CalledPointerArrays(unittest.TestCase):
     at a prologue is still no function.
     """
 
-    def build(self, walker, *, wrapper=False, table_extra=()):
+    def build(self, walker, *, wrapper=False, table_extra=(), slot_base=None):
         base = 0x08804000
         start_at = base
         start_len = 10 * 4
@@ -2544,6 +2544,13 @@ class CalledPointerArrays(unittest.TestCase):
             _addiu(4, 4, table_at), _jal(callee), _addiu(5, 5, table_end),
             0x8FBF000C, 0x03E00008, 0x27BD0010,                      # restore, return
         )
+        if slot_base is not None:
+            start = (
+                0x27BDFFF0, 0xAFBF000C,
+                _lui(slot_base, (table_at + 0x8000) >> 16), _lui(5, (table_end + 0x8000) >> 16),
+                _addiu(5, 5, table_end), _jal(callee), _addiu(4, slot_base, table_at),
+                0x8FBF000C, 0x03E00008, 0x27BD0010,
+            )
         if wrapper:  # passes its own a0 and a1 on through stack slots
             wrapper_words = (
                 0x27BDFFB0, 0xAFBF000C, 0xAFA40010, 0xAFA50020, 0x8FA40010, 0x8FA50020,
@@ -2581,6 +2588,18 @@ class CalledPointerArrays(unittest.TestCase):
     def test_an_array_passed_to_a_walker_seeds_its_words_in_data(self):
         elf, layout = self.build(OPTIMISED_WALKER)
         self.assertEqual(analyze.file_backed_exec_ranges(elf), [(0x08804000, layout["data"])])
+        self.assert_constructor_owned(elf, layout)
+
+    def test_jal_slot_does_not_seed_an_array_from_the_old_ra(self):
+        # $ra now holds the link rather than the LUI result. The real slot's
+        # a0 exceeds a1, so this call cannot walk the table in .data.
+        elf, layout = self.build(OPTIMISED_WALKER, slot_base=31)
+        entries, owned = self.analyze(elf)
+        self.assertNotIn(layout["ctor"], entries)
+        self.assertNotIn(layout["helper"], entries)
+        self.assertFalse(analyze.in_ranges(layout["ctor"], owned))
+
+        elf, layout = self.build(OPTIMISED_WALKER, slot_base=16)
         self.assert_constructor_owned(elf, layout)
 
     def test_an_unoptimised_walker_behind_a_forwarding_wrapper_is_still_a_walker(self):

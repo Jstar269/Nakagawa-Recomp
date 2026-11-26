@@ -1208,6 +1208,23 @@ static int run_case(const CosimCase *test, const char *trace_dir) {
                                  &failed);
             }
         }
+    } else if (strcmp(test->name, "muldiv") == 0) {
+        /* The two lanes share no division code, but both could carry the same wrong value.
+         * The zero-divisor and INT_MIN / -1 rows are PSP-measured (pspautotests
+         * tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7; #3031). */
+        static const struct { unsigned reg; uint32_t value; const char *name; } expected[] = {
+            {10u, 0xfffffffdu, "div -7 / 2 lo"}, {11u, 0xffffffffu, "div -7 / 2 hi"},
+            {12u, 0x00000001u, "div -7 / 0 lo"}, {13u, 0xfffffff9u, "div -7 / 0 hi"},
+            {14u, 0x7ffffffcu, "divu 0xfffffff9 / 2 lo"}, {15u, 0x0000ffffu, "divu 2 / 0 lo"},
+            {5u, 0x80000000u, "div INT_MIN / -1 lo"}, {2u, 0x00000000u, "div INT_MIN / -1 hi"},
+        };
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned li = 0u; li < 2u; li++) {
+            for (unsigned i = 0u; i < sizeof expected / sizeof expected[0]; i++) {
+                expect_lane_word(test, lanes[li], expected[i].name,
+                                 lanes[li]->state.r[expected[i].reg], expected[i].value, &failed);
+            }
+        }
     } else if (strcmp(test->name, "bitops") == 0) {
         static const struct { unsigned reg; uint32_t value; const char *name; } expected[] = {
             {22u, 0x89abcdefu, "ext full word"}, {23u, 1u, "ext bit 31"},

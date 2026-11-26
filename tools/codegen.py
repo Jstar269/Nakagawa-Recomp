@@ -2254,8 +2254,11 @@ def _effect_sync(addr, w, options, delay_branch_pc):
 
 
 def _effect_div(addr, w, options, delay_branch_pc):
+    # INT_MIN / -1 and a zero divisor are tested before C's / and %, which are undefined for
+    # both. The PSP leaves LO 0x80000000 and HI 0 for the overflow (pspautotests
+    # tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7, recorded on a PSP; #3031).
     a, b = rs(w), rt(w)
-    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0xFFFFFFFFu;} "
+    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0u;} "
             "else if (_b!=0){s->lo=(uint32_t)(_a/_b);s->hi=(uint32_t)(_a%%_b);} else {s->lo=_a<0?1u:0xFFFFFFFFu;s->hi=(uint32_t)_a;} }") % (R(a), R(b)), None, 0
 
 
@@ -3293,8 +3296,11 @@ def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
     si = vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     cond = w & 0xF
+    # Each lane result must be 0 or 1 before it is shifted into CC: glibc's isinf() returns -1
+    # for -inf, which set every bit above the lane (pspautotests e37443a6
+    # tests/cpu/vfpu/specials.expected, recorded on a PSP, reads EI 0x1c for (NaN, -NaN, inf, -inf)).
     _C = {0: "0", 1: "_x==_y", 2: "_x<_y", 3: "_x<=_y", 4: "1", 5: "_x!=_y",
-          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "isnan(_x)", 10: "isinf(_x)",
+          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "(isnan(_x)!=0)", 10: "(isinf(_x)!=0)",
           11: "(isnan(_x)||isinf(_x))", 12: "_x!=0.0f", 13: "!isnan(_x)",
           14: "!isinf(_x)", 15: "!(isnan(_x)||isinf(_x))"}[cond]
     body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
@@ -3992,6 +3998,14 @@ def _walk_body(elf, start, ranges, known, resume_owners, dispatch_boundaries,
             # syscall there still ends the line), so the body is the same in either order.
             terminator_slots.discard(pc)
             seen.discard(pc)
+        elif pc in seen and continuations.get(pc - 4) == pc + 4:
+            # A label on the delay slot of a transfer whose fall-through stopped at another
+            # entry (jal, a linked call, a split conditional branch). The transfer marked the
+            # slot seen without walking it, so the labelled copy takes the same continuation
+            # edge: after the slot, control goes on into that entry, not into whatever block
+            # the address order puts next.
+            stop_at_continuation(pc, pc + 4)
+            continue
         while in_ranges(pc, ranges) and pc not in seen:
             seen.add(pc)
             insns.add(pc)
@@ -4536,6 +4550,10 @@ def sv_points(elf, insns, labels, hst_profile=False, options=None):
         return {}
     if ENHANCEMENT_ACE_SITES and (insns & set(ENHANCEMENT_ACE_SITES.keys())):
         return {}
+    # A labelled delay slot's copy is skipped by its transfer's fall-through, which enters
+    # the next word with the slot run inline, annulled or followed by a call: a join, as a
+    # label is (the emitter's planned skip targets).
+    labels = set(labels) | set(_dup_slot_skips(elf, insns, labels).values())
     points, total = {}, 0
     regs: list[int | None] = [None] * 32
     regs[0] = 0

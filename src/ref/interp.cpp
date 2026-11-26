@@ -277,9 +277,12 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 					uint64_t prod = (uint64_t)s->r[Rs(op)] * (uint64_t)s->r[Rt(op)];
 					s->lo = (uint32_t)prod; s->hi = (uint32_t)(prod >> 32); return StopReason::kRunning;
 				}
-				case 0x1A: {  // div (semantics match PPSSPP Int_MulDivType exactly)
+				case 0x1A: {  // div
+					// INT_MIN / -1 and a zero divisor are tested before / and %, which are undefined
+					// for both. HI is 0 for the overflow on the PSP (pspautotests
+					// tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7, #3031).
 					int32_t a = (int32_t)s->r[Rs(op)], b = (int32_t)s->r[Rt(op)];
-					if (a == (int32_t)0x80000000 && b == -1) { s->lo = 0x80000000; s->hi = 0xFFFFFFFF; }
+					if (a == (int32_t)0x80000000 && b == -1) { s->lo = 0x80000000; s->hi = 0; }
 					else if (b != 0) { s->lo = (uint32_t)(a / b); s->hi = (uint32_t)(a % b); }
 					else { s->lo = a < 0 ? 1u : 0xFFFFFFFFu; s->hi = (uint32_t)a; }
 					return StopReason::kRunning;
