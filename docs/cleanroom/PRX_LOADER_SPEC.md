@@ -254,7 +254,7 @@ firmware's [C3]. A HI16 run that reaches the end of the table with no partner fa
 2. Records are walked by their length field until the table end; a zero length or a
    record crossing the end fails.
 3. Every function and variable becomes an `SrPrxExport` with its relocated address.
-   System-library entries of note [C4]: `0xD632ACDB` module_start, `0xCEE05613`
+   System-library entries of note [C4]: `0xD632ACDB` module_start, `0xCEE8593C`
    module_stop, `0xF01D73A7` module_info (variable).
 4. Library names are read as NUL-terminated strings inside the image; a name not
    terminated within 256 bytes or outside the image fails.

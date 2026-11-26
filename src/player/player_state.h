@@ -1323,6 +1323,10 @@ struct PlayerApp {
     int window_height;
     bool enable_focus_handoff;
     bool child_window_ready;
+    /* The runtime reported its first frame (BOOT_EVENT phase=first_frame) for the
+       running launch. Decides whether a short clean exit ran the game (#306);
+       child_window_ready, set earlier by window_ready, drives the start watch. */
+    bool child_first_frame;
     /* Start watch for the running launch (#1290): the first running check was
        logged, the child wrote its first boot event, and the "still no boot
        event" developer-log note was written. Cleared by each launch. */
@@ -1539,6 +1543,13 @@ typedef enum {
     PLAYER_SAVES_EXISTS,    /* Add a save: a save of that name is there; ask before replacing */
     PLAYER_SAVES_FAILED     /* error says what, in plain words */
 } PlayerSavesResult;
+
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+/* Test seam (player-state test build only): called in player_app_monitor_game_session
+   after its live read of the session file and before it checks whether the child
+   still runs, so a test can append what a child wrote between those two points. */
+extern void (*g_player_state_test_after_live_read)(PlayerApp *app);
+#endif
 
 #if defined(NK_SAVES_TEST_SEAMS)
 /* Test seam (player-state test build only): the nth rename the saves code makes from now
@@ -2437,8 +2448,11 @@ NkResult player_app_apply_input_profile_to_session(PlayerApp *app, const GameRec
 /* Advance the running-game session state machine one tick at `now_ms`.
  *
  * Returns true when this tick observed the child's exit and finalized the
- * session. A child that exits before 500 ms of wall time is reported through
- * the structured RUNTIME_PREMATURE_EXIT error; a later non-zero exit becomes
+ * session. A child that exits before 500 ms of wall time, with a non-zero
+ * code or before it presented its first frame (BOOT_EVENT phase=first_frame),
+ * is reported through the structured RUNTIME_PREMATURE_EXIT error (a clean
+ * exit 0 after the first frame is a short successful run, #306); a later
+ * non-zero exit becomes
  * RUNTIME_ERROR_EXIT. A child still running PLAYER_GAME_START_TIMEOUT_MS
  * after launch without having written a single boot event never started: the
  * tick stops it, reports RUNTIME_START_TIMEOUT and returns true (#1290).
