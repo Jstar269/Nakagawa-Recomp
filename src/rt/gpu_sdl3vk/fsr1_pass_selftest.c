@@ -730,7 +730,7 @@ int main(int argc, char **argv) {
     init.easu_spirv_bytes = rcas_mutant ? 0 : mutant_bytes;
     init.rcas_spirv = rcas_mutant ? mutant : NULL;
     init.rcas_spirv_bytes = rcas_mutant ? mutant_bytes : 0;
-    Fsr1Pass *p = fsr1_create(&init, why, sizeof(why));
+    Fsr1Pass *p = fsr1_create(&init, why, sizeof(why), NULL);
     CHECK(p != NULL, "fsr1_create: %s", why);
     CHECK(fsr1_parse_mode(NULL) == 0 && fsr1_parse_mode("") == 0 && fsr1_parse_mode("off") == 0 &&
           fsr1_parse_mode("fsr1") == 1 && fsr1_parse_mode("FSR") == -1, "SR_PRESENT_UPSCALE values");

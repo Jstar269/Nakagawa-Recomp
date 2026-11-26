@@ -1225,7 +1225,7 @@ def build_export_fixture(zero_len=False, start_twice=False, func_nids=None,
     struct.pack_into("<IHHBBHI", raw, rec0_off, 0, 0, 0, 4, 1, 2,
                      g + etab0_off)
     if func_nids is None:
-        func_nids = (0xD632ACDB, 0xD632ACDB if start_twice else 0xCEE05613)
+        func_nids = (0xD632ACDB, 0xD632ACDB if start_twice else 0xCEE8593C)
     struct.pack_into("<3I", raw, etab0_off, func_nids[0], func_nids[1],
                      var_nid)
     struct.pack_into("<3I", raw, etab0_off + 12, f0, f1, vv)
@@ -1252,7 +1252,7 @@ class TestExports(PrxTestBase):
         self.assertEqual(by_nid[0xD632ACDB]["lib"], "")
         self.assertEqual(by_nid[0xD632ACDB]["func"], 1)
         self.assertEqual(by_nid[0xD632ACDB]["addr"], BASE + 0x1000 + 0x500)
-        self.assertEqual(by_nid[0xCEE05613]["addr"], BASE + 0x1000 + 0x600)
+        self.assertEqual(by_nid[0xCEE8593C]["addr"], BASE + 0x1000 + 0x600)
         self.assertEqual(by_nid[0xF01D73A7]["func"], 0)
         self.assertEqual(by_nid[0x12345678]["lib"], "myLib")
         self.assertEqual(by_nid[0x12345678]["func"], 1)
@@ -1277,7 +1277,7 @@ class TestExports(PrxTestBase):
         # otherwise the ELF entry; the runtime starts a loaded module at mod_start.
         m = Module(e_entry=0x10)
         m.add_seg(0x1000, build_export_fixture(
-            func_nids=(0xD3744BE0, 0xCEE05613)), 256)
+            func_nids=(0xD3744BE0, 0xCEE8593C)), 256)
         info = self.run_load(m.build())
         self.assertEqual(info.get("result"), "ok", info.get("err"))
         self.assertEqual(info["hasstart"], 1)
@@ -1289,13 +1289,13 @@ class TestExports(PrxTestBase):
         # record, does not (sr_prx_start_entry_from_table reads the same way).
         m = Module(e_entry=0x10)
         m.add_seg(0x1000, build_export_fixture(
-            func_nids=(0x11111111, 0xCEE05613), var_nid=0xD632ACDB), 256)
+            func_nids=(0x11111111, 0xCEE8593C), var_nid=0xD632ACDB), 256)
         info = self.run_load(m.build())
         self.assertEqual(info.get("result"), "ok", info.get("err"))
         self.assertEqual(info["hasstart"], 0)
         m = Module(e_entry=0x10)
         m.add_seg(0x1000, build_export_fixture(
-            func_nids=(0x11111111, 0xCEE05613), rec1_syslib_nid=0xD632ACDB), 256)
+            func_nids=(0x11111111, 0xCEE8593C), rec1_syslib_nid=0xD632ACDB), 256)
         info = self.run_load(m.build())
         self.assertEqual(info.get("result"), "ok", info.get("err"))
         self.assertEqual(info["hasstart"], 0)
@@ -1332,6 +1332,33 @@ class TestExports(PrxTestBase):
                 self.assertEqual(a["result"], "ok", a.get("err"))
                 self.assertTrue(a[populated], "fixture leaves %s empty" % populated)
                 self.assertEqual(a, b)
+
+    def test_system_library_nids_are_the_sha1_of_their_names(self):
+        # A NID is the first four bytes of SHA-1(name), read little-endian. The
+        # runtime finds a module's start and stop routines by these constants, so a
+        # wrong one means the routine is never found: a module_stop NID that no
+        # linker writes leaves every guest module without a stop routine.
+        import hashlib
+        root = repo_root()
+        prog = os.path.join(self.TMP, "syslib_nids.c")
+        with open(prog, "w") as f:
+            f.write('#include <stdio.h>\n#include "prx_loader.h"\n'
+                    'int main(void) {\n'
+                    '    printf("module_start %08x\\n", (unsigned)SR_PRX_NID_MODULE_START);\n'
+                    '    printf("module_bootstart %08x\\n", (unsigned)SR_PRX_NID_MODULE_BOOTSTART);\n'
+                    '    printf("module_stop %08x\\n", (unsigned)SR_PRX_NID_MODULE_STOP);\n'
+                    '    return 0;\n}\n')
+        exe = os.path.join(self.TMP, "syslib_nids.exe")
+        r = subprocess.run(["gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-I", os.path.join(root, "src", "rt"), prog, "-o", exe],
+                           capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = subprocess.run([exe], capture_output=True, text=True, timeout=60).stdout
+        self.assertEqual(len(out.splitlines()), 3, out)
+        for line in out.splitlines():
+            name, value = line.split()
+            want = struct.unpack("<I", hashlib.sha1(name.encode()).digest()[:4])[0]
+            self.assertEqual(int(value, 16), want, "%s NID" % name)
 
 
 # ---------------------------------------------------------------------------

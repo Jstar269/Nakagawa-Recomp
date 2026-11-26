@@ -439,6 +439,125 @@ static int pop_into(SrPsmfProducer *p, SrPsmfAuKind kind, uint32_t sizes[], int 
     return n;
 }
 
+/* A short PSMF file can place its end in the next PES timestamp epoch.
+ * Only known low timestamps inside that declared window need adjustment. */
+static void test_presentation_timestamp_wrap(void) {
+    const int64_t cycle = INT64_C(1) << 33;
+    const int64_t origin = cycle - 3003;
+    const int64_t limit = cycle + 4997;
+    const struct {
+        int64_t pts, dts;
+        int64_t corrected_pts, corrected_dts;
+        int present;
+    } video[] = {
+        {origin - 600, origin - 700, -600, -700, 1},
+        {origin, origin - 100, 0, -100, 1},
+        {0, cycle - 100, 3003, 2903, 1},
+        {0, 0, -origin, -origin, 0},
+        {cycle - 103, cycle - 203, 2900, 2800, 1},
+        {3003, 2903, 6006, 5906, 1},
+        {4996, 4997, 7999, 4997 - origin, 1},
+        {4997, 6000, 4997 - origin, 6000 - origin, 1},
+    };
+    const struct {
+        int64_t start, end;
+        int streaming;
+        int unwrap;
+    } cases[] = {
+        {origin, limit, 0, 1},
+        {origin, origin + cycle / 2, 0, 0},
+        {origin, 4997, 0, 0},
+        {1000, 9000, 0, 0},
+        {0, 0, 1, 0},
+    };
+    uint8_t data[4096] = {'P', 'S', 'M', 'F'};
+    Buf b = {data, 2048u, sizeof(data), 0};
+    be32(data + 8, 2048u);
+    add_pack(&b);
+    static const uint8_t picture[] = {0, 0, 1, 9, 0xf0, 0x65, 1};
+    for (size_t i = 0; i < sizeof(video) / sizeof(video[0]); ++i) {
+        if (video[i].present)
+            add_pes_ex(&b, 0xe0, PES_TS_BOTH, 10u, video[i].pts, video[i].dts,
+                       1, picture, sizeof(picture));
+        else
+            add_pes(&b, 0xe0, 0, 0, picture, sizeof(picture));
+    }
+    static const uint8_t atrac[] = {0x0f, 0xd0, 0, 0, 0, 0, 0, 0,
+                                    1, 2, 3, 4, 5, 6, 7, 8};
+    static const uint8_t atrac_pes[] = {0, 0, 0, 0, 0x0f, 0xd0, 0, 0, 0, 0, 0, 0,
+                                        1, 2, 3, 4, 5, 6, 7, 8};
+    add_audio_pes(&b, 1, origin, atrac, sizeof(atrac));
+    add_pes_ex(&b, 0xbd, PES_TS_BOTH, 10u, 1177, 1077, 1, atrac_pes, sizeof(atrac_pes));
+    add_audio_pes(&b, 1, 4000, atrac, sizeof(atrac));
+    add_audio_pes(&b, 0, 0, atrac, sizeof(atrac));
+    CHECK(!b.overflow, "timestamp wrap fixture fits");
+    if (b.overflow) return;
+    const uint32_t ps_size = b.at - 2048u;
+    be32(data + 12, ps_size);
+
+    for (size_t f = 0; f < sizeof(cases) / sizeof(cases[0]); ++f) {
+        const int64_t start = cases[f].start;
+        const int64_t end = cases[f].end;
+        /* These fixtures use only the low five bytes of each header field. */
+        data[0x55] = (uint8_t)(start >> 32);
+        be32(data + 0x56, (uint32_t)start);
+        data[0x5b] = (uint8_t)(end >> 32);
+        be32(data + 0x5c, (uint32_t)end);
+        MemSource mem = {data, b.at, 7u, 0};
+        SrPsmfSource source = {mem_read, &mem, b.at};
+        SrPsmfProducer *p = cases[f].streaming ? sr_psmf_producer_open_stream(0)
+                                              : sr_psmf_producer_open(&source, start);
+        CHECK(p != NULL, "timestamp wrap producer opens");
+        if (!p) continue;
+        if (cases[f].streaming) {
+            CHECK(sr_psmf_producer_select_streams(p, 0, 0), "timestamp wrap selects both streaming tracks");
+            CHECK(sr_psmf_producer_feed_stream(p, data + 2048u, ps_size, 1) == 0,
+                  "timestamp wrap streaming producer receives the program");
+        }
+
+        /* Pop before letting the next pass parse EOF. The producer queues are bounded. */
+        for (size_t i = 0; i < sizeof(video) / sizeof(video[0]); ++i) {
+            sr_psmf_producer_pump(p, 16);
+            SrPsmfAu au;
+            int got = sr_psmf_producer_pop(p, SR_PSMF_AU_VIDEO, &au);
+            CHECK(got, "timestamp wrap yields every video AU");
+            if (!got) break;
+            CHECK(au.has_pts == video[i].present && au.has_dts == video[i].present &&
+                  au.raw_pts == video[i].pts && au.raw_dts == video[i].dts,
+                  "timestamp wrap preserves raw video and missing flags");
+            const int64_t pts = cases[f].unwrap ? video[i].corrected_pts : video[i].pts - start;
+            const int64_t dts = cases[f].unwrap ? video[i].corrected_dts : video[i].dts - start;
+            CHECK(au.pts == pts && au.dts == dts,
+                  "timestamp wrap adjusts only video stamps inside the short declared epoch");
+            sr_psmf_au_release(&au);
+        }
+
+        const int64_t audio_pts[] = {origin, 1177, 4000, 0};
+        const int64_t audio_dts[] = {origin, 1077, 4000, 0};
+        const int64_t wrapped_audio_pts[] = {0, 4180, 7003, -origin};
+        const int64_t wrapped_audio_dts[] = {0, 4080, 7003, -origin};
+        for (size_t i = 0; i < sizeof(audio_pts) / sizeof(audio_pts[0]); ++i) {
+            SrPsmfAu au;
+            int got = sr_psmf_producer_pop(p, SR_PSMF_AU_AUDIO, &au);
+            CHECK(got, "timestamp wrap yields every audio AU");
+            if (!got) break;
+            CHECK(au.has_pts == (i < 3) && au.has_dts == (i == 1) &&
+                  au.raw_pts == audio_pts[i] && au.raw_dts == audio_dts[i],
+                  "timestamp wrap preserves raw audio, DTS fallback and missing flags");
+            const int64_t pts = cases[f].unwrap ? wrapped_audio_pts[i] : audio_pts[i] - start;
+            const int64_t dts = cases[f].unwrap ? wrapped_audio_dts[i] : audio_dts[i] - start;
+            CHECK(au.pts == pts && au.dts == dts,
+                  "timestamp wrap adjusts only audio stamps inside the short declared epoch");
+            sr_psmf_au_release(&au);
+        }
+        SrPsmfProducerStats stats;
+        sr_psmf_producer_stats(p, &stats);
+        CHECK(stats.eof && !stats.failed && !stats.video_depth && !stats.audio_depth,
+              "timestamp wrap reaches clean terminal state");
+        sr_psmf_producer_close(p);
+    }
+}
+
 static void test_access_unit_formation(void) {
     uint32_t size = 0; uint8_t *bytes = fixture(&size, 0);
     MemSource mem = {bytes, size, 7, 0};      /* fragmented reads: nothing assumed whole */
@@ -2171,6 +2290,7 @@ int main(int argc, char **argv) {
     test_mpeg1_pack_does_not_read_past_stream();
     test_reserved_pack_prefix_fails_closed();
     test_presentation_base_bounds();
+    test_presentation_timestamp_wrap();
     test_pts_advance_no_drift_over_long_run();
     test_conformance_corpus();
     if (fuzz_iterations) test_seeded_mutation(fuzz_iterations);

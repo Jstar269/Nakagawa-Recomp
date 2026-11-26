@@ -306,11 +306,12 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         hit = sorted(insns & hst_emission_sites(cg))
         if hit:
             raise Unsupported(f"title-profile special site 0x{hit[0]:08x}")
-    # The same points emit_function asserts, from the same labels (before the planned skip
-    # targets and the entry label join them); the runtime-module and variable-import cases
+    # The same points emit_function asserts, from the same labels and entry (before the
+    # planned skip targets join them); the runtime-module and variable-import cases
     # that carry none in C were refused above.
     sv_checks = {addr: tuple(checks) for addr, checks in cg.sv_points(
-        elf, insns, labels, hst_profile=profile == "hst", options=options).items()}
+        elf, insns, labels, hst_profile=profile == "hst", options=options,
+        entry=start).items()}
 
     def word(addr):
         return space.instruction_word(addr, cg.read32(elf, addr), options=options)

@@ -358,9 +358,10 @@ static void audio_auto_load_transition(int active) {
 }
 
 /* At the output boundary, every accepted sample that could play ends the
- * automatic mode before touching the host queue. Keep the SAS wide sum and
- * the converted SRC output in the same decision. */
-static void audio_auto_load_output(int ch, const int16_t *lr, const int32_t *wide, uint32_t frames) {
+ * automatic mode before touching the host queue. A zero per-call gain keeps
+ * that channel's new samples silent, including SAS wide and converted SRC. */
+static void audio_auto_load_output(int ch, const int16_t *lr, const int32_t *wide, uint32_t frames,
+                                   int vol_l, int vol_r) {
     if (!sched_auto_load_enabled()) return;
     /* Feeding a played-dry stream can release retained converter or limiter
      * samples, even with a zero input block. Give the backend that block at
@@ -369,8 +370,10 @@ static void audio_auto_load_output(int ch, const int16_t *lr, const int32_t *wid
         sched_auto_load_audible();
         return;
     }
-    for (uint32_t i = 0; i < frames * 2u; ++i) {
-        if (lr[i] || (wide && wide[i])) {
+    if (vol_l == 0 && vol_r == 0) return;
+    for (uint32_t i = 0; i < frames * 2u; i += 2u) {
+        if ((vol_l && (lr[i] || (wide && wide[i]))) ||
+            (vol_r && (lr[i + 1u] || (wide && wide[i + 1u])))) {
             sched_auto_load_audible();
             return;
         }
@@ -612,7 +615,7 @@ static uint32_t audio_output_mode(CpuState *s, uint32_t ch, uint32_t buf, int vo
         }
         const int32_t *wide = !mono && (!sched_fast_forward_on() || sched_auto_load_enabled())
             ? sas_wide_for_output(buf, n, lr) : NULL;
-        audio_auto_load_output((int)ch, lr, wide, n);
+        audio_auto_load_output((int)ch, lr, wide, n, voll, volr);
         /* The output counters live here, on the guest-visible sceAudioOutput* hand-off,
          * not inside a host audio backend. A backend that does not instrument itself made
          * audio_output_calls/frames read zero for a run whose music was plainly audible,
@@ -881,7 +884,8 @@ static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t 
         psmf_av_audio_submit(AUDIO_OUTPUT2_CHANNEL, buf, bytes, 4u, s_audio_src_freq);
         converted_frames = sr_audio_resampler_pull(&s_audio_src_resampler, converted, 4111u);
         if (converted_frames > 0u) {
-            audio_auto_load_output(AUDIO_OUTPUT2_CHANNEL, converted, NULL, (uint32_t)converted_frames);
+            audio_auto_load_output(AUDIO_OUTPUT2_CHANNEL, converted, NULL, (uint32_t)converted_frames,
+                                   (int)vol, (int)vol);
             audio_host_hold_prime((int)AUDIO_OUTPUT2_CHANNEL, period);
             uint64_t out_started = sr_perf_now_ns();
             sr_videorec_audio(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,
