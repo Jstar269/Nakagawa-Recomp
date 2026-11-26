@@ -1074,9 +1074,9 @@ the Vulkan picture), `src/rt/gui.c` (the setting, the wing width and the softwar
   rounded down to a multiple of 4: 21:9 (about 635x272) has 76-pixel wings and 32:9 (about 967x272) has 240-pixel
   wings. The PSP's 480x272 is 30:17, about 16:9; a 16:9 window widens it by under 4 pixels, so 16:9 has none. One canvas
   holds both wings in a 512-column image, the GE's widest framebuffer, so the Vulkan canvas shares every target's size,
-  viewport and readback. The wings never use columns 480-511 of the guest's own 512-wide framebuffer: a title may keep
-  its palettes in that stride padding, beside the picture it draws. That caps a wing at 256 pixels, a picture of 992x272 (about 32.8:9); a wider window (three
-  screens) gets the widest Fill and black beyond it.
+  viewport and readback. That caps a wing at 256 pixels, a picture of 992x272 (about 32.8:9); a wider window (three
+  screens) gets the widest Fill and black beyond it. The canvas is the host's own: the wings never use columns 480-511
+  of the guest's 512-wide framebuffer, where a title may keep its palettes in the stride padding beside its picture.
 - **Off is the default.** With no wing width set, no canvas exists and no wing is drawn or submitted, and the window
   shows the frame alone, fitted as before. What Off still costs is a test per primitive in `src/rt/ge.c` (`s_wide_d`),
   tests of an always-NULL pointer in the software rasterizer's pixel accessors (`s_wing`) and the Vulkan backend's
