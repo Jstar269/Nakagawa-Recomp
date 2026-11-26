@@ -566,16 +566,22 @@ static SDL_SharedObject *nk_ui_ttf_load_object(const char *candidate) {
    beside this executable comes first, as on Windows: an install carries SDL3_ttf in
    its bin/ folder, and a run path in the executable cannot reach it, because SDL3's
    dlopen searches the run path of SDL3 itself, not the program's. A copy that is not there
-   falls through to the system's. */
-static size_t nk_ui_ttf_default_paths(char out[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_PATH_MAX]) {
+   falls through to the system's. The folder counts only when it is an absolute path: on
+   Android SDL reports "./", which is the current folder, never a place that holds the
+   program's own libraries (they load by soname from the APK). */
+size_t nk_ui_ttf_default_candidates(const char *base,
+                                    char out[NK_UI_TTF_CANDIDATE_MAX][NK_UI_TTF_CANDIDATE_LEN]) {
     size_t n = 0;
-    const char *base = SDL_GetBasePath();
-    if (base != NULL && base[0] != '\0') {
-        int written = snprintf(out[n], NK_UI_TTF_PATH_MAX, "%s%s", base, NK_UI_TTF_SONAME);
-        if (written > 0 && (size_t)written < NK_UI_TTF_PATH_MAX) ++n;
+    if (base != NULL && base[0] == '/') {
+        int written = snprintf(out[n], NK_UI_TTF_CANDIDATE_LEN, "%s%s", base, NK_UI_TTF_SONAME);
+        if (written > 0 && (size_t)written < NK_UI_TTF_CANDIDATE_LEN) ++n;
     }
-    snprintf(out[n], NK_UI_TTF_PATH_MAX, "%s", NK_UI_TTF_SONAME);
+    snprintf(out[n], NK_UI_TTF_CANDIDATE_LEN, "%s", NK_UI_TTF_SONAME);
     return n + 1u;
+}
+
+static size_t nk_ui_ttf_default_paths(char out[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_PATH_MAX]) {
+    return nk_ui_ttf_default_candidates(SDL_GetBasePath(), out);
 }
 
 static SDL_SharedObject *nk_ui_ttf_load_object(const char *candidate) {
