@@ -1012,6 +1012,34 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(strstr(observed, expected) != NULL);
         assert(strstr(observed, "poisoned-parent-cheats") == NULL);
     }
+    {
+        /* A cheat database (cheats/cheat.db, src/player/cheat_db.h) is read when the title has
+           no file of its own, and the title's own file wins once it exists. */
+        char cheats_dir[NK_MAX_PATH + 16];
+        char database[NK_MAX_PATH + 32];
+        char own[NK_MAX_PATH + 48];
+        char expected[NK_MAX_PATH * 2 + 64];
+        snprintf(cheats_dir, sizeof(cheats_dir), "%s%ccheats", per_user_root, sep);
+        snprintf(database, sizeof(database), "%s%ccheat.db", cheats_dir, sep);
+        snprintf(own, sizeof(own), "%s%cTEST00006.ini", cheats_dir, sep);
+        assert(nk_platform_mkdir_p(cheats_dir));
+        write_file(database, "_S TEST-00006\n_C0 fixture\n_L 0x00000000 0x00000000\n");
+        for (int round = 0; round < 2; round++) {
+            if (round == 1) write_file(own, "_S TEST-00006\n");
+            assert(nk_launch_start(&session) == NK_OK);
+            child_exit = nk_launch_wait(&session, -1);
+            nk_launch_stop(&session);
+            assert(child_exit == 0);
+            report = fopen(report_path, "rb");
+            assert(report != NULL);
+            observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+            observed[observed_size] = '\0';
+            assert(fclose(report) == 0);
+            snprintf(expected, sizeof(expected), "SR_CHEATS_FILE=%s\n", round == 0 ? database : own);
+            assert(strstr(observed, expected) != NULL);
+        }
+        assert(remove(own) == 0 && remove(database) == 0);
+    }
     assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);
     assert(strstr(observed, "fixture-pack-folder") == NULL);

@@ -39,9 +39,12 @@ stream.
 `cases` holds command-word cases. The first is an untextured solid triangle in a 16×16 8888
 framebuffer. Its selected pixels and full framebuffer digest are deliberately unset until a
 qualified PSP run records them. The case uses the PSP GE command word layout; address operands are
-explicit relocations to its source-owned vertex words. A result records `framebuffer_sha256` and
-one `pixel_<x>_<y>` value for each selected coordinate, packed according to the case framebuffer
-format.
+explicit relocations to its source-owned vertex words. `solid-triangle-8888-v1` has a dedicated
+`PSP-GE-PIXEL-001` producer. Its build binds the fixed declaration and separate initial GE setup
+digests and the parser checks both digests, the scanout and restore guards, and all 16 raw rows.
+The corpus gate derives `framebuffer_sha256` over exactly 1,024 little-endian bytes and compares the
+three selected packed values from that same readback. The existing `PSP-GE-001` NaN probe has its own
+unchanged route. The triangle remains `NOT_RUN`.
 
 `python tools/psp_oracle/run_psplink.py --ge-corpus-write RUN_REPORT...` writes a probe run from
 the runner's report of a `ge-raster`, `ge-weight` or `ge-rtt` launch. It takes only a qualified,
