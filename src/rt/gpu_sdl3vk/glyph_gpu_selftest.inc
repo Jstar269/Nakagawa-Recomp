@@ -14,9 +14,9 @@
  *   rewrite    a page the guest rewrites draws a rebuilt tile for the new texels and never the old
  *              one; a cell whose texels did not change keeps its tile;
  *   rewrite-gap a rewrite the cache's content hash does not see (it samples part of a page) draws its new tile;
+ *   rewrite-back a cell rewritten, synced stale, then written back to its first glyph draws its tile again;
  *   abutting-edge updating only the shared edge of the second cell rebuilds just that tile and leaves
  *              the first sprite byte-identical in a warm cache;
- *   rewrite-back a cell rewritten, synced stale, then written back to its first glyph draws its tile again;
  *   gradient   fade bars of one colour (shallow, steep, four texels, two) and a box shadow draw without a reversal along their rows and columns;
  *   cap        more new rectangles in one present than NK_GLYPH_PER_PRESENT: exactly that many are
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
