@@ -270,6 +270,9 @@
       "apis": ["sceKernelSysClock2USecWide", "sceCtrlGetSamplingMode", "sceKernelReferThreadProfiler", "sceKernelReferGlobalProfiler", "sceKernelCreateVTimer", "sceKernelGetVTimerTime", "sceKernelStartVTimer", "sceKernelStopVTimer", "sceKernelDeleteVTimer", "sceDisplaySetHoldMode", "sceDisplayWaitVblankStartMultiCB", "sceImposeGetBatteryIconStatus", "sceImposeSetUMDPopup"],
       "case_ids": ["sysclock-wide", "ctrl-sampling-mode", "thread-profiler", "global-profiler", "vtimer-basic", "display-basic", "impose-basic", "kernel-misc-done"],
       "case_apis": {
+        "sysclock-wide": [
+          {"call": "sceKernelSysClock2USecWide(clock, &usec_low, &usec_high)", "cell": "clock is 1234567890 microseconds with valid outputs. Returns 0 and writes 1234 seconds and 567890 remaining microseconds (public confirmation in PR #3078)"}
+        ],
         "display-basic": [
           {"call": "sceDisplaySetHoldMode(0)", "cell": "mode 0 from a user thread"},
           {"call": "sceDisplayWaitVblankStartMultiCB(1u)", "cell": "argument 1 from a user thread"}
@@ -4051,6 +4054,22 @@
         ],
         "risk": "low; raw display lists into an 8 KiB colour block at VRAM offset 0x100000 and a 4 KiB target at 0x120000 that the CPU writes first; depth test and writes are off; every GE wait is bounded and a list that does not finish resets the queues; no display, callback or device state is changed",
         "reset": "one PRX launch; PSPLink soft reset before the next launch"
+      },
+      {
+        "id": "PSP-GE-PIXEL-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Fixed command corpus triangle and independently identified bounded setup. Parser and compiler qualification supply no PSP pixel values.",
+        "group": "ge",
+        "source": "tests/fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "solid_triangle_8888_v1.prx",
+        "apis": ["sceDisplayGetMode", "sceDisplayGetFrameBuf", "sceGeEdramGetAddr", "sceGeEdramGetSize", "sceGeSaveContext", "sceGeRestoreContext", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync", "sceKernelDcacheWritebackAll"],
+        "diagnostic_case_ids": ["solid-triangle-8888-v1"],
+        "case_ids": ["solid-triangle-8888-v1-input", "solid-triangle-8888-v1-guard", "solid-triangle-8888-v1-draw", "solid-triangle-8888-v1-restore", "solid-triangle-8888-v1-r*", "solid-triangle-8888-v1-done"],
+        "invariant": "The two input digests and guarded restoration bind sixteen raw rows from the fixed 16 by 16 8888 rectangle at EDRAM offset zero.",
+        "issues": [343],
+        "risk": "requires owner-controlled GE and scanout; both scanout views must be known and disjoint from the fixed 1 KiB target, the GE must be idle, and failed restoration keeps the module resident",
+        "reset": "one approved launch; a busy GE or failed restore stops the session and requires owner requalification"
       },
       {
         "id": "PSP-TRACE-001",

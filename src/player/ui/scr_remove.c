@@ -224,30 +224,38 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
         nk_ui_text_role(ui, FLOW_ID_NOTICE, model->blocked, NK_UI_TYPE_BODY_S, theme->warning);
     }
     if (model->ask != PLAYER_UI_SAVES_ASK_NONE && !blocked) {
-        bool restore = model->ask == PLAYER_UI_SAVES_ASK_RESTORE;
-        const char *when = restore && model->ask_row < shown
-            ? safe_text(model->rows[model->ask_row].when, NK_UI_STR(REMOVE_SAVES_BACKUP_FALLBACK)) : NK_UI_STR(REMOVE_SAVES_BACKUP_FALLBACK);
+        const char *confirm = NK_UI_STR(REMOVE_SAVES_REPLACE);
+        const char *note = NK_UI_STR(REMOVE_SAVES_REPLACE_NOTE);
+        uint32_t style = NK_UI_BUTTON_DANGER;
         NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                      NK_UI_SPACE_3);
-        if (restore) {
+        if (model->ask == PLAYER_UI_SAVES_ASK_RESTORE) {
+            const char *when = model->ask_row < shown
+                ? safe_text(model->rows[model->ask_row].when, NK_UI_STR(REMOVE_SAVES_BACKUP_FALLBACK))
+                : NK_UI_STR(REMOVE_SAVES_BACKUP_FALLBACK);
             (void)snprintf(text, sizeof(text), NK_UI_STR(REMOVE_SAVES_RESTORE_FORMAT), when);
+            confirm = NK_UI_STR(REMOVE_SAVES_RESTORE);
+            note = NK_UI_STR(REMOVE_SAVES_RESTORE_NOTE);
+            style = NK_UI_BUTTON_PRIMARY;
+        } else if (model->ask == PLAYER_UI_SAVES_ASK_BRING_IN) {
+            (void)snprintf(text, sizeof(text), NK_UI_STR(REMOVE_SAVES_BRING_IN_ASK),
+                           safe_text(model->bring_in_name, ""));
+            confirm = NK_UI_STR(REMOVE_SAVES_BRING_IN);
+            note = model->bring_in_note;
+            style = NK_UI_BUTTON_PRIMARY;
         } else {
             (void)snprintf(text, sizeof(text), NK_UI_STR(REMOVE_SAVES_REPLACE_FORMAT),
                            safe_text(model->ask_name, NK_UI_STR(REMOVE_SAVES_REPLACE_FALLBACK)));
         }
         nk_ui_text_role(ui, FLOW_ID_MESSAGE, nk_ui_frame_text(ui, text), NK_UI_TYPE_BODY,
                         theme->paper);
-        nk_ui_text_role(ui, FLOW_ID_DETAILS,
-                        restore ? NK_UI_STR(REMOVE_SAVES_RESTORE_NOTE)
-                                : NK_UI_STR(REMOVE_SAVES_REPLACE_NOTE),
-                        NK_UI_TYPE_BODY_S, theme->muted);
+        nk_ui_text_role(ui, FLOW_ID_DETAILS, note, NK_UI_TYPE_BODY_S, theme->muted);
         if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
             if (nk_ui_button(ui, PLAYER_UI_ID_SAVES_CANCEL, NK_UI_STR(REMOVE_CANCEL), 0u)) {
                 result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
                                 (PlayerUiPrimaryAction)PLAYER_UI_SAVES_CANCEL);
             }
-            if (nk_ui_button(ui, PLAYER_UI_ID_SAVES_CONFIRM, restore ? NK_UI_STR(REMOVE_SAVES_RESTORE) : NK_UI_STR(REMOVE_SAVES_REPLACE),
-                             restore ? NK_UI_BUTTON_PRIMARY : NK_UI_BUTTON_DANGER)) {
+            if (nk_ui_button(ui, PLAYER_UI_ID_SAVES_CONFIRM, confirm, style)) {
                 result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
                                 (PlayerUiPrimaryAction)PLAYER_UI_SAVES_CONFIRM);
             }
@@ -270,6 +278,14 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
         uint32_t back_up = model->has_saves && !blocked ? NK_UI_BUTTON_PRIMARY
                                                         : NK_UI_BUTTON_DISABLED;
         if (nk_ui_flow_begin(ui, &flow, FLOW_ID_ACTIONS, &row, inner)) {
+            if (model->bring_in_name != NULL) {
+                const char *label = NK_UI_STR(REMOVE_SAVES_BRING_IN);
+                nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, label, change));
+                if (nk_ui_button(ui, PLAYER_UI_ID_SAVES_BRING_IN, label, change)) {
+                    result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
+                                    (PlayerUiPrimaryAction)PLAYER_UI_SAVES_BRING_IN);
+                }
+            }
             nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, NK_UI_STR(REMOVE_SAVES_BACK_UP), back_up));
             if (nk_ui_button(ui, PLAYER_UI_ID_SAVES_BACK_UP, NK_UI_STR(REMOVE_SAVES_BACK_UP), back_up)) {
                 result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
@@ -292,6 +308,9 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
             }
             nk_ui_flow_end(ui, &flow);
         }
+    }
+    if (model->bring_in_problem != NULL && model->bring_in_problem[0] != '\0') {
+        nk_ui_text_role(ui, FLOW_ID_DETAILS, model->bring_in_problem, NK_UI_TYPE_BODY_S, theme->warning);
     }
     if (model->status != NULL && model->status[0] != '\0') {
         nk_ui_text_role(ui, FLOW_ID_STATUS, model->status, NK_UI_TYPE_BODY_S,

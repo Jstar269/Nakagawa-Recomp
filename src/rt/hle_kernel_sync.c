@@ -2364,8 +2364,12 @@ static uint32_t h_DeleteMutex(CpuState *s) {
     Mutex *m = mutex_find(uid);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MUTEXID;
 
+    int waiters = sched_count_waiters(uid);
     sched_wait_cancel_object(uid, SCE_KERNEL_ERROR_WAIT_DELETE);
     mutex_free(m);
+    /* pspautotests tests/threads/mutex/delete.expected "Delete same" (PSP-recorded):
+     * a released waiter of higher priority runs before the delete returns. */
+    if (waiters) sched_preempt();
     return 0;
 }
 
@@ -2574,7 +2578,11 @@ static uint32_t h_CancelMutex(CpuState *s) {
     m->wait_count = 0;
     m->num_wait_threads = 0;
 
+    int waiters = sched_count_waiters(uid);
     sched_wait_cancel_object(uid, SCE_KERNEL_ERROR_WAIT_CANCEL);
+    /* pspautotests tests/threads/mutex/cancel.expected "Cancel waited" (PSP-recorded):
+     * a released waiter of higher priority runs before the cancel returns. */
+    if (waiters) sched_preempt();
     return 0;
 }
 

@@ -202,6 +202,12 @@ typedef struct {
     /* NkGameEntry.enhancement_hook_only: no timing package in the build. */
     bool enhancement_hook_only;
     bool package_launch;
+    /* The final validation's completion digest and runtime source record (#2998),
+       saved after a package child starts. Empty until a package has spawned. */
+    char package_identity[65];
+    char runtime_source_commit[41];
+    char runtime_source_origin[16];
+    char runtime_source_reason[128];
     bool experimental_package;
     bool showcase_package;
     bool staged_executable_checked;

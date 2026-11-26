@@ -248,7 +248,8 @@ class AndroidAppContractTests(unittest.TestCase):
         self.assertIn("int nk_android_title_main(int argc, char **argv)", shim)
         self.assertIn("private static native void nativeImportEnvironment();", launcher)
         self.assertIn("JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(\n"
-                      "    JNIEnv *env, jclass cls) {\n    (void)cls;\n    android_import_environment(env);", posix)
+                      "    JNIEnv *env, jclass cls) {\n    (void)cls;\n    (void)android_import_environment(env);",
+                      posix)
 
     def test_the_player_starts_after_the_toolchain_variables_reach_native_code(self) -> None:
         """Under an ARM translation layer the player library has its own libc, which took the
@@ -289,19 +290,9 @@ class AndroidAppContractTests(unittest.TestCase):
         registered first and once, a handler's own exit() goes on with the rest,
         a second thread's exit() waits for the first, and the exit file is written after the log
         is drained, with the status the process ends with."""
-        shim = ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c"
         with tempfile.TemporaryDirectory(prefix="nk-title-shim-") as tmp:
             work = Path(tmp)
-            (work / "harness.c").write_text(_TITLE_SHIM_HARNESS, encoding="utf-8")
-            program = work / "title"
-            wraps = [f"-Wl,--wrap={symbol}" for symbol in ("exit", "_exit", "_Exit", "atexit")]
-            subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-I", str(ROOT / "src" / "core"),
-                            "-Dmain=nk_shim_runtime_main", "-c", str(shim), "-o", str(work / "shim.o")],
-                           check=True)
-            subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-c",
-                            str(work / "harness.c"), "-o", str(work / "harness.o")], check=True)
-            subprocess.run(["cc", str(work / "harness.o"), str(work / "shim.o"), "-pthread", *wraps,
-                            "-o", str(program)], check=True)
+            program = self._build_title_shim(work)
             cases = {
                 "order": (3, "b a shutdown(no-exit-file) "),
                 "nested": (5, "b nested a shutdown(no-exit-file) "),
@@ -318,6 +309,61 @@ class AndroidAppContractTests(unittest.TestCase):
                     self.assertEqual(ran.returncode, status)
                     self.assertEqual((work / f"exit-{mode}").read_text(encoding="utf-8"), f"{status}\n")
                     self.assertEqual((work / f"trace-{mode}").read_text(encoding="utf-8"), trace)
+
+    @staticmethod
+    def _build_title_shim(work: Path) -> Path:
+        """nk_android_title.c built for Linux with the Android link's --wrap flags, around the
+        stub runtime and platform in _TITLE_SHIM_HARNESS; returns the program."""
+        shim = ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c"
+        (work / "harness.c").write_text(_TITLE_SHIM_HARNESS, encoding="utf-8")
+        program = work / "title"
+        wraps = [f"-Wl,--wrap={symbol}" for symbol in ("exit", "_exit", "_Exit", "atexit")]
+        subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-I", str(ROOT / "src" / "core"),
+                        "-Dmain=nk_shim_runtime_main", "-c", str(shim), "-o", str(work / "shim.o")],
+                       check=True)
+        subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-c",
+                        str(work / "harness.c"), "-o", str(work / "harness.o")], check=True)
+        subprocess.run(["cc", str(work / "harness.o"), str(work / "shim.o"), "-pthread", *wraps,
+                        "-o", str(program)], check=True)
+        return program
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc"), "needs a Linux C compiler")
+    def test_the_title_takes_the_launchers_variables_through_the_import(self) -> None:
+        """A title library SDL dlopen()s by path (a demo package in the files folder) gets no
+        JNI_OnLoad, and under ARM translation its C library does not see what TitleActivity set
+        with Os.setenv: the pid, exit and boot-event files and the app folder reach it only
+        through nk_platform_android_import_environment, with SDL's JNI environment. The title's
+        process start applies them before it writes the pid file or starts the host, so the
+        launcher finds the pid and the exit status (#360, emulator run NK-360-EMU-A01)."""
+        with tempfile.TemporaryDirectory(prefix="nk-title-shim-") as tmp:
+            work = Path(tmp)
+            program = self._build_title_shim(work)
+            pid_file, exit_file, app = work / "title.pid", work / "title.exit", work / "app"
+            env = {name: value for name, value in os.environ.items()
+                   if name not in ("NK_ANDROID_PID_FILE", "NK_ANDROID_EXIT_FILE", "NK_ANDROID_APP_DIR")}
+            env["NK_TEST_TRACE"] = str(work / "trace")
+            env["NK_TEST_IMPORTED_ENV"] = (f"NK_ANDROID_PID_FILE={pid_file}\nNK_ANDROID_EXIT_FILE={exit_file}\n"
+                                           f"NK_ANDROID_APP_DIR={app}\n")
+            process = subprocess.Popen([str(program), "import"], env=env)
+            self.assertEqual(process.wait(timeout=60), 7)
+            self.assertEqual((work / "trace").read_text(encoding="utf-8"),
+                             f"import startup-app={app} shutdown(no-exit-file) ")
+            self.assertEqual(pid_file.read_text(encoding="utf-8"), f"{process.pid}\n")
+            self.assertEqual(exit_file.read_text(encoding="utf-8"), "7\n")
+
+    def test_the_title_applies_the_launchers_variables_first(self) -> None:
+        shim = (ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c").read_text(encoding="utf-8")
+        body = shim[shim.index("int nk_android_title_main(int argc, char **argv) {"):]
+        body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+        statements = [line.strip() for line in body.splitlines()[1:] if line.strip()]
+        self.assertEqual(statements[0], "(void)nk_platform_android_import_environment(SDL_GetAndroidJNIEnv());")
+        self.assertEqual(statements[1], 'write_number_file("NK_ANDROID_PID_FILE", (long)getpid());')
+        self.assertIn("#include <SDL3/SDL_system.h>", shim)
+        header = (ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
+        self.assertIn("bool nk_platform_android_import_environment(void *jni_env);", header)
+        for source in ("nk_platform_posix.c", "nk_platform_win32.c"):
+            text = (ROOT / "src" / "core" / source).read_text(encoding="utf-8")
+            self.assertIn("bool nk_platform_android_import_environment(void *jni_env)", text)
 
     def test_data_folder_has_the_name_every_host_uses(self) -> None:
         """The user data folder is called Nakagawa on every host; on Android it is in the
@@ -663,10 +709,12 @@ class AndroidTitleLibraryTests(unittest.TestCase):
         cls.lib = cls.work / "app" / "lib" / "arm64"
         cls.files = cls.work / "data" / "files"
         cls.outside = cls.work / "outside"
-        for folder in (cls.lib / "sub", cls.files / "Nakagawa" / "packages" / "ULUS00000", cls.outside):
+        for folder in (cls.lib / "sub", cls.files / "Nakagawa" / "packages" / "ULUS00000", cls.outside,
+                       cls.files / "demos" / "packages" / "TEST00007"):
             folder.mkdir(parents=True)
         for path in (cls.lib / "libnk_title_demo.so", cls.lib / "sub" / "libnested.so",
                      cls.files / "Nakagawa" / "packages" / "ULUS00000" / "libULUS00000.so",
+                     cls.files / "demos" / "packages" / "TEST00007" / "libshowcase-scene.so",
                      cls.files / "notes.txt", cls.outside / "libother.so"):
             path.write_bytes(b"\x7fELF")
         (cls.files / "dir.so").mkdir()
@@ -700,6 +748,13 @@ class AndroidTitleLibraryTests(unittest.TestCase):
         self.assertEqual(self._resolve(built.as_posix()), [f"{self._abs(built)}|"])
         if self.links:
             self.assertEqual(self._resolve((self.files / "inside.so").as_posix()), [f"{self._abs(built)}|"])
+
+    def test_a_bundled_demo_loads_by_the_path_the_launcher_validated(self) -> None:
+        """An nk.demos package is unpacked to <files>/demos/packages/<disc>/ and Play names its
+        library by that absolute path (the validated package's executable), as for a package
+        the player built (#360)."""
+        demo = self.files / "demos" / "packages" / "TEST00007" / "libshowcase-scene.so"
+        self.assertEqual(self._resolve(demo.as_posix()), [f"{self._abs(demo)}|"])
 
     def test_every_other_name_is_refused(self) -> None:
         refused = [
@@ -810,6 +865,108 @@ class AndroidTitleLibraryTests(unittest.TestCase):
         self.assertIn("showBundledFilesFailure(", created)
         strings = (ANDROID / "app" / "src" / "main" / "res" / "values" / "strings.xml").read_text(encoding="utf-8")
         self.assertRegex(strings, r'<string name="bundled_files_failed">[^<]*%1\$s')
+
+
+class AndroidBundledDemoTests(unittest.TestCase):
+    """The showcase demos reach the Android launcher's library by the desktop route (#360):
+    nk.demos bundles a whole `showcase.py build --target android` demos folder as demos/, the
+    first start unpacks it into the files folder, which is SDL_GetBasePath() there, and the
+    launcher's own showcase discovery validates each package exactly as on the desktop. nk.titles
+    keeps the debug route, named by the catalogue's title id. Gradle is not run here (hosted CI
+    builds the launcher-only APK); these pin what the build files and the documented commands
+    say to one another."""
+
+    gradle = (ANDROID / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+    cmake = (ANDROID / "app" / "CMakeLists.txt").read_text(encoding="utf-8")
+    docs = (ROOT / "docs" / "ANDROID_DEVELOPMENT.md").read_text(encoding="utf-8")
+
+    def _demo_discs(self) -> dict[str, str]:
+        """Each showcase demo's catalogue id and its disc id, from showcase.py's DEMOS."""
+        sys.path.insert(0, str(ROOT / "tests" / "fixtures" / "showcase"))
+        try:
+            import showcase  # noqa: PLC0415
+        finally:
+            sys.path.remove(str(ROOT / "tests" / "fixtures" / "showcase"))
+        return {str(demo["id"]): str(demo["disc_id"]) for demo in showcase.DEMOS}
+
+    def test_nk_titles_is_named_by_the_id_the_package_records(self) -> None:
+        """F1: a showcase package records the catalogue id (showcase-scene-v1) while its files
+        carry the game's name (showcase-scene_image.bin, showcase-scene_recomp.c). nk.titles
+        takes the recorded id, finds the image beside the recorded executable, and names the
+        library and the staged files by the id, so the documented commands work as written."""
+        parse = self.gradle[self.gradle.index("val titles: List<BundledTitle>"):]
+        parse = parse[:parse.index("\n    }\n")]
+        self.assertIn("require(recorded == id)", parse)
+        self.assertIn('val image = File(dir, "${stem}_image.bin")', parse)
+        self.assertNotIn("${id}_image.bin", parse)
+        self.assertIn('rename { "${title.id}_image.bin" }', self.gradle)
+        self.assertIn('"nk_title_${it.id}"', self.gradle)
+        self.assertIn('"${it.id}=${it.codeName}=${it.dir.invariantSeparatorsPath}"', self.gradle)
+        self.assertIn('nk_add_title_runtime(${target} "${package_dir}" "${code_name}")', self.cmake)
+        self.assertIn('set(target "nk_title_${title_id}")', self.cmake)
+
+        demos = self._demo_discs()
+        titles = re.findall(r'-Pnk\.titles=([^"\s]+)', self.docs)
+        self.assertTrue(titles, "the documentation shows the nk.titles command")
+        for value in titles:
+            for entry in value.split(";"):
+                title_id, package = entry.split("=", 1)
+                self.assertIn(title_id, demos, entry)
+                self.assertTrue(package.endswith(f"packages/{demos[title_id]}"), entry)
+        # \x5c is the shell's line-continuation backslash (spelled so it is not read as a UNC path).
+        starts = re.findall(
+            r"--es library nk_title_(\S+) \x5c\n\s+--esa args \"--image,<app files>/titles/"
+            r"([^/]+)/([^,]+)_image\.bin", self.docs)
+        self.assertTrue(starts, "the documentation shows the debug am start command")
+        for library, title, image_title in starts:
+            self.assertEqual((library, title, image_title), (library, library, library))
+            self.assertIn(library, demos)
+
+    def test_nk_demos_bundles_the_listed_files_in_the_desktop_layout(self) -> None:
+        self.assertIn('findProperty("nk.demos")', self.gradle)
+        parse = self.gradle[self.gradle.index("val demoPackages: List<DemoPackage> ="):]
+        parse = parse[:parse.index("\nval nativeTargets")]
+        # One package per ABI, and these are arm64 builds.
+        self.assertIn('require(abis == listOf("arm64-v8a"))', parse)
+        # A desktop package, or a library for another ABI, is refused by name before any task.
+        self.assertIn('executable.startsWith("lib") && executable.endsWith(".so")', parse)
+        self.assertIn("elfMachine(File(dir, executable)) == 183", parse)
+        self.assertIn('File(root, "images/${dir.name}.iso").isFile', parse)
+        self.assertIn("DemoPackage(dir, completionArtifacts(property, dir))", parse)
+        # Exactly what each completion manifest lists, plus the manifest, the disc image and the
+        # notices, in the desktop layout; never the whole folder (a stray file would ship).
+        listed = self.gradle[self.gradle.index("fun completionArtifacts("):]
+        listed = listed[:listed.index("\n}\n")]
+        self.assertIn('require(File(dir, path).isFile)', listed)
+        self.assertIn('path.split(\'/\').none { it == "." || it == ".." }', listed)
+        stage = self.gradle[self.gradle.index('val stageBundledAssets = tasks.register<Sync>'):]
+        stage = stage[:stage.index("\n}\n")]
+        self.assertIn('include(demo.listed + "completion-manifest.json")', stage)
+        self.assertIn('into("app/demos/packages/${demo.dir.name}")', stage)
+        self.assertIn('"images/${demo.dir.name}.iso")) { into("app/demos/images") }', stage)
+        self.assertNotIn("from(root) {", stage)
+
+    def test_every_file_a_package_lists_reaches_the_apk(self) -> None:
+        """aapt leaves out names starting with "." or folders starting with "_" by default; a
+        demo package lists .game-inputs and other dot files, so the pattern keeps them."""
+        match = re.search(r'ignoreAssetsPattern = "([^"]*)"', self.gradle)
+        self.assertIsNotNone(match, "build.gradle.kts sets the asset pattern")
+        assert match is not None
+        rules = match.group(1).split(":")
+        self.assertNotIn(".*", rules)
+        self.assertNotIn("<dir>_*", rules)
+        self.assertTrue(all(rule.startswith("!") for rule in rules), rules)
+
+    def test_the_unpacked_demos_are_where_the_launcher_looks(self) -> None:
+        java = ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" / "nakagawa"
+        host = (java / "NakagawaHost.java").read_text(encoding="utf-8")
+        # assets/app/<child> goes to <files>/<child>, which is the working directory and so
+        # SDL_GetBasePath() ("./") for the player.
+        self.assertIn('copyAssetTree(context.getAssets(), "app/" + child, new File(app, child));', host)
+        main = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn("player_app_discover_showcase(&run->app, executable_directory);", main)
+        state = (ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
+        self.assertIn('"%sdemos", executable_directory);', state)
 
 
 def cast_str(value: str | None) -> str:
@@ -929,7 +1086,34 @@ static void say(const char *text) {
     close(fd);
 }
 
-bool nk_platform_host_startup(const char *log_tag) { (void)log_tag; return true; }
+/* SDL's JNI environment and the platform's import, as on Android: the import applies the
+   NAME=VALUE lines of NK_TEST_IMPORTED_ENV, standing in for NakagawaHost.nativeEnvironment
+   (variables Java set that this library's C library does not see), when given SDL's env. */
+static int s_fake_jni_env;
+void *SDL_GetAndroidJNIEnv(void) { return &s_fake_jni_env; }
+bool nk_platform_android_import_environment(void *jni_env) {
+    const char *list = getenv("NK_TEST_IMPORTED_ENV");
+    if (!list) return true;
+    if (jni_env != &s_fake_jni_env) { say("import(wrong-env) "); return false; }
+    char copy[4096];
+    strncpy(copy, list, sizeof(copy) - 1);
+    copy[sizeof(copy) - 1] = '\0';
+    for (char *line = strtok(copy, "\n"); line; line = strtok(NULL, "\n")) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        setenv(line, eq + 1, 1);
+    }
+    say("import ");
+    return true;
+}
+
+static const char *s_startup_app_dir;
+bool nk_platform_host_startup(const char *log_tag) {
+    (void)log_tag;
+    s_startup_app_dir = getenv("NK_ANDROID_APP_DIR");
+    return true;
+}
 void nk_platform_host_shutdown(void) {
     say(access(getenv("NK_ANDROID_EXIT_FILE"), F_OK) == 0 ? "shutdown(exit-file) " : "shutdown(no-exit-file) ");
 }
@@ -963,6 +1147,12 @@ int nk_shim_runtime_main(int argc, char **argv) {
     if (strcmp(mode, "_exit") == 0) { atexit(handler_a); _exit(4); }
     if (strcmp(mode, "race") == 0) { atexit(handler_a); atexit(handler_slow); exit(2); }
     if (strcmp(mode, "foreign") == 0) { __real_atexit(handler_foreign); atexit(handler_a); exit(6); }
+    if (strcmp(mode, "import") == 0) {
+        say(s_startup_app_dir ? "startup-app=" : "startup-app=(unset)");
+        if (s_startup_app_dir) say(s_startup_app_dir);
+        say(" ");
+        return 7;
+    }
     return 99;
 }
 

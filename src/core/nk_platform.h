@@ -48,12 +48,13 @@ int64_t nk_ftell64(FILE *f);
 FILE *nk_fopen_utf8(const char *path, const char *mode);
 int nk_remove_utf8(const char *path);
 int nk_rename_utf8(const char *from, const char *to);
-/* Move file `from` to `to` only while `to` does not exist, so a file someone else put at `to`
+/* Move `from` to `to` only while `to` does not exist, so an entry someone else put at `to`
  * (a player's edited image, say) is never replaced, even one made between a check and the move.
  * Returns 0 when moved, 1 when `to` already exists (`from` is left where it is), -1 on any other
  * failure. Win32: MoveFileExW without MOVEFILE_REPLACE_EXISTING. POSIX: link() and then unlink()
  * of `from`; on a Linux file system without hard links, renameat2 with RENAME_NOREPLACE; with
- * neither the move is refused (-1), never done by a rename that could replace. */
+ * neither the move is refused (-1), never done by a rename that could replace. Directories
+ * work on Win32 and where Linux's RENAME_NOREPLACE is available. */
 int nk_rename_noreplace_utf8(const char *from, const char *to);
 
 /* Filesystem and path utilities (all paths in UTF-8) */
@@ -103,6 +104,11 @@ bool nk_platform_list_dir(const char *dir, NkDirEntryFn fn, void *ctx);
  * stops on a read error part way. */
 bool nk_platform_list_dir_counted(const char *dir, NkDirEntryFn fn, void *ctx,
                                   size_t *skipped);
+/* A strict walk that reports skipped names without following or opening their
+ * entries. An unrepresentable name fails the listing, and either callback can
+ * stop it early by returning false. */
+bool nk_platform_list_dir_report_skipped(const char *dir, NkDirEntryFn fn,
+                                        NkDirFileFn skipped_name, void *ctx);
 /* Flush f's buffered bytes and have the operating system put them on the disk
  * (fflush, then FlushFileBuffers or fsync). False when either fails. */
 bool nk_platform_sync_file(FILE *f);
@@ -576,6 +582,14 @@ bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
  * open. NULL on refusal or failure. */
 FILE *nk_platform_open_regular_file(const char *path);
 
+typedef struct {
+    int64_t seconds;
+    uint32_t nanoseconds;
+} NkFileWriteTime;
+
+/* Last-write time of an open regular file, in Unix seconds and nanoseconds. */
+bool nk_platform_file_write_time(FILE *file, NkFileWriteTime *out);
+
 /* Open the file at `path` for reading in binary mode and, while the stream stays
  * open, keep other programs from changing it where the platform can. Windows:
  * the handle shares reads only, so no other open may write to, replace, rename
@@ -795,8 +809,10 @@ typedef enum {
 NkHostKind nk_platform_host_kind(void);
 
 /* Linux Steam integration: discover the common per-user Steam root and conservatively check
-   `$HOME/.steam/steam.pid`. These POSIX-backend helpers return false on non-Linux hosts. */
-bool nk_platform_linux_steam_find_root(char *root, size_t root_cap);
+   `$HOME/.steam/steam.pid`. The supplied account check distinguishes usable roots from ones
+   containing only a userdata directory. These POSIX helpers return false on non-Linux hosts. */
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap,
+                                      bool (*has_accounts)(const char *));
 bool nk_platform_linux_steam_client_running(void);
 
 /* Path text comparison as the host's file system compares names: Win32 folds ASCII case
@@ -884,6 +900,17 @@ bool nk_platform_harden_library_search(void);
    line buffering (#1303). POSIX streams already reach the terminal or the launcher's log:
    nothing changes. Call after nk_platform_set_app_data_dir_override. */
 void nk_platform_setup_standard_streams(const char *fallback_log_name);
+
+/* Android: apply the variables the activity set (NakagawaHost.nativeEnvironment: the launcher's
+   NK_ANDROID_PID_FILE, NK_ANDROID_EXIT_FILE, SR_BOOT_EVENT_FILE, NK_ANDROID_APP_DIR and the rest)
+   to this library's own C library, through jni_env, the JNIEnv of the calling Java thread. Java's
+   Os.setenv reaches only the C library the app process runs on; an arm64 library under an ARM
+   translation layer runs on another. A library Java loads does this in JNI_OnLoad; a title's
+   library loaded by path (dlopen) gets no JNI_OnLoad, so its process start calls this first.
+   Setting a variable again to the value it has changes nothing, so a second call is harmless.
+   False, after an NK_ENV_IMPORT_FAILED line in the system log, when a variable could not be
+   applied. Everywhere else it does nothing and returns true. */
+bool nk_platform_android_import_environment(void *jni_env);
 
 /* Process start, for hosts whose application model needs it. Android: copy stdout and stderr to
    the system log under log_tag (and to NK_ANDROID_LOG_FILE when set), and make the folder the app

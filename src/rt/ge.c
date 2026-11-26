@@ -5440,7 +5440,8 @@ static int vertex_cache_enabled(void) {
         const char *disable = getenv("SR_GE_VERTEX_CACHE_DISABLE");
         s_vertex_cache_on = !(disable && disable[0] && strcmp(disable, "0") != 0);
     }
-    return s_vertex_cache_on;
+    return s_vertex_cache_on &&
+           !(sr_perf_windows_enabled && sr_perf_window_skips_vertex_cache());
 }
 
 void ge_vertex_cache_reload_env(void) {
@@ -5456,6 +5457,7 @@ static void vertex_cache_begin_draw(int repeats) {
         s_vertex_cache_epoch = 1u;
     }
 #endif
+    if (repeats && sr_perf_windows_enabled) sr_perf_window_note_ge_draw();
     if (!vertex_cache_enabled() || !repeats) {
         s_vertex_cache_draw = 0;
         return;

@@ -3,6 +3,7 @@
 
 #include "input_settings.h"
 #include "nk_platform.h"
+#include "nk_shared_helpers.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -467,18 +468,20 @@ void input_settings_set_device(InputSettingsState *state, InputSettingsDevice de
 static void note_moved(InputSettingsState *state, const char *taken, int other,
                        const char *given, const char *kept, const char *nothing) {
     const char *name = input_settings_control_name(other);
+    /* Format the two binding labels before clipping the displayed note. */
+    char message[2u * sizeof(state->note)];
     state->note_error = false;
     if (given) {
-        snprintf(state->note, sizeof(state->note), "%s was %s's. %s now uses %s.", taken, name,
+        snprintf(message, sizeof(message), "%s was %s's. %s now uses %s.", taken, name,
                  name, given);
     } else if (kept) {
-        snprintf(state->note, sizeof(state->note), "%s was %s's. %s keeps %s.", taken, name,
-                 name, kept);
+        snprintf(message, sizeof(message), "%s was %s's. %s keeps %s.", taken, name, name, kept);
     } else {
-        snprintf(state->note, sizeof(state->note), "%s was %s's. %s has %s now: choose one.",
+        snprintf(message, sizeof(message), "%s was %s's. %s has %s now: choose one.",
                  taken, name, name, nothing);
         state->note_error = true;
     }
+    nk_shared_text_copy(state->note, sizeof(state->note), message, NK_SHARED_TEXT_COPY_TRUNCATE);
     state->note_control = other;
 }
 
