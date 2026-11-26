@@ -715,7 +715,7 @@ a title that translates none has generated code unchanged.
 | `0xe26f226e` | `sceNetAdhocctlInit` | network | `synthetic` | HLE selftest dispatch |
 | `0xe2d56b2d` | `sceAudioOutputPanned` | audio | `synthetic` | HLE selftest dispatch |
 | `0xe3eb004c` | `sceIoDread` | io | `synthetic` | HLE selftest dispatch |
-| `0xe3ee2c81` | `sceMp3LowLevelDecode` | audio_codec | `ppsspp-derived` | registry notes name PPSSPP |
+| `0xe3ee2c81` | `sceMp3LowLevelDecode` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP |
 | `0xe47e40e4` | `sceGeEdramGetAddr` | ge | `hardware-measured` | PSP oracle PSP-HLE-GE-EDRAM-001, PSP-VRAM-MIRROR-001 |
 | `0xe49bfe92` | `sceUtilityUnloadModule` | utility | `ppsspp-derived` | registry notes name PPSSPP |
 | `0xe51b4b7a` | `sceRtcTickAddDays` | rtc | `synthetic` | HLE selftest dispatch |
