@@ -181,6 +181,13 @@ static uint64_t s_present_busy_surface = 0;  /* the window had no surface (Andro
  * stay 0 unless a surface is lost. */
 static int      s_surface_lost = 0;
 static int      s_app_background = 0;
+/* 1 while the current surface may be replaced when it is lost: a frame was shown on it, or the
+ * platform took the window away since it was made (the background, or no window surface), or it
+ * is the surface init made. A surface made by replace_surface starts at 0, so one lost again
+ * before any frame was shown on it, with the window still there, is terminal: otherwise a window
+ * whose every surface is lost at the acquire or the present would get a new surface on every
+ * present, and nothing would ever be shown or end it (#360). */
+static int      s_surface_proven = 1;
 /* Set from the first present held back for lack of a window surface until presenting resumes:
  * one line marks each edge, so a device log shows the background period. s_withheld_from is the
  * held-back count when it began. */
@@ -721,14 +728,29 @@ static int window_surface_absent(void) {
 #endif
 }
 
+/* window_surface_absent() for the replacement paths: the platform taking the window away also
+ * lets the next surface be replaced (s_surface_proven), as a new window brings a new surface. */
+static int window_surface_gone(void) {
+    if (!window_surface_absent()) return 0;
+    s_surface_proven = 1;
+    return 1;
+}
+
 /* Replaces the lost surface: the swapchain made on it and the surface go once nothing uses
  * them (a lost surface's swapchain cannot be the new one's oldSwapchain), and a new surface is
  * made for the same window and checked against the present queue family. Returns 1 when it was
  * replaced; 0 when the platform has no window surface now (s_surface_lost stays set and a later
  * present tries again); -1 when the renderer turned terminal: the wait for the old swapchain
- * failed, or with the window in the foreground the new surface cannot be made or presented to. */
+ * failed, the lost surface was itself a replacement no frame was shown on (s_surface_proven), or
+ * with the window in the foreground the new surface cannot be made or presented to. */
 static int replace_surface(void) {
-    if (window_surface_absent()) return 0;
+    if (window_surface_gone()) return 0;
+    if (!s_surface_proven) {
+        terminal_line("sdl3vk: the window's new surface was lost before any frame was shown on "
+                      "it; the renderer is terminal\n");
+        s_renderer_terminal = 1;
+        return -1;
+    }
     if (!wait_swapchain_unused()) return -1;
     destroy_swapchain();
     destroy_present_semaphores();
@@ -747,7 +769,7 @@ static int replace_surface(void) {
         created = SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &made);
     }
     if (!created) {
-        if (window_surface_absent()) return 0;   /* gone again before it could be made */
+        if (window_surface_gone()) return 0;   /* gone again before it could be made */
         terminal_line("sdl3vk: the window's surface was lost and a new one could not be made: %s; "
                       "the renderer is terminal\n", SDL_GetError());
         s_renderer_terminal = 1;
@@ -761,13 +783,14 @@ static int replace_surface(void) {
         can_present = VK_FALSE;
     }
     if (sr != VK_SUCCESS || !can_present) {
-        if (window_surface_absent()) return 0;   /* the next replacement destroys this one */
+        if (window_surface_gone()) return 0;   /* the next replacement destroys this one */
         terminal_line("sdl3vk: the window's new surface cannot be presented to from queue family "
                       "%u (VkResult %d); the renderer is terminal\n", (unsigned)s_qfam, (int)sr);
         s_renderer_terminal = 1;
         return -1;
     }
     s_surface_lost = 0;
+    s_surface_proven = 0;
     s_surface_gen++;
     fprintf(stderr, "sdl3vk: the window's surface was lost; a new surface replaced it\n");
     return 1;
@@ -780,7 +803,10 @@ static int replace_surface(void) {
  * is a new surface lost as its swapchain is made while the platform still has a window, so a
  * renderer never goes on presenting nothing, or replacing surfaces, without a line saying so. */
 static int surface_ready(void) {
-    if (s_app_background) return 0;
+    if (s_app_background) {
+        s_surface_proven = 1;
+        return 0;
+    }
     if (s_surface_lost) {
         const int replaced = replace_surface();
         if (replaced <= 0) return replaced;
@@ -794,10 +820,10 @@ static int surface_ready(void) {
      * window again. A window still there means every new surface would be lost the same way, so
      * that is terminal instead of a new surface on every present. */
     if (s_surface_lost) {
-        if (window_surface_absent()) return 0;
+        if (window_surface_gone()) return 0;
     } else {
         int w = 0, h = 0;
-        if (window_surface_absent() || sdl3vk_window_minimized() ||
+        if (window_surface_gone() || sdl3vk_window_minimized() ||
             !SDL_GetWindowSizeInPixels(s_win, &w, &h) || w <= 0 || h <= 0)
             return 0;
     }
@@ -1772,6 +1798,7 @@ static void poll_input_on_this_stack(void *arg) {
         case SDL_EVENT_DID_ENTER_BACKGROUND:
             s_app_background = 1;
             s_surface_lost = 1;
+            s_surface_proven = 1;
             break;
         case SDL_EVENT_DID_ENTER_FOREGROUND: s_app_background = 0; break;
         case SDL_EVENT_GAMEPAD_ADDED:
@@ -3197,6 +3224,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         int did_present = 0;
         const char *disp_why = NULL;
         PresentDisposition disp = classify_present(pr, &did_present, &disp_why);
+        if (did_present) s_surface_proven = 1;
 
         switch (disp) {
         case PRESENT_OK:
@@ -3704,8 +3732,10 @@ int sdl3vk_present_overlay(const void *px, int pitch) {
     pi.pImageIndices = &idx;
     int did_present = 0;
     const char *why = NULL;
-    switch (classify_present(PSTEP_VK(PSTEP_PRESENT, vkQueuePresentKHR(s_queue, &pi)), &did_present,
-                             &why)) {
+    const PresentDisposition disp =
+        classify_present(PSTEP_VK(PSTEP_PRESENT, vkQueuePresentKHR(s_queue, &pi)), &did_present, &why);
+    if (did_present) s_surface_proven = 1;
+    switch (disp) {
     case PRESENT_OK:
         s_frame_cursor = (s_frame_cursor + 1) % PRESENT_FRAMES;
         return 1;
@@ -3858,6 +3888,7 @@ void sdl3vk_shutdown(void) {
     s_swap_extent_zero_fault = 0;
     s_surface_lost = 0;
     s_app_background = 0;
+    s_surface_proven = 1;
     s_surface_withheld = 0;
     s_withheld_from = 0;
     s_swap_surface_lost_fault = SWAP_LOST_NONE;

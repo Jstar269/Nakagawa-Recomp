@@ -330,8 +330,11 @@ go on decides the transition:
   cannot be made, or cannot be presented to, with the window in the foreground is terminal, as
   is a swapchain that cannot be made on it for a window with pixels, and a new surface lost as
   its swapchain is made while the platform still has a window (otherwise every present would
-  replace the surface again). The pause overlay replaces the surface the same way and asks for
-  its image to be composed again (2).
+  replace the surface again). Likewise a surface made to replace a lost one that is lost again,
+  at an acquire, a present or a rebuild, before any frame was shown on it, while the platform
+  still has a window, is terminal with one line instead of being replaced again; a frame shown on
+  it, or the platform taking the window away in between, lets it be replaced. The pause overlay
+  replaces the surface the same way and asks for its image to be composed again (2).
 - The renderer turns terminal (`sdl3vk_renderer_terminal()`; every later present returns -1 at
   once) when the device is lost, a fence wait fails (the frame's work may still run),
   or any step between a successful acquire and the submit fails (the image stays acquired and its
@@ -366,10 +369,12 @@ one session; SDL's background and foreground events, and a loss while the platfo
 surface (a seam), each twice; the pause overlay meeting a loss at its acquire or its present; a
 loss at the rebuild's capabilities query and at its `vkCreateSwapchainKHR`, after a suboptimal
 present and after a present that was not enqueued (a game frame and the pause overlay); a new
-surface lost at once as the window goes; and the terminal cases (a new surface that cannot be
-made, after a lost acquire, a lost present or in the pause overlay, cannot be presented to, or
-is lost at once with the window still there; a device lost at the acquire or the present), each
-with one line. The `surface-lost` leg of `gpu-capture-selftest` checks that a present that met
+surface lost at once as the window goes; a surface lost again as the window goes, and lost and
+shown in turn; and the terminal cases (a new surface that cannot be made, after a lost acquire,
+a lost present or in the pause overlay, cannot be presented to, or is lost at once with the
+window still there or minimized; a surface lost at every acquire, at every present, or at every
+pause-overlay present; a device lost at the acquire or the present), each with one line. The
+minimized case needs a window manager that minimizes and reports SKIP without one (Xvfb). The `surface-lost` leg of `gpu-capture-selftest` checks that a present that met
 the loss is not shown, the renderer is not terminal and the next present is shown. These run on
 desktop drivers; they do not show what an Android device does.
 
