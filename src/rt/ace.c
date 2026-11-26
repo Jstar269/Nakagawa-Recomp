@@ -1065,10 +1065,11 @@ int ace_det_flip(AceDetector *d, uint32_t vcount, int new_frame) {
     }
     if (d->have_last) {
         uint32_t gap = vcount - d->last_new_vcount;
-        /* Ahead of 30 Hz: less than two VBLANKs after the frame before it. Not so when that
-         * frame was late (three VBLANKs or more): this one is its catch-up, and the two are
-         * back on a 30 Hz pace. */
-        d->ahead = gap < 2u && d->last_gap < 3u;
+        /* Ahead of 30 Hz: the second frame in a row to come less than two VBLANKs after the
+         * frame before it. One short interval alone is a hitch, an early frame or the catch-up
+         * of a late one, and its frame is held; whether it starts a faster pace shows only at
+         * the next flip. */
+        d->ahead = gap < 2u && d->last_gap < 2u;
         d->last_gap = gap;
         /* A gap of a static stretch or longer is not a frame interval: the window keeps the
          * rate the game had, and frames that resume are judged from here. */

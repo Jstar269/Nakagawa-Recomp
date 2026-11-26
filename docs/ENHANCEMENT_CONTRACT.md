@@ -928,11 +928,13 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   run's report as `added_delay_ms`. A new flip that arrives before B's present replaces it, counted in
   `presents.superseded`: one VBLANK of delay does not fit a frame that is on screen for one VBLANK (a title leaving
   30 FPS), and holding each frame back instead would keep every later frame one VBLANK late. The frame that
-  replaces it came one VBLANK after it, and is not held either when it runs ahead of 30 FPS ("Only at 30" below).
-  So a title that goes from 30 FPS to a flip on every VBLANK gives up one frame, the last of its 30 FPS stretch, or
-  two when that frame was itself late. A title that leaves 30 FPS for an uneven pace is not helped: with intervals
-  of one and two VBLANKs, each frame that came two VBLANKs after the one before it is still held and then replaced,
-  until the detector leaves 30 about half a second later (13 frames in `gui-present-selftest`'s run).
+  replaces it came one VBLANK after it. The first such frame is held in its turn, because one early frame can be a
+  hitch; the second in a row runs ahead of 30 FPS and is not held ("Only at 30" below). So a title that goes from
+  30 FPS to a flip on every VBLANK gives up two frames, the last of its 30 FPS stretch and the first of the new
+  pace, where it gave up every frame until the detector left 30 before issue #2341 (33 frames in
+  `gui-present-selftest`'s run). A title that leaves 30 FPS for an uneven pace is not helped: with intervals of one
+  and two VBLANKs, each frame that came two VBLANKs after the one before it is still held and then replaced, until
+  the detector leaves 30 about 0.6 seconds later (37 VBLANKs and 13 frames in `gui-present-selftest`'s run).
 - **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
   paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
   cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
@@ -964,15 +966,16 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   superseded by the first new frame (`presents.superseded`), which is shown as it comes. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
   30 Hz after a second of agreement and leaves after half a second of disagreement. While it still reads 30, a frame
   that runs ahead of 30 FPS is shown as it comes too, with no in-between (issue #2341, `ace_det_holds` in
-  `src/rt/ace.c`). A frame runs ahead when it is flipped less than two VBLANKs after the frame before it and that
-  frame was not late. Held, it would be replaced by the next flip before its own present, and a title that goes to a
-  flip on every VBLANK would show only in-betweens until the detector left 30. A frame flipped that soon after a
-  late frame (one that came three VBLANKs or more after its own predecessor, or the first after a static picture) is
-  its catch-up: the two are on a 30 FPS pace again, so it is held like any other, and a title whose intervals
-  alternate three VBLANKs and one keeps an in-between for every frame. This is judged frame by frame and does not
-  move the class, so the next frame that comes two VBLANKs after the one before it has its in-between again. The
-  costs: a frame that comes one VBLANK after an on-time frame inside a 30 FPS stretch is shown without an
-  in-between, and a title that goes to a flip on every VBLANK right after a late frame gives up two frames, not one.
+  `src/rt/ace.c`). A frame runs ahead when it is the second in a row to be flipped less than two VBLANKs after the
+  frame before it. Held, it would be replaced by the next flip before its own present, and a title that goes to a
+  flip on every VBLANK would show only in-betweens until the detector left 30. One short interval alone is a hitch,
+  and its frame is held like any other: the catch-up of a late frame, an early frame that a late one follows, or a
+  frame one VBLANK after the first frame that follows a static picture. So a title whose intervals alternate three
+  VBLANKs and one, or repeat two, one and three, keeps an in-between for every frame for as long as that lasts. This
+  is judged frame by frame and does not move the class, so the next frame that comes two VBLANKs after the one
+  before it has its in-between again. The cost: the first frame of a move to a flip on every VBLANK cannot be told
+  from an early hitch until the next flip comes, so it is held and then replaced, and such a move gives up two
+  frames where not holding it would give up one.
 - **Never off without saying so, and never more than it moved.** The setting's description says it smooths
   steady 30 FPS scenes only where it can follow the motion. With the speed readout on, its text ends with
   `SMOOTH n`, or with `SMOOTH OFF` for a second in which no in-between was shown: another frame rate, a PC that

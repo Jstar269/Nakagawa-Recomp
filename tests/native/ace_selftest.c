@@ -1809,8 +1809,10 @@ static void cell_detector(void) {
         CHECK(ace_det_holds(&d), "the first frame back at 30 Hz after a static stretch is held: %d", ace_det_holds(&d));
     }
     /* What smooth motion may hold (ace_det_holds, #2341): a frame at a stable 30 Hz that does
-     * not run ahead of it. A frame that comes less than two VBLANKs after an on-time one is not
-     * held although the class still reads 30, and the class does not move for it. */
+     * not run ahead of it. One frame that comes less than two VBLANKs after the one before it
+     * is still held: an early frame can be a hitch, and whether it starts a faster pace shows
+     * only at the next flip. The second such frame in a row is not held although the class still
+     * reads 30, and the class does not move for it. */
     {
         ace_det_reset(&d);
         vc = 1000;
@@ -1820,8 +1822,13 @@ static void cell_detector(void) {
               ace_rate_name(d.stable), ace_det_holds(&d));
         vc += 1;
         int changed = ace_det_flip(&d, vc, 1);
+        CHECK(!changed && d.stable == ACE_RATE_K2 && ace_det_holds(&d),
+              "one frame one VBLANK after an on-time one is held: %s, %d", ace_rate_name(d.stable),
+              ace_det_holds(&d));
+        vc += 1;
+        changed = ace_det_flip(&d, vc, 1);
         CHECK(!changed && d.stable == ACE_RATE_K2 && !ace_det_holds(&d),
-              "a frame one VBLANK after the one before it is not held, at 30 Hz still: %s, %d",
+              "the second frame in a row one VBLANK after the one before it is not held, at 30 Hz still: %s, %d",
               ace_rate_name(d.stable), ace_det_holds(&d));
         (void)ace_det_flip(&d, vc + 1u, 0);
         CHECK(!ace_det_holds(&d), "a re-flip of that frame leaves it not held: %d", ace_det_holds(&d));
@@ -1830,8 +1837,14 @@ static void cell_detector(void) {
         CHECK(!changed && d.stable == ACE_RATE_K2 && ace_det_holds(&d),
               "the next frame, two VBLANKs later, is held again: %s, %d", ace_rate_name(d.stable),
               ace_det_holds(&d));
+        /* Two new frames in one VBLANK are an interval of none: one short interval after an
+         * on-time frame, held as the frame one VBLANK later is above. A third is the second in
+         * a row. */
         (void)ace_det_flip(&d, vc, 1);
-        CHECK(d.stable == ACE_RATE_K2 && !ace_det_holds(&d), "a second new frame in one VBLANK is not held: %s, %d",
+        CHECK(d.stable == ACE_RATE_K2 && ace_det_holds(&d), "a second new frame in one VBLANK is held: %s, %d",
+              ace_rate_name(d.stable), ace_det_holds(&d));
+        (void)ace_det_flip(&d, vc, 1);
+        CHECK(d.stable == ACE_RATE_K2 && !ace_det_holds(&d), "a third new frame in one VBLANK is not held: %s, %d",
               ace_rate_name(d.stable), ace_det_holds(&d));
         vc += 3;
         (void)ace_det_flip(&d, vc, 1);
@@ -1881,13 +1894,39 @@ static void cell_detector(void) {
         CHECK(!moved && d.stable == ACE_RATE_K2 && held == 64, "3,1 alternating holds every frame: %s, %d of 64",
               ace_rate_name(d.stable), held);
     }
+    /* An early frame, then a late one (#2341): intervals that repeat 2, 1, 3 or 2, 2, 1, 3
+     * average two VBLANKs, so the class reads 30 for as long as they last, and no two short
+     * intervals come in a row, so every frame is held. 96 frames are 32 and 24 turns of the two
+     * patterns and three class windows. */
+    {
+        static const uint8_t early_late[] = {2, 1, 3}, on_early_late[] = {2, 2, 1, 3};
+        struct { const uint8_t *g; size_t n; const char *name; } paces[] = {
+            { early_late, 3, "2,1,3" }, { on_early_late, 4, "2,2,1,3" },
+        };
+        for (size_t p = 0; p < sizeof(paces) / sizeof(paces[0]); p++) {
+            ace_det_reset(&d);
+            vc = 1000;
+            (void)det_run(&d, &vc, k2, 1, 400);
+            int held = 0, moved = 0;
+            for (size_t i = 0; i < 96; i++) {
+                vc += paces[p].g[i % paces[p].n];
+                moved |= ace_det_flip(&d, vc, 1);
+                held += ace_det_holds(&d);
+            }
+            CHECK(!moved && d.stable == ACE_RATE_K2 && held == 96, "%s repeating holds every frame: %s, %d of 96",
+                  paces[p].name, ace_rate_name(d.stable), held);
+        }
+    }
     /* A static stretch (#2341). The first frame after it is held whatever the frame before the
-     * stretch was. Its own long interval counts as late, so a frame one VBLANK after it is held
-     * as its catch-up, and the one after that is not. */
+     * stretch was: here that one ran ahead, the second of two frames flipped one VBLANK apart.
+     * The first frame's own interval is the long one, so a frame one VBLANK after it is the
+     * first short interval and is held, and the one after that is not. */
     {
         ace_det_reset(&d);
         vc = 1000;
         (void)det_run(&d, &vc, k2, 1, 400);
+        vc += 1;
+        (void)ace_det_flip(&d, vc, 1);
         vc += 1;
         (void)ace_det_flip(&d, vc, 1);
         CHECK(!ace_det_holds(&d), "the frame before the stretch runs ahead: %d", ace_det_holds(&d));

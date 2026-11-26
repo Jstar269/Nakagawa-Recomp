@@ -3979,6 +3979,8 @@ static int busy_frames_replaced(const BusyRun *r, int from, int to, int step) {
 static const uint8_t k_busy_one[1] = { 1 };
 static const uint8_t k_busy_late_one[2] = { 3, 1 };
 static const uint8_t k_busy_one_two[2] = { 1, 2 };
+static const uint8_t k_busy_early_late[3] = { 2, 1, 3 };
+static const uint8_t k_busy_on_early_late[4] = { 2, 2, 1, 3 };
 
 /* The control, a steady 30 FPS title whose flips come before or after their VBLANK's held
  * present: once the detector reads 30, every frame has its in-between at its flip and its own
@@ -4047,45 +4049,93 @@ static void cadence_one_hitch(void) {
     busy_check_motion(&r, 0u);
 }
 
-/* The title leaves 30 FPS: frames 201 on are flipped on consecutive VBLANKs. */
+/* A 30 FPS title whose frames keep coming early and then late: from frame 200 its intervals
+ * repeat 2, 1, 3 or 2, 2, 1, 3 VBLANKs. Both average two, so the class reads 30 to the end of
+ * the run. A frame that comes one VBLANK after an on-time one is an early hitch here, not the
+ * start of a faster pace: no second short interval follows it, so it is held like any other
+ * and every frame keeps its in-between, as before #2341. That is 40 in-betweens for frames 200
+ * to 239; not holding the early frames would show 27 and 30, and save no frame. With latched
+ * flips the frame before each early one is replaced by it, as it was before: the frames whose
+ * successor comes one VBLANK later, 13 (200, 203, ... 236) and 10 (201, 205, ... 237) in this
+ * run. With flips after the held present every frame is shown. */
+static void cadence_early_and_late(void) {
+    static const struct { const uint8_t *gap; int count; int replaced; } pace[2] = {
+        { k_busy_early_late, 3, 13 }, { k_busy_on_early_late, 4, 10 },
+    };
+    BusyRun r;
+    AcePaceStats st;
+    BusyCadence c;
+    for (int i = 0; i < 2; i++) {
+        for (int after = 0; after <= 1; after++) {
+            busy_cadence(&c, BUSY_LEAVE, BUSY_FRAMES, pace[i].gap, pace[i].count, after);
+            busy_run_cadence(&r, 0, &c, busy_never, BUSY_NO_FAIL, 0, 0u);
+            ace_pace_stats(&st);
+            assert(r.rate[BUSY_FRAMES - 1] == ACE_RATE_K2);
+            assert(busy_frames_shown(&r, &c, BUSY_FIRST_BETWEEN, BUSY_LEAVE, 1));
+            int replaced = 0;
+            for (int n = BUSY_LEAVE; n < BUSY_FRAMES; n++) {
+                if (!after && n + 1 < BUSY_FRAMES && c.gap[n + 1] == 1) {
+                    assert(busy_frames_replaced(&r, n, n + 1, 1));
+                    replaced++;
+                } else {
+                    assert(busy_frames_shown(&r, &c, n, n + 1, 1));
+                }
+            }
+            assert(busy_count(r.between, BUSY_LEAVE, BUSY_FRAMES) == 40);
+            assert(busy_sum(r.between) == BUSY_FRAMES - BUSY_FIRST_BETWEEN && r.order_ok && r.gaps == 0);
+            assert(replaced == (after ? 0 : pace[i].replaced));
+            assert(st.busy == 0u && st.superseded == (uint64_t)replaced);
+            busy_check_motion(&r, 0u);
+        }
+    }
+}
+
+/* The title leaves 30 FPS: frames 201 on are flipped on consecutive VBLANKs. Frame 201 is one
+ * short interval after an on-time frame, which the cadences above show can be a hitch, so it is
+ * held like any other. Frame 202 is the second short interval in a row: it and every frame
+ * after it are shown as they come. */
 static void cadence_leaves_30(void) {
     BusyRun r;
     AcePaceStats st;
     BusyCadence c;
 
-    /* Each flip before its VBLANK's held present. The class still reads 30 at frame 201 and
-     * leaves later, by its own rule. Every one of those frames is shown once, in the VBLANK of
-     * its flip, and none gets an in-between. Frame 200 is the one frame given up: it was held
-     * when frame 201's flip came, one VBLANK cannot show both, and showing 200 would keep every
-     * later frame a VBLANK late. Its in-between was shown, and it is counted. */
+    /* Each flip before its VBLANK's held present. The class still reads 30 at frame 202 and
+     * leaves later, by its own rule. Two frames are given up: frame 200 was held when frame
+     * 201's flip came, and frame 201, held in its turn, when frame 202's came. One VBLANK cannot
+     * show a held frame and the next one, and showing the held one would keep every later frame
+     * a VBLANK late. Their in-betweens were shown, and both are counted. Frames 202 on are each
+     * shown once, in the VBLANK of their flip, and none gets an in-between. */
     busy_cadence(&c, BUSY_LEAVE + 1, BUSY_FRAMES, k_busy_one, 1, 0);
     busy_run_cadence(&r, 0, &c, busy_never, BUSY_NO_FAIL, 0, 0u);
     ace_pace_stats(&st);
-    assert(r.rate[BUSY_LEAVE + 1] == ACE_RATE_K2 && r.rate[BUSY_FRAMES - 1] != ACE_RATE_K2);
+    assert(r.rate[BUSY_LEAVE + 2] == ACE_RATE_K2 && r.rate[BUSY_FRAMES - 1] != ACE_RATE_K2);
     assert(busy_frames_shown(&r, &c, BUSY_FIRST_BETWEEN, BUSY_LEAVE, 1));
-    assert(busy_frames_shown(&r, &c, BUSY_LEAVE + 1, BUSY_FRAMES, 0));     /* was: 32 never shown */
-    assert(busy_frames_replaced(&r, BUSY_LEAVE, BUSY_LEAVE + 1, 1));
-    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES - 1 && r.order_ok && r.gaps == 0);
-    assert(st.busy == 0u && st.superseded == 1u);                           /* was: 33 */
+    assert(busy_frames_shown(&r, &c, BUSY_LEAVE + 2, BUSY_FRAMES, 0));     /* was: 202 to 232 never shown */
+    assert(busy_frames_replaced(&r, BUSY_LEAVE, BUSY_LEAVE + 2, 1));
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES - 2 && r.order_ok && r.gaps == 0);
+    assert(st.busy == 0u && st.superseded == 2u);                           /* was: 33 */
     busy_check_motion(&r, 0u);
-    busy_check_report("\"superseded\": 1, \"unpaired\": 0, \"busy\": 0}");
+    busy_check_report("\"superseded\": 2, \"unpaired\": 0, \"busy\": 0}");
 
-    /* Each flip after its VBLANK's held present: frame 200 is shown at its VBLANK, then every
-     * later frame at its flip, on time. Nothing is given up. Before, frames 201 to 232 were each
-     * a VBLANK late, behind an in-between presented in the VBLANK of its flip. */
+    /* Each flip after its VBLANK's held present: frames 200 and 201 are each shown at their
+     * VBLANK, behind their in-between, then every later frame at its flip, on time. Nothing is
+     * given up. Before, frames 201 to 232 were each a VBLANK late, behind an in-between
+     * presented in the VBLANK of its flip; now frame 201 is the one such frame. */
     busy_cadence(&c, BUSY_LEAVE + 1, BUSY_FRAMES, k_busy_one, 1, 1);
     busy_run_cadence(&r, 0, &c, busy_never, BUSY_NO_FAIL, 0, 0u);
     ace_pace_stats(&st);
-    assert(busy_frames_shown(&r, &c, BUSY_FIRST_BETWEEN, BUSY_LEAVE + 1, 1));
-    assert(busy_frames_shown(&r, &c, BUSY_LEAVE + 1, BUSY_FRAMES, 0));
+    assert(busy_frames_shown(&r, &c, BUSY_FIRST_BETWEEN, BUSY_LEAVE + 2, 1));
+    assert(busy_frames_shown(&r, &c, BUSY_LEAVE + 2, BUSY_FRAMES, 0));
     assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok && r.gaps == 0);
     assert(st.busy == 0u && st.superseded == 0u);
     busy_check_motion(&r, 0u);
     busy_check_report("\"superseded\": 0, \"unpaired\": 0, \"busy\": 0}");
 
     /* Latched flips again, and the slot rule drops frame 201's present: that frame is not
-     * shown, as without smooth motion, and its flip had already replaced frame 200. Frames 202
-     * on are shown as they come. */
+     * shown, as without smooth motion, and its flip had already replaced frame 200. A frame is
+     * held only once its in-between has been shown, so frame 201 is not held and frame 202 has
+     * nothing to replace: one frame is given up here, not two. Frames 202 on are shown as they
+     * come. */
     busy_cadence(&c, BUSY_LEAVE + 1, BUSY_FRAMES, k_busy_one, 1, 0);
     c.early = BUSY_LEAVE + 1;
     busy_run_cadence(&r, 0, &c, busy_never, BUSY_NO_FAIL, 0, 0u);
@@ -4101,8 +4151,9 @@ static void cadence_leaves_30(void) {
 
 /* The title leaves 30 FPS right after a late frame: frame 200 comes three VBLANKs after 199,
  * and frames 201 on are flipped on consecutive VBLANKs, latched. Frame 201 reads as frame 200's
- * catch-up, so it is held, and frame 202 replaces it: two frames are given up here, 200 and 201,
- * where the departure from an on-time frame gives up one. Frames 202 on are shown as they come. */
+ * catch-up, one short interval with none before it, so it is held, and frame 202 replaces it:
+ * two frames are given up, 200 and 201, as in the departure from an on-time frame. Frames 202
+ * on are shown as they come. */
 static void cadence_late_then_leaves_30(void) {
     BusyRun r;
     AcePaceStats st;
@@ -4121,11 +4172,13 @@ static void cadence_late_then_leaves_30(void) {
 }
 
 /* The title leaves 30 FPS for an uneven pace: from frame 201 its intervals alternate 1 and 2
- * VBLANKs, latched. This is not a move to consecutive flips, and the frame-by-frame rule does
- * not save its frames: while the class still reads 30, each frame that comes two VBLANKs after
- * the one before it is held, and the next flip, one VBLANK later, replaces it. Those frames and
- * frame 200 are given up, 13 in this run, as before #2341. The frames that come one VBLANK after
- * an on-time one are shown as they come, and once the class has left 30 every frame is. */
+ * VBLANKs, latched. This is not a move to consecutive flips: no two short intervals come in a
+ * row, so the frame-by-frame rule holds every frame while the class still reads 30, as before
+ * #2341. Each frame that comes two VBLANKs after the one before it is replaced by the next
+ * flip, one VBLANK later: those frames and frame 200 are given up, 13 in this run (200, 202,
+ * ... 224). Each frame that comes one VBLANK after the one before it has two VBLANKs to the
+ * next flip and is shown behind its in-between. The class leaves 30 at frame 225, so 25 frames
+ * (200 to 224) have an in-between, and from there on every frame is shown as it comes. */
 static void cadence_uneven(void) {
     BusyRun r;
     AcePaceStats st;
@@ -4137,19 +4190,21 @@ static void cadence_uneven(void) {
     while (left < BUSY_FRAMES && r.rate[left] == ACE_RATE_K2) left++;
     assert(left > BUSY_LEAVE + 1 && left < BUSY_FRAMES);
     assert(busy_frames_replaced(&r, BUSY_LEAVE, left, 2));
-    for (int n = BUSY_LEAVE + 1; n < left; n += 2) assert(busy_frames_shown(&r, &c, n, n + 1, 0));
+    for (int n = BUSY_LEAVE + 1; n < left; n += 2) assert(busy_frames_shown(&r, &c, n, n + 1, 1));
     assert(busy_frames_shown(&r, &c, left, BUSY_FRAMES, 0));
+    assert(left == BUSY_LEAVE + 25 && busy_count(r.between, BUSY_LEAVE, BUSY_FRAMES) == 25);
     assert(r.order_ok && r.gaps == 0 && st.busy == 0u);
     assert(st.superseded == (uint64_t)(left - BUSY_LEAVE + 1) / 2u && st.superseded == 13u);
     busy_check_motion(&r, 0u);
 }
 
 /* 30 FPS, a stretch of flips on consecutive VBLANKs, then 30 FPS again. The stretch's frames
- * are shown as they come, and the first frame that again comes two VBLANKs after the one
- * before it has its in-between: smooth motion is back at once, for as long as the class
- * reads 30. Two such frames are a hitch the class absorbs, so it reads 30 to the end of the
- * run; after eight, it leaves 30 some frames later by its own rule, and the frames from
- * there on are shown as they come. */
+ * are shown as they come from its second one: the first, frame 201, is held behind its
+ * in-between like frame 200, and with latched flips both are replaced. The first frame that
+ * again comes two VBLANKs after the one before it has its in-between: smooth motion is back at
+ * once, for as long as the class reads 30. Two such frames are a hitch the class absorbs, so it
+ * reads 30 to the end of the run; after eight, it leaves 30 some frames later by its own rule,
+ * and the frames from there on are shown as they come. */
 static void cadence_returns_to_30(void) {
     static const int stretch[2] = { 2, 8 };
     BusyRun r;
@@ -4165,12 +4220,13 @@ static void cadence_returns_to_30(void) {
             while (left < BUSY_FRAMES && r.rate[left] == ACE_RATE_K2) left++;
             assert(i == 0 ? left == BUSY_FRAMES : left > back && left < BUSY_FRAMES);
             assert(busy_frames_shown(&r, &c, BUSY_FIRST_BETWEEN, BUSY_LEAVE, 1));
-            assert(r.between[BUSY_LEAVE] == 1 && r.real[BUSY_LEAVE] == after);
-            assert(busy_frames_shown(&r, &c, BUSY_LEAVE + 1, back, 0));
+            assert(after ? busy_frames_shown(&r, &c, BUSY_LEAVE, BUSY_LEAVE + 2, 1)
+                         : busy_frames_replaced(&r, BUSY_LEAVE, BUSY_LEAVE + 2, 1));
+            assert(busy_frames_shown(&r, &c, BUSY_LEAVE + 2, back, 0));
             assert(busy_frames_shown(&r, &c, back, left, 1));
             assert(busy_frames_shown(&r, &c, left, BUSY_FRAMES, 0));
-            assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES - !after && r.order_ok && r.gaps == 0);
-            assert(st.busy == 0u && st.superseded == (after ? 0u : 1u));
+            assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES - (after ? 0 : 2) && r.order_ok && r.gaps == 0);
+            assert(st.busy == 0u && st.superseded == (after ? 0u : 2u));
             busy_check_motion(&r, 0u);
         }
     }
@@ -4180,6 +4236,7 @@ static void selftest_consecutive_flips_are_not_held(void) {
     cadence_steady_30();
     cadence_late_and_catch_up();
     cadence_one_hitch();
+    cadence_early_and_late();
     cadence_leaves_30();
     cadence_late_then_leaves_30();
     cadence_uneven();
