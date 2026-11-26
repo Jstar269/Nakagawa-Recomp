@@ -8565,17 +8565,18 @@ class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
 
     A title's own replay re-runs recorded input through its logic from a known state. Under a 60 Hz
     package the update count is the run's, not the replay's: the attract loop, menus and loads
-    before the replay advance it too. These tests compile the generated code and start a replay
-    after an odd and after an even number of updates. A plain gate follows the parity of the run's
+    before the replay advance it too. These tests compile the generated code and start replays
+    after odd and after even numbers of updates. A plain gate follows the parity of the run's
     count, so after an odd count it runs on the other updates of the replay than in a recording
     started on an even count; a gate_30hz_alt site keeps its own phase and makes the stock call
-    first whenever it is reached again, whatever the parity.
+    first whenever it is reached again after a gap, whatever the parity and whichever call ended
+    its previous visit.
     """
 
     REPLAY = 12   # updates the replay re-runs; input k (0-based) is k + 1
 
     def _gate_and_count(self, tmp: Path) -> tuple[str, str]:
-        """The generated gate definition and the boundary's count statement."""
+        """The generated gate definition and the generated update boundary statement."""
         elf_path = tmp / "synth.elf"
         elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
         pkg, symbols = self._make_package_and_symbols(elf_bytes)
@@ -8591,8 +8592,10 @@ class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
         gate_def = next(line for line in header.splitlines()
                         if "int nk_enhancement_gate_30hz(void)" in line)
         combined = b"\n".join(files.values()).decode("utf-8")
+        # The boundary is found by the call it makes, not by how it counts, so a boundary that
+        # counts wrongly compiles and fails the behaviour checks below.
         count_stmt = next(line.strip() for line in combined.splitlines()
-                          if "nk_enhancement_updates++" in line)
+                          if "sr_enhancement_update_begin();" in line)
         return gate_def, count_stmt
 
     @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
@@ -8684,9 +8687,11 @@ class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
                 "int main(void) {\n"
                 "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
                 f"    segment(s, {self.REPLAY}u, 1);   /* the recording, from count 0 */\n"
-                "    segment(s, 7u, 0);   /* an odd gap: the replay starts at an odd count */\n"
-                f"    segment(s, {self.REPLAY}u, 1);\n"
-                "    segment(s, 6u, 0);   /* an even gap after the replay's even length */\n"
+                "    segment(s, 7u, 0);   /* replay 1 starts after 19 updates */\n"
+                f"    segment(s, {self.REPLAY + 1}u, 1);   /* odd length: it ends on a stock call */\n"
+                "    segment(s, 1u, 0);   /* replay 2 starts after 33, one update after that stock call */\n"
+                f"    segment(s, {self.REPLAY + 1}u, 1);\n"
+                "    segment(s, 6u, 0);   /* replay 3 starts after 52, an even count */\n"
                 f"    segment(s, {self.REPLAY}u, 1);\n"
                 "    putchar('\\n');\n"
                 "    return 0;\n"
@@ -8704,8 +8709,11 @@ class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
             # Sections 9.2 and 9.5: the site makes its alternates only in an update right after
             # one in which it made the stock call, so each segment begins with the stock call
             # (S), then the two alternates (AB), whatever the parity of the count it starts on.
-            pattern = "SAB" * (self.REPLAY // 2)
-            self.assertEqual(out.split("|")[:3], [pattern, pattern, pattern])
+            # Replays 2 and 3 follow a segment that ended on a stock call: a site that toggled on
+            # its own last choice without the gap rule would start them with AB.
+            even = "SAB" * (self.REPLAY // 2)
+            odd = even + "S"
+            self.assertEqual(out, "|".join([even, odd, odd, even]) + "|")
 
 
 if __name__ == "__main__":
