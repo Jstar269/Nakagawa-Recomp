@@ -1116,7 +1116,8 @@ static uint32_t h_PsmfAudioOutSize(CpuState *s) {
  * h264_null.c picks the build's decoder, Media Foundation (h264_mf.c) on Windows or the vendored
  * FFmpeg H.264 subset (h264_ffmpeg.c, the H264_FFMPEG=1 default elsewhere). A build with
  * neither fails closed. Nothing here depends on which backend decodes. sceMpegAtracDecode
- * still decodes no audio samples; it only advances the audio clock.
+ * decodes the held ATRAC3+ frame through atrac3p_bridge into the guest's 8192-byte block and
+ * advances the audio clock (mpeg_atrac_decode in mpeg.c).
  *
  * The executable HLE harness (SR_HLE_THREAD_SELFTEST) does not link mpeg.c: its own
  * tests/native/hle_thread_selftest.c defines mpeg_init, mpeg_finish, mpeg_create and
