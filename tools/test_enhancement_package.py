@@ -8661,7 +8661,7 @@ class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
             callees = list(dict.fromkeys(re.findall(r"(\w+)\(s\); SR_TAIL_DRAIN", statement)))
             self.assertEqual(len(callees), 3, statement)
             stubs = "".join(f"static void {fn}(CpuState *s) {{ (void)s; putchar('{tag}'); }}\n"
-                            for fn, tag in zip(callees, "SAB"))
+                            for fn, tag in zip(callees, "SAB", strict=True))
             harness = tmp / "alt_replay.c"
             harness.write_text(
                 "#include \"recomp.h\"\n"
