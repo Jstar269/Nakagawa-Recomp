@@ -1304,6 +1304,28 @@ static int planted_ttf_in_current_folder_is_ignored(void) {
 }
 #endif
 
+#if !defined(_WIN32)
+/* Where nk_ui_ttf_create looks by default (#306): the soname beside the executable, then the
+   bare soname. The folder SDL reports counts only as an absolute path; Android reports "./",
+   the current folder, which must never come first. */
+static int test_default_candidates_are_beside_the_executable_then_the_soname(void) {
+    char out[NK_UI_TTF_CANDIDATE_MAX][NK_UI_TTF_CANDIDATE_LEN];
+    size_t n = nk_ui_ttf_default_candidates("/opt/nk/bin/", out);
+    CHECK(n == 2u, "an absolute folder gives two candidates");
+    CHECK(strstr(out[0], "/opt/nk/bin/") == out[0] && strlen(out[0]) > strlen("/opt/nk/bin/"),
+          "the first candidate is the soname in that folder");
+    CHECK(strchr(out[1], '/') == NULL && strcmp(out[1], out[0] + strlen("/opt/nk/bin/")) == 0,
+          "the second is the bare soname the dynamic linker searches for");
+    n = nk_ui_ttf_default_candidates("./", out);
+    CHECK(n == 1u && strchr(out[0], '/') == NULL, "a relative folder (Android) gives only the soname");
+    n = nk_ui_ttf_default_candidates("", out);
+    CHECK(n == 1u && strchr(out[0], '/') == NULL, "an empty folder gives only the soname");
+    n = nk_ui_ttf_default_candidates(NULL, out);
+    CHECK(n == 1u && strchr(out[0], '/') == NULL, "no folder gives only the soname");
+    return 1;
+}
+#endif
+
 static int test_availability(void) {
     CHECK(nk_ui_sdlr_available() && nk_ui_ttf_available(), "this build includes both halves");
     CHECK(nk_ui_sdlr_create(NULL, NULL) == NULL, "no renderer, no backend");
@@ -1335,6 +1357,11 @@ int main(void) {
                    "beside SDL3.dll\n");
         }
     }
+#endif
+#if !defined(_WIN32)
+    /* No library is needed for this one, so it runs before the SKIP below. */
+    if (!test_default_candidates_are_beside_the_executable_then_the_soname()) return 1;
+    printf("PASS test_default_candidates_are_beside_the_executable_then_the_soname\n");
 #endif
     g_ttf = nk_ui_ttf_create(NULL, 0);
     if (g_ttf == NULL) {

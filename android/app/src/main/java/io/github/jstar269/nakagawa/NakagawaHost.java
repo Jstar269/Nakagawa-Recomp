@@ -117,8 +117,13 @@ final class NakagawaHost {
                 sBundlesToolchain = bundlesToolchain;
             }
             if (!stamp.equals(ToolchainArchive.readText(stampFile))) {
-                // Replace only what the APK bundles (assets/, titles/), never the user's data.
+                // Replace only what the APK bundles (assets/, demos/, titles/), never the user's
+                // data. A demos/ or titles/ an earlier APK unpacked and this one does not carry
+                // goes first, so the launcher does not list a demo this APK does not ship.
                 String[] bundled = context.getAssets().list("app");
+                for (String gone : ToolchainArchive.removeUnbundled(app, bundled)) {
+                    Log.i(TAG, "BUNDLED_FOLDER_REMOVED " + gone);
+                }
                 if (bundled != null) {
                     for (String child : bundled) {
                         ToolchainArchive.deleteTree(new File(app, child));

@@ -59,9 +59,9 @@ EXPECTED_PRX_SHA256 = {
 
 # The three runtime-placed overlay modules ladder-overlay loads (#704).
 EXPECTED_OVERLAY_SHA256 = {
-    "overlay_a.prx": "d992b86dacceb709f32d20798f0e7885936fa8e2ee8ac1e28ef08462db040866",
-    "overlay_b.prx": "8429a327cccfcb63db300bee63c73735b4067de4281dabbe9475442ca36beb36",
-    "overlay_c.prx": "257987793655f2c941a9121fc4aa1b492c0cedc31dbdf86c98552a6cb1a57626",
+    "overlay_a.prx": "a7bbd5bd75eda53f701865dab8a2dd1253ca7204a900c9d84dfbcbee4640be9d",
+    "overlay_b.prx": "22b437e5552a01911f1073d5aec54dc9fdef464b500313379bbad5ea1d475c45",
+    "overlay_c.prx": "e766186463213b61272efdf1462a07600d0dceb5be683b940fc85c46eb899698",
 }
 
 # Cross-platform differential: prxload output for ladder-zero is byte-identical

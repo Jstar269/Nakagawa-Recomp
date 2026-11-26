@@ -101,10 +101,11 @@ static inline NkPortableState nk_portable_resolve(const char *exe_path,
     if (!nk_platform_mkdir_p_private(out->root) || !nk_portable_dir_writable(out->root)) {
         snprintf(out->message, sizeof(out->message),
                  "[PORTABLE_NOT_WRITABLE] %s is next to the program in %s, so Nakagawa keeps "
-                 "its data in %s, but that folder cannot be written. Nothing was saved "
+                 "its data in %.*s, but that folder cannot be written. Nothing was saved "
                  "anywhere else. Move Nakagawa to a folder you can write to, or delete %s "
                  "to use the normal per-user data folder.",
-                 NK_PORTABLE_MARKER, folder, out->root, NK_PORTABLE_MARKER);
+                 NK_PORTABLE_MARKER, folder, (int)sizeof(out->root) - 1, out->root,
+                 NK_PORTABLE_MARKER);
         return out->state;
     }
     out->state = NK_PORTABLE_ACTIVE;

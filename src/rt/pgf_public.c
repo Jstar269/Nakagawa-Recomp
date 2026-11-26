@@ -1073,6 +1073,20 @@ static uint8_t pgf_interpolated_sample(const PgfGlyph *glyph,
     return (uint8_t)((upper * (int)fy + lower * (int)(64u - fy)) / 4096);
 }
 
+/* Format 2 (PGF_SPEC.md 3.10, [C12]): the source coverage is 17 times the packed nibble.
+   The preceding column contributes fx/64 of its coverage rounded down and the current
+   column (64 - fx)/64 of its coverage rounded up, so the last source column reaches one
+   more output column. The row is the integer source row: the vertical fraction takes no
+   part. The two weights sum to 64, so the result never exceeds 255, and at fx = 0 it is
+   exactly the current column's coverage. */
+static uint8_t pgf_coverage_sample(const PgfGlyph *glyph,
+                                   const uint8_t samples[PGF_MAX_GLYPH_EDGE * PGF_MAX_GLYPH_EDGE],
+                                   uint32_t fx, uint32_t ox, uint32_t oy) {
+    uint32_t previous = 17u * pgf_source_sample(glyph, samples, (int64_t)ox - 1, oy);
+    uint32_t current = 17u * pgf_source_sample(glyph, samples, ox, oy);
+    return (uint8_t)((fx * previous) / 64u + ((64u - fx) * current + 63u) / 64u);
+}
+
 static int pgf_guest_row_span(uint32_t base, uint64_t row_offset,
                               uint64_t byte_offset, uint64_t byte_count,
                               uint32_t *address) {
@@ -1218,7 +1232,11 @@ static PgfDrawStatus pgf_plan_component(const PgfTarget *target, const PgfGlyph 
     writable_width = target->buffer_width < target->addressable_width ?
                      target->buffer_width : target->addressable_width;
     footprint_width = glyph->width + (target->fraction_x != 0u ? 1u : 0u);
-    footprint_height = glyph->height + (target->fraction_y != 0u ? 1u : 0u);
+    /* Format 2 draws the integer source row, so its footprint is h rows whatever the
+       vertical fraction (PGF_SPEC.md 3.10); the row interval, the validated bytes, and the
+       dirty spans below all follow from this one height. */
+    footprint_height = glyph->height +
+                       (target->fraction_y != 0u && target->format != 2u ? 1u : 0u);
     actual_x0 = target->base_x < 0 ? 0u : (uint64_t)target->base_x;
     pixel_x1 = target->base_x + (int64_t)footprint_width;
     actual_x1 = pixel_x1 < 0 ? 0u : (uint64_t)pixel_x1;
@@ -1281,10 +1299,14 @@ static void pgf_blit_component(const PGF *p, const PgfTarget *target,
         uint32_t x;
         for (x = plan->first_x; x < plan->last_x; ++x) {
             uint32_t ox = (uint32_t)((int64_t)x - target->base_x);
-            uint8_t sample = pgf_interpolated_sample(glyph, samples,
+            uint32_t oy = plan->first_row + row;
+            uint8_t sample = target->format == 2u ?
+                             pgf_coverage_sample(glyph, samples, target->fraction_x,
+                                                 ox, oy) :
+                             pgf_interpolated_sample(glyph, samples,
                                                      target->fraction_x,
                                                      target->fraction_y,
-                                                     ox, plan->first_row + row);
+                                                     ox, oy);
             uint64_t byte_offset = target->format <= 1u ?
                                    x / 2u : (uint64_t)x * target->unit_bytes;
             uint64_t address64 = (uint64_t)target->buffer_address +
