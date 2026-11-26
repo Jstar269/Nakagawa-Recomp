@@ -803,10 +803,7 @@ static int replace_surface(void) {
  * is a new surface lost as its swapchain is made while the platform still has a window, so a
  * renderer never goes on presenting nothing, or replacing surfaces, without a line saying so. */
 static int surface_ready(void) {
-    if (s_app_background) {
-        s_surface_proven = 1;
-        return 0;
-    }
+    if (s_app_background) return 0;
     if (s_surface_lost) {
         const int replaced = replace_surface();
         if (replaced <= 0) return replaced;
@@ -3457,7 +3454,18 @@ static int overlay_format_order(VkFormat fmt, int *rgba) {
     }
 }
 
+#ifdef SR_VIDEOREC_SELFTEST
+/* Selftest builds only (gpu_capture_selftest defines SR_VIDEOREC_SELFTEST; the shipped presenter
+ * does not, so neither the flag nor its check exists there): makes sdl3vk_window_minimized()
+ * report 1, so the surface selftest's minimized row runs where the window manager cannot
+ * minimize a window (Xvfb), not only on Windows. */
+static int s_window_minimized_fault = 0;
+#endif
+
 int sdl3vk_window_minimized(void) {
+#ifdef SR_VIDEOREC_SELFTEST
+    if (s_window_minimized_fault) return 1;
+#endif
     return s_win && (SDL_GetWindowFlags(s_win) & SDL_WINDOW_MINIMIZED) != 0;
 }
 
@@ -3795,7 +3803,8 @@ void sdl3vk_shutdown(void) {
     }
     if (s_present_busy_surface) {
         fprintf(stderr, "sdl3vk: %llu game frame(s) not shown while the window had no surface (the "
-                        "app in the background)\n", (unsigned long long)s_present_busy_surface);
+                        "app in the background, or no window surface) or no pixels (minimized)\n",
+                (unsigned long long)s_present_busy_surface);
         s_present_busy_surface = 0;
     }
     sdl3vk_overlay_release();
@@ -3889,6 +3898,9 @@ void sdl3vk_shutdown(void) {
     s_surface_lost = 0;
     s_app_background = 0;
     s_surface_proven = 1;
+#ifdef SR_VIDEOREC_SELFTEST
+    s_window_minimized_fault = 0;
+#endif
     s_surface_withheld = 0;
     s_withheld_from = 0;
     s_swap_surface_lost_fault = SWAP_LOST_NONE;

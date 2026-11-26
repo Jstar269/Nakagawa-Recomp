@@ -370,13 +370,16 @@ surface (a seam), each twice; the pause overlay meeting a loss at its acquire or
 loss at the rebuild's capabilities query and at its `vkCreateSwapchainKHR`, after a suboptimal
 present and after a present that was not enqueued (a game frame and the pause overlay); a new
 surface lost at once as the window goes; a surface lost again as the window goes, and lost and
-shown in turn; and the terminal cases (a new surface that cannot be made, after a lost acquire,
-a lost present or in the pause overlay, cannot be presented to, or is lost at once with the
-window still there or minimized; a surface lost at every acquire, at every present, or at every
-pause-overlay present; a device lost at the acquire or the present), each with one line. The
-minimized case needs a window manager that minimizes and reports SKIP without one (Xvfb). The `surface-lost` leg of `gpu-capture-selftest` checks that a present that met
-the loss is not shown, the renderer is not terminal and the next present is shown. These run on
-desktop drivers; they do not show what an Android device does.
+shown in turn; a loss followed by a background and return in one event poll; the pause overlay
+alone losing its surface, showing a frame and losing it again; and the terminal cases (a new
+surface that cannot be made, after a lost acquire, a lost present or in the pause overlay,
+cannot be presented to, or is lost at once with the window still there or minimized; a surface
+lost at every acquire, at every present, or at every pause-overlay present; a device lost at the
+acquire or the present), each with one line. The minimized window is a seam that exists only in
+the selftest build (`SR_VIDEOREC_SELFTEST`), so that case runs on every host. The
+`surface-lost` leg of `gpu-capture-selftest` checks that a present that met the loss is not
+shown, the renderer is not terminal and the next present is shown. These run on desktop
+drivers; they do not show what an Android device does.
 
 ## Render scale and render targets read as textures (#2052)
 

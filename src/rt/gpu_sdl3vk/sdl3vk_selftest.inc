@@ -12,7 +12,8 @@
  * sit, because the tests reach the renderer's file-local state (swapchain, frame ring, init
  * fault seams) directly. Build it only through sdl3vk.c. It holds the capture self-test
  * (issue #57), the input-profile and pause-input self-tests, the lifecycle self-test (#1377)
- * and the window-surface self-test (#360); the entry point is sdl3vk_capture_selftest(), run by gpu_capture_selftest.c.
+ * and the window-surface self-test (#360); the entry point is sdl3vk_capture_selftest(), run by
+ * gpu_capture_selftest.c.
  */
 
 #include "fsr1_pass.h"
@@ -2238,12 +2239,14 @@ static int sdl3vk_surface_selftest(void) {
         if (c != 0) bad |= !after;
         if (bad) {
             fprintf(stderr, "surface: '%s': warm=%d shown=%d reached=%d present on the loss=%d "
-                            "(want -1) terminal at the loss=%d later presents as wanted=%d (want 1) terminal then=%d "
+                            "(want -1) terminal at the loss=%d later presents as wanted=%d "
+                            "(want 1) terminal then=%d "
                             "surfaces made by then %d (want 1) held back marked %d next "
                             "present=%d (want %d) terminal=%d in %u line(s) (want %d) surfaces "
                             "replaced %llu (want %llu) later shown=%d, %d validation error(s), %d "
                             "object(s) alive after shutdown\n", name, warm, shown, reached, got,
-                    loss_terminal, busy, held_terminal, held_surfaces, held_marked, back, want_back, terminal,
+                    loss_terminal, busy, held_terminal, held_surfaces, held_marked, back,
+                    want_back, terminal,
                     lines, want_terminal, (unsigned long long)surfaces,
                     (unsigned long long)want_surfaces, after, verrors, live);
             ok = 0;
@@ -2350,48 +2353,120 @@ static int sdl3vk_surface_selftest(void) {
     }
 
     /* (h) A new surface lost at once while the window is minimized: the minimized exemption is
-     * for a surface that was not lost, so this is terminal with one line, not held back. It needs
-     * a window manager that minimizes (not Xvfb); without one the row says so and is not counted. */
+     * for a surface that was not lost, so this is terminal with one line, not held back. The
+     * window is reported minimized through a selftest-build seam (s_window_minimized_fault), so
+     * the row runs on every host, Xvfb included. */
+#ifdef SR_VIDEOREC_SELFTEST
     if (sdl3vk_init("Nakagawa GPU surface selftest")) {
         const char *name = "new surface lost at once while minimized";
         const int verr0 = sdl3vk_validation_error_count();
         const int warm = surface_test_warm(px);
-        SDL_MinimizeWindow(s_win);
-        (void)SDL_SyncWindow(s_win);
-        SDL_PumpEvents();
-        if (!sdl3vk_window_minimized()) {
-            printf("gpu surface selftest: '%s' SKIP: the window manager did not minimize the "
-                   "window\n", name);
-            sdl3vk_shutdown();
-        } else {
-            const uint64_t surf0 = s_surface_gen;
-            s_surface_lost = 1;   /* as an acquire or a present loss leaves it */
-            s_swap_surface_lost_fault = SWAP_LOST_CAPS;
-            const int got = sdl3vk_present_rgba(px);
-            const int reached = s_swap_surface_lost_fault == SWAP_LOST_NONE;
-            s_swap_surface_lost_fault = SWAP_LOST_NONE;
-            const int terminal = sdl3vk_renderer_terminal();
-            const unsigned lines = s_terminal_lines;
-            const uint64_t surfaces = s_surface_gen - surf0;
-            SDL_RestoreWindow(s_win);
-            (void)SDL_SyncWindow(s_win);
-            const int verrors = sdl3vk_validation_error_count() - verr0;
-            sdl3vk_shutdown();
-            const int live = lifecycle_live_objects();
-            if (!warm || !reached || got != -1 || !terminal || lines != 1 || surfaces != 1 ||
-                verrors != 0 || live != 0) {
-                fprintf(stderr, "surface: '%s': warm=%d reached=%d present=%d (want -1) "
-                                "terminal=%d in %u line(s) (want 1, 1) surfaces replaced %llu "
-                                "(want 1), %d validation error(s), %d object(s) alive after "
-                                "shutdown\n", name, warm, reached, got, terminal, lines,
-                        (unsigned long long)surfaces, verrors, live);
-                ok = 0;
-            }
-            cases++;
+        const uint64_t surf0 = s_surface_gen;
+        s_window_minimized_fault = 1;
+        const int minimized = sdl3vk_window_minimized();
+        s_surface_lost = 1;   /* as an acquire or a present loss leaves it */
+        s_swap_surface_lost_fault = SWAP_LOST_CAPS;
+        const int got = sdl3vk_present_rgba(px);
+        const int reached = s_swap_surface_lost_fault == SWAP_LOST_NONE;
+        s_swap_surface_lost_fault = SWAP_LOST_NONE;
+        s_window_minimized_fault = 0;
+        const int terminal = sdl3vk_renderer_terminal();
+        const unsigned lines = s_terminal_lines;
+        const uint64_t surfaces = s_surface_gen - surf0;
+        const int verrors = sdl3vk_validation_error_count() - verr0;
+        sdl3vk_shutdown();
+        const int live = lifecycle_live_objects();
+        if (!warm || !minimized || !reached || got != -1 || !terminal || lines != 1 ||
+            surfaces != 1 || verrors != 0 || live != 0) {
+            fprintf(stderr, "surface: '%s': warm=%d minimized=%d reached=%d present=%d (want -1) "
+                            "terminal=%d in %u line(s) (want 1, 1) surfaces replaced %llu "
+                            "(want 1), %d validation error(s), %d object(s) alive after "
+                            "shutdown\n", name, warm, minimized, reached, got, terminal, lines,
+                    (unsigned long long)surfaces, verrors, live);
+            ok = 0;
         }
+        cases++;
     } else {
-        fprintf(stderr, "surface: init before 'new surface lost at once while minimized' failed\n");
+        fprintf(stderr, "surface: init before 'new surface lost at once while minimized' "
+                        "failed\n");
         ok = 0;
+    }
+#endif
+
+    /* (i) What lets a replacement nothing was shown on be replaced in turn. A loss on the surface
+     * init made leaves such a replacement; SDL's background and foreground events then arrive in
+     * one poll, as Android delivers a whole background and return once the app runs again (SDL
+     * blocks in its event pump while paused). The background event lets the next surface be
+     * replaced, so the return is shown. And the pause overlay alone: a loss, an overlay frame
+     * shown on the replacement, a loss again: that shown overlay frame lets the second loss be
+     * replaced too. Neither is terminal. */
+    for (int c = 0; c < 2; c++) {
+        const char *name = c == 0 ? "loss, then background and return in one poll"
+                                  : "pause overlay alone: loss, frame shown, loss";
+        if (!sdl3vk_init("Nakagawa GPU surface selftest")) {
+            fprintf(stderr, "surface: init before '%s' failed\n", name);
+            ok = 0;
+            break;
+        }
+        const int verr0 = sdl3vk_validation_error_count();
+        const int warm = surface_test_warm(px);
+        const uint64_t surf0 = s_surface_gen;
+        int r[6] = {0, 0, 0, 0, 0, 0}, seq_ok = 0, unproven = 0, pushed = 1;
+        if (c == 0) {
+            s_pstep_fault = PSTEP_ACQUIRE;
+            s_pstep_fault_result = VK_ERROR_SURFACE_LOST_KHR;
+            r[0] = sdl3vk_present_rgba(px);
+            s_pstep_fault = PSTEP_NONE;
+            unproven = !s_surface_proven;   /* the replacement has shown nothing yet */
+            pushed = surface_test_push(SDL_EVENT_WILL_ENTER_BACKGROUND) &&
+                     surface_test_push(SDL_EVENT_DID_ENTER_BACKGROUND) &&
+                     surface_test_push(SDL_EVENT_WILL_ENTER_FOREGROUND) &&
+                     surface_test_push(SDL_EVENT_DID_ENTER_FOREGROUND);
+            r[1] = sdl3vk_present_rgba(px);
+            r[2] = surface_test_warm(px);
+            seq_ok = r[0] == -1 && unproven && r[1] == 1 && r[2] == 1;
+        } else {
+            int ow = 0, oh = 0, orgba = 0;
+            uint32_t *opx = NULL;
+            if (sdl3vk_overlay_extent(&ow, &oh, &orgba))
+                opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u);
+            if (opx) {
+                r[0] = sdl3vk_present_overlay(opx, ow * 4);
+                for (int k = 1; k < 6; k++) {
+                    if (k == 1 || k == 3) {
+                        s_pstep_fault = PSTEP_ACQUIRE;
+                        s_pstep_fault_result = VK_ERROR_SURFACE_LOST_KHR;
+                    }
+                    int w2 = 0, h2 = 0;
+                    r[k] = sdl3vk_overlay_extent(&w2, &h2, &orgba) && w2 == ow && h2 == oh
+                         ? sdl3vk_present_overlay(opx, ow * 4) : -9;
+                    s_pstep_fault = PSTEP_NONE;
+                    if (k == 1) unproven = !s_surface_proven;
+                }
+            }
+            free(opx);
+            sdl3vk_overlay_release();
+            seq_ok = r[0] == 1 && r[1] == 2 && unproven && r[2] == 1 && r[3] == 2 && r[4] == 1 &&
+                     r[5] == 1;
+        }
+        const int terminal = sdl3vk_renderer_terminal();
+        const unsigned lines = s_terminal_lines;
+        const uint64_t surfaces = s_surface_gen - surf0;
+        const int verrors = sdl3vk_validation_error_count() - verr0;
+        sdl3vk_shutdown();
+        const int live = lifecycle_live_objects();
+        if (!warm || !pushed || !seq_ok || terminal || lines != 0 || surfaces != 2 ||
+            verrors != 0 || live != 0) {
+            fprintf(stderr, "surface: '%s': warm=%d pushed=%d presents %d %d %d %d %d %d (want "
+                            "%s) replacement unproven=%d (want 1) terminal=%d in %u line(s) "
+                            "(want 0) surfaces replaced %llu (want 2), %d validation error(s), "
+                            "%d object(s) alive after shutdown\n", name, warm, pushed, r[0],
+                    r[1], r[2], r[3], r[4], r[5],
+                    c == 0 ? "-1 1 1, rest 0" : "1 2 1 2 1 1", unproven, terminal, lines,
+                    (unsigned long long)surfaces, verrors, live);
+            ok = 0;
+        }
+        cases++;
     }
 
     if (keep) vkDestroyInstance(keep, NULL);
