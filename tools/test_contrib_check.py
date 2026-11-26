@@ -5,9 +5,9 @@
 
 The local fast path is only worth having if it selects the same gates the
 hosted workflow would, and only if a gate that could not run is reported as
-such.  These tests pin both properties, plus the one place the script
-interprets an audit result: the findings only a maintainer can clear, by
-regenerating the controls from the private trusted ledger.
+such.  These tests also pin the failure identifiers the Python gate reports
+and the publication findings only a maintainer can clear by regenerating
+the controls from the private trusted ledger.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from textwrap import dedent
 import unittest
 from unittest import mock
 
@@ -491,6 +492,113 @@ class TestGateStatusVocabulary(unittest.TestCase):
             gate = contrib_check.ruff_gate(["tools/a.py"])
         self.assertEqual(gate.status, contrib_check.FAIL)
         self.assertIn("timed out", gate.detail)
+
+
+class TestUnittestFailureReporting(unittest.TestCase):
+    def invoke(self, modules: dict[str, str]) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tools").mkdir()
+            (root / "tools" / "__init__.py").touch()
+            paths = []
+            for name, source in modules.items():
+                relative = f"tools/{name}.py"
+                (root / relative).write_text(dedent(source), encoding="utf-8")
+                paths.append(relative)
+            unrelated = contrib_check.Gate("other-gate", contrib_check.NOT_RUN)
+            output = io.StringIO()
+            with (
+                mock.patch.object(contrib_check, "ROOT", root),
+                mock.patch.object(contrib_check, "changed_paths", return_value=paths),
+                mock.patch.object(contrib_check, "GATE_PYTHON", sys.executable),
+                mock.patch.object(contrib_check, "ruff_gate", return_value=unrelated),
+                mock.patch.object(contrib_check, "publication_gate", return_value=(unrelated, unrelated)),
+                redirect_stdout(output),
+            ):
+                status = contrib_check.main(["--base", "HEAD"])
+            return status, output.getvalue()
+
+    def test_names_real_failures_outside_the_summary_tail(self) -> None:
+        with mock.patch.dict(os.environ, {"PYTHON_COLORS": "1"}):
+            status, output = self.invoke({
+                "test_reporting_early": """
+                    import unittest
+
+
+                    class Early(unittest.TestCase):
+                        def test_failure(self):
+                            print("=" * 70)
+                            print("FAIL: test_noise (tools.test_reporting_early.Early.test_noise)")
+                            self.fail("EARLY_TRACEBACK_DETAIL")
+
+                        def test_subtests(self):
+                            for value in ("SUBTEST_PRIVATE_A", "SUBTEST_PRIVATE_B"):
+                                with self.subTest(value=value):
+                                    self.fail("subtest failed")
+                """,
+                "test_reporting_late": """
+                    import unittest
+
+
+                    class Late(unittest.TestCase):
+                        def test_error(self):
+                            raise RuntimeError("isolated synthetic error")
+                """,
+            })
+        self.assertEqual(status, 1, output)
+        self.assertIn("Ran 3 tests", output)
+        self.assertIn("failures=3, errors=1", re.sub(r"\x1b\[[0-9;]*m", "", output))
+        self.assertIn("contrib-check: FAIL (python-unittest)", output)
+        for line in (
+            "    ERROR: tools.test_reporting_late.Late.test_error",
+            "    FAIL: tools.test_reporting_early.Early.test_failure",
+            "    FAIL: tools.test_reporting_early.Early.test_subtests",
+        ):
+            self.assertEqual(output.splitlines().count(line), 1, output)
+        for hidden in ("EARLY_TRACEBACK_DETAIL", "SUBTEST_PRIVATE", "test_noise"):
+            self.assertNotIn(hidden, output)
+
+    def test_named_setup_error_survives_missing_unittest_footer(self) -> None:
+        stderr = "\n".join((
+            "=" * 70,
+            "ERROR: setUpClass (tools.test_reporting_fixture.Container)",
+            "-" * 70,
+            "fake detail the six-line excerpt omits",
+            "line one", "line two", "line three", "line four", "line five", "line six",
+        ))
+        with mock.patch.object(contrib_check.subprocess, "run", return_value=_Completed(1, "", stderr)):
+            gate = contrib_check.unit_gate(["tools.test_reporting_fixture"])
+        self.assertEqual(gate.status, contrib_check.FAIL)
+        self.assertEqual(
+            gate.detail.splitlines(),
+            ["line one | line two | line three | line four | line five | line six",
+             "    ERROR: tools.test_reporting_fixture.Container"],
+        )
+
+    def test_early_exit_without_result_keeps_exit_detail(self) -> None:
+        status, output = self.invoke({"test_reporting_exit": "raise SystemExit(7)\n"})
+        self.assertEqual(status, 1, output)
+        self.assertIn("python-unittest -- exit 7", output)
+        self.assertIn("contrib-check: FAIL (python-unittest)", output)
+
+    def test_success_keeps_one_concise_gate_line(self) -> None:
+        status, output = self.invoke({
+            "test_reporting_pass": """
+                import unittest
+
+
+                class Passing(unittest.TestCase):
+                    def test_pass(self):
+                        self.assertTrue(True)
+            """,
+        })
+        self.assertEqual(status, 0, output)
+        self.assertEqual(
+            [line for line in output.splitlines() if "python-unittest" in line],
+            ["  PASS           python-unittest"],
+            output,
+        )
+        self.assertIn("contrib-check: OK", output)
 
 
 class TestStrictCompileIncludePath(unittest.TestCase):

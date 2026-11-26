@@ -740,6 +740,7 @@ uint32_t h_IoRead(CpuState *s) {
     sched_vtime_refresh();   /* a paced run: the host time the read itself took counts as waited */
     const uint64_t waited_us = sched_vtime_us() - started;
     if (waited_us < drive_us) sched_delay_current(drive_us - waited_us);
+    if (sr_perf_windows_enabled) sr_perf_window_note_umd_us(started, sched_vtime_us());
     return result;
 }
 /* PSP-HLE-IO-SEEK-002 measured synchronous seeks only on flash0:/font/ltn0.pgf. Other flash0

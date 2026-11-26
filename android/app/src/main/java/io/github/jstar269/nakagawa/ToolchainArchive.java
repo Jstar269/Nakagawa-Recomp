@@ -13,6 +13,10 @@ import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.Executor;
 
 /**
@@ -29,7 +33,7 @@ import java.util.concurrent.Executor;
  * <p>{@link Install} runs the whole unpack once per process on a worker thread, with progress, a
  * stamp written last and a failure the caller can show and retry.
  *
- * <p>It uses only java.io, java.nio and java.util.concurrent, so the host tests
+ * <p>It uses only java.io, java.nio and java.util, so the host tests
  * (tools/test_android_toolchain.py) run it with a plain JDK.
  */
 final class ToolchainArchive {
@@ -243,6 +247,33 @@ final class ToolchainArchive {
         }
         // exists() follows a link, so a dangling one would look absent.
         if ((link || file.exists()) && !file.delete()) throw new IOException("cannot delete " + file);
+    }
+
+    /**
+     * The folders of the files folder that only the bundled-files unpack writes, each from the
+     * APK's assets/app folder of the same name (#360): the showcase demos (nk.demos) and the
+     * nk.titles images.
+     */
+    static final String[] APK_ONLY_FOLDERS = {"demos", "titles"};
+
+    /**
+     * Deletes each of {@link #APK_ONLY_FOLDERS} in {@code app} that the installed APK does not
+     * bundle ({@code bundled}: its assets/app children; null is none), as the toolchain folder is
+     * deleted when the APK carries no toolchain. Without it, demos an earlier APK unpacked would
+     * still be listed, and their libraries loaded, after an update to an APK without them.
+     * Returns the names it deleted.
+     */
+    static List<String> removeUnbundled(File app, String[] bundled) throws IOException {
+        // Arrays.asList, not List.of: List.of needs API 30 and the app runs from API 29.
+        List<String> carried = Arrays.asList(bundled != null ? bundled : new String[0]);
+        List<String> removed = new ArrayList<>();
+        for (String folder : APK_ONLY_FOLDERS) {
+            File tree = new File(app, folder);
+            if (carried.contains(folder) || !Files.exists(tree.toPath(), LinkOption.NOFOLLOW_LINKS)) continue;
+            deleteTree(tree);
+            removed.add(folder);
+        }
+        return removed;
     }
 
     /** The first 256 bytes of {@code file} as text; "" when it is missing or unreadable. */

@@ -2785,7 +2785,7 @@ static int sdl3vk_capture_selftest_body(void) {
             init.physical_device = (VkPhysicalDevice)vi.physical;
             init.device = (VkDevice)vi.device;
             init.queue_family = vi.queue_family;
-            s_test_fsr = fsr1_create(&init, err, sizeof(err));
+            s_test_fsr = fsr1_create(&init, err, sizeof(err), NULL);
         }
         Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, PSP_W, PSP_H, (int)s_swap_ext.width,
                                                      (int)s_swap_ext.height, (int)s_max_image_dim);
@@ -2874,8 +2874,8 @@ static int sdl3vk_capture_selftest_body(void) {
             init.physical_device = (VkPhysicalDevice)vi.physical;
             init.device = (VkDevice)vi.device;
             init.queue_family = vi.queue_family;
-            s_test_rec_fsr = fsr1_create(&init, err, sizeof(err));
-            if (s_test_rec_fsr) ref_fsr = fsr1_create(&init, err, sizeof(err));
+            s_test_rec_fsr = fsr1_create(&init, err, sizeof(err), NULL);
+            if (s_test_rec_fsr) ref_fsr = fsr1_create(&init, err, sizeof(err), NULL);
         }
         uint8_t *fsr_pic = (uint8_t *)malloc(rbytes);
         uint8_t *plain_pic = (uint8_t *)malloc(rbytes);
