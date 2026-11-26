@@ -635,7 +635,6 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(BUILD_ROOT_RUN)/test_cover_art$(EXE_EXT)
 	$(call ADHOC_SERVERS_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_adhoc_servers$(EXE_EXT)
-# The cheat database download and import (#2639, src/player/cheat_db.h): fake transport only.
 	$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) src/player/package_builder.c src/player/cheat_db.c \
 		tests/native/native_test_isolation.c tests/native/test_cheat_db.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_cheat_db$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_cheat_db$(EXE_EXT)
