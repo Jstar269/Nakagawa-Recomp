@@ -855,12 +855,11 @@ static inline uint32_t sr_watch_old_bytes(uint32_t a, uint32_t width) {
     return old;
 }
 
-uint32_t sched_current_uid(void); /* 0 when no thread is current; declared again below */
-
 /* ra and sp come from the scheduler's current register file, s_cpu, which is the running
  * thread's CpuState ($ra is r[31], $sp is r[29]). Under the opt-in --promote-registers build a
  * store inside a promoted run sees the values written back at the run's start, and an HLE
- * host store reports the thread that made the call. */
+ * host store reports the thread that made the call. The recorder fills in the thread from the
+ * source the scheduler registers, so a host without the scheduler links these helpers too. */
 static inline void sr_watch_note_store(uint32_t pc, uint32_t a, uint32_t v, uint32_t width,
                                        uint32_t old) {
     SrWatchHit hit;
@@ -872,7 +871,7 @@ static inline void sr_watch_note_store(uint32_t pc, uint32_t a, uint32_t v, uint
     hit.has_cpu = s_cpu != NULL;
     hit.ra = s_cpu ? s_cpu->r[31] : 0u;
     hit.sp = s_cpu ? s_cpu->r[29] : 0u;
-    hit.thread = sched_current_uid();
+    hit.thread = 0u;
     sr_watch_store(&hit);
 }
 

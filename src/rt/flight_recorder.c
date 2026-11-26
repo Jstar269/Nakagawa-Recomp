@@ -73,6 +73,7 @@ static uint32_t s_watch_vblank;
 static uint64_t s_watch_matches;
 static SrWatchHit s_watch_last_hit;
 static int s_watch_have_hit;
+static SrWatchThreadSource s_watch_thread_source;
 int g_sr_watch_enabled;
 
 /* Watch-class byte shadow (schema 7): the last value the recorder saw stored to each watched
@@ -132,11 +133,15 @@ int sr_watch_covers(uint32_t addr, uint32_t width) {
 
 /* The report line keeps the fields it always had, in the same order, and appends the context
  * (#2809), so a reader matching the old prefix still matches. */
-void sr_watch_store(const SrWatchHit *hit) {
-    if (!hit || !sr_watch_covers(hit->addr, hit->width)) return;
+void sr_watch_set_thread_source(SrWatchThreadSource source) { s_watch_thread_source = source; }
+
+void sr_watch_store(const SrWatchHit *stored) {
+    if (!stored || !sr_watch_covers(stored->addr, stored->width)) return;
     s_watch_matches++;
-    s_watch_last_hit = *hit;
+    s_watch_last_hit = *stored;
+    s_watch_last_hit.thread = s_watch_thread_source ? s_watch_thread_source() : 0u;
     s_watch_have_hit = 1;
+    const SrWatchHit *hit = &s_watch_last_hit;
     char registers[48];
     if (hit->has_cpu)
         snprintf(registers, sizeof registers, "ra=0x%08" PRIx32 " sp=0x%08" PRIx32, hit->ra,

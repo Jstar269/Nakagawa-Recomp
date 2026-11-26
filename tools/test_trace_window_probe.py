@@ -52,6 +52,7 @@ WINDOW_H = (ROOT / "src/rt/flight_recorder.h").read_text(encoding="utf-8")
 INTERP_C = (ROOT / "src/rt/guest_interp.c").read_text(encoding="utf-8")
 CODEGEN_PY = (ROOT / "tools/codegen.py").read_text(encoding="utf-8")
 DISPATCH_SELFTEST = (ROOT / "tests/native/dispatch_isolation_selftest.c").read_text(encoding="utf-8")
+SCHED_C = (ROOT / "src/rt/sched.c").read_text(encoding="utf-8")
 MAKEFILE = read_makefile(ROOT)
 NK_CLI = (ROOT / "tools/nk_cli.py").read_text(encoding="utf-8")
 
@@ -196,7 +197,7 @@ class TraceWindowProbeTests(unittest.TestCase):
         covers = body_of(WINDOW_C, "int sr_watch_covers(")
         self.assertIn("store_start < s_watch_end && store_end > s_watch_start", covers)
         store = body_of(WINDOW_C, "void sr_watch_store(")
-        self.assertIn("sr_watch_covers(hit->addr, hit->width)", store)
+        self.assertIn("sr_watch_covers(stored->addr, stored->width)", store)
         # The fields before #2809 keep their order; the context is appended after them.
         self.assertIn(
             '"SR_WATCH: pc=0x%08" PRIx32 " addr=0x%08" PRIx32 " val=0x%08" PRIx32'
@@ -205,6 +206,12 @@ class TraceWindowProbeTests(unittest.TestCase):
             store,
         )
         self.assertIn("s_watch_matches++", store)
+        # #2809: the hit's thread comes from the source the scheduler registers, so the store
+        # helpers need no scheduler symbol and every host that links them still links.
+        self.assertIn("s_watch_thread_source ? s_watch_thread_source() : 0u", store)
+        self.assertNotIn("sched_current_uid", body_of(RECOMP_H, "static inline void sr_watch_note_store("))
+        self.assertIn("sr_watch_set_thread_source(sched_current_uid);",
+                      body_of(SCHED_C, "void sched_init(CpuState *cpu)"))
         flight_init = body_of(WINDOW_C, "void sr_flight_init(void)")
         self.assertIn("sr_watch_configure();", flight_init)
 

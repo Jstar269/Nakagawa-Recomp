@@ -3177,6 +3177,9 @@ int main(int argc, char **argv) {
     }
     sr_watch_configure();
     sr_watch_note_vblank(7u);
+#ifdef SR_WATCH_HIT_CONTEXT
+    sr_watch_set_thread_source(sched_current_uid); /* as sched_init registers it */
+#endif
     atomic_store(&sr_timeslice, 0);
 
     if (argc == 2 && strcmp(argv[1], "--unregistered-dispatch-child") == 0) {

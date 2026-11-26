@@ -817,7 +817,10 @@ static void block(uint32_t uid) {
 }
 
 /* A store as recomp.h's store helpers report it: the context of a thread with ra and sp,
- * or (has_cpu 0) a store with no current register file. */
+ * or (has_cpu 0) a store with no current register file and no current thread. */
+static uint32_t watch_uid;
+static uint32_t current_uid(void) { return watch_uid; }
+
 static void watch(uint32_t pc, uint32_t addr, uint32_t value, uint32_t width, uint32_t old,
                   int has_cpu) {
     SrWatchHit hit;
@@ -830,7 +833,8 @@ static void watch(uint32_t pc, uint32_t addr, uint32_t value, uint32_t width, ui
     hit.has_cpu = has_cpu ? 1u : 0u;
     hit.ra = has_cpu ? 0x08804abcu : 0u;
     hit.sp = has_cpu ? 0x09ffe0c0u : 0u;
-    hit.thread = has_cpu ? 0x0415u : 0u;
+    hit.thread = 0xdeadu; /* the recorder takes the thread from its source, never the caller */
+    watch_uid = has_cpu ? 0x0415u : 0u;
     sr_watch_store(&hit);
 }
 
@@ -842,6 +846,7 @@ static void draw(uint32_t list, uint32_t vertices) {
 int main(int argc, char **argv) {
     const char *scenario = argc > 1 ? argv[1] : "";
     sr_flight_init();
+    sr_watch_set_thread_source(current_uid);
     if (strcmp(scenario, "pc") == 0) {
         pick(0x10u);
         hle(0x12345678u, PC_A, FIRST_ARGUMENT, 0u);
