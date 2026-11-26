@@ -1803,8 +1803,9 @@ void sr_hle_test_atrac_release_reset(void) { s_atrac_release_count = 0u; }
  * non-44.1 kHz refusal follows the libmp3 SDK-version threshold PPSSPP documents instead of its
  * deliberate leniency. Nothing here is PSP-measured by this project.
  *
- * sceMp3LowLevelInit/sceMp3LowLevelDecode and the module entry points are refused by name (see
- * hle_register_mp3_handlers): their contracts are not established. */
+ * sceMp3LowLevelInit/sceMp3LowLevelDecode are the PPSSPP-derived second tier described above
+ * h_Mp3LowLevelInit. The module entry points are refused by name (see hle_register_mp3_handlers):
+ * their contracts are not established. */
 #define MP3_MAX_HANDLES 2u
 #define MP3_AU_BUF_MIN_SIZE 8192
 #define MP3_PCM_BUF_MIN_SIZE 9216
@@ -1857,6 +1858,30 @@ static void mp3_free(Mp3Ctx *c) {
     mp3_bridge_destroy(c->dec);
     free(c->src);
     memset(c, 0, sizeof(*c));
+}
+
+/* Low-level contexts (sceMp3LowLevelInit): a decoder under a handle number the caller chose. */
+typedef struct Mp3LowLevel {
+    uint32_t handle;
+    Mp3Bridge *dec;
+} Mp3LowLevel;
+static Mp3LowLevel *s_mp3_ll;
+static uint32_t s_mp3_ll_count, s_mp3_ll_cap;
+
+static Mp3LowLevel *mp3_ll_find(uint32_t handle) {
+    for (uint32_t i = 0; i < s_mp3_ll_count; i++)
+        if (s_mp3_ll[i].handle == handle) return &s_mp3_ll[i];
+    return NULL;
+}
+static void mp3_ll_remove(Mp3LowLevel *e) {
+    mp3_bridge_destroy(e->dec);
+    *e = s_mp3_ll[--s_mp3_ll_count];
+}
+static void mp3_ll_free_all(void) {
+    for (uint32_t i = 0; i < s_mp3_ll_count; i++) mp3_bridge_destroy(s_mp3_ll[i].dec);
+    free(s_mp3_ll);
+    s_mp3_ll = NULL;
+    s_mp3_ll_count = s_mp3_ll_cap = 0u;
 }
 /* The decoder consumes from src + srcHead; the unconsumed bytes move down only when an append
  * needs the room (h_Mp3NotifyAddStreamData), not after every frame. */
@@ -1926,6 +1951,7 @@ static uint32_t h_Mp3TermResource(CpuState *s) {
     if (!s_mp3_resource_inited) return 0;
     for (uint32_t i = 0; i < MP3_MAX_HANDLES; i++)
         if (s_mp3[i].used) mp3_free(&s_mp3[i]);
+    mp3_ll_free_all(); /* PPSSPP frees every context, the low-level ones included */
     s_mp3_resource_inited = 0;
     sched_delay_current(100);
     return 0;
@@ -1938,8 +1964,9 @@ static uint32_t h_Mp3ReserveMp3Handle(CpuState *s) {
     uint32_t arg = A0;
     if (!s_mp3_resource_inited) return SCE_MP3_ERROR_NO_RESOURCE_AVAIL;
     uint32_t handle = MP3_MAX_HANDLES;
+    /* The lowest number held by no context: a low-level one keeps its number too (PPSSPP). */
     for (uint32_t i = 0; i < MP3_MAX_HANDLES; i++)
-        if (!s_mp3[i].used) { handle = i; break; }
+        if (!s_mp3[i].used && !mp3_ll_find(i)) { handle = i; break; }
     if (handle == MP3_MAX_HANDLES) return SCE_MP3_ERROR_NO_RESOURCE_AVAIL;
     /* The PSP crashes on a bad pointer; this is PPSSPP's error for it. */
     if (arg && !sr_guest_span_readable(arg, 32u)) return SCE_MP3_KERNEL_ERROR_INVALID_POINTER;
@@ -1985,6 +2012,9 @@ static uint32_t h_Mp3ReleaseMp3Handle(CpuState *s) {
     uint32_t handle = A0;
     Mp3Ctx *c = mp3_ctx(handle);
     if (c) { mp3_free(c); return 0; }
+    /* PPSSPP-derived, not PSP-measured: a low-level context is released like a reserved one. */
+    Mp3LowLevel *e = mp3_ll_find(handle);
+    if (e) { mp3_ll_remove(e); return 0; }
     if (handle >= MP3_MAX_HANDLES) return SCE_MP3_ERROR_INVALID_HANDLE;
     return 0; /* releasing an unused handle number is not an error */
 }
@@ -2257,12 +2287,129 @@ static uint32_t h_Mp3GetMPEGVersion(CpuState *s) {
     return (uint32_t)c->version;
 }
 
+/* ---- sceMp3 low-level pair (#2640) ---------------------------------------------------------
+ * sceMp3LowLevelInit(handle, unknown) and sceMp3LowLevelDecode(handle, src, u32 *srcUsed,
+ * s16 *pcm, u32 *pcmBytes): a game that manages its own stream decodes one frame at a time from
+ * its own buffer.
+ *
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp 0028f30da6784570264a41ef6cce1c3963692ea7,
+ * Core/HLE/sceMp3.cpp, sceMp3LowLevelInit and sceMp3LowLevelDecode (GPL-2.0-or-later, Copyright
+ * (c) 2012- PPSSPP Project). Taken from there:
+ *   - Init accepts any handle number the caller chooses, needs no sceMp3InitResource, replaces a
+ *     context already held under that number (a reserved one included), ignores its second
+ *     argument, and returns 0 after a 600 us delay.
+ *   - Decode on a number with no context is INVALID_HANDLE (0x80671001); a bad argument pointer
+ *     is -1; otherwise it decodes the first frame within 4096 source bytes into interleaved
+ *     stereo s16 (a mono frame on both channels), writes the source bytes used and the PCM bytes
+ *     (samples * 4), and returns 0, also when no frame came out.
+ *   - Release and sceMp3TermResource free low-level contexts; a reserve skips their numbers.
+ * JPCSP 00ac4d6daedd89c0492093ae83fb0d3d819af414 (src/jpcsp/HLE/modules/sceMp3.java) agrees on
+ * the stereo output, the two words written and the 0 result, and differs elsewhere: it takes only
+ * a reserved handle 0 or 1, reads up to 10000 bytes, and returns 0x80672001 when the decoder fails.
+ * Local differences, not measured: the source bytes used are the bytes the decoder took (any bytes
+ * before the frame sync, then the frame), not the size of PPSSPP's FFmpeg packet (the whole
+ * 4096-byte window); the 4096 source bytes and 4608 PCM bytes (the largest frame) must be mapped
+ * guest memory before anything is read or written, where PPSSPP checks the first byte of each;
+ * a low-level context does not count against the two reserved handles, and the stream and format
+ * calls answer a low-level number as an unused one, where PPSSPP finds the context in its one map;
+ * Decode is refused on a reserved handle that had no low-level Init (PPSSPP decodes with that
+ * handle's decoder). */
+#define MP3_LOW_LEVEL_WINDOW 4096u
+#define MP3_LOW_LEVEL_PCM_MAX ((uint32_t)MP3_BRIDGE_MAX_PCM_VALUES * 2u)
+
+static void mp3_ll_note_first_use(int *noted, const char *api) {
+    if (*noted) return;
+    *noted = 1;
+    fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: %s (hrydgard/ppsspp 0028f30da678, "
+                    "Core/HLE/sceMp3.cpp)\n", api);
+}
+
+static uint32_t h_Mp3LowLevelInit(CpuState *s) {
+    static int noted;
+    uint32_t handle = A0; /* A1 is not used */
+    mp3_ll_note_first_use(&noted, "sceMp3LowLevelInit");
+    if (handle < MP3_MAX_HANDLES && s_mp3[handle].used) mp3_free(&s_mp3[handle]);
+    Mp3LowLevel *e = mp3_ll_find(handle);
+    if (e) {
+        mp3_bridge_reset(e->dec); /* PPSSPP replaces the context: a fresh decoder */
+    } else {
+        Mp3Bridge *dec = NULL;
+        if (s_mp3_ll_count == s_mp3_ll_cap) {
+            uint32_t cap = s_mp3_ll_cap ? s_mp3_ll_cap * 2u : 4u;
+            Mp3LowLevel *grown = (Mp3LowLevel *)realloc(s_mp3_ll, cap * sizeof(*grown));
+            if (!grown) {
+                fprintf(stderr, "MP3: host allocation failed for low-level handle 0x%x\n", handle);
+                return SCE_MP3_ERROR_NO_RESOURCE_AVAIL;
+            }
+            s_mp3_ll = grown;
+            s_mp3_ll_cap = cap;
+        }
+        if (mp3_bridge_create(&dec) != 0) {
+            fprintf(stderr, "MP3: host allocation failed for low-level handle 0x%x\n", handle);
+            return SCE_MP3_ERROR_NO_RESOURCE_AVAIL;
+        }
+        s_mp3_ll[s_mp3_ll_count].handle = handle;
+        s_mp3_ll[s_mp3_ll_count].dec = dec;
+        s_mp3_ll_count++;
+    }
+    sched_delay_current(600);
+    return 0;
+}
+
+static uint32_t h_Mp3LowLevelDecode(CpuState *s) {
+    static int noted;
+    static unsigned misses;
+    uint32_t handle = A0, src = A1, usedAddr = A2, pcmAddr = A3, bytesAddr = stack_arg(s, 0);
+    mp3_ll_note_first_use(&noted, "sceMp3LowLevelDecode");
+    Mp3LowLevel *e = mp3_ll_find(handle);
+    if (!e) return SCE_MP3_ERROR_INVALID_HANDLE;
+    if (!src || !usedAddr || !pcmAddr || !bytesAddr ||
+        !sr_guest_span_readable(src, MP3_LOW_LEVEL_WINDOW) || !sr_guest_span_writable(usedAddr, 4u) ||
+        !sr_guest_span_writable(pcmAddr, MP3_LOW_LEVEL_PCM_MAX) || !sr_guest_span_writable(bytesAddr, 4u))
+        return 0xffffffffu;
+
+    uint8_t in[MP3_LOW_LEVEL_WINDOW];
+    for (uint32_t i = 0; i < MP3_LOW_LEVEL_WINDOW; i++) in[i] = (uint8_t)MEM_R8(src + i);
+    int16_t pcm[MP3_BRIDGE_MAX_PCM_VALUES];
+    int consumed = 0, samples = 0;
+    int r = mp3_bridge_decode(e->dec, in, (int)MP3_LOW_LEVEL_WINDOW, pcm, &consumed, &samples, NULL);
+    if (r == MP3_BRIDGE_NO_FRAME) {
+        /* The bridge believes a sync only when the next header in the window continues the
+         * stream, so the last frame of the game's data, followed by anything else, is not found.
+         * Take the first header whose whole frame lies in the window as that frame. */
+        for (uint32_t off = 0; off + 4u <= MP3_LOW_LEVEL_WINDOW; off++) {
+            Mp3BridgeHeader h;
+            if (in[off] != 0xffu || mp3_bridge_parse_header(in + off, &h) != 0 ||
+                (uint32_t)h.frame_bytes > MP3_LOW_LEVEL_WINDOW - off)
+                continue;
+            int took = 0;
+            r = mp3_bridge_decode(e->dec, in + off, h.frame_bytes, pcm, &took, &samples, NULL);
+            consumed = (int)off + took;
+            break;
+        }
+    }
+    if (r != MP3_BRIDGE_OK) {
+        samples = 0;
+        if (++misses <= 8u)
+            fprintf(stderr, "MP3: sceMp3LowLevelDecode handle 0x%x decoded no frame from its "
+                            "4096-byte window (bridge result %d, %d bytes used)\n",
+                    handle, r, consumed);
+    }
+    uint32_t pcm_bytes = (uint32_t)samples * 4u;
+    /* Inside the PCM span validated above. */
+    for (uint32_t i = 0; i < pcm_bytes / 2u; i++) MEM_W16(pcmAddr + i * 2u, (uint16_t)pcm[i]);
+    MEM_W32(usedAddr, (uint32_t)consumed);
+    MEM_W32(bytesAddr, pcm_bytes);
+    return 0;
+}
+
 /* sceKernelLoadExec: the next program starts with the library uninitialized and no handle
  * reserved. A handle's buffers lie in the old program's partition, which the next program
  * reuses, so its decoder and source copy go with it. */
 void hle_mp3_guest_reset(void) {
     for (uint32_t i = 0; i < MP3_MAX_HANDLES; i++)
         if (s_mp3[i].used) mp3_free(&s_mp3[i]);
+    mp3_ll_free_all();
     s_mp3_resource_inited = 0;
 }
 
@@ -2297,12 +2444,11 @@ void hle_register_mp3_handlers(void) {
     sr_hle_register(0x8f450998u, "sceMp3GetSamplingRate", h_Mp3GetSamplingRate);
     sr_hle_register(0x3548aec8u, "sceMp3GetFrameNum", h_Mp3GetFrameNum);
     sr_hle_register(0xae6d2027u, "sceMp3GetMPEGVersion", h_Mp3GetMPEGVersion);
-    /* Not modelled: the low-level pair works on caller-chosen handle numbers and an
-     * unestablished input/output contract (PPSSPP's version guesses a 4096-byte window), and
-     * the module entry points are not called by games. Refused by name with the non-kernel
-     * library code (SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED) rather than faked. */
-    sr_hle_register_unsupported(0x1b839b83u, "sceMp3LowLevelInit", 0x80010086u);
-    sr_hle_register_unsupported(0xe3ee2c81u, "sceMp3LowLevelDecode", 0x80010086u);
+    /* The low-level pair: PPSSPP-derived, not PSP-measured (see h_Mp3LowLevelInit). */
+    sr_hle_register(0x1b839b83u, "sceMp3LowLevelInit", h_Mp3LowLevelInit);
+    sr_hle_register(0xe3ee2c81u, "sceMp3LowLevelDecode", h_Mp3LowLevelDecode);
+    /* Not modelled: the module entry points are not called by games. Refused by name with the
+     * non-kernel library code (SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED) rather than faked. */
     sr_hle_register_unsupported(0x8ab81558u, "sceMp3StartEntry", 0x80010086u);
     sr_hle_register_unsupported(0x732b042au, "sceMp3EndEntry", 0x80010086u);
 }

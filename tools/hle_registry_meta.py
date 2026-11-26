@@ -152,6 +152,23 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "PSP-KERNEL-MISC-001 measures only by-value 1234567890 us with valid outputs. It returns 0 and writes seconds 1234 and remaining microseconds 567890. Other clock arithmetic is PPSSPP-derived, not PSP-measured. Required output spans and ordered alias writes are runtime policy. Null, alias, signed-input and error behavior on PSP remain unmeasured.",
     },
+    # sceMp3 low-level pair (#2640): the second tier of AGENTS.md section 7.
+    "h_Mp3LowLevelInit": {
+        "status": "partial",
+        "evidence": [
+            "PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelInit, a context under any caller-chosen handle number, replacing one already held there",
+            "tests/native/hle_thread_selftest.c:test_mp3_low_level",
+        ],
+        "limitation": "PPSSPP-derived, not PSP-measured. Takes any handle number without sceMp3InitResource and ignores its second argument; JPCSP instead requires a reserved handle 0 or 1. A low-level context does not count against the two reserved handles, and the stream and format calls answer its number as an unused one.",
+    },
+    "h_Mp3LowLevelDecode": {
+        "status": "partial",
+        "evidence": [
+            "PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelDecode, one frame from at most 4096 source bytes into stereo s16, the bytes used and PCM bytes written, result 0",
+            "tests/native/hle_thread_selftest.c:test_mp3_low_level",
+        ],
+        "limitation": "PPSSPP-derived, not PSP-measured. The bytes used are the decoder's (bytes before the sync plus the frame), not PPSSPP's FFmpeg packet size; a call that decodes no frame returns 0 with no PCM (JPCSP returns 0x80672001); bad pointers return -1, and the 4096 source bytes and 4608 PCM bytes must be mapped (runtime safety policy).",
+    },
     "h_ReferProfilerNull": {
         "status": "partial",
         "limitation": "no profiler is modeled, so both sceKernelReferThreadProfiler and sceKernelReferGlobalProfiler always report NULL, like firmware with profiling off; NULL-ness on retail firmware is not hardware-measured",
