@@ -702,7 +702,7 @@ text layout and any pairwise kerning remain with `libfont` integration, #299).
 For a positive-area row-order-1 or row-order-2 glyph of *w* by *h* samples,
 let *x* be mathematical floor division of `xPos64` by 64 and *fx* the
 nonnegative remainder; define *y* and *fy* identically [project decision: the
-following sub-pixel rule is the complete project behaviour and is pinned by
+following sub-pixel rule for formats 0, 1, 3 and 4 is pinned by
 source-owned vectors in §8]. Let *S(ox,oy)* be source sample *ox,oy*, or zero
 outside the source rectangle. The interpolated output footprint is *ow* by
 *oh*, where *ow* is *w* plus one when *fx* is nonzero and *oh* is *h* plus one
@@ -724,6 +724,21 @@ truncation toward zero, so the fractional remainder is always 0–63.
 The footprint can reach 128 by 128, still below §3.11's 65,536-sample ceiling.
 The advance values do not scale, round, or otherwise alter this bitmap
 placement; their fixed-point representation is queried independently.
+
+**8-bit coverage (format 2).** In the public integer-position capture [C12],
+the 8-bit value is 17 times the corresponding packed nibble at all 400
+positions examined, spanning every nibble value. This relation sets the units
+of the source coverage before horizontal placement. At horizontal fractions
+32 and 63 of 64, the captured byte agrees with the sum of two contributions:
+the preceding column's 8-bit coverage weighted by *fx*/64 and rounded down,
+and the current column's coverage weighted by (64 − *fx*)/64 and rounded up.
+The last source column can contribute to one more column. For the two positive
+vertical fractions in the same capture, the output equals the integer-Y image
+throughout the comparison region. Use the integer source row and an output
+height of *h* for format 2. Applying this rule to other fractions and
+project-generated glyph shapes is a project generalization of these observations.
+The comparison used cleared buffers and ordinary character drawing. It supplies
+no measurement of composite overlay, shadow drawing or nonzero-prefill handling.
 
 **Composite assembly.** A row-order-3 record is placed by the rule above applied
 three times, once per component, and combined per addressable sample:
@@ -771,14 +786,14 @@ that prevents an empty range from being treated as a successful raster. For a
 composite, the preflight is repeated for all three components before the first
 pixel of the first component is written, so a component that cannot be placed
 leaves the whole draw untouched. Except
-for ABI field meanings, this section's preflight, raw-sample write, and dirty
+for ABI field meanings and format-2 coverage [C12], this section's preflight, pixel writes, and dirty
 rules are project decisions: they make hostile geometry fail before guest
 memory changes and keep all platform implementations on one PSP-visible rule
 [C2].
 
 Let *bpl* be `bytesPerLine`. For pixel formats 0 and 1, the maximum
 addressable horizontal coordinate supplied by one row is `2 × bpl`; for formats
-2, 3, and 4 it is `bpl` divided by 2, 3, or 4 respectively. Integer division
+2, 3, and 4 it is `bpl`, `floor(bpl ÷ 3)`, or `floor(bpl ÷ 4)`, respectively. Integer division
 floors; a zero result makes the horizontal intersection empty and fails the
 request.
 Pixel writes require both *y* in `[0, bufHeight)` and *x* in
@@ -794,14 +809,13 @@ dependence].
 | --- | --- | --- |
 | 0: packed 4-bit | 2 pixels/byte | Even *x* uses the low nibble; odd *x* uses the high nibble. |
 | 1: reversed packed 4-bit | 2 pixels/byte | Even *x* uses the high nibble; odd *x* uses the low nibble. |
-| 2: 8-bit | 1 byte/pixel | One byte equal to the interpolated sample. |
+| 2: 8-bit | 1 byte/pixel | One byte of 8-bit coverage from §3.10 [C12]. |
 | 3: 24-bit | 3 bytes/pixel | Three bytes all equal to the interpolated sample. |
 | 4: 32-bit | 4 bytes/pixel | Four bytes all equal to the interpolated sample. |
 
 Packed 4-bit writes are read-modify-write operations and preserve the partner
-nibble, including on the first and last clipped pixel. The interpolated sample
-is the unsigned 4-bit result from §3.10 and is not scaled to 8-bit or 32-bit
-alpha. The 24-bit and 32-bit forms repeat that raw value in every component;
+nibble, including on the first and last clipped pixel. The packed formats use the unsigned 4-bit
+result from §3.10. The 24-bit and 32-bit project forms repeat that raw value in every component;
 the latter is not an RGBA blend operation. The reserved record word at image
 offset `0x12` has no effect.
 
@@ -1245,7 +1259,7 @@ and no shadow; mutations then vary one fact at a time.
    in component order.
 2. Render the same composite at `fx = 32`, at `fy = 32`, at both fractions, and
    at a negative position, and assert the destination samples and the widened
-   footprint column and row.
+   footprint column and the format-2 height.
 3. Assert the composite's own `SceFontCharInfo` fields: its dimensions,
    adjustments, and advances, not its components'; and that
    `pgf_has_char` and `pgf_get_char_info` return 1 for it.
@@ -1306,14 +1320,16 @@ and no shadow; mutations then vary one fact at a time.
 1. At `fx = fy = 0`, every 4-by-4 source sample reaches the same integer
    destination sample for both row orders.
 2. In 8-bit format, place a horizontal source `[10,5,0,0]` at `fx = 32` and
-   `fy = 0`; the five destination samples are `[5,7,2,0,0]`, including the
-   added left and right footprint samples. Repeat with `fy = 32`, both
-   fractions, row order 2, and
-   a negative coordinate whose floor and remainder are checked explicitly.
+   `fy = 0`; the five expected bytes are `[85,128,42,0,0]`. At integer
+   coordinates they are `[170,85,0,0]` with the next byte untouched. At
+   `fy = 32` verify the same source row and unchanged height. Repeat with both
+   fractions, row order 2, and a negative coordinate whose floor and remainder
+   are checked explicitly. Include unchanged bytes just outside the footprint.
 3. For format 0, prefill each destination byte with distinguishable partner
    nibbles and overwrite even then odd pixels. Assert low/high order and
    partner preservation. Repeat reversed for format 1.
-4. In formats 2, 3, and 4, assert one, three, and four identical bytes equal
+4. In format 2, assert the 8-bit coverage values across the complete nibble
+   range. For formats 3 and 4, assert three and four identical bytes equal
    to the raw interpolated 4-bit sample. Pixel-format value 5 fails.
 5. Cover negative x/y, exact first/last edges, full horizontal clipping, and
    a valid footprint wholly above/below the buffer. The latter returns 1 with
@@ -1408,6 +1424,11 @@ vector passes once §§3.1, 3.3, 3.6, 3.10, and 3.11 are implemented.
   <https://wiki.xentax.spektr.name/index.php/PGF_Font> (independent
   corroboration of header offset, magic, version fields, and map/pointer width
   locations).
+- [C12] PSPAutotests at `e37443a681c6a4d562f32b6b48e1f4e36cd69c97`,
+  [ordinary glyph-image probe](https://github.com/hrydgard/pspautotests/blob/e37443a681c6a4d562f32b6b48e1f4e36cd69c97/tests/font/charglyphimage.cpp)
+  and its [recorded output](https://github.com/hrydgard/pspautotests/blob/e37443a681c6a4d562f32b6b48e1f4e36cd69c97/tests/font/charglyphimage.expected).
+  The pixel-format and positive X/Y position cases support the byte comparisons in
+  §3.10. [Tracking issue](https://github.com/Jstar269/Nakagawa-Recomp/issues/3094).
 
 ## Sources read
 

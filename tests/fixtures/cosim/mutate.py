@@ -480,6 +480,28 @@ MUTANTS: tuple[Mutant, ...] = (
         target="fp-convert",
     ),
     Mutant(
+        "fpu-wrong-invalid-op-nan",
+        "FPU: return the x86 default NaN for an invalid add.s, sub.s or div.s",
+        [(
+            "#define SR_FPU_INVALID_OP_NAN_BITS 0x7fc00000u",
+            "#define SR_FPU_INVALID_OP_NAN_BITS 0xffc00000u",
+            1,
+        )],
+        target="fp-convert",
+    ),
+    Mutant(
+        "fpu-nan-operand-ft-first",
+        "FPU: return ft's NaN when both operands are NaNs",
+        [(
+            "    const uint32_t bits = sr_fpu_bits_are_nan(a_bits) ? a_bits | 0x00400000u\n"
+            "                        : sr_fpu_bits_are_nan(b_bits) ? b_bits | 0x00400000u\n",
+            "    const uint32_t bits = sr_fpu_bits_are_nan(b_bits) ? b_bits | 0x00400000u\n"
+            "                        : sr_fpu_bits_are_nan(a_bits) ? a_bits | 0x00400000u\n",
+            1,
+        )],
+        target="fp-convert",
+    ),
+    Mutant(
         "fpu-wrong-nan-compare",
         "FPU: reject unordered C.cond predicates",
         [(

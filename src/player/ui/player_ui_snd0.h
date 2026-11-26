@@ -73,9 +73,11 @@ typedef enum {
 } PlayerUiSnd0ReadResult;
 
 /* Reads the clip of `iso_path` (at most PLAYER_UI_SND0_MAX_FILE_BYTES) into a
-   malloc'd buffer the caller frees. Runs on the worker thread. */
+   malloc'd buffer the caller frees. Runs on the worker thread. The reader
+   checks cancel between chunks and returns without a buffer on cancellation. */
 typedef PlayerUiSnd0ReadResult (*PlayerUiSnd0Reader)(const char *iso_path, uint8_t **bytes,
-                                                     size_t *size, void *user);
+                                                     size_t *size, void *user,
+                                                     bool (*cancel)(void *), void *cancel_user);
 
 typedef struct PlayerUiSnd0 PlayerUiSnd0;
 

@@ -1016,14 +1016,14 @@ static unsigned g_live_polls, g_live_abandons, g_live_request, g_live_request_po
 
 typedef struct {
     unsigned frames;
-    int perturb, hard_exit, osk_extra;
+    int perturb, hard_exit, osk_extra, osk_unavailable;
     char text[16];
     unsigned pad_seed;
     int pause;
     int crowd;
 } ChildOptions;
 
-static ChildOptions g_child = {24u, -1, -1, 0, "HELLO", 1u, -1, -1};
+static ChildOptions g_child = {24u, -1, -1, 0, 0, "HELLO", 1u, -1, -1};
 
 /* "--rr-child" alone, or followed by ":" and comma-separated options. Returns 0 on a bad one. */
 static int parse_child_options(const char *arg) {
@@ -1044,6 +1044,7 @@ static int parse_child_options(const char *arg) {
         else if (strncmp(opt, "hardexit=", 9) == 0) g_child.hard_exit = atoi(opt + 9);
         else if (strncmp(opt, "crowd=", 6) == 0) g_child.crowd = atoi(opt + 6);
         else if (strcmp(opt, "extra") == 0) g_child.osk_extra = 1;
+        else if (strcmp(opt, "osk-unavailable") == 0) g_child.osk_unavailable = 1;
         else if (strncmp(opt, "pad=", 4) == 0) g_child.pad_seed = (unsigned)atoi(opt + 4);
         else if (strncmp(opt, "pause=", 6) == 0) g_child.pause = atoi(opt + 6);
         else if (strcmp(opt, "hostclock") == 0) g_child_host_clock = 1;
@@ -1058,6 +1059,7 @@ static int fake_live(const wchar_t *desc, const wchar_t *initial, wchar_t *out, 
     g_live_polls++;
     g_live_request_polls++;
     if (g_live_request == 0u && g_live_request_polls == 4u) {
+        if (g_child.osk_unavailable) return SR_OSK_TEXT_UNAVAILABLE;
         const char *text = g_child.text;
         int n = 0;
         for (; text[n] && n < cap - 1; n++) out[n] = (wchar_t)(unsigned char)text[n];
@@ -1119,6 +1121,10 @@ static int rr_child(void) {
         wchar_t out[64] = L"init";
         if ((request == 0u && f >= 2u) || (request == 1u && f >= 9u)) {
             const int r = sr_replay_osk_poll(L"name", L"init", out, 64, 0u, fake_live);
+            if (r == SR_OSK_TEXT_UNAVAILABLE) {
+                fputs("CHILD_OSK_UNAVAILABLE\n", stderr);
+                return 7;
+            }
             if (r != SR_OSK_TEXT_PENDING) {
                 fold_answer(r, out);
                 request++;
@@ -1705,6 +1711,25 @@ static void test_write_file_keeps_a_good_state(void) {
     (void)remove(path);
 }
 
+static void test_record_unavailable_keyboard(void) {
+    int status;
+    remove(RR_REC);
+    rr_env(RR_REC, "");
+    rr_opt("osk-unavailable");
+    char *log = rr_run(&status);
+    CHECK(status == 7 && strstr(log, "CHILD_OSK_UNAVAILABLE") != NULL,
+          "host-unavailable child exit %d: %.300s", status, log);
+    free(log);
+
+    char *recording = slurp_text(RR_REC);
+    CHECK(strstr(recording, "call=osk request=0 pending=3 result=open") != NULL &&
+              strstr(recording, "result=cancel") == NULL && strstr(recording, "result=ok") == NULL,
+          "an unavailable keyboard must leave an open request instead of recording an answer: %.600s",
+          recording);
+    free(recording);
+    rr_env("", "");
+}
+
 int main(int argc, char **argv) {
     sr_mem_init();
     sr_exec_span_reset();
@@ -1735,6 +1760,7 @@ int main(int argc, char **argv) {
     test_checkpoints();
     test_checkpoint_stream();
     test_record_replay();
+    test_record_unavailable_keyboard();
     if (g_failed) {
         fprintf(stderr, "NKSTATE SELFTEST FAILED\n");
         return 1;

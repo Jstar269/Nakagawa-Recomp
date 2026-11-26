@@ -184,15 +184,14 @@ static void osk_text_entry_abandon_live(void) {
 
 #else /* !_WIN32 */
 
-/* No native input box exists on this host: sr_osk_input answers cancelled at once without
- * waiting, so asking it from the scheduler thread cannot stop guest time. */
+/* The native seam reports unavailability immediately on this host. */
 static int osk_text_entry_poll_live(const wchar_t *desc, const wchar_t *initial, wchar_t *out, int cap,
                                     uint32_t input_type) {
     if (!out || cap < 2) return 0;
     if (osk_text_entry_unanswerable()) return SR_OSK_TEXT_PENDING;
     if (sr_osk_overlay_host()) return sr_osk_overlay_poll(desc, initial, out, cap, input_type);
     /* input_type is enforced only by the in-window keyboard; this native box fallback takes none. */
-    return sr_osk_input(desc, initial, out, cap) == 1;
+    return sr_osk_input(desc, initial, out, cap);
 }
 
 static void osk_text_entry_abandon_live(void) {

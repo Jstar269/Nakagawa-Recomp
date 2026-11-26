@@ -555,7 +555,7 @@ unsigned register_prx_exports(const char *host_path, uint32_t base) {
                     if (target <= UINT32_MAX - base) {
                         if (pairs[i] == 0xd632acdbu) {
                             s_last_prx_entry = base + target;
-                        } else if (pairs[i] == 0xcee05613u) {
+                        } else if (pairs[i] == SR_PRX_NID_MODULE_STOP) {
                             s_last_prx_stop = base + target;
                         }
                     }
@@ -1350,7 +1350,7 @@ static uint32_t load_guest_placed_module(const char *file, int required, uint32_
             continue;
         }
         if (e->lib[0] == '\0') {
-            if (e->nid == 0xCEE05613u) module_stop = e->addr;
+            if (e->nid == SR_PRX_NID_MODULE_STOP) module_stop = e->addr;
             continue;
         }
         if (sr_hle_register_late_import(e->nid, e->addr)) exported++;

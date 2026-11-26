@@ -936,7 +936,8 @@ int sr_replay_osk_poll(const wchar_t *desc, const wchar_t *initial, wchar_t *out
         s_osk_live = 1; /* used up: the person answers from here */
     }
     const int answer = live(desc, initial, out, cap, input_type);
-    if (s_rr != RR_RECORD) return answer;
+    /* Host failure is not a guest answer and must never be serialized as CANCEL. */
+    if (s_rr != RR_RECORD || answer == SR_OSK_TEXT_UNAVAILABLE) return answer;
     if (answer == SR_OSK_TEXT_PENDING) {
         s_osk_pending++;
         return answer;

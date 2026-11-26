@@ -43,6 +43,7 @@
 #include "recomp.h"
 #include "debug.h"
 #include "ge_capture.h"
+#include "perf.h"
 #include "ge_shared.h"
 #include "motion_tap.h"
 
@@ -4431,6 +4432,54 @@ static void test_ge_vertex_cache_overwrite_wide(void) {
     printf("VERTEX_CACHE_OVERWRITE %s rewritten_vertex_bytes=%lu differing=%lu\n", name, rewritten, diff);
 }
 
+static void test_ge_vertex_cache_benchmark(void) {
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    char path[512];
+    int n = snprintf(path, sizeof path, "%s/nk_ge_ab_%llu.json", tmp,
+                     (unsigned long long)sr_exec_now_ns());
+    if (n < 0 || (size_t)n >= sizeof path) {
+        expect(0, "vertex_cache_ab", "summary path does not fit");
+        return;
+    }
+    env_set("SR_PERF", "1");
+    env_set("SR_PERF_JSON", path);
+    env_set("SR_PERF_WINDOWS", "1-2,3-4");
+    env_set("SR_PERF_AB", "ge.vertex_cache");
+    env_set("SR_PERF_RUN_ID", "synthetic-ge-ab");
+    env_set("SR_GE_VERTEX_CACHE_DISABLE", NULL);
+    ge_vertex_cache_reload_env();
+    sr_perf_init();
+    expect(sr_perf_windows_enabled, "vertex_cache_ab", "route windows are not armed");
+    const uint8_t digest[32] = {0x12u};
+    sr_perf_window_route_loaded(digest, 4u);
+
+    VcCase draw = {"vertex_cache_ab", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96,
+                   s_vc_u8_list, 0u, 0.0f, 0, 0, 0, 0};
+    enum { BYTES = 128 * 128 * 4 };
+    static uint8_t reference[BYTES];
+    vc_fill();
+    vc_build_indices();
+    vc_clear();
+    sr_perf_window_step(1u, 1u, 100u, g_ge_vertex_cache_hits, 1, 0u);
+    vc_run_case(&draw);
+    sr_perf_window_step(2u, 2u, 200u, g_ge_vertex_cache_hits, 1, 0u);
+    expect(draw.hits == 0, "vertex_cache_ab", "reference window used the vertex cache");
+    memcpy(reference, SR_HOST(VC_FB), sizeof reference);
+
+    vc_clear();
+    sr_perf_window_step(3u, 3u, 300u, g_ge_vertex_cache_hits, 1, 0u);
+    vc_run_case(&draw);
+    sr_perf_window_step(4u, 4u, 400u, g_ge_vertex_cache_hits, 1, 0u);
+    expect(draw.hits > 0, "vertex_cache_ab", "optimized window did not use the cache");
+    expect(memcmp(reference, SR_HOST(VC_FB), sizeof reference) == 0,
+           "vertex_cache_ab", "alternating cache arms changed the framebuffer");
+    sr_perf_window_route_done();
+    sr_perf_shutdown();
+    remove(path);
+}
+
 int main(int argc, char **argv) {
     int strip_cache = 1;
     if (argc == 3 && strcmp(argv[1], "--bench") == 0) {
@@ -4615,6 +4664,7 @@ int main(int argc, char **argv) {
         test_ge_vram_capture(dir);
     }
     test_ge_motion_tap();
+    test_ge_vertex_cache_benchmark();
 
     printf("ge_cpu_profile_validate_selftest: strip_cache=%s vertex_cache=%s scenarios=%u faults=%u "
            "failures=%d\n", strip_cache ? "on" : "off", vertex_cache ? "on" : "off", s_scenarios,

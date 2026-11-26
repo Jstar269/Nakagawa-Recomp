@@ -44,7 +44,8 @@ typedef enum {
     NK_ICON_ERR_MISSING,
     NK_ICON_ERR_OVERSIZED,
     NK_ICON_ERR_CORRUPT,
-    NK_ICON_ERR_INVALID_PARAM
+    NK_ICON_ERR_INVALID_PARAM,
+    NK_ICON_ERR_CANCELLED
 } NkIconStatus;
 
 #define NK_ICON_MAX_BYTES (1024 * 1024) /* 1 MiB bound */
@@ -80,9 +81,13 @@ NkIconStatus nk_iso_read_image_entry(const char *iso_path, const char *rel_path,
  * reader that checks its own format (the launcher's PSP_GAME/SND0.AT3 clip).
  * NK_ICON_ERR_MISSING: no image, or no such file (or it is a directory);
  * NK_ICON_ERR_OVERSIZED: larger than max_bytes; NK_ICON_ERR_CORRUPT: empty or
- * unreadable. *out_data is malloc'd (caller frees) only on NK_ICON_OK. */
+ * unreadable. The optional cancel callback is checked before payload I/O,
+ * between chunks, and before handing off a complete result. Cancellation
+ * returns NK_ICON_ERR_CANCELLED. *out_data is malloc'd (caller frees) only
+ * on NK_ICON_OK. */
 NkIconStatus nk_iso_read_bounded_entry(const char *iso_path, const char *rel_path,
-                                       size_t max_bytes, uint8_t **out_data, size_t *out_size);
+                                       size_t max_bytes, uint8_t **out_data, size_t *out_size,
+                                       bool (*cancel)(void *), void *cancel_user);
 
 /* Which library images an attempt still needs. A disc without one of them is
  * common, so a retry only asks for the image whose texture is still absent

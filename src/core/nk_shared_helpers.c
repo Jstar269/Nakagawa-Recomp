@@ -438,6 +438,26 @@ bool nk_render_path_event_parse(const char *line, NkRenderPath *out) {
     return true;
 }
 
+#define NK_FSR1_REFUSAL_PREFIX "BOOT_EVENT phase=present_upscale_refused mode=fsr1 reason="
+const char *nk_fsr1_refusal_event(NkFsr1Refusal reason) {
+    switch (reason) {
+    case NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE: return NK_FSR1_REFUSAL_PREFIX "queue_no_compute";
+    case NK_FSR1_REFUSAL_STARTUP: return NK_FSR1_REFUSAL_PREFIX "startup_failed";
+    default: return NULL;
+    }
+}
+
+NkFsr1Refusal nk_fsr1_refusal_event_parse(const char *line) {
+    const size_t prefix = sizeof(NK_FSR1_REFUSAL_PREFIX) - 1u;
+    if (!line || strncmp(line, NK_FSR1_REFUSAL_PREFIX, prefix) != 0) return NK_FSR1_REFUSAL_NONE;
+    const char *reason = line + prefix;
+    const size_t length = strcspn(reason, " \r\n");
+    if (event_value_is(reason, length, "queue_no_compute")) return NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE;
+    if (event_value_is(reason, length, "startup_failed")) return NK_FSR1_REFUSAL_STARTUP;
+    return NK_FSR1_REFUSAL_NONE;
+}
+#undef NK_FSR1_REFUSAL_PREFIX
+
 static const char *const k_render_effect_names[NK_RENDER_EFFECT_COUNT] = {
     "stencil", "color_test", "logic_op", "write_mask", "ram_fb", "wide_stride", "mips", "line",
     "point"

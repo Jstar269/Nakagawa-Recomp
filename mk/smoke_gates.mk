@@ -44,6 +44,7 @@ production-smoke-clean:
 
 showcase:
 	"$(PYTHON)" tests/fixtures/showcase/showcase.py build
+	"$(PYTHON)" tests/fixtures/showcase/showcase.py audit
 
 showcase-smoke: showcase
 	"$(PYTHON)" tests/fixtures/showcase/showcase.py smoke
@@ -60,6 +61,7 @@ showcase-smoke: showcase
 # uses the default ignored build/ tree.
 showcase-linux:
 	"$(PYTHON)" tests/fixtures/showcase/showcase.py build
+	"$(PYTHON)" tests/fixtures/showcase/showcase.py audit
 	"$(PYTHON)" tests/fixtures/showcase/showcase.py smoke
 
 # display-smoke builds the guest and asserts the presented framebuffer word
