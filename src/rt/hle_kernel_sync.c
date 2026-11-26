@@ -1376,6 +1376,24 @@ static void sema_write_timeout_left(uint32_t toptr, int blocked, uint64_t wait_e
     MEM_W32(toptr, now < wait_end ? (uint32_t)(wait_end - now) : 0u);
 }
 
+/* A sceKernelWaitSema[CB] that finds its semaphore gone without a wake result: a callback or
+ * another thread deleted it while this thread was not blocked on it, so the delete woke nobody.
+ * The semaphore existed when the wait began, so the wait ends as a deleted one (WAIT_DELETE),
+ * never with the generic 0x80020000. PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/KernelWaitHelpers.h,
+ * HLEKernel::WaitEndCallback (a wait whose object is gone when its callbacks end resumes with
+ * SCE_KERNEL_ERROR_WAIT_DELETE), reached from Core/HLE/sceKernelSemaphore.cpp
+ * __KernelSemaEndCallback. Logged once per run, at its first use. */
+static int s_sema_gone_noted;
+static uint32_t sema_wait_gone(uint32_t uid, const char *call) {
+    if (!s_sema_gone_noted) {
+        s_sema_gone_noted = 1;
+        fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: %s on semaphore 0x%x deleted "
+                        "while the thread was not blocked on it ends with WAIT_DELETE\n", call, uid);
+    }
+    return SCE_KERNEL_ERROR_WAIT_DELETE;
+}
+
 static uint32_t h_WaitSema(CpuState *s) {
     /* a0=semaid, a1=signal, a2=timeout ptr (0=infinite, else *a2 = microseconds). */
     uint32_t uid = A0; int need = (int)A1; uint32_t toptr = A2;
@@ -1437,12 +1455,8 @@ static uint32_t h_WaitSema(CpuState *s) {
                 return woken;
             }
         }
-        /* Gone without a wake result (a callback or another thread deleted it while this
-         * thread was not blocked on it, so the delete woke nobody): the semaphore existed
-         * when the wait began, so the wait ends as a deleted one, as the event-flag, mailbox
-         * and mutex waits here end (PPSSPP-derived, not PSP-measured), never with the
-         * generic 0x80020000. The same holds for sceKernelWaitSemaCB below. */
-        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_WAIT_DELETE;
+        /* Gone without a wake result: sema_wait_gone above (PPSSPP-derived). */
+        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return sema_wait_gone(uid, "sceKernelWaitSema");
     }
     m->count -= need;
     sema_write_timeout_left(toptr, wait_end_set, wait_end);
@@ -1467,7 +1481,7 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
     while (m->count < need) {
         if (sr_thread_has_pending_callbacks(sched_current_uid())) {
             sr_thread_dispatch_callbacks();
-            m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_WAIT_DELETE;
+            m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return sema_wait_gone(uid, "sceKernelWaitSemaCB");
             sched_vtime_refresh();
             continue;
         }
@@ -1513,7 +1527,7 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
                 return woken;
             }
         }
-        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_WAIT_DELETE;
+        m = sync_find(uid, SYNC_KIND_SEMA); if (!m) return sema_wait_gone(uid, "sceKernelWaitSemaCB");
         sched_vtime_refresh();
     }
     m->count -= need;
@@ -2113,12 +2127,22 @@ static uint32_t h_CancelSema(CpuState *s) {
     if (hle_log_on())
         fprintf(stderr, "HLE: CancelSema uid=0x%x newCount=%d (from 0x%x)\n", A0, new_count, sched_current_uid());
     int waiters = sched_count_waiters(A0);
-    /* Measured (PSP-B2-01): -1 restores the create-time initial count. Every other
-     * negative count does too, and is never stored as the count: pspautotests
-     * tests/threads/semaphores/cancel.expected (reference output) reads cur=0 after
-     * "Negative -3" on a semaphore created with init 0, and PPSSPP (hrydgard/ppsspp
-     * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelSemaphore.cpp,
-     * sceKernelCancelSema) restores initCount for any newCount < 0. */
+    /* Negative counts, three evidence tiers kept apart:
+     * - -1 restores the create-time initial count: measured (PSP-B2-01).
+     * - Another negative count is never stored as the count: pspautotests
+     *   tests/threads/semaphores/cancel.expected (reference output recorded on a PSP;
+     *   corroborative) reads cur=0 after "Negative -3" on a semaphore created with init 0.
+     *   That cell cannot tell restoring the initial count from clamping to 0.
+     * - That it restores the initial count, as -1 does: PPSSPP-derived, not PSP-measured
+     *   (hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+     *   Core/HLE/sceKernelSemaphore.cpp, sceKernelCancelSema: newCount < 0 restores
+     *   initCount). Logged once per run, at the first negative count other than -1. */
+    static int s_cancel_sema_negative_noted;
+    if (new_count < -1 && !s_cancel_sema_negative_noted) {
+        s_cancel_sema_negative_noted = 1;
+        fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelCancelSema(%d) restores "
+                        "the initial count %d\n", new_count, m->initc);
+    }
     m->count = (new_count < 0) ? m->initc : new_count;
     /* The third argument is a2 (AGENTS.md section 7: arguments 1-4 are a0-a3). */
     uint32_t nump = A2;

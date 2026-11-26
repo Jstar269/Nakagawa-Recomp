@@ -27103,8 +27103,12 @@ static void test_wait_sema_count_validation(void) {
 
     /* ---- 7. a CB wait whose semaphore is deleted outside a waking delete ---- */
     /* The semaphore existed when the wait began, so a wait that finds it gone ends as a
-     * deleted one (WAIT_DELETE), as the event-flag, mailbox and mutex CB waits here do,
-     * never with the generic 0x80020000. (a) the pending callback the wait runs before it
+     * deleted one (WAIT_DELETE), never with the generic 0x80020000. PPSSPP-derived, not
+     * PSP-measured (hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+     * Core/HLE/KernelWaitHelpers.h, HLEKernel::WaitEndCallback). This is separate from the
+     * CancelSema negative-count cells below, which have their own evidence.
+     * MUTANT: return 0x80020000 again in sceKernelWaitSemaCB -- (a) and (b) fail.
+     * (a) the pending callback the wait runs before it
      * blocks deletes the semaphore; (b) a blocked waiter readied by a callback notification
      * finds its semaphore deleted before it runs, so the delete woke nobody. */
     {
@@ -28723,13 +28727,14 @@ static void test_b23_second_round(void) {
     }
 
     /* ---- CancelSema with a negative count other than -1 restores init -- */
-    /* pspautotests tests/threads/semaphores/cancel.expected (reference output): "Negative
-     * -3: OK" and the following refer reads cur=0 on a semaphore created with init 0, so
-     * any negative count, not only -1, restores the initial count; it is never stored as
-     * the count. The init-2 leg follows PPSSPP (hrydgard/ppsspp
+    /* Separate from the WaitSemaCB deleted-semaphore cells. Init-0 leg: pspautotests
+     * tests/threads/semaphores/cancel.expected (reference output recorded on a PSP): "Negative
+     * -3: OK" and the following refer reads cur=0 on a semaphore created with init 0, so a
+     * negative count is never stored as the count. Init-2 leg (restore the initial count, not
+     * clamp to 0): PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
      * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelSemaphore.cpp,
-     * sceKernelCancelSema: newCount < 0 restores initCount), consistent with the measured
-     * -1 rule above. */
+     * sceKernelCancelSema: newCount < 0 restores initCount), consistent with the measured -1
+     * rule above. MUTANT: clamp a negative count other than -1 to 0 -- the init-2 leg fails. */
     {
         static const int inits[2] = {0, 2};
         for (int k = 0; k < 2; k++) {
