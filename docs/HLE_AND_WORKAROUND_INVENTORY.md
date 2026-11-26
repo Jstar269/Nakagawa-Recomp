@@ -52,10 +52,10 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 421 | 434 |
+| `partial` | 423 | 436 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 211 | 215 |
+| `unreviewed` | 209 | 213 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -83,13 +83,13 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 | `scePsmf` | 0 | 4 | 0 | 0 | 14 | 18 | 18 |
 | `sceReg` | 0 | 15 | 0 | 0 | 0 | 15 | 15 |
 | `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
-| `sceSas` | 0 | 3 | 0 | 1 | 24 | 28 | 32 |
+| `sceSas` | 0 | 5 | 0 | 1 | 22 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
 | `sceUtility` | 0 | 25 | 0 | 0 | 12 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 1 | 0 | 0 | 1 | 2 | 3 |
-| **Total** | **14** | **421** | **1** | **3** | **211** | **650** | **680** |
+| **Total** | **14** | **423** | **1** | **3** | **209** | **650** | **680** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1594,6 +1594,10 @@ Semantic handler census: **650** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)
   - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
+- **`h_SasCoreWithMix`** (`sceSas`): `__sceSasCoreWithMix` (0x50a14dfc)
+  - Limitation: this status covers the measured cells only: PSP-SAS-003 is one acceptance-eligible launch on a PSP-3000 (system software 6.61, game context) of the probe built from 3872796c, 204 cells and the done record all PASS, and it calls __sceSasCoreWithMix once per cell on a core of grain 256 initialised fresh, over caller PCM (i - 256) * 97 in shorts 0..511; the selftest replays those calls and asserts the published words in the three windows the probe reads: with no voice keyed, (0x1000, 0x1000) returns 0 and leaves the buffer unchanged, (0x800, 0x800) returns 0 and halves it (0x9f00 becomes 0xcf80), and (0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return 0x80420018 and leave it untouched (sas-mix-w-zero-neg-calls, sas-mix-w-over-calls, sas-mix-w-extreme-calls); with voice 0 keyed at 0x1000, (0, 0) returns 0 and leaves the voice alone (0x06fe) and (0x1000, 0x1000) adds it to the caller's PCM (0x9f61 + 0x06fe = 0xa65f); in raw output mode (1), (0x1000, 0x1000) returns 0x80000004 and leaves the buffer untouched (sas-mix-w-raw-unity-calls); the handler accepted every gain and mixed in raw mode until #2807; it now refuses a gain below 0 or above 0x1000 on either side, a range the measured points bound but do not pin: 0x1001 to 0x1fff and -0xfff to -1 are unmeasured, as are the rounding of an odd sample at a gain below 0x1000, raw mode with other gains, the order of the raw-mode, gain, core, address and dispatch checks against each other, the XMB context and other consoles; they are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_withmix_cells
 - **`h_SasSetADSR`** (`sceSas`): `__sceSasSetADSR` (0x019b25eb)
   - Limitation: this status covers the measured cells only: in PSP-SAS-002 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 06a6c942c) __sceSasSetADSR with mask 0xf on voice 0 before KeyOn returns 0 for the table baseline (attack 0x00400000, decay 0x00100000, sustain 0x00004000, release 0x00040000) in all 32 rows of sas-adsr-m00-calls..sas-adsr-m31-calls, and for the rates of the expatk and expatk-g64 runs (0x00020000, 0x00100000, 0, 0x00040000) and of the bound and bound-half runs (0x00400000, 0x00100000, 0, 0x00100000); the selftest replays those calls and asserts those words, and in the bound runs the rates act as linear steps: the attack reaches the top within one grain and the decay holds 0x30000000 from grain 2 to grain 15; the refusals (a mask above 0xf, a negative rate) and other masks are unmeasured, and the absolute heights after KeyOn are not claimed, since the one the record publishes (expatk, 0x00a76d9d) moves with the key-on delay this runtime does not model (#1296); they are not reviewed here (#2807)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
@@ -1609,6 +1613,10 @@ Semantic handler census: **650** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
   - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
   - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
+- **`h_SasSetVolume`** (`sceSas`): `__sceSasSetVolume` (0x440ca7d8)
+  - Limitation: this status covers the measured cells only: in PSP-SAS-003 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 3872796c) __sceSasSetVolume sets voice 0 of a fresh core of grain 256, which plays a flat VAG held at the envelope's top, and the probe reads the grain after four warm-up grains; the selftest replays those calls and asserts the published words: with no __sceSasSetVolume after __sceSasInit every plane peaks at 0x06fe (output mode 0 and raw mode 1), 0 on all four sides is silent, 0x800 gives 0x037f, (0, 0, 0x1000, 0x1000) in raw mode leaves the dry planes 0 and the send planes at 0x06fe, -0x1000 on any side returns 0 and plays that side inverted, +0x1001 and -0x1001 on any side return 0x80420018 and keep the previous volume (0x800, so 0x037f on every plane), and a second __sceSasInit after it restores 0x06fe; the handler already answered all of these, so #2807 changes no code here; the inverted value is not claimed: the PSP plays 0xf901 and this runtime 0xf902, because its mixer (__sceSasCore, unreviewed) applies the envelope to the sample before the volume; other volumes, the core and voice-index refusals, a call on a sounding voice, the XMB context and other consoles are unmeasured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_volume_cells
 - **`h_UmdActivate`** (`sceUmd`): `sceUmdActivate` (0xc6183d47)
   - Limitation: the callback argument follows PPSSPP (0x22 when no compiled SDK version is set, 0x32 otherwise) and is host-selftested, not hardware measured; the activation result and argument checks are not hardware measured either
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_unregister_callback
