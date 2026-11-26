@@ -171,7 +171,7 @@ class RecompLauncherManifestShapeTests(unittest.TestCase):
             self.assertGreaterEqual(len(setting["choices"]), 2)
             for choice in setting["choices"]:
                 self.assertLessEqual(set(choice), CHOICE_KEYS)
-        for name, places in manifest["folders"].items():
+        for places in manifest["folders"].values():
             check_places(self, places)
         for action in manifest["actions"]:
             self.assertLessEqual(set(action), ACTION_KEYS)
