@@ -1561,9 +1561,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
 
     /* Revalidate the package and current source media immediately before spawn
        so changed executable/module revisions fail closed. */
+    NkRuntimePackageInfo current;
     if (session->package_launch) {
         NkGameEntry identity;
-        NkRuntimePackageInfo current;
         char gate_error[1024] = "";
         memset(&identity, 0, sizeof(identity));
         snprintf(identity.disc_id, sizeof(identity.disc_id), "%s", session->disc_id);
@@ -2144,6 +2144,16 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         return NK_ERROR_PROCESS_SPAWN;
     }
 
+    if (session->package_launch) {
+        memcpy(session->package_identity, current.completion_digest,
+               sizeof(session->package_identity));
+        memcpy(session->runtime_source_commit, current.runtime_source_commit,
+               sizeof(session->runtime_source_commit));
+        memcpy(session->runtime_source_origin, current.runtime_source_origin,
+               sizeof(session->runtime_source_origin));
+        memcpy(session->runtime_source_reason, current.runtime_source_reason,
+               sizeof(session->runtime_source_reason));
+    }
     session->is_running = true;
     return NK_OK;
 }

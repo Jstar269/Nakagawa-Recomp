@@ -505,13 +505,10 @@ NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data
     return nk_launch_validate_runtime_package(user_data_root, game, out, reason, reason_size);
 }
 
-void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
-                                                         const char *commit,
-                                                         const char *origin,
-                                                         const char *reason) {
-    if (!app || game_index < 0 || game_index >= app->game_count) return;
-    char *out = app->runtime_package_cache[game_index].runtime_source;
-    const size_t cap = sizeof(app->runtime_package_cache[game_index].runtime_source);
+/* The report's Runtime source line for a package's record (#2875): "" when the package
+ * predates the record (an empty origin). */
+static void player_runtime_source_text(const char *commit, const char *origin,
+                                       const char *reason, char *out, size_t cap) {
     out[0] = '\0';
     if (!origin || !origin[0]) return;
     if (commit && commit[0]) {
@@ -526,6 +523,16 @@ void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int gam
     for (char *c = out; *c; c++) {
         if ((unsigned char)*c < 0x20u || (unsigned char)*c == 0x7fu) *c = ' ';
     }
+}
+
+void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
+                                                         const char *commit,
+                                                         const char *origin,
+                                                         const char *reason) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return;
+    player_runtime_source_text(commit, origin, reason,
+                               app->runtime_package_cache[game_index].runtime_source,
+                               sizeof(app->runtime_package_cache[game_index].runtime_source));
 }
 
 const char *player_app_runtime_package_reason(const PlayerApp *app,
@@ -5725,6 +5732,9 @@ void player_app_set_error(PlayerApp *app, const char *code, const char *title, c
     app->last_error.stop_boundary[0] = '\0';
     app->last_error.stop_exit_code = 0;
     app->last_error.stop_has_exit_code = false;
+    app->last_error.about_launch = false;
+    app->last_error.launch_package[0] = '\0';
+    app->last_error.launch_runtime_source[0] = '\0';
     app->active_view = VIEW_ERROR;
     player_dev_log_add(app, "error", "%s: %s", app->last_error.error_code,
                        app->last_error.title);
@@ -6073,6 +6083,13 @@ static const char *player_package_status_word(NkRuntimePackageStatus status) {
     }
 }
 
+/* The report's Package line: the package's status and the start of its cache key. */
+static void player_package_report_line(NkRuntimePackageStatus status, const char *identity,
+                                       char *out, size_t out_size) {
+    snprintf(out, out_size, "%s%s%.12s", player_package_status_word(status),
+             identity && identity[0] ? ", identity " : "", identity ? identity : "");
+}
+
 size_t player_app_format_error_report(const PlayerApp *app, const char *version,
                                       char *out, size_t out_size) {
     const char *profile = NULL;
@@ -6106,20 +6123,24 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
     if (index >= 0) {
         player_report_append(raw, sizeof(raw), &used, "Disc version: ",
                              app->games[index].disc_version);
+    }
+    /* Beside the player's own commit on the version line (#2875). A card about a
+       launch names the package that launch spawned, as it recorded it then (#2998);
+       the library's stored status may be another build's by now. */
+    if (error->about_launch) {
+        player_report_append(raw, sizeof(raw), &used, "Package: ", error->launch_package);
+        player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
+                             error->launch_runtime_source);
+    } else if (index >= 0) {
         const PlayerRuntimePackageCacheEntry *package =
             player_runtime_cache_for_game(app, &app->games[index]);
         if (package && package->status_valid) {
             char line[128];
-            snprintf(line, sizeof(line), "%s%s%.12s",
-                     player_package_status_word(package->status),
-                     package->package_identity[0] ? ", identity " : "",
-                     package->package_identity);
+            player_package_report_line(package->status, package->package_identity, line,
+                                       sizeof(line));
             player_report_append(raw, sizeof(raw), &used, "Package: ", line);
-            /* Beside the player's own commit on the version line (#2875). */
-            if (package->runtime_source[0]) {
-                player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
-                                     package->runtime_source);
-            }
+            player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
+                                 package->runtime_source);
         }
     }
     player_report_append(raw, sizeof(raw), &used, "Boundary: ", error->stop_boundary);
@@ -6629,13 +6650,26 @@ void player_app_set_game_stop_error(PlayerApp *app, const char *code,
         snprintf(app->last_error.log_file_path, sizeof(app->last_error.log_file_path),
                  "%s", log_file_path);
     }
+    app->last_error.about_launch = true;
     if (disc_id && disc_id[0]) {
         snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                  "%s", disc_id);
-        /* The image that ran, when this stop is the running game's. */
+        /* The image that ran, and the package the launch spawned for it (#2998), when
+           this stop is the running game's. */
         if (strcmp(disc_id, app->launch_session.disc_id) == 0) {
             snprintf(app->last_error.subject_iso_path, sizeof(app->last_error.subject_iso_path),
                      "%s", app->running_iso_path);
+            if (app->launch_session.package_launch) {
+                player_package_report_line(NK_RUNTIME_PACKAGE_OK,
+                                           app->launch_session.package_identity,
+                                           app->last_error.launch_package,
+                                           sizeof(app->last_error.launch_package));
+                player_runtime_source_text(app->launch_session.runtime_source_commit,
+                                           app->launch_session.runtime_source_origin,
+                                           app->launch_session.runtime_source_reason,
+                                           app->last_error.launch_runtime_source,
+                                           sizeof(app->last_error.launch_runtime_source));
+            }
         }
         app->last_error.retry = PLAYER_ERROR_RETRY_RESTART_GAME;
     }
@@ -6884,6 +6918,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
                      "on the game's Enhanced page.", info.error);
             player_app_set_error(app, "TEXTURE_PACK_REFUSED", "Texture pack not used", message,
                                  "Back to library", VIEW_LIBRARY);
+            /* No child started: Copy details names no package for it (#2998). */
+            app->last_error.about_launch = true;
             if (have_key) {
                 snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                          "%s", game->disc_id);
