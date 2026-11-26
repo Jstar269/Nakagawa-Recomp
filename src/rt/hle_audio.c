@@ -112,8 +112,7 @@ static uint32_t h_AudioChReserve(CpuState *s) {
         if (ch < 7 && !s_audio_auto_order_noted) {
             s_audio_auto_order_noted = 1;
             fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceAudioChReserve(%d) with "
-                            "channel 7 held takes the highest free channel (%d)
-",
+                            "channel 7 held takes the highest free channel (%d)\n",
                     (int)(int32_t)A0, (int)ch);
         }
     }
