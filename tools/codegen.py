@@ -3998,6 +3998,14 @@ def _walk_body(elf, start, ranges, known, resume_owners, dispatch_boundaries,
             # syscall there still ends the line), so the body is the same in either order.
             terminator_slots.discard(pc)
             seen.discard(pc)
+        elif pc in seen and continuations.get(pc - 4) == pc + 4:
+            # A label on the delay slot of a transfer whose fall-through stopped at another
+            # entry (jal, a linked call, a split conditional branch). The transfer marked the
+            # slot seen without walking it, so the labelled copy takes the same continuation
+            # edge: after the slot, control goes on into that entry, not into whatever block
+            # the address order puts next.
+            stop_at_continuation(pc, pc + 4)
+            continue
         while in_ranges(pc, ranges) and pc not in seen:
             seen.add(pc)
             insns.add(pc)
@@ -4519,20 +4527,22 @@ def _sv_step(w, regs, written):
         for i in range(1, 32):
             regs[i] = None
 
-def sv_plan(elf, insns, labels, hst_profile=False, options=None):
+def sv_plan(elf, insns, labels, hst_profile=False, options=None, entry=None):
     """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function.
 
     Counts the points for the run's summary line; sv_points computes them without
     counting, for the LLVM lowering plan, which reads the same function again."""
-    points = sv_points(elf, insns, labels, hst_profile=hst_profile, options=options)
+    points = sv_points(elf, insns, labels, hst_profile=hst_profile, options=options, entry=entry)
     if points:
         SV_STATS["funcs"] += 1
         SV_STATS["checks"] += sum(len(checks) for checks in points.values())
     return points
 
 
-def sv_points(elf, insns, labels, hst_profile=False, options=None):
-    """sv_plan's {flush_addr: [(reg, expected_value), ...]}, with no side effect."""
+def sv_points(elf, insns, labels, hst_profile=False, options=None, entry=None):
+    """sv_plan's {flush_addr: [(reg, expected_value), ...]}, with no side effect.
+
+    ``entry`` is the body's entry address when the caller knows it."""
     options = _options_for_call(options)
     if not (insns and options.static_verify):
         return {}
@@ -4542,6 +4552,14 @@ def sv_points(elf, insns, labels, hst_profile=False, options=None):
         return {}
     if ENHANCEMENT_ACE_SITES and (insns & set(ENHANCEMENT_ACE_SITES.keys())):
         return {}
+    # A labelled delay slot's copy is skipped by its transfer's fall-through, which enters
+    # the next word with the slot run inline, annulled or followed by a call: a join, as a
+    # label is (the emitter's planned skip targets).
+    labels = set(labels) | set(_dup_slot_skips(elf, insns, labels).values())
+    # An entry above the body's lowest address is entered past the words below it (emit_function
+    # jumps to its label), so the first pass from it did not run them: a join, as a label is.
+    if entry is not None and entry != min(insns):
+        labels.add(entry)
     points, total = {}, 0
     regs: list[int | None] = [None] * 32
     regs[0] = 0
@@ -5195,7 +5213,7 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     # relocated immediates and link values are not constants, so it carries none.
     # A variable-import site's immediate is the linker's too, so its body carries none either.
     sv_points = ({} if ADDRESS_SPACE.runtime_module or not ADDRESS_SPACE.patched.keys().isdisjoint(insns)
-                 else sv_plan(elf, insns, labels, hst_profile=hst_profile, options=options))
+                 else sv_plan(elf, insns, labels, hst_profile=hst_profile, options=options, entry=start))
     dup_slot_skips = _dup_slot_skips(elf, insns, labels)
     if dup_slot_skips:
         labels = set(labels) | set(dup_slot_skips.values())

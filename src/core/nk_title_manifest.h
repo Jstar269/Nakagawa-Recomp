@@ -66,6 +66,8 @@ typedef struct {
     char executable_path[NK_MAX_PATH];
     char image_path[NK_MAX_PATH];
     bool validation_cache_hit;
+    /* SHA-256 of the validated completion manifest bytes. */
+    char completion_digest[65];
     /* The runtime source commit the package records (#2875): 40 lowercase hex, or empty
      * when the package predates the record or records it as unknown. origin is
      * "install-record", "git", "unknown", or empty when not recorded; reason names why

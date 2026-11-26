@@ -556,13 +556,15 @@ static void snapshot_real_config_probe(RealConfigProbe *real) {
     char sep = nk_platform_path_separator();
     char probe[NATIVE_TEST_PATH_MAX + 64];
     real->existed_before = nk_platform_dir_exists(real->path);
-    snprintf(probe, sizeof(probe), "%s%cinput_profiles", real->path, sep);
+    /* add_real_config_probe rejects roots that do not fit this field. */
+    snprintf(probe, sizeof(probe), "%.*s%cinput_profiles", NATIVE_TEST_PATH_MAX - 1, real->path, sep);
     real->input_profiles_existed_before = nk_platform_dir_exists(probe);
     if (real->input_profiles_existed_before) {
         real->input_profiles_file_count = 0;
         nk_platform_list_files(probe, count_files_callback, &real->input_profiles_file_count);
     }
-    snprintf(probe, sizeof(probe), "%s%cinput_profiles%cUCUS98701.json", real->path, sep, sep);
+    snprintf(probe, sizeof(probe), "%.*s%cinput_profiles%cUCUS98701.json",
+             NATIVE_TEST_PATH_MAX - 1, real->path, sep, sep);
     real->disc_profile_existed_before = nk_platform_file_exists(probe);
     real->disc_profile_size = -1;
     real->disc_profile_mtime = 0;
@@ -623,7 +625,8 @@ static bool real_config_probe_unchanged(const RealConfigProbe *real, char *probl
 
     /* The disc profile must not be created if absent before; if it existed before the run, its
      * size and mtime must be unchanged. */
-    snprintf(probe, sizeof(probe), "%s%cinput_profiles%cUCUS98701.json", real->path, sep, sep);
+    snprintf(probe, sizeof(probe), "%.*s%cinput_profiles%cUCUS98701.json",
+             NATIVE_TEST_PATH_MAX - 1, real->path, sep, sep);
     if (!real->disc_profile_existed_before) {
         if (nk_platform_file_exists(probe)) {
             snprintf(problem, problem_size, "'%s' was created", probe);
@@ -641,7 +644,7 @@ static bool real_config_probe_unchanged(const RealConfigProbe *real, char *probl
 
     /* The input profiles folder must not be created if absent; if it existed before, the number
      * of files in it must be unchanged. */
-    snprintf(probe, sizeof(probe), "%s%cinput_profiles", real->path, sep);
+    snprintf(probe, sizeof(probe), "%.*s%cinput_profiles", NATIVE_TEST_PATH_MAX - 1, real->path, sep);
     if (!real->input_profiles_existed_before) {
         if (nk_platform_dir_exists(probe)) {
             snprintf(problem, problem_size, "'%s' was created", probe);
@@ -658,7 +661,7 @@ static bool real_config_probe_unchanged(const RealConfigProbe *real, char *probl
 
     /* The settings folder itself must not be created if absent. */
     if (!real->existed_before && nk_platform_dir_exists(real->path)) {
-        snprintf(problem, problem_size, "'%s' was created", real->path);
+        snprintf(problem, problem_size, "'%.*s' was created", NATIVE_TEST_PATH_MAX - 1, real->path);
         return false;
     }
 
@@ -667,8 +670,8 @@ static bool real_config_probe_unchanged(const RealConfigProbe *real, char *probl
     TreeFingerprint tree = {0, 0};
     tree_fingerprint_walk(&tree, real->path, "");
     if (tree.sum != real->tree_sum || tree.entries != real->tree_entries) {
-        snprintf(problem, problem_size, "a file or folder under '%s' was added, removed or rewritten",
-                 real->path);
+        snprintf(problem, problem_size, "a file or folder under '%.*s' was added, removed or rewritten",
+                 NATIVE_TEST_PATH_MAX - 1, real->path);
         return false;
     }
     return true;

@@ -1711,6 +1711,7 @@ def _required_local_assets(
     selected_optional: set[str],
     module_hashes: dict[str, str],
     output_dir: Path,
+    target: str = "host",
 ) -> list[dict[str, Any]]:
     filesystem = manifest["filesystem"]
     assets: list[dict[str, Any]] = []
@@ -1749,7 +1750,9 @@ def _required_local_assets(
             asset["sha256"] = module_hashes[module["name"]]
         assets.append(asset)
 
-    if os.name == "nt":
+    # The libraries the built program loads: an Android package's library loads SDL3 and the
+    # Vulkan loader as a Linux program does, whatever host built it.
+    if os.name == "nt" and target == "host":
         assets.extend((
             {
                 "kind": "host-runtime-library",
@@ -2178,6 +2181,15 @@ def package_executable_name(game_name: str, target: str) -> str:
     if target == "android":
         return f"lib{game_name}.so"
     return f"{game_name}{'.exe' if os.name == 'nt' else ''}"
+
+
+def package_image_name(executable_name: str) -> str:
+    """The runtime image's name in a package: ``<executable stem>_image.bin``, the file every
+    package reader looks for beside the executable (``validate_package_cache`` in
+    tools/nk_core/package_cache.py, ``nk_title_manifest_validate_aot_package`` in
+    src/core/nk_title_manifest.c). For the Android library ``lib<game>.so`` that is
+    ``lib<game>_image.bin``, not the ``<game>_image.bin`` Make writes."""
+    return f"{Path(executable_name).stem}_image.bin"
 
 
 def build_package(
@@ -2685,6 +2697,10 @@ def build_package(
             raise PackageRouteError(
                 "PACKAGE_BUILD_INCOMPLETE", "missing build outputs: " + ", ".join(missing_outputs)
             )
+        packaged_image = build_workspace / package_image_name(executable_name)
+        if packaged_image != image_path:
+            # An Android package: its readers find the image as lib<game>_image.bin.
+            os.replace(image_path, packaged_image)
 
         entry_symbols = re.findall(
             r"(?m)^\s*void\s+([fr])_[0-9a-fA-F]+\s*\(",
@@ -2712,7 +2728,7 @@ def build_package(
         executable_sha256 = _sha256_file(compiled_executable)
         module_hashes = {row["name"]: row["sha256"] for row in input_hashes["modules"]}
         required_assets = _required_local_assets(
-            normalized, selected_optional, module_hashes, build_workspace
+            normalized, selected_optional, module_hashes, build_workspace, target
         )
         runtime_header_hash = _sha256_file(ROOT / "src" / "rt" / "recomp.h")
         tools = {

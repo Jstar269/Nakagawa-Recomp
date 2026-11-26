@@ -92,7 +92,8 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
     game->disc_key_version = iso_inspect_result_for_library(&keyed, app->library.entries,
                                                             app->library.count);
     result = &keyed;
-    snprintf(game->disc_id, sizeof(game->disc_id), "%s", result->disc_id);
+    nk_shared_text_copy(game->disc_id, sizeof(game->disc_id), result->disc_id,
+                        NK_SHARED_TEXT_COPY_TRUNCATE);
     const char *title_id_end = memchr(result->matched_title_id, '\0',
                                       sizeof(result->matched_title_id));
     if (!title_id_end ||
@@ -103,8 +104,10 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
         }
         return false;
     }
-    snprintf(game->title_name, sizeof(game->title_name), "%s", result->title_name);
-    snprintf(game->disc_version, sizeof(game->disc_version), "%s", result->disc_version);
+    nk_shared_text_copy(game->title_name, sizeof(game->title_name), result->title_name,
+                        NK_SHARED_TEXT_COPY_TRUNCATE);
+    nk_shared_text_copy(game->disc_version, sizeof(game->disc_version), result->disc_version,
+                        NK_SHARED_TEXT_COPY_TRUNCATE);
     snprintf(game->iso_path, sizeof(game->iso_path), "%s", iso_path);
     /* A compressed image keeps its own path for the user; every later step
        reads the expanded .iso in iso_path. */
@@ -118,8 +121,8 @@ static bool player_populate_inspected_game(PlayerApp *app, const char *iso_path,
     game->executable_boot_kind = (uint32_t)result->executables.boot.kind;
     game->executable_selection = (uint32_t)result->executables.selected;
     game->executable_boot_fallback = result->executables.boot_fallback;
-    snprintf(game->selected_executable, sizeof(game->selected_executable), "%s",
-             result->executables.selected_path);
+    nk_shared_text_copy(game->selected_executable, sizeof(game->selected_executable),
+                        result->executables.selected_path, NK_SHARED_TEXT_COPY_TRUNCATE);
 
     char refused_profile[512] = "";
     bool profile_refused = player_app_title_profile_refusal_for_disc(
@@ -5369,12 +5372,17 @@ static void player_achievements_load_queue(PlayerRun *run) {
 /* A status the sign-in comes to rest on, followed once by what the queue's load had to say. */
 static void player_achievements_rest_status(PlayerRun *run, const char *text) {
     PlayerApp *app = &run->app;
+    char *status = app->achievements_status;
+    const size_t capacity = sizeof(app->achievements_status);
+    nk_shared_text_copy(status, capacity, text, NK_SHARED_TEXT_COPY_TRUNCATE);
     if (run->achievements_queue_notice[0]) {
-        snprintf(app->achievements_status, sizeof app->achievements_status, "%s %s", text,
-                 run->achievements_queue_notice);
+        const size_t used = strlen(status);
+        if (used + 1u < capacity) {
+            status[used] = ' ';
+            nk_shared_text_copy(status + used + 1u, capacity - used - 1u,
+                                run->achievements_queue_notice, NK_SHARED_TEXT_COPY_TRUNCATE);
+        }
         run->achievements_queue_notice[0] = '\0';
-    } else {
-        snprintf(app->achievements_status, sizeof app->achievements_status, "%s", text);
     }
 }
 
@@ -5432,7 +5440,8 @@ static void player_achievements_refresh_list(PlayerRun *run) {
     memset(app->achievements_list, 0, sizeof app->achievements_list);
     for (size_t i = 0u; i < count; i++) {
         PlayerAchievementRow *row = &app->achievements_list[i];
-        snprintf(row->title, sizeof row->title, "%s", entries[i].title);
+        memcpy(row->title, entries[i].title, sizeof(entries[i].title));
+        row->title[sizeof(row->title) - 1u] = '\0';
         snprintf(row->description, sizeof row->description, "%s", entries[i].description);
         snprintf(row->badge_name, sizeof row->badge_name, "%s", entries[i].badge_name);
         row->points = entries[i].points;
@@ -5555,7 +5564,8 @@ static void player_achievements_pump_badges(PlayerRun *run) {
         return;
     PlayerAchBadgeSlot *slot = &run->ach_badges[k];
     memset(slot, 0, sizeof *slot);
-    snprintf(slot->name, sizeof slot->name, "%s", app->achievements_list[row].badge_name);
+    memmove(slot->name, app->achievements_list[row].badge_name, sizeof(slot->name));
+    slot->name[sizeof(slot->name) - 1u] = '\0';
     slot->locked = locked;
     slot->state = PLAYER_ACH_BADGE_ASKED;
 }
