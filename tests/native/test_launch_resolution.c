@@ -4374,6 +4374,288 @@ static void test_memstick_stock_discovery_reports_a_linked_slot(const char *base
 }
 #endif
 
+static int memstick_record_state(const char *saves) {
+    NkMemstickLayout layout;
+    int state = -1;
+    if (nk_memstick_layout_read(saves, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK)
+        state = (int)layout.state;
+    nk_memstick_layout_free(&layout);
+    return state;
+}
+
+static void memstick_one_legacy_save(const char *saves, const char *slot, const char *bytes,
+                                     char file[NK_MAX_PATH]) {
+    char folder[NK_MAX_PATH], path[NK_MAX_PATH];
+    memstick_fixture_path(folder, saves, slot);
+    memstick_fixture_path(path, folder, "PSP/SAVEDATA/SAVE");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(file, path, "DATA.BIN");
+    write_file_utf8(file, bytes);
+}
+
+/* A stick or a staging folder that no journal accounts for is refused before the first
+   record is written, with or without a plan. */
+static void test_memstick_first_move_refuses_an_unjournalled_stick(const char *base) {
+    puts("[LAUNCH_TEST] First move refuses an unjournalled stick or staging folder, writing no record");
+    for (int staging = 0; staging < 2; ++staging) {
+        char saves[NK_MAX_PATH], file[NK_MAX_PATH], found[NK_MAX_PATH], error[512];
+        memstick_fixture_path(saves, base, staging ? "memstick-unjournalled-staging"
+                                                   : "memstick-unjournalled-stick");
+        memstick_one_legacy_save(saves, "TEST05001", "legacy save", file);
+        NkMemstickPaths paths;
+        assert(nk_memstick_layout_paths(saves, &paths));
+        NkMemstickSavePlan plan;
+        assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+        assert(plan.unit_count == 1u);
+        const char *occupied = staging ? paths.staging : paths.stick;
+        assert(nk_platform_mkdir_p(occupied));
+        memstick_fixture_path(found, occupied, "FOUND.BIN");
+        write_file_utf8(found, "somebody else's file");
+        NkFileLock lock;
+        assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+        for (int with_plan = 1; with_plan >= 0; --with_plan) {
+            snprintf(error, sizeof(error), "unset");
+            assert(nk_memstick_prepare_shared(saves, with_plan ? &plan : NULL,
+                                              with_plan ? "test" : NULL, error, sizeof(error)) ==
+                   NK_MEMSTICK_SHARED_REFUSED);
+            if (strcmp(error, "MIGRATION_DESTINATION_CONFLICT") != 0)
+                fprintf(stderr, "unjournalled %s: %s\n", staging ? "staging" : "stick", error);
+            assert(strcmp(error, "MIGRATION_DESTINATION_CONFLICT") == 0);
+            assert(nk_platform_path_missing(paths.record) &&
+                   nk_platform_path_missing(paths.record_temp) &&
+                   nk_platform_path_missing(paths.migration) &&
+                   nk_platform_path_missing(paths.kept_copies));
+            assert(nk_platform_path_missing(staging ? paths.stick : paths.staging));
+            assert_file_text(found, "somebody else's file");
+            assert_file_text(file, "legacy save");
+        }
+        nk_platform_file_lock_release(&lock);
+        nk_memstick_save_plan_free(&plan);
+    }
+}
+
+/* With no record yet, a refusal carries its own name and never the reader's note that the
+   record is absent; asking without a plan leaves the message empty. */
+static void test_memstick_first_move_names_a_damaged_journal(const char *base) {
+    puts("[LAUNCH_TEST] First move names a journal it cannot read, not the absent record");
+    static const char earlier_schema[] = "{\"schema_version\":1,\"sources\":[],\"units\":[]}\n";
+    char saves[NK_MAX_PATH], file[NK_MAX_PATH], journal[NK_MAX_PATH], frozen[NK_MAX_PATH];
+    char error[512];
+    memstick_fixture_path(saves, base, "memstick-absent-record-journal");
+    memstick_one_legacy_save(saves, "TEST05002", "legacy save", file);
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    snprintf(error, sizeof(error), "unset");
+    assert(nk_memstick_prepare_shared(saves, NULL, NULL, error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_NEEDS_PLAN);
+    assert(error[0] == '\0');
+    assert(nk_platform_path_missing(paths.record));
+
+    memstick_fixture_path(journal, paths.migration, "psp-savedata");
+    assert(nk_platform_mkdir_p(journal));
+    memstick_fixture_path(frozen, journal, "plan.json");
+    write_file_utf8(frozen, earlier_schema);
+    NkMemstickSavePlan plan;
+    assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+    for (int with_plan = 0; with_plan < 2; ++with_plan) {
+        snprintf(error, sizeof(error), "unset");
+        assert(nk_memstick_prepare_shared(saves, with_plan ? &plan : NULL,
+                                          with_plan ? "test" : NULL, error, sizeof(error)) ==
+               NK_MEMSTICK_SHARED_REFUSED);
+        if (strcmp(error, "MIGRATION_JOURNAL_DAMAGED") != 0)
+            fprintf(stderr, "damaged journal, no record: %s\n", error);
+        assert(strcmp(error, "MIGRATION_JOURNAL_DAMAGED") == 0);
+        assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.staging) &&
+               nk_platform_path_missing(paths.stick));
+        assert_file_text(frozen, earlier_schema);
+    }
+    nk_memstick_save_plan_free(&plan);
+    nk_platform_file_lock_release(&lock);
+    assert_file_text(file, "legacy save");
+}
+
+/* The whole staged stick is compared with the plan before the rename, and the promoted stick
+   again when a call finds the rename done and READY not yet written. */
+static void test_memstick_promotion_verifies_the_whole_stick(const char *base) {
+    puts("[LAUNCH_TEST] Promotion refuses a staged or promoted stick that differs from the plan");
+    char saves[NK_MAX_PATH], file[NK_MAX_PATH], note[NK_MAX_PATH], path[NK_MAX_PATH];
+    char extra[NK_MAX_PATH], aside[NK_MAX_PATH], seal[NK_MAX_PATH], record[NK_MAX_PATH];
+    char error[512];
+    memstick_fixture_path(saves, base, "memstick-verify-store");
+    memstick_one_legacy_save(saves, "TEST05003", "legacy save", file);
+    memstick_fixture_path(note, saves, "TEST05003/NOTE.BIN");
+    write_file_utf8(note, "loose note");
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    NkMemstickLayout moving;
+    assert(nk_memstick_layout_init(&moving, NK_MEMSTICK_STATE_MOVING, "test"));
+    assert(nk_memstick_layout_write(saves, &moving, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    nk_memstick_layout_free(&moving);
+    NkMemstickSavePlan plan;
+    assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+    assert(plan.unit_count == 2u);
+    assert(nk_memstick_savedata_move_begin(saves, &plan) == NK_MEMSTICK_COLLISION_COPIED);
+    nk_memstick_save_plan_free(&plan);
+
+    /* The frozen plan says which schema its rows are, and the earlier number is not read. */
+    memstick_fixture_path(path, paths.migration, "psp-savedata/plan.json");
+    char *frozen = read_text_file(path);
+    static const char schema[] = "{\"schema_version\":2,";
+    assert(frozen && strncmp(frozen, schema, sizeof(schema) - 1u) == 0);
+    bool complete = true;
+    frozen[sizeof(schema) - 3u] = '1';
+    write_file_utf8(path, frozen);
+    assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) ==
+           NK_MEMSTICK_COLLISION_JOURNAL_DAMAGED);
+    assert(!complete && nk_platform_path_missing(paths.staging));
+    frozen[sizeof(schema) - 3u] = '2';
+    write_file_utf8(path, frozen);
+    free(frozen);
+    assert(nk_memstick_savedata_move_resume(saves, 0u, &complete) == NK_MEMSTICK_COLLISION_COPIED);
+    assert(complete);
+
+    /* Before the rename: the staged stick holds an entry the plan does not name. */
+    memstick_fixture_path(extra, paths.staging, "EXTRA.BIN");
+    write_file_utf8(extra, "not in the plan");
+    memstick_fixture_path(seal, paths.migration, "psp-savedata/promotion.json");
+    snprintf(error, sizeof(error), "unset");
+    assert(nk_memstick_prepare_shared(saves, NULL, NULL, error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_REFUSED);
+    if (strcmp(error, "MIGRATION_COPY_MISMATCH") != 0)
+        fprintf(stderr, "staged stick with an extra entry: %s\n", error);
+    assert(strcmp(error, "MIGRATION_COPY_MISMATCH") == 0);
+    assert(nk_platform_path_missing(paths.stick) && nk_platform_dir_exists(paths.staging) &&
+           nk_platform_path_missing(seal));
+    assert(memstick_record_state(saves) == (int)NK_MEMSTICK_STATE_MOVING);
+    assert_file_text(extra, "not in the plan");
+    memstick_fixture_path(aside, saves, "fixture-extra.bin");
+    assert(nk_rename_noreplace_utf8(extra, aside) == 0);
+
+    /* The rename commits; an occupied source-record path holds READY back. */
+    memstick_fixture_path(record, paths.migration, "TEST05003.json");
+    write_file_utf8(record, "existing unrelated record");
+    assert(nk_memstick_prepare_shared(saves, NULL, NULL, error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_REFUSED);
+    assert(strstr(error, "MIGRATION_SOURCE_RECORD_IO"));
+    assert(nk_platform_path_missing(paths.staging) && nk_platform_dir_exists(paths.stick));
+    memstick_fixture_path(aside, saves, "fixture-prior-record");
+    assert(nk_rename_noreplace_utf8(record, aside) == 0);
+
+    /* After the rename: a promoted file no longer holds the planned bytes. */
+    memstick_fixture_path(path, paths.stick, "NOTE.BIN");
+    assert_file_text(path, "loose note");
+    write_file_utf8(path, "changed since");
+    snprintf(error, sizeof(error), "unset");
+    assert(nk_memstick_prepare_shared(saves, NULL, NULL, error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_REFUSED);
+    if (strcmp(error, "MIGRATION_DESTINATION_CONFLICT") != 0)
+        fprintf(stderr, "promoted stick with a changed file: %s\n", error);
+    assert(strcmp(error, "MIGRATION_DESTINATION_CONFLICT") == 0);
+    assert(memstick_record_state(saves) == (int)NK_MEMSTICK_STATE_MOVING);
+    assert(nk_platform_path_missing(record));
+    assert_file_text(path, "changed since");
+
+    /* With the planned bytes back, the same call finishes the move. */
+    write_file_utf8(path, "loose note");
+    assert(nk_memstick_prepare_shared(saves, NULL, NULL, error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_READY);
+    assert(memstick_record_state(saves) == (int)NK_MEMSTICK_STATE_READY);
+    nk_platform_file_lock_release(&lock);
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/SAVE/DATA.BIN");
+    assert_file_text(path, "legacy save");
+    assert_file_text(file, "legacy save");
+    assert_file_text(note, "loose note");
+}
+
+/* A plan made before a legacy folder changed cannot begin. The refusal names the change; the
+   MOVING record this call wrote stays, with no journal and nothing staged, and a fresh plan
+   moves the folder. */
+static void test_memstick_first_move_names_a_stale_plan(const char *base) {
+    puts("[LAUNCH_TEST] First move names a legacy folder that changed after the plan");
+    char saves[NK_MAX_PATH], file[NK_MAX_PATH], path[NK_MAX_PATH], error[512];
+    memstick_fixture_path(saves, base, "memstick-stale-plan");
+    memstick_one_legacy_save(saves, "TEST05004", "planned bytes", file);
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    NkMemstickSavePlan plan;
+    assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+    write_file_utf8(file, "changed after the plan");
+    snprintf(error, sizeof(error), "unset");
+    assert(nk_memstick_prepare_shared(saves, &plan, "test", error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_REFUSED);
+    if (strcmp(error, "SAVES_NOT_MOVED: MIGRATION_SOURCE_CHANGING") != 0)
+        fprintf(stderr, "stale plan: %s\n", error);
+    assert(strcmp(error, "SAVES_NOT_MOVED: MIGRATION_SOURCE_CHANGING") == 0);
+    nk_memstick_save_plan_free(&plan);
+    assert(memstick_record_state(saves) == (int)NK_MEMSTICK_STATE_MOVING);
+    assert(nk_platform_path_missing(paths.migration) && nk_platform_path_missing(paths.staging) &&
+           nk_platform_path_missing(paths.stick));
+    assert_file_text(file, "changed after the plan");
+
+    assert(nk_memstick_prepare_shared(saves, NULL, NULL, error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_NEEDS_PLAN);
+    assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+    assert(nk_memstick_prepare_shared(saves, &plan, "test", error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_READY);
+    nk_memstick_save_plan_free(&plan);
+    nk_platform_file_lock_release(&lock);
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/SAVE/DATA.BIN");
+    assert_file_text(path, "changed after the plan");
+}
+
+/* A stock plan may name as many sources as a layout record may, NK_MEMSTICK_LAYOUT_MAX_SOURCES,
+   and a plan that can be made can be resumed: its rescan passes every source back in. */
+static void test_memstick_stock_plan_source_limit(const char *base) {
+    puts("[LAUNCH_TEST] A stock plan at the source limit is made, resumed and promoted");
+    const size_t most = NK_MEMSTICK_LAYOUT_MAX_SOURCES;
+    char (*names)[16] = calloc(most + 1u, sizeof(*names));
+    NkMemstickPlanInput *inputs = calloc(most + 1u, sizeof(*inputs));
+    assert(names && inputs);
+    for (size_t i = 0; i <= most; ++i) {
+        snprintf(names[i], sizeof(names[i]), "LIMIT%05u", (unsigned)i);
+        inputs[i].slot = names[i];
+    }
+    char saves[NK_MAX_PATH], file[NK_MAX_PATH], path[NK_MAX_PATH], error[512];
+    memstick_fixture_path(saves, base, "memstick-source-limit");
+    memstick_one_legacy_save(saves, names[0], "legacy save", file);
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkMemstickSavePlan plan;
+
+    /* One more than the limit, either given or by adding "unidentified", is refused. */
+    assert(!nk_memstick_plan_stock_legacy(saves, inputs, most + 1u, NULL, 0u, &plan));
+    assert(!nk_memstick_plan_stock_legacy(saves, inputs, most, NULL, 0u, &plan));
+    /* Exactly the limit when the inputs already name "unidentified". */
+    snprintf(names[most - 1u], sizeof(names[most - 1u]), "unidentified");
+    assert(nk_memstick_plan_stock_legacy(saves, inputs, most, NULL, 0u, &plan));
+    assert(plan.source_count == most && plan.unit_count == 1u);
+    nk_memstick_save_plan_free(&plan);
+    /* Exactly the limit when "unidentified" is the one added. */
+    assert(nk_memstick_plan_stock_legacy(saves, inputs, most - 1u, NULL, 0u, &plan));
+    assert(plan.source_count == most && plan.unit_count == 1u);
+
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    NkMemstickSharedResult moved = nk_memstick_prepare_shared(saves, &plan, "test", error,
+                                                              sizeof(error));
+    if (moved != NK_MEMSTICK_SHARED_READY) fprintf(stderr, "source limit: %s\n", error);
+    assert(moved == NK_MEMSTICK_SHARED_READY);
+    nk_memstick_save_plan_free(&plan);
+    nk_platform_file_lock_release(&lock);
+    assert(memstick_record_state(saves) == (int)NK_MEMSTICK_STATE_READY);
+    memstick_fixture_path(path, paths.stick, "PSP/SAVEDATA/SAVE/DATA.BIN");
+    assert_file_text(path, "legacy save");
+    assert_file_text(file, "legacy save");
+    free(inputs);
+    free(names);
+}
+
 static void test_memstick_layout(const char *base, char sep) {
     printf("[LAUNCH_TEST] Shared Memory Stick layout and record\n");
     fflush(stdout);
@@ -4935,6 +5217,11 @@ int main(int argc, char **argv) {
     test_memstick_full_legacy(base);
     test_memstick_loose_occupant_blocks_resume(base);
     test_memstick_bring_in_after_full_move(base);
+    test_memstick_first_move_refuses_an_unjournalled_stick(base);
+    test_memstick_first_move_names_a_damaged_journal(base);
+    test_memstick_promotion_verifies_the_whole_stick(base);
+    test_memstick_first_move_names_a_stale_plan(base);
+    test_memstick_stock_plan_source_limit(base);
 #if !defined(_WIN32) && !defined(_WIN64)
     test_memstick_stock_discovery_reports_a_linked_slot(base);
 #endif

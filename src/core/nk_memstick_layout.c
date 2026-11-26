@@ -1590,7 +1590,9 @@ bool nk_memstick_plan_stock_legacy(const char *saves_root, const NkMemstickPlanI
                                    size_t homebrew_count, NkMemstickSavePlan *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
-    if (!saves_root || input_count >= NK_MEMSTICK_LAYOUT_MAX_SOURCES ||
+    /* The inputs may already fill the limit: a rescan passes a plan's own sources back in.
+       A name that would be one more is refused where it is added. */
+    if (!saves_root || input_count > NK_MEMSTICK_LAYOUT_MAX_SOURCES ||
         (input_count && !inputs)) return false;
     StockSlots slots = {calloc(NK_MEMSTICK_LAYOUT_MAX_SOURCES, sizeof(*slots.inputs)), 0u, false};
     if (!slots.inputs) return false;
@@ -1691,6 +1693,8 @@ NkMemstickCollisionResult nk_memstick_replay_savedata(const char *saves_root,
 #define SAVEDATA_MOVE_PLAN "plan.json"
 #define SAVEDATA_MOVE_PROGRESS "progress.json"
 #define SAVEDATA_MOVE_PROMOTION "promotion.json"
+/* plan.json only. Schema 1 had narrower rows and no scope flags; no reader is kept for it. */
+#define SAVEDATA_MOVE_PLAN_SCHEMA 2u
 
 /* Find the first row after this complete group. The caller has validated the
    names and group ordering. */
@@ -1805,7 +1809,9 @@ static void move_text_size(LayoutText *text, size_t size) {
    keys, noncanonical numbers and any embedded NUL in a JSON string value. */
 static LayoutText move_format_plan(const NkMemstickSavePlan *plan) {
     LayoutText text = {0};
-    text_literal(&text, "{\"schema_version\":1,\"complete_legacy_scope\":");
+    text_literal(&text, "{\"schema_version\":");
+    move_text_size(&text, SAVEDATA_MOVE_PLAN_SCHEMA);
+    text_literal(&text, ",\"complete_legacy_scope\":");
     text_literal(&text, plan->complete_legacy_scope ? "true" : "false");
     text_literal(&text, ",\"includes_stock_discovery\":");
     text_literal(&text, plan->includes_stock_discovery ? "true" : "false");
@@ -1908,8 +1914,9 @@ static bool move_parse_plan_arrays(const NkJsonNode *root, NkMemstickSavePlan *p
 static bool move_parse_plan(const unsigned char *bytes, size_t length, NkMemstickSavePlan *plan) {
     NkJsonNode *root = nk_json_parse((const char *)bytes, length, NULL, 0u);
     size_t version;
-    bool ok = root && move_read_index(nk_json_object_get(root, "schema_version"), 1u, &version) &&
-              version == 1u &&
+    bool ok = root && move_read_index(nk_json_object_get(root, "schema_version"),
+                                      SAVEDATA_MOVE_PLAN_SCHEMA, &version) &&
+              version == SAVEDATA_MOVE_PLAN_SCHEMA &&
               nk_json_get_bool(nk_json_object_get(root, "complete_legacy_scope"),
                                &plan->complete_legacy_scope) &&
               nk_json_get_bool(nk_json_object_get(root, "includes_stock_discovery"),
@@ -2421,8 +2428,17 @@ NkMemstickSharedResult nk_memstick_prepare_shared(const char *saves_root,
             journal = nk_memstick_savedata_move_begin(saves, initial);
             if (journal == NK_MEMSTICK_COLLISION_COPIED)
                 journal = move_load_plan(&paths, directory, &plan, hash);
-            if (journal != NK_MEMSTICK_COLLISION_COPIED)
-                layout_error(err, err_size, "SAVES_NOT_MOVED: MIGRATION_PLAN_IO");
+            if (journal != NK_MEMSTICK_COLLISION_COPIED) {
+                /* The caller's plan was made before this call: name a folder that changed
+                   since, or can no longer be read, as that and not as a write failure. */
+                layout_error(err, err_size, "SAVES_NOT_MOVED: %s",
+                             journal == NK_MEMSTICK_COLLISION_SOURCE_CHANGING
+                                 ? "MIGRATION_SOURCE_CHANGING"
+                             : journal == NK_MEMSTICK_COLLISION_SOURCE_UNREADABLE
+                                 ? "MIGRATION_SOURCE_UNREADABLE"
+                             : journal == NK_MEMSTICK_COLLISION_JOURNAL_DAMAGED
+                                 ? "MIGRATION_JOURNAL_DAMAGED" : "MIGRATION_PLAN_IO");
+            }
         }
     }
     if (journal == NK_MEMSTICK_COLLISION_COPIED) {

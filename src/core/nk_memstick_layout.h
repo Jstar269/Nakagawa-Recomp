@@ -238,7 +238,7 @@ NkMemstickCollisionResult nk_memstick_replay_savedata(const char *saves_root,
 
 /* Freeze an immutable per-stick plan under .nakagawa-migration/psp-savedata in MOVING,
  * before making a staged copy. Repeating begin with the same plan is safe.
- * plan.json carries schema 1, source slots and statuses, and the
+ * plan.json carries schema 2, its scope, source slots and statuses, and the
  * ordered unit records (source slot, relative path, kind, SHA-256, ownership
  * and replay decision).
  * progress.json binds the first unfinished row to the plan's SHA-256.
