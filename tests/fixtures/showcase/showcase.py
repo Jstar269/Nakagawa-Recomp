@@ -826,7 +826,7 @@ def trim_to_runtime_package(package_dir: Path, game_name: str) -> int:
 
 
 def _build_one(demo: dict[str, object], license_notice: bytes,
-               prebuilt_prx_dir: Path | None = None) -> None:
+               prebuilt_prx_dir: Path | None = None, target: str = "host") -> None:
     title_id = str(demo["id"])
     stage = BUILD_ROOT / title_id
     if prebuilt_prx_dir is None:
@@ -840,7 +840,11 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     write_iso(iso_path, str(demo["disc_id"]), str(demo["display_name"]), icon,
               prx.read_bytes(), license_notice)
 
-    package_stage = stage / f"package-{_package_fingerprint(demo, prx)}"
+    # A host and an Android package of the same inputs are different builds: each has its
+    # own stage, so neither reuses the other's objects or executable.
+    fingerprint = _package_fingerprint(demo, prx)
+    package_stage = stage / (f"package-{fingerprint}" if target == "host"
+                             else f"package-{target}-{fingerprint}")
     if package_stage.is_symlink():
         raise ShowcaseError(f"refusing to use symlink package output: {package_stage}")
     package_stage.mkdir(parents=True, exist_ok=True)
@@ -848,6 +852,7 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
         sys.executable, str(ROOT / "tools" / "title_codegen_plan.py"),
         str(ROOT / str(demo["manifest"])), "--package", "--public-safe",
         "--game-elf", str(prx), "--output-dir", str(package_stage),
+        "--target", target,
     ]
     # The runtime looks for the SDL3 libraries beside the player it ships under (Linux; the
     # Makefile ignores the setting elsewhere), never in a folder of the building machine.
@@ -878,12 +883,18 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     print(f"SHOWCASE_PACKAGE: {demo['disc_id']} {release_dir}")
 
 
-def build_all(prebuilt_prx_dir: Path | None = None) -> None:
+def build_all(prebuilt_prx_dir: Path | None = None, target: str = "host") -> None:
     """Build every demo's image and package into DEMO_ROOT.
 
     With `prebuilt_prx_dir` (what `build-prx` wrote, on a host that has PSPDEV) the
     PSPDEV step is skipped and those PRXs and that license notice are used, so a host
     without PSPDEV, such as the Windows release job, builds the same packages.
+
+    `target` is the system the packages run on: `host`, or `android` for the packages the
+    Android app bundles (title_codegen_plan.py --target android: each package's executable
+    is the library lib<game>.so, and the build needs CC naming an Android Clang and
+    ANDROID_SDL3_INCLUDE and ANDROID_SDL3_LIBDIR naming the APK's SDL3;
+    docs/ANDROID_DEVELOPMENT.md). The demos folder has the same layout either way.
     """
     if prebuilt_prx_dir is None:
         _check_pspdev()
@@ -891,7 +902,7 @@ def build_all(prebuilt_prx_dir: Path | None = None) -> None:
     else:
         license_notice = _prebuilt_license(prebuilt_prx_dir)
     for demo in DEMOS:
-        _build_one(demo, license_notice, prebuilt_prx_dir)
+        _build_one(demo, license_notice, prebuilt_prx_dir, target)
 
 
 def build_prx_all(out_dir: Path) -> None:
@@ -1524,6 +1535,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prebuilt-prx-dir", type=Path,
                         help="build: use the PRXs and license notice build-prx wrote there "
                              "instead of running PSPDEV")
+    parser.add_argument("--target", choices=("host", "android"), default=None,
+                        help="build: the system the packages run on (default host); android "
+                             "builds the packages the Android app bundles")
     args = parser.parse_args(argv)
     if args.prebuilt_prx_dir is not None and args.action != "build":
         parser.error("--prebuilt-prx-dir applies only to build")
@@ -1531,9 +1545,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("files apply only to audit-run-paths")
     if args.action == "audit-run-paths" and not args.files:
         parser.error("audit-run-paths requires at least one file")
+    if args.target is not None and args.action != "build":
+        parser.error("--target applies only to build")
     try:
         if args.action == "build":
-            build_all(args.prebuilt_prx_dir)
+            build_all(args.prebuilt_prx_dir, args.target or "host")
         elif args.action == "build-prx":
             if args.out_dir is None:
                 parser.error("build-prx requires --out-dir")
