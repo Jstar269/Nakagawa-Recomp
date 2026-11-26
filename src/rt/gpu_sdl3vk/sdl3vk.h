@@ -374,8 +374,10 @@ int  sdl3vk_input_claimed(void);
 
 /* The pause presenter draws the window itself while the game is stopped: one image at the
  * swapchain's pixel size, composed by the caller. sdl3vk_overlay_extent gives that size and
- * its byte order (rgba 1: R,G,B,A in memory; 0: B,G,R,A); it returns 0 when no image can be
- * shown now (minimised, no swapchain, or a surface format with another layout). */
+ * its byte order (rgba 1: R,G,B,A in memory; 0: B,G,R,A); it returns 1 with the size, 0 when
+ * no image can be shown now (minimised, no swapchain, or a surface format with another layout),
+ * and -1 when the renderer is terminal, as when the lost window surface it replaces first
+ * cannot be replaced (#360). */
 int  sdl3vk_overlay_extent(int *w, int *h, int *rgba);
 /* Shows the overlay image. px (w*h pixels of `pitch` bytes per row, at the current extent)
  * replaces the uploaded image; NULL shows the last one again. These presents are not game

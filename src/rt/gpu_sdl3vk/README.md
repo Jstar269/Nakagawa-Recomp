@@ -334,7 +334,10 @@ go on decides the transition:
   at an acquire, a present or a rebuild, before any frame was shown on it, while the platform
   still has a window, is terminal with one line instead of being replaced again; a frame shown on
   it, or the platform taking the window away in between, lets it be replaced. The pause overlay
-  replaces the surface the same way and asks for its image to be composed again (2).
+  replaces the surface the same way and asks for its image to be composed again (2). Its extent
+  query replaces a lost surface first; when that turns the renderer terminal the query returns
+  -1, and the pause ends so the game meets the terminal renderer, as after a failed overlay
+  present.
 - The renderer turns terminal (`sdl3vk_renderer_terminal()`; every later present returns -1 at
   once) when the device is lost, a fence wait fails (the frame's work may still run),
   or any step between a successful acquire and the submit fails (the image stays acquired and its
@@ -372,8 +375,9 @@ present and after a present that was not enqueued (a game frame and the pause ov
 surface lost at once as the window goes; a surface lost again as the window goes, and lost and
 shown in turn; a loss followed by a background and return in one event poll; the pause overlay
 alone losing its surface, showing a frame and losing it again; and the terminal cases (a new
-surface that cannot be made, after a lost acquire, a lost present or in the pause overlay,
-cannot be presented to, or is lost at once with the window still there or minimized; a surface
+surface that cannot be made, after a lost acquire, a lost present, in the pause overlay or in
+the pause overlay's extent query after a background and return, cannot be presented to (also
+in that query), or is lost at once with the window still there or minimized; a surface
 lost at every acquire, at every present, or at every pause-overlay present; a device lost at the
 acquire or the present), each with one line. The minimized window is a seam that exists only in
 the selftest build (`SR_VIDEOREC_SELFTEST`), so that case runs on every host. The

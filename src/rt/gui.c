@@ -3018,7 +3018,11 @@ SrPauseFrame gui_pause_frame(void) {
     if (nk_overlay_host_due(s_pause_host, (double)now / 1e9)) s_pause_dirty = 1;
 
     int w = 0, h = 0, rgba = 0;
-    if (!sdl3vk_overlay_extent(&w, &h, &rgba)) return SR_PAUSE_FRAME_CONTINUE;
+    const int extent = sdl3vk_overlay_extent(&w, &h, &rgba);
+    /* A terminal renderer (a lost window surface that could not be replaced, #360) ends the
+     * pause as a failed overlay present below does: the game meets the same terminal renderer. */
+    if (extent < 0) return SR_PAUSE_FRAME_RESUME;
+    if (extent == 0) return SR_PAUSE_FRAME_CONTINUE;
     const void *px = NULL;
     int pitch = 0;
     if (s_pause_dirty) {

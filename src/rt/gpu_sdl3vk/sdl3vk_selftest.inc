@@ -2056,7 +2056,7 @@ static int sdl3vk_surface_selftest(void) {
         unsigned lines = 0;
         uint64_t surfaces = 0;
         uint32_t *opx = NULL;
-        if (sdl3vk_overlay_extent(&ow, &oh, &orgba) &&
+        if (sdl3vk_overlay_extent(&ow, &oh, &orgba) > 0 &&
             (opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u)) != NULL) {
             shown = sdl3vk_present_overlay(opx, ow * 4);
             const uint64_t surf0 = s_surface_gen;
@@ -2070,7 +2070,7 @@ static int sdl3vk_surface_selftest(void) {
             terminal = sdl3vk_renderer_terminal();
             lines = s_terminal_lines;
             surfaces = s_surface_gen - surf0;
-            if (sdl3vk_overlay_extent(&ow2, &oh2, &orgba) && ow2 == ow && oh2 == oh)
+            if (sdl3vk_overlay_extent(&ow2, &oh2, &orgba) > 0 && ow2 == ow && oh2 == oh)
                 again = sdl3vk_present_overlay(opx, ow * 4);
             else if (create_fault)
                 again = sdl3vk_present_overlay(opx, ow * 4);   /* refused: -1 */
@@ -2200,7 +2200,7 @@ static int sdl3vk_surface_selftest(void) {
         } else {
             int ow = 0, oh = 0, orgba = 0;
             uint32_t *opx = NULL;
-            if (sdl3vk_overlay_extent(&ow, &oh, &orgba) &&
+            if (sdl3vk_overlay_extent(&ow, &oh, &orgba) > 0 &&
                 (opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u)) != NULL) {
                 shown = sdl3vk_present_overlay(opx, ow * 4) == 1;
                 s_pstep_fault = PSTEP_PRESENT;
@@ -2212,7 +2212,7 @@ static int sdl3vk_surface_selftest(void) {
                 s_swap_surface_lost_fault = SWAP_LOST_NONE;
                 held_terminal = sdl3vk_renderer_terminal();
                 int ow2 = 0, oh2 = 0;
-                if (sdl3vk_overlay_extent(&ow2, &oh2, &orgba) && ow2 == ow && oh2 == oh)
+                if (sdl3vk_overlay_extent(&ow2, &oh2, &orgba) > 0 && ow2 == ow && oh2 == oh)
                     back = sdl3vk_present_overlay(opx, ow * 4);
             } else {
                 shown = 0;
@@ -2276,7 +2276,7 @@ static int sdl3vk_surface_selftest(void) {
         uint32_t *opx = NULL;
         int ow = 0, oh = 0, orgba = 0;
         if (c == 2) {
-            if (sdl3vk_overlay_extent(&ow, &oh, &orgba) &&
+            if (sdl3vk_overlay_extent(&ow, &oh, &orgba) > 0 &&
                 (opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u)) != NULL)
                 shown = sdl3vk_present_overlay(opx, ow * 4) == 1;
             else
@@ -2294,7 +2294,7 @@ static int sdl3vk_surface_selftest(void) {
                 int w2 = 0, h2 = 0;
                 /* The overlay asks for the extent before it composes; a terminal renderer has
                  * none, and the overlay is refused. */
-                r[k] = sdl3vk_overlay_extent(&w2, &h2, &orgba) && w2 == ow && h2 == oh
+                r[k] = sdl3vk_overlay_extent(&w2, &h2, &orgba) > 0 && w2 == ow && h2 == oh
                      ? sdl3vk_present_overlay(opx, ow * 4) : -1;
             } else {
                 r[k] = sdl3vk_present_rgba(px);
@@ -2428,7 +2428,7 @@ static int sdl3vk_surface_selftest(void) {
         } else {
             int ow = 0, oh = 0, orgba = 0;
             uint32_t *opx = NULL;
-            if (sdl3vk_overlay_extent(&ow, &oh, &orgba))
+            if (sdl3vk_overlay_extent(&ow, &oh, &orgba) > 0)
                 opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u);
             if (opx) {
                 r[0] = sdl3vk_present_overlay(opx, ow * 4);
@@ -2438,7 +2438,7 @@ static int sdl3vk_surface_selftest(void) {
                         s_pstep_fault_result = VK_ERROR_SURFACE_LOST_KHR;
                     }
                     int w2 = 0, h2 = 0;
-                    r[k] = sdl3vk_overlay_extent(&w2, &h2, &orgba) && w2 == ow && h2 == oh
+                    r[k] = sdl3vk_overlay_extent(&w2, &h2, &orgba) > 0 && w2 == ow && h2 == oh
                          ? sdl3vk_present_overlay(opx, ow * 4) : -9;
                     s_pstep_fault = PSTEP_NONE;
                     if (k == 1) unproven = !s_surface_proven;
@@ -2463,6 +2463,70 @@ static int sdl3vk_surface_selftest(void) {
                             "%d object(s) alive after shutdown\n", name, warm, pushed, r[0],
                     r[1], r[2], r[3], r[4], r[5],
                     c == 0 ? "-1 1 1, rest 0" : "1 2 1 2 1 1", unproven, terminal, lines,
+                    (unsigned long long)surfaces, verrors, live);
+            ok = 0;
+        }
+        cases++;
+    }
+
+    /* (j) The pause overlay is open when the app goes to the background and returns, and the
+     * surface it then replaces, in the overlay's extent query as the pause loop asks it first,
+     * cannot be made or presented to. The query reports the terminal renderer (-1), not "nothing
+     * to show now" (0), so the pause loop ends (gui_pause_frame) and the game meets the terminal
+     * renderer, with the one line the same failure names outside a pause (c). Each later query
+     * and overlay present is refused. */
+    for (int c = 0; ok && c < 2; c++) {
+        const char *name = c == 0 ? "pause overlay, background and return, new surface cannot be "
+                                    "made"
+                                  : "pause overlay, background and return, new surface cannot be "
+                                    "presented to";
+        if (!sdl3vk_init("Nakagawa GPU surface selftest")) {
+            fprintf(stderr, "surface: init before '%s' failed\n", name);
+            ok = 0;
+            break;
+        }
+        const int verr0 = sdl3vk_validation_error_count();
+        const int warm = surface_test_warm(px);
+        const uint64_t surf0 = s_surface_gen;
+        int ow = 0, oh = 0, orgba = 0, shown = 0, pushed = 0, polled = 0, reached = 0;
+        int extent = 0, again = 0, refused = 0, terminal = 0, reported = 0;
+        unsigned lines = 0;
+        uint32_t *opx = NULL;
+        if (sdl3vk_overlay_extent(&ow, &oh, &orgba) > 0 &&
+            (opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u)) != NULL) {
+            shown = sdl3vk_present_overlay(opx, ow * 4);
+            pushed = surface_test_push(SDL_EVENT_WILL_ENTER_BACKGROUND) &&
+                     surface_test_push(SDL_EVENT_DID_ENTER_BACKGROUND) &&
+                     surface_test_push(SDL_EVENT_WILL_ENTER_FOREGROUND) &&
+                     surface_test_push(SDL_EVENT_DID_ENTER_FOREGROUND);
+            polled = sdl3vk_poll();   /* the pause loop's poll reads the four events */
+            s_surface_create_fault = c == 0;
+            s_surface_support_fault = c == 1;
+            int w2 = 0, h2 = 0;
+            extent = sdl3vk_overlay_extent(&w2, &h2, &orgba);
+            reached = s_surface_create_fault == 0 && s_surface_support_fault == 0;
+            s_surface_create_fault = s_surface_support_fault = 0;
+            terminal = sdl3vk_renderer_terminal();
+            reported = s_terminal_reported;
+            again = sdl3vk_overlay_extent(&w2, &h2, &orgba);
+            refused = sdl3vk_present_overlay(opx, ow * 4);
+            lines = s_terminal_lines;
+        }
+        free(opx);
+        sdl3vk_overlay_release();
+        const uint64_t surfaces = s_surface_gen - surf0;
+        const int verrors = sdl3vk_validation_error_count() - verr0;
+        sdl3vk_shutdown();
+        const int live = lifecycle_live_objects();
+        if (!warm || shown != 1 || !pushed || polled != 1 || !reached || extent != -1 ||
+            !terminal || !reported || lines != 1 || again != -1 || refused != -1 ||
+            surfaces != 0 || verrors != 0 || live != 0) {
+            fprintf(stderr, "surface: '%s': warm=%d shown=%d (want 1) pushed=%d polled=%d "
+                            "reached=%d extent query=%d (want -1) terminal=%d named %d in %u "
+                            "line(s) (want 1, 1, 1) next query=%d present=%d (want -1, -1) "
+                            "surfaces replaced %llu (want 0), %d validation error(s), %d "
+                            "object(s) alive after shutdown\n", name, warm, shown, pushed, polled,
+                    reached, extent, terminal, reported, lines, again, refused,
                     (unsigned long long)surfaces, verrors, live);
             ok = 0;
         }
@@ -3834,7 +3898,7 @@ static int sdl3vk_capture_selftest_body(void) {
     /* ---- pause overlay (#1159): shown, repeated without an upload, never captured ------ */
     {
         int ow = 0, oh = 0, orgba = 0;
-        if (!sdl3vk_overlay_extent(&ow, &oh, &orgba)) {
+        if (sdl3vk_overlay_extent(&ow, &oh, &orgba) <= 0) {
             fprintf(stderr, "overlay: no extent for a live swapchain\n"); ok = 0;
         } else {
             const size_t opitch = (size_t)ow * 4u;

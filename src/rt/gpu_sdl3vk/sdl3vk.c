@@ -3526,10 +3526,13 @@ uint64_t sdl3vk_display_period_ns(void) {
 
 int sdl3vk_overlay_extent(int *w, int *h, int *rgba) {
     int order = 0;
-    /* A lost window surface is replaced first, as a game present does (#360). */
+    /* A lost window surface is replaced first, as a game present does (#360). A replacement
+     * that turns the renderer terminal is told to the pause caller, as a failed overlay present
+     * is, so the pause ends instead of waiting on a window it can no longer draw. */
     if (s_dev && !s_renderer_terminal && (s_app_background || s_surface_lost || !s_swap))
         (void)surface_ready();
-    if (!s_dev || !s_swap || s_renderer_terminal || sdl3vk_window_minimized() ||
+    if (s_renderer_terminal) return -1;
+    if (!s_dev || !s_swap || sdl3vk_window_minimized() ||
         !s_swap_ext.width || !s_swap_ext.height || !overlay_format_order(s_swap_fmt, &order))
         return 0;
     if (w) *w = (int)s_swap_ext.width;
