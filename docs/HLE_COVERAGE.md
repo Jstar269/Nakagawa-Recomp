@@ -24,10 +24,10 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 181 | 88 |
+| `ppsspp-derived` | 182 | 88 |
 | `game-route` | 0 | 0 |
 | `synthetic` | 301 | 183 |
-| `unverified` | 172 | 22 |
+| `unverified` | 171 | 22 |
 | total | 718 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -349,7 +349,7 @@ a title that translates none has generated code unchanged.
 | `0x5dd66588` | `sceAtracSetAA3HalfwayBufferAndGetID` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x5e3d4b79` | `sceNetAdhocMatchingSelectTarget` | network | `ppsspp-derived` | sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x5e7f79c9` | `sceNetAdhocctlJoin` | network | `ppsspp-derived` | registry notes name PPSSPP |
-| `0x5ec81c55` | `sceAudioChReserve` | audio | `unverified` | no recorded evidence; unlinked hardware note |
+| `0x5ec81c55` | `sceAudioChReserve` | audio | `ppsspp-derived` | handler comment names PPSSPP; unlinked hardware note |
 | `0x5f10d406` | `sceKernelCpuResumeIntr` | kernel_interrupt | `synthetic` | HLE selftest dispatch |
 | `0x5f32beaa` | `sceKernelReferVTimerStatus` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-VTIMER-001, PSP-HLE-VTIMER-002 |
 | `0x5f9529f6` | `__sceSasSetSL` | audio | `synthetic` | HLE selftest dispatch |
