@@ -4245,6 +4245,135 @@ static void test_memstick_bring_in_supersedes_unpublished(const char *base) {
     assert(!strcmp(offer.name, "Z-NEXT") && offer.decision == NK_MEMSTICK_PLAN_STAGE);
 }
 
+/* Bring In (#3097) reads the frozen plan of the first move. A whole-stick plan orders its rows
+   by parent before name, so the loose file here sorts after the save it follows by name. */
+static void test_memstick_bring_in_after_full_move(const char *base) {
+    puts("[LAUNCH_TEST] Bring In after a whole-stick move offers only what the move did not take");
+    char saves[NK_MAX_PATH], path[NK_MAX_PATH], file[NK_MAX_PATH], error[512];
+    memstick_fixture_path(saves, base, "memstick-bring-in-full");
+    memstick_fixture_path(path, saves, "TEST02001/PSP/SAVEDATA/ALPHA00001");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(file, path, "DATA.BIN");
+    write_file_utf8(file, "moved save");
+    memstick_fixture_path(file, saves, "TEST02001/ZETA.BIN");
+    write_file_utf8(file, "loose file");
+
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    NkMemstickSavePlan plan;
+    assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+    assert(plan.complete_legacy_scope && plan.includes_stock_discovery && plan.unit_count == 2u);
+    assert(!strcmp(plan.units[0].name, "ZETA.BIN") && !plan.units[0].parent[0] &&
+           plan.units[0].kind == NK_MEMSTICK_UNIT_FILE);
+    assert(!strcmp(plan.units[1].name, "ALPHA00001") &&
+           !strcmp(plan.units[1].parent, "PSP/SAVEDATA") &&
+           plan.units[1].kind == NK_MEMSTICK_UNIT_TREE);
+
+    /* The record names the player that wrote it. A first move without that name is
+       refused before anything is written. */
+    assert(nk_memstick_prepare_shared(saves, &plan, NULL, error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_REFUSED);
+    assert(strstr(error, "SAVES_LAYOUT_INVALID"));
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.migration) &&
+           nk_platform_path_missing(paths.staging) && nk_platform_path_missing(paths.stick));
+    assert(nk_memstick_prepare_shared(saves, &plan, "test-player 1.2.3", error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_READY);
+    nk_memstick_save_plan_free(&plan);
+    nk_platform_file_lock_release(&lock);
+    NkMemstickLayout layout;
+    assert(nk_memstick_layout_read(saves, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+    assert(layout.state == NK_MEMSTICK_STATE_READY &&
+           !strcmp(layout.written_by, "test-player 1.2.3"));
+    nk_memstick_layout_free(&layout);
+
+    NkMemstickPlanUnit offer;
+    assert(nk_memstick_savedata_bring_in_offer(saves, "TEST02001", &offer) ==
+           NK_MEMSTICK_COLLISION_COPIED);
+    assert(!offer.name[0]);
+
+    /* A save the older player writes afterwards is the only offer, and it is brought in. */
+    memstick_fixture_path(path, saves, "TEST02001/PSP/SAVEDATA/BETA00001");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(file, path, "DATA.BIN");
+    write_file_utf8(file, "later save");
+    assert(nk_memstick_savedata_bring_in_offer(saves, "TEST02001", &offer) ==
+           NK_MEMSTICK_COLLISION_COPIED);
+    assert(!strcmp(offer.name, "BETA00001") && offer.decision == NK_MEMSTICK_PLAN_STAGE &&
+           offer.kind == NK_MEMSTICK_UNIT_TREE && !strcmp(offer.parent, "PSP/SAVEDATA"));
+    assert(nk_memstick_savedata_bring_in(saves, "TEST02001", &offer) ==
+           NK_MEMSTICK_COLLISION_COPIED);
+    memstick_fixture_path(file, paths.stick, "PSP/SAVEDATA/BETA00001/DATA.BIN");
+    assert_file_text(file, "later save");
+    memstick_fixture_path(file, paths.stick, "PSP/SAVEDATA/ALPHA00001/DATA.BIN");
+    assert_file_text(file, "moved save");
+    memstick_fixture_path(file, paths.stick, "ZETA.BIN");
+    assert_file_text(file, "loose file");
+    memstick_fixture_path(file, saves, "TEST02001/PSP/SAVEDATA/ALPHA00001/DATA.BIN");
+    assert_file_text(file, "moved save");
+    memstick_fixture_path(file, saves, "TEST02001/ZETA.BIN");
+    assert_file_text(file, "loose file");
+    assert(nk_memstick_savedata_bring_in_offer(saves, "TEST02001", &offer) ==
+           NK_MEMSTICK_COLLISION_COPIED);
+    assert(!offer.name[0]);
+}
+
+#if !defined(_WIN32) && !defined(_WIN64)
+/* A stock-form folder name that is a link is not read, and it is not left out without
+   a word either: the plan names it unreadable and the move does not begin. */
+static void test_memstick_stock_discovery_reports_a_linked_slot(const char *base) {
+    puts("[LAUNCH_TEST] Stock discovery reports a linked legacy slot as unreadable");
+    char saves[NK_MAX_PATH], target[NK_MAX_PATH], path[NK_MAX_PATH], file[NK_MAX_PATH];
+    char link_path[NK_MAX_PATH], error[512];
+    memstick_fixture_path(saves, base, "memstick-stock-linked");
+    memstick_fixture_path(path, saves, "TEST03001/PSP/SAVEDATA/SAVE");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(file, path, "DATA.BIN");
+    write_file_utf8(file, "ordinary legacy save");
+    memstick_fixture_path(target, base, "memstick-stock-linked-target");
+    memstick_fixture_path(path, target, "PSP/SAVEDATA/ELSEWHERE");
+    assert(nk_platform_mkdir_p(path));
+    memstick_fixture_path(file, path, "DATA.BIN");
+    write_file_utf8(file, "save kept on another drive");
+    memstick_fixture_path(link_path, saves, "ULUS03002");
+    assert(symlink(target, link_path) == 0);
+
+    NkMemstickPaths paths;
+    assert(nk_memstick_layout_paths(saves, &paths));
+    NkFileLock lock;
+    assert(nk_platform_file_lock_acquire(&lock, paths.lock, 0u));
+    NkMemstickSavePlan plan;
+    assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+    assert(plan.source_count == 3u && plan.unit_count == 1u);
+    assert(!strcmp(plan.sources[0].slot, "TEST03001") &&
+           plan.sources[0].status == NK_MEMSTICK_PLAN_SOURCE_READABLE);
+    assert(!strcmp(plan.sources[1].slot, "ULUS03002") &&
+           plan.sources[1].status == NK_MEMSTICK_PLAN_SOURCE_UNREADABLE);
+    assert(!strcmp(plan.sources[2].slot, "unidentified") &&
+           plan.sources[2].status == NK_MEMSTICK_PLAN_SOURCE_ABSENT);
+    assert(nk_memstick_prepare_shared(saves, &plan, "test", error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_REFUSED);
+    assert(strstr(error, "MIGRATION_SOURCE_UNREADABLE"));
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.migration) &&
+           nk_platform_path_missing(paths.staging) && nk_platform_path_missing(paths.stick));
+    nk_memstick_save_plan_free(&plan);
+
+    /* Without the link the same folder moves. */
+    assert(unlink(link_path) == 0);
+    assert(nk_memstick_plan_stock_legacy(saves, NULL, 0u, NULL, 0u, &plan));
+    assert(plan.source_count == 2u && plan.unit_count == 1u);
+    assert(nk_memstick_prepare_shared(saves, &plan, "test", error, sizeof(error)) ==
+           NK_MEMSTICK_SHARED_READY);
+    nk_memstick_save_plan_free(&plan);
+    nk_platform_file_lock_release(&lock);
+    memstick_fixture_path(file, paths.stick, "PSP/SAVEDATA/SAVE/DATA.BIN");
+    assert_file_text(file, "ordinary legacy save");
+    memstick_fixture_path(file, target, "PSP/SAVEDATA/ELSEWHERE/DATA.BIN");
+    assert_file_text(file, "save kept on another drive");
+}
+#endif
+
 static void test_memstick_layout(const char *base, char sep) {
     printf("[LAUNCH_TEST] Shared Memory Stick layout and record\n");
     fflush(stdout);
@@ -4805,6 +4934,10 @@ int main(int argc, char **argv) {
     test_memstick_bring_in_supersedes_unpublished(base);
     test_memstick_full_legacy(base);
     test_memstick_loose_occupant_blocks_resume(base);
+    test_memstick_bring_in_after_full_move(base);
+#if !defined(_WIN32) && !defined(_WIN64)
+    test_memstick_stock_discovery_reports_a_linked_slot(base);
+#endif
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);
