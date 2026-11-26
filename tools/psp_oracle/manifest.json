@@ -4056,6 +4056,22 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch"
       },
       {
+        "id": "PSP-GE-PIXEL-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Fixed command corpus triangle and independently identified bounded setup. Parser and compiler qualification supply no PSP pixel values.",
+        "group": "ge",
+        "source": "tests/fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "solid_triangle_8888_v1.prx",
+        "apis": ["sceDisplayGetMode", "sceDisplayGetFrameBuf", "sceGeEdramGetAddr", "sceGeEdramGetSize", "sceGeSaveContext", "sceGeRestoreContext", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync", "sceKernelDcacheWritebackAll"],
+        "diagnostic_case_ids": ["solid-triangle-8888-v1"],
+        "case_ids": ["solid-triangle-8888-v1-input", "solid-triangle-8888-v1-guard", "solid-triangle-8888-v1-draw", "solid-triangle-8888-v1-restore", "solid-triangle-8888-v1-r*", "solid-triangle-8888-v1-done"],
+        "invariant": "The two input digests and guarded restoration bind sixteen raw rows from the fixed 16 by 16 8888 rectangle at EDRAM offset zero.",
+        "issues": [343],
+        "risk": "requires owner-controlled GE and scanout; both scanout views must be known and disjoint from the fixed 1 KiB target, the GE must be idle, and failed restoration keeps the module resident",
+        "reset": "one approved launch; a busy GE or failed restore stops the session and requires owner requalification"
+      },
+      {
         "id": "PSP-TRACE-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",
