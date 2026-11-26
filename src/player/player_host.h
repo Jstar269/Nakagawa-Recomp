@@ -24,7 +24,8 @@ typedef enum {
     PLAYER_HOST_PICK_DISC = 0,  /* a disc image or PSN package; one file */
     PLAYER_HOST_PICK_FONTS,     /* the PSP .pgf fonts; any number, one folder */
     PLAYER_HOST_PICK_SAVE,      /* Add a save (#1883): one save's folder, a folder picker */
-    PLAYER_HOST_PICK_TEXPACK    /* a title's texture pack: its folder, a folder picker */
+    PLAYER_HOST_PICK_TEXPACK,   /* a title's texture pack: its folder, a folder picker */
+    PLAYER_HOST_PICK_CHEAT_DB   /* one CWCheat database */
 } PlayerHostPick;
 
 /* Show the host's open-file picker for `what` (the folder picker for a save),
