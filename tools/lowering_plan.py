@@ -335,6 +335,12 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         else:
             decoded[addr] = decode_op(addr, w, stale_detect=options.stale_detect)
 
+    # An entry above the body's lowest address is a label (the body starts by branching to
+    # it), and it counts when the skips below are planned (#3163).
+    labels = set(labels)
+    entry_label = start != min(insns)
+    if entry_label:
+        labels.add(start)
     # A delay slot that is itself a branch target runs inline at its transfer and again
     # under its own label; fall-through past the transfer skips the labelled copy.
     dup_slot_skips = {}
@@ -347,10 +353,7 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
             continue
         if addr + 4 in labels and addr + 8 in insns:
             dup_slot_skips[addr] = addr + 8
-    labels = set(labels) | set(dup_slot_skips.values())
-    entry_label = start != min(insns)
-    if entry_label:
-        labels.add(start)
+    labels |= set(dup_slot_skips.values())
 
     plan = FunctionPlan(PLAN_VERSION, start, symbol(start), resumable, start in resume_owners,
                         entry_label, sv_checks=sv_checks)
