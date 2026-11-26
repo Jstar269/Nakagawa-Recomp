@@ -365,6 +365,8 @@ typedef struct {
     uint32_t head;                    /* next slot to write */
     uint32_t last_new_vcount;
     int have_last;
+    uint32_t last_gap;                /* VBLANKs between the two newest new frames, of any length */
+    int ahead;                        /* the newest new frame runs ahead of 30 Hz (ace_det_holds) */
     AceRate candidate;                /* the window's class, while it differs from stable */
     uint32_t candidate_since;
     AceRate stable;
@@ -383,6 +385,24 @@ AceRate ace_det_window_class(const AceDetector *d);
 /* One flip at `vcount`; new_frame is nonzero when the flipped target changed since its own
  * previous flip. Returns 1 when the stable class changed. */
 int ace_det_flip(AceDetector *d, uint32_t vcount, int new_frame);
+/* Whether smooth motion may hold the newest new frame for the VBLANK after its flip: the stable
+ * class is 30 Hz, and that frame does not run ahead of it. A frame runs ahead when it is the
+ * second in a row to come less than two VBLANKs after the frame before it. One short interval
+ * alone is a hitch, an early frame or the catch-up of a late one, and its frame is held like
+ * any other: a title whose intervals alternate 3 and 1, or repeat 2, 1, 3, keeps an in-between
+ * for every frame. The interval before is the real one, of any length: the first frame after a
+ * static stretch came after a long interval, so a frame one VBLANK after it is held.
+ *
+ * The class itself is slow on purpose: its window absorbs a few short intervals, and it is left
+ * only after ACE_DET_LEAVE_VBLANKS of disagreement. A title that leaves 30 FPS and flips on
+ * consecutive VBLANKs has no VBLANK free for a held frame: held while the class still reads 30,
+ * each of those frames would be replaced by the next flip before its present, and only
+ * in-betweens would reach the screen (#2341). A frame that runs ahead is shown as it comes. The
+ * first of those flips cannot be told from an early hitch until the next one comes, so it is
+ * held and then replaced: such a title gives up two frames, the last of its 30 Hz stretch and
+ * that one. This is judged frame by frame and does not move the class: the next frame that
+ * comes two VBLANKs after the one before it is held again. */
+int ace_det_holds(const AceDetector *d);
 const char *ace_rate_name(AceRate rate);   /* "60 Hz", "30 Hz", ..., "static", "variable" */
 
 /* ---- observation: the speed readout --------------------------------------------------------- */
@@ -471,8 +491,9 @@ void ace_counters(AceCounters *out);
  * the guest. Host side only: these presents read private copies (gpu_sdl3vk/ace_smooth.h), and
  * the flip's own present still gives the capture and guest VRAM the real frame.
  *
- * Only the detector's stable 30 Hz class interpolates. Anything else shows each frame as it
- * comes (and keeps a copy, so the first frame of a 30 Hz stretch has a predecessor). */
+ * Only the detector's stable 30 Hz class interpolates, and only a frame that does not run ahead
+ * of that pace (ace_det_holds). Anything else shows each frame as it comes
+ * (and keeps a copy, so the first frame of a 30 Hz stretch has a predecessor). */
 typedef enum {
     ACE_SHOW_REAL = 0,     /* no new frame, or smooth off: this present is today's */
     ACE_SHOW_KEEP,         /* a new frame outside 30 Hz: show it and keep a copy */

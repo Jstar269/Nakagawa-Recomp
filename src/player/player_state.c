@@ -6865,6 +6865,16 @@ static void player_set_boundary_text(PlayerApp *app, const char *reason) {
 static NkResult player_resolve_input_profile(PlayerApp *app, const GameRecord *game,
                                              char *out, size_t out_size);
 
+void player_app_select_launch_game(const PlayerApp *app, const GameRecord *game,
+                                   GameRecord *launch_game) {
+    *launch_game = *game;
+    if (app->headless_accept_presented_frames > 0u) {
+        /* The Authentic checkpoint needs the stock executable as well as Ace off. */
+        launch_game->enhancement_package_id[0] = '\0';
+        launch_game->enhancement_hook_only = false;
+    }
+}
+
 bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *work) {
     if (!app || !work || game_index < 0 || game_index >= app->game_count) return false;
     const GameRecord *game = &app->games[game_index];
@@ -6877,7 +6887,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     const bool without_pack = have_key && app->launch_without_pack[0] &&
                               strcmp(app->launch_without_pack, game_key) == 0;
     app->launch_without_pack[0] = '\0';
-    if (player_app_title_60hz_blocked(app, game_index)) {
+    if (app->headless_accept_presented_frames == 0u &&
+        player_app_title_60hz_blocked(app, game_index)) {
         /* 60 FPS game logic is on and its package is gone: the original game
            is not started in its place. */
         player_app_set_error(
@@ -6923,8 +6934,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
        package preflight rejects it before launch-session preparation. */
     app->launch_session.config.gui_mode = !app->launch_headless;
     work->game_index = game_index;
-    work->game = *game;
-    if (game->enhancement_package_id[0]) {
+    player_app_select_launch_game(app, game, &work->game);
+    if (work->game.enhancement_package_id[0]) {
         player_app_enhancement_sources(app, &work->enhancement_sources);
     }
     if (root) {
