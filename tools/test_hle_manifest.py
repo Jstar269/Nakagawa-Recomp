@@ -1127,7 +1127,7 @@ class LiveManifestTests(unittest.TestCase):
             0x440CA7D8: (
                 "__sceSasSetVolume", "h_SasSetVolume", "NID_SAS_MIX_SET_VOLUME", "sas_mix_set_volume",
                 "test_sas_mix_psp_sas_003_volume_cells",
-                ("0x06fe", "0x037f", "0x80420018", "keep the previous volume", "second __sceSasInit",
+                ("0x06fe", "0x037f", "0x80420018", "keep the previous volume", "a second init of the core",
                  "inverted value is not claimed", "0xf901", "0xf902"),
             ),
         }
