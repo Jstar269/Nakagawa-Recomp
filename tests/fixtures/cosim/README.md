@@ -471,7 +471,9 @@ Two generator mutants take the continuation away from a delay slot that a branch
 the next word is another entry (#3128). The first does it for every transfer and runs in the
 ordinary lane, where `cslot_call` must diverge: the body returns to its caller after the slot
 instead of entering the next cell. The second keeps the call form right and runs in the lane with
-every body split, where `cslot_branch` must diverge.
+every body split, where `cslot_branch`'s body must diverge; the campaign reports it first in the
+chain that starts in `cslot_call`, which then stops after 9 traced instructions of the
+interpreter's 12.
 
 Two interpreter guards are not killed by this gate, and each is layering rather than a
 hole:

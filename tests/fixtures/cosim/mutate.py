@@ -603,8 +603,10 @@ MUTANTS: tuple[Mutant, ...] = (
         target="split-generator",
     ),
     Mutant(
-        # The call form keeps its continuation, so `cslot_call` still passes and the kill
-        # is `cslot_branch`, whose conditional stops at the next entry only when split.
+        # The call form keeps its continuation, so the chain gets through `cslot_call`'s own
+        # body. It ends after `cslot_branch`'s labelled slot, whose conditional stops at the
+        # next entry only when split: the first report is in the chain's case (`cslot_call`,
+        # 9 traced instructions against the interpreter's 12).
         "split-labelled-branch-slot-loses-entry",
         "SPLIT GENERATOR: a branch onto a conditional branch's delay slot before another entry "
         "does not continue into it",
