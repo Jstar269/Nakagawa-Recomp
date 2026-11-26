@@ -809,6 +809,16 @@ typedef struct {
     bool valid;
 } RepeatLaunchReport;
 
+/* Copy a report value into its field, keeping the first cap - 1 bytes if it is longer. The cut is
+ * explicit (a %.*s precision), where a plain "%s" into a smaller field is a possible truncation
+ * the compiler rightly flags. */
+static void copy_report_value(char *dst, size_t cap, const char *value) {
+    snprintf(dst, cap, "%.*s", (int)(cap - 1u), value);
+}
+
+/* The file the factory-reset test plants in each folder to see it moved into the backup. */
+#define RESET_MARK_NAME "reset-mark.txt"
+
 static RepeatLaunchReport read_repeat_launch_report(const char *path) {
     RepeatLaunchReport report;
     memset(&report, 0, sizeof(report));
@@ -821,11 +831,11 @@ static RepeatLaunchReport read_repeat_launch_report(const char *path) {
             line[--length] = '\0';
         }
         if (strncmp(line, "SR_MEMSTICK=", 12) == 0) {
-            snprintf(report.memstick, sizeof(report.memstick), "%s", line + 12);
+            copy_report_value(report.memstick, sizeof(report.memstick), line + 12);
         } else if (strncmp(line, "DISPLAY=", 8) == 0) {
-            snprintf(report.display, sizeof(report.display), "%s", line + 8);
+            copy_report_value(report.display, sizeof(report.display), line + 8);
         } else if (strncmp(line, "ACE=", 4) == 0) {
-            snprintf(report.ace, sizeof(report.ace), "%s", line + 4);
+            copy_report_value(report.ace, sizeof(report.ace), line + 4);
         } else if (strcmp(line, "MARKER_PRESENT=1") == 0) {
             report.marker_present = true;
             report.valid = true;
@@ -23419,11 +23429,13 @@ int main(int argc, char **argv) {
         static const NkPathType types[] = {
             NK_PATH_CONFIG, NK_PATH_DATA, NK_PATH_CACHE, NK_PATH_SAVES
         };
+        /* Each folder is a NUL-terminated path of fewer than NK_MAX_PATH bytes; the %.*s precisions
+         * below say so to the compiler, which only sees the whole two-dimensional array. */
         char dirs[4][NK_MAX_PATH];
         char marks[4][NK_MAX_PATH + 32];
         for (size_t i = 0; i < 4u; ++i) {
             assert(nk_platform_get_path(types[i], dirs[i], sizeof(dirs[i])));
-            snprintf(marks[i], sizeof(marks[i]), "%s%creset-mark.txt", dirs[i], sep);
+            snprintf(marks[i], sizeof(marks[i]), "%.*s%c" RESET_MARK_NAME, NK_MAX_PATH - 1, dirs[i], sep);
             write_text_file(marks[i], "user data\n");
         }
         char logs_dir[NK_MAX_PATH];
@@ -23529,7 +23541,8 @@ int main(int argc, char **argv) {
             assert(nk_platform_dir_exists(moved));
         }
         for (size_t i = 0; i < 4u; ++i) {
-            char moved_mark[NK_MAX_PATH + 96];
+            /* backed-up folder + its tail + the mark name, each bounded below */
+            char moved_mark[2 * NK_MAX_PATH + 64];
             const char *name = strrchr(marks[i], sep) + 1;
             assert(!nk_platform_file_exists(marks[i]));
             /* The mark is in the backup of the outermost folder holding it. */
@@ -23537,8 +23550,9 @@ int main(int argc, char **argv) {
             for (size_t j = 0; j < folder_count && !found; ++j) {
                 size_t n = strlen(folders[j]);
                 if (strncmp(dirs[i], folders[j], n) != 0) continue;
-                snprintf(moved_mark, sizeof(moved_mark), "%s-backup-20261029-010205%s%c%s",
-                         folders[j], dirs[i] + n, sep, name);
+                snprintf(moved_mark, sizeof(moved_mark), "%.*s-backup-20261029-010205%.*s%c%.*s",
+                         NK_MAX_PATH - 1, folders[j], NK_MAX_PATH - 1, dirs[i] + n, sep,
+                         (int)(sizeof(RESET_MARK_NAME) - 1u), name);
                 found = nk_platform_file_exists(moved_mark);
             }
             assert(found);
