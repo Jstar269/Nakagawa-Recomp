@@ -19,6 +19,7 @@ job builds the PRXs on Linux this way and the packages on Windows.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -201,6 +202,26 @@ def audit_run_paths(paths: list[Path]) -> list[str]:
     return problems
 
 
+def audit_required_run_path(paths: list[Path], required: str,
+                            library_prefix: str = "libSDL3.so") -> list[str]:
+    """Name every ELF executable that needs SDL3 but does not search `required` for it.
+
+    A run path that is only well formed is not enough: a demo linked with none still starts
+    on a machine whose loader cache holds an SDL3 and fails on one that does not. Each ELF
+    file that lists a library starting with `library_prefix` must carry `required` (for the
+    demos `$ORIGIN/../../..`, the player's folder) among its run path entries.
+    """
+    problems = []
+    for path in paths:
+        records = elf_run_paths(path)
+        if records is None or not any(name.startswith(library_prefix) for name in records[0]):
+            continue
+        if required not in records[1]:
+            found = ", ".join(records[1]) or "none"
+            problems.append(f"{path}: needs {library_prefix} but its run path ({found}) lacks {required}")
+    return problems
+
+
 def system_library_files(prefix: str) -> list[Path]:
     """The real files of the system's copies of a library, from the loader's cache (Linux)."""
     listing = subprocess.run(["/sbin/ldconfig", "-p"], check=False, capture_output=True, text=True)
@@ -259,12 +280,17 @@ def files_naming(root: Path, needles: list[str]) -> list[str]:
 def audit_demo_root(demo_root: Path) -> list[str]:
     """What stops the staged demos from being moved to another machine, one line each.
 
-    Every ELF file in a package folder must have only `$ORIGIN`-relative run paths, and no
-    file in the demo folder may name this checkout or the showcase build folder.
+    Every ELF file in a package folder must have only `$ORIGIN`-relative run paths, an
+    executable that needs SDL3 must search the player's folder for it, and no file in the
+    demo folder may name this checkout, the showcase build folder or the user's home folder.
     """
     executables = [path for path in sorted((demo_root / "packages").glob("*/*")) if path.is_file()]
     problems = audit_run_paths(executables)
+    problems.extend(audit_required_run_path(executables, f"$ORIGIN/{RUNTIME_RUNPATH_ORIGIN}"))
     needles = [str(ROOT), ROOT.as_posix(), str(BUILD_ROOT), BUILD_ROOT.as_posix()]
+    home = Path.home()
+    if home.parent != home:  # not the file system root
+        needles.extend([str(home), home.as_posix()])
     problems.extend(f"{demo_root / name}: names the build folder"
                     for name in files_naming(demo_root, needles))
     return problems
@@ -728,18 +754,46 @@ def _prebuilt_license(prebuilt_dir: Path) -> bytes:
     return notice
 
 
-def trim_to_runtime_package(package_dir: Path, game_name: str) -> int:
-    """Keep only the runtime files of a package, as `nk_cli build-package` does (#306).
+def title_runtime_sources(names: set[str]) -> set[str]:
+    """The files of a package folder that `nk_add_title_runtime` compiles (CMakeLists.txt).
 
-    The planner leaves the build's own files beside the runtime: dependency files, objects,
-    the link map and response file, generated C and the build stamps. The compiler and
-    linker wrote the folder the build ran in into them, so a package that carries them names
-    the builder's machine and cannot move. The runtime package (schema 3) declares no
-    generated objects, so none of them is a runtime file; the player's own route removes the
-    same set (nk_cli._remove_package_build_outputs) and writes the completion manifest over
-    what remains. This does the same, then runs the full package check on the result, so
-    the manifest still lists every remaining file and its digest, and a damaged package is
-    refused before and after. Returns how many files were removed.
+    The Android `nk.titles` route (docs/ANDROID_DEVELOPMENT.md) builds a title's runtime
+    library from the package it is pointed at: `<id>_recomp.c`, `<id>_recomp_*.c`,
+    `nk_lib_*.c` and `sr_title_config.h`, plus the generated header they include. Those
+    are not run-time files of the PC player but they hold no builder path, so the trim keeps
+    them. `names` are file names at the top of the package folder.
+    """
+    return {name for name in names
+            if fnmatch.fnmatchcase(name, "*_recomp.c") or fnmatch.fnmatchcase(name, "*_recomp_*.c")
+            or fnmatch.fnmatchcase(name, "nk_lib_*.c") or name == "sr_title_config.h"
+            or fnmatch.fnmatchcase(name, "*_recomp_funcs.h")}
+
+
+def package_game_name(demo: dict[str, object]) -> str:
+    """The game name the planner gave this demo's package, taken from the same code.
+
+    The executable's file name is not it: an Android library is `lib<game>.so`.
+    """
+    import title_codegen_plan  # imported here: the module is large and only the build needs it
+
+    manifest = json.loads((ROOT / str(demo["manifest"])).read_text(encoding="utf-8"))
+    return str(title_codegen_plan._package_game_name(manifest, None))
+
+
+def trim_to_runtime_package(package_dir: Path, game_name: str) -> int:
+    """Drop the build's own files from a package folder, as `nk_cli build-package` does (#306).
+
+    The planner leaves the build's files beside the runtime: dependency files, objects, the
+    link map and response file and the build stamps. The compiler and linker wrote the folder
+    the build ran in into them, so a package that carries them names the builder's machine
+    and cannot move. The runtime package (schema 3) declares no generated objects, so none
+    of them is a runtime file; the player's own route removes the same set
+    (nk_cli._remove_package_build_outputs) and writes the completion manifest over what
+    remains. This does the same, then runs the full package check on the result, so the
+    manifest still lists every remaining file and its digest, and a damaged package is
+    refused before and after. The generated C that the title runtime route compiles stays
+    (title_runtime_sources). Call it on the copy that is installed, never on the build
+    folder. Returns how many files were removed.
     """
     import nk_cli  # imported here: the module is large and the build route needs it only once
 
@@ -757,7 +811,11 @@ def trim_to_runtime_package(package_dir: Path, game_name: str) -> int:
     if key is None:
         raise ShowcaseError("the package carries no cache key")
     outputs = nk_cli._package_build_output_paths(package_dir)
-    removed, _ = nk_cli._remove_package_build_outputs(package_dir, game_name, outputs)
+    kept = title_runtime_sources({name for name in outputs if "/" not in name})
+    removed, _ = nk_cli._remove_package_build_outputs(package_dir, game_name, outputs - kept)
+    for folder in sorted((p for p in package_dir.rglob("*") if p.is_dir()), reverse=True):
+        if not any(folder.iterdir()):
+            folder.rmdir()
     package_cache.write_completion_manifest(
         package_dir, key, title_input_identity=package["title_input_identity"],
         backends=completion.get("backends"), limits=completion.get("limits"))
@@ -803,12 +861,13 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     exe = package_stage / package_meta["executable"]["path"]
     if not exe.is_file():
         raise ShowcaseError(f"validated package executable is missing for {title_id}")
-    trim_to_runtime_package(package_stage, exe.stem)
 
     release_dir = DEMO_ROOT / "packages" / str(demo["disc_id"])
     _clear_owned(release_dir, DEMO_ROOT / "packages")
     release_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(package_stage, release_dir)
+    # Only the installed copy loses the build's files; the build folder stays whole.
+    trim_to_runtime_package(release_dir, package_game_name(demo))
     image = DEMO_ROOT / "images" / f"{demo['disc_id']}.iso"
     image.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(iso_path, image)

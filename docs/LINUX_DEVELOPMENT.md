@@ -164,9 +164,14 @@ build run from its build folder finds a system SDL3 through the loader's own sea
 CMake builds can add one folder for an SDL3 outside that search with
 `-DNK_PLAYER_EXTRA_RUNPATH=<folder>` (such a binary is not relocatable); the Makefile variables are
 `PLAYER_RUNPATH_ORIGIN` and `RUNTIME_RUNPATH_ORIGIN`. Staging the libraries into `bin/` is the
-stager's job and is not done yet. `showcase.py audit` (part of `make showcase-linux`) and the CTest
-`player_run_path_audit` refuse a shipped executable whose run path is absolute, and the showcase
-packages hold only their runtime files, so no file in a demo folder names the folder that built it.
+stager's job and is not done yet. `showcase.py audit` (part of `make showcase-linux`) refuses a demo
+executable whose run path is absolute or lacks `$ORIGIN/../../..`, and the CTest
+`player_run_path_audit` refuses an absolute run path in the player. The installed copy of each
+showcase package drops the build's own files (dependency files, objects, the link map) and keeps the
+runtime files and the generated C that `nk_add_title_runtime` compiles, so no file in a demo folder
+names the folder that built it; the build folder under `NK_SHOWCASE_BUILD_ROOT` stays whole. The
+audit reads both `RUNPATH` and `RPATH`; which of the two a link writes is the linker's default
+(Ubuntu's writes `RUNPATH`).
 
 ### Makefile title-configured HLE selftests
 
