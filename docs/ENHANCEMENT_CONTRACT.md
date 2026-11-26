@@ -106,17 +106,19 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   depends on it under `SR_DETERMINISTIC_CLOCK=1`; that has not been measured. Under the wall clock it
   takes host time as any host work does. It chooses only which upscaler enlarges the shown picture.
 
-  *When a frame is a movie frame.* Its movie box (the box around its movie pixels) covers at least
-  half of the shown 480 x 272, in either way a movie reaches the GE:
+  *When a frame is a movie frame.* The movie covers at least half of the shown 480 x 272 under
+  the rule for its route into the GE:
   - *drawn as a texture* (Hot Shots Tennis's opening movie, and LittleBigPlanet's intro as #2111
     describes it): draws since the target was last presented sampled a texture whose upload matched
     a noted picture (same stride and format, and either the texture's first texel is a pixel of the
     picture, or the texture starts with the picture's rows byte for byte, a copy such as Hot Shots
     Tennis makes with its own code before drawing it; the note's rows unchanged), bound as level 0,
-    the anisotropic or scaled image, or the host mip chain (Enhanced `mips=on`); UI drawn over part
-    of the movie (subtitles, a prompt) keeps the frame a movie frame, and a later draw, line, point
-    or GE block transfer over the whole movie box does not (a primitive the software GE draws
-    instead keeps it);
+    the anisotropic or scaled image, or the host mip chain (Enhanced `mips=on`). Count the union of
+    those draw rectangles after clipping to the scissor and display. Overlaps count once and gaps
+    between rectangles count zero. Triangles contribute their clipped bounding rectangles, so this
+    is a coverage estimate. UI drawn over part of the movie (subtitles, a prompt) keeps its
+    coverage. A later draw, line, point or GE block transfer over the whole movie box clears it.
+    A primitive the software GE draws instead keeps it;
   - *decoded into a GE target*: the presented target holds a whole noted picture of its stride and
     format, written after the GE's last write to that target and unchanged since; any GE draw or GE
     block transfer after it, even one pixel of UI, leaves the frame to the GE (a CPU copy into VRAM
@@ -128,16 +130,20 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   never matching a texture served from a target), when a later picture is written over it, when its
   decoder is deleted or released, when eight newer pictures were noted (counted as dropped), and
   when the upscaler is off. A picture behind a swizzled VRAM view, a copy that is converted, scaled,
-  partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, a picture sampled from a render
-  target, and a picture written in more than eight strips (whose first strip is dropped) are not
-  matched: those frames stay GE frames. Known limit: a picture of one solid colour (a fade to black)
+  partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, and a picture sampled from a render
+  target do not match. The renderer holds eight notes. When a picture is written in more than
+  eight strips, a texture starting in an evicted strip loses that address match, but surviving
+  strips can still match when drawn separately. Two distant strips whose rectangles together cover
+  less than half the frame stay GE. Known limit: a picture of one solid colour (a fade to black)
   is matched by any texture of its stride and format that starts with the same bytes, so while that
   note is held, a frame that draws such a texture (a plain black background) over half the screen
   goes to the movie upscaler, UI drawn over it included. Only the presented picture changes.
 
   Evidence: `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way
   through the production path, check every way a note stops matching, and compare one frame's guest
-  VRAM with tracking on and off; `gpu-mips-selftest`'s `movie` cell draws a transformed, linearly
+  VRAM with tracking on and off; `movie-strip-coverage` checks sparse, overlapping and contiguous
+  strips, the half-screen threshold, overlays and framebuffer equality with tracking on and off;
+  `gpu-mips-selftest`'s `movie` cell draws a transformed, linearly
   filtered movie quad with the mip chain bound and without it; `gpu-coherence-selftest-movie-mutant`
   builds the renderer without the match (both cases must fail) and with the copy judged by a
   word-wise hash (the alpha-bit cell must fail); `psmf-media-selftest` checks the notes each HLE
@@ -1088,12 +1094,25 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 `settings.json` keeps the library's choice in `"enhanced"` and a sparse `"title_play"` map, every value by name:
 
 ```json
-"enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
-            "load": "off", "twin": "off", "mips": "off"},
-"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
-"texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+{
+  "enhanced": {
+    "default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on",
+    "wide": "off", "smooth": "off", "sas": "off", "tess": "off", "cull": "off",
+    "upscale": "off", "stick": "off", "load": "off", "twin": "off", "ssaa": "off",
+    "mips": "off", "texpack": "off", "pad": "off", "shadow": "off", "peak": "off",
+    "texscale": "off", "smart2d": "off"
+  },
+  "title_play": {
+    "ULUS10000": {"mode": "ace", "af": "8", "texpack": "on"},
+    "ULES00000": {"mode": "library", "logic_60": "off"}
+  },
+  "texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+}
 ```
+
+Here the library defaults to Enhanced with texture replacement off. `ULUS10000` enables its chosen pack with
+`"texpack": "on"`, while `ULES00000` inherits the library's texture pack setting. Authentic keeps texture
+replacement off even when a folder is saved.
 
 `"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
 256 of them; choosing one more is refused with a message. A member that is not a disc ID and a folder string is

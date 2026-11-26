@@ -2391,6 +2391,69 @@ static int check_vcmp_denormal_operands(void) {
     return bad;
 }
 
+/* Runs vcmp.q C000, C010 with condition cond on lanes s and t in both lanes; nonzero on a miss. */
+static int vcmp_q_cc_matches(int cond, const uint32_t s[4], const uint32_t t[4], uint32_t want,
+                             const char *what) {
+    char name[32];
+    snprintf(name, sizeof(name), "vcmp-q-c%02d-measured", cond);
+    const int c = find_overlap_diff_case(name);
+    CHECK(c >= 0, "vcmp word is in the overlap-diff header");
+    if (c < 0) return 1;
+    CpuState aot, interp;
+    setup_identity_compute(&aot);
+    for (int i = 0; i < 4; i++) { aot.vi[i] = s[i]; aot.vi[4 + i] = t[i]; }
+    interp = aot;
+    overlap_diff_run_codegen(&aot, c);
+    const int kind = sr_vfpu_interp(&interp, overlap_diff_cases[c].w);
+    g_checks++;
+    if (kind == SR_VFPU_STATE && aot.vfpuCtrl[3] == want && interp.vfpuCtrl[3] == want) return 0;
+    g_failures++;
+    fprintf(stderr, "FAIL: vcmp.q %s cond %d s=%08x,%08x,%08x,%08x want=0x%02x aot=0x%02x interp=0x%02x kind=%d\n",
+            what, cond, s[0], s[1], s[2], s[3], want, aot.vfpuCtrl[3], interp.vfpuCtrl[3], kind);
+    return 1;
+}
+
+/* vcmp.q with NaN and infinity lanes. pspautotests e37443a6 tests/cpu/vfpu/specials.expected
+ * (recorded on a PSP), lines 2-5: s = (NaN, -NaN, +inf, -inf), NaN being 0x7fbfffff as that file
+ * prints its inputs, against t = (1, NaN, 0, -inf), four NaNs, (+den, 0, -0, -den) and s itself;
+ * all 16 conditions. glibc's isinf() returns -1 for -inf, and the shifted -1 set every CC bit above
+ * its lane, so EI read 0x3c for the recorded 0x1c. The EI and NI rows below put -inf in lane 0 or
+ * lane 1 of (1, 1, 1, 1); their words follow the measured CC rule of PSP-VFPU-CCCMOV-001 (lane j at
+ * bit j, bit 4 the OR and bit 5 the AND of the lanes) and are derived, not recorded. */
+static int check_vcmp_special_operands(void) {
+    static const uint32_t s[4] = {0x7fbfffffu, 0xffbfffffu, 0x7f800000u, 0xff800000u};
+    static const struct {
+        uint32_t t[4];
+        uint8_t cc[16];
+    } recorded[] = {
+        {{0x3f800000u, 0x7fbfffffu, 0x00000000u, 0xff800000u},
+         {0x00, 0x18, 0x00, 0x18, 0x3f, 0x17, 0x1c, 0x14, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+        {{0x7fbfffffu, 0x7fbfffffu, 0x7fbfffffu, 0x7fbfffffu},
+         {0x00, 0x00, 0x00, 0x00, 0x3f, 0x3f, 0x00, 0x00, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+        {{0x000116c2u, 0x00000000u, 0x80000000u, 0x800116c2u},
+         {0x00, 0x00, 0x18, 0x18, 0x3f, 0x3f, 0x14, 0x14, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+        {{0x7fbfffffu, 0xffbfffffu, 0x7f800000u, 0xff800000u},
+         {0x00, 0x1c, 0x00, 0x1c, 0x3f, 0x13, 0x1c, 0x00, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+    };
+    static const struct {
+        uint32_t s[4];
+        uint8_t ei, ni;
+    } derived[] = {
+        {{0xff800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, 0x11, 0x1e},
+        {{0x3f800000u, 0xff800000u, 0x3f800000u, 0x3f800000u}, 0x12, 0x1d},
+    };
+    static const uint32_t ones[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+    int bad = 0;
+    for (unsigned r = 0; r < sizeof(recorded) / sizeof(recorded[0]); r++)
+        for (int cond = 0; cond < 16; cond++)
+            bad |= vcmp_q_cc_matches(cond, s, recorded[r].t, recorded[r].cc[cond], "specials.expected");
+    for (unsigned r = 0; r < sizeof(derived) / sizeof(derived[0]); r++) {
+        bad |= vcmp_q_cc_matches(10, derived[r].s, ones, derived[r].ei, "CC rule");
+        bad |= vcmp_q_cc_matches(14, derived[r].s, ones, derived[r].ni, "CC rule");
+    }
+    return bad;
+}
+
 /* PSP-VFPU-BASICARITH-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith):
  * vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over
  * 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q for every form but vdiv,
@@ -4070,6 +4133,7 @@ int main(void) {
     bad |= check_cop2_control_transfers();
     bad |= check_vfpu_cc_write_mask();
     bad |= check_vcmp_denormal_operands();
+    bad |= check_vcmp_special_operands();
     bad |= check_quad_memops();
     bad |= check_quad_wb_measured();
     bad |= check_vcrs_widths();

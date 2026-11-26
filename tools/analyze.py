@@ -1880,7 +1880,9 @@ def bounded_computed_goto_targets(elf, ranges):
                 break
             sign = -1 if funct == 0x23 else 1
             pads = {(base + sign * value) & 0xFFFFFFFF for value in values}
-            if all(in_ranges(pad, ranges) for pad in pads):
+            # A `jr` to an unaligned address raises an address error and lands nowhere, so a
+            # base that is not word-aligned names no pad at all.
+            if all((pad & 3) == 0 and in_ranges(pad, ranges) for pad in pads):
                 targets.update(pads)
             break
     return frozenset(targets)

@@ -399,14 +399,14 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             int cc = 0, orv = 0, andv = 1, affected = (1 << 4) | (1 << 5);
             for (int i = 0; i < n; i++) {
                 float x = sr_vfpu_ftz(a[i]), y = sr_vfpu_ftz(b[i]);
-                int c;
+                int c;  /* 0 or 1: glibc's isinf() returns -1 for -inf (see codegen.py _vfpu3_vcmp) */
                 switch (cond) {
                     case 0: c = 0; break;            case 1: c = x == y; break;
                     case 2: c = x < y; break;        case 3: c = x <= y; break;
                     case 4: c = 1; break;            case 5: c = x != y; break;
                     case 6: c = x >= y; break;       case 7: c = x > y; break;
-                    case 8: c = x == 0.0f; break;    case 9: c = isnan(x); break;
-                    case 10: c = isinf(x); break;    case 11: c = isnan(x) || isinf(x); break;
+                    case 8: c = x == 0.0f; break;    case 9: c = isnan(x) != 0; break;
+                    case 10: c = isinf(x) != 0; break; case 11: c = isnan(x) || isinf(x); break;
                     case 12: c = x != 0.0f; break;   case 13: c = !isnan(x); break;
                     case 14: c = !isinf(x); break;   default: c = !(isnan(x) || isinf(x)); break;
                 }
