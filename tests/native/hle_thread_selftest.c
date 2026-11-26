@@ -39343,6 +39343,69 @@ static void test_ge_enqueue_busy_on_active_list(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* Which address the duplicate check compares once a list has advanced and been paused (#3073
+ * review). uofw src/kd/ge/ge.c (28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9) compares the driver's
+ * SceGeDisplayList.list, which sceGeBreak(0) replaces with the saved resume address (one word
+ * back after a SIGNAL or FINISH, two after an END); UNMEASURED on a PSP. So after the pause the
+ * resume address is BUSY and the original enqueue address queues a new list. Each refusal is
+ * checked to run nothing (the GE's FOG1 register keeps its value) and to take no slot.
+ * MUTANT: compare start_pc -- the resume address is accepted and the enqueue address refused.
+ * MUTANT: drop the FINISH/SIGNAL step-back -- the address of the FINISH is accepted. */
+static void test_ge_enqueue_busy_uses_the_paused_resume_address(void) {
+    const uint32_t dl = 0x08929000u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0x02080000u);
+    MEM_W32(dl, 0xcd000011u);         /* FOG1 0x11 */
+    MEM_W32(dl + 4u, 0xcd000012u);    /* FOG1 0x12 */
+    MEM_W32(dl + 8u, 0xcd000013u);    /* FOG1 0x13: past the stall address */
+    MEM_W32(dl + 12u, 0x0f000000u);   /* FINISH */
+    MEM_W32(dl + 16u, 0x0c000000u);   /* END */
+    const uint32_t a = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl + 8u, 0xffffffffu, 0u);
+    expect(a == 0x35000000u && gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x12u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 3u,
+           "paused duplicate: the list runs two commands and stalls at dl+8");
+    expect(gsw_call(NID_SCE_GE_BREAK, 0u, 0u, 0u, 0u) == a &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 4u,
+           "paused duplicate: sceGeBreak(0) pauses the stalled list");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 8u, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "paused duplicate: the saved resume address dl+8 is BUSY (0x80000021)");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, (dl + 8u) | 0x40000000u, 0u, 0xffffffffu, 0u) ==
+               0x80000021u,
+           "paused duplicate: the resume address through the uncached mirror is BUSY too");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x12u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u,
+           "paused duplicate: the refusals ran no command and took no slot");
+    const uint32_t b = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect(b == 0x35000040u && gsw_call(NID_SCE_GE_LIST_SYNC, b, 1u, 0u, 0u) == 1u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x12u,
+           "paused duplicate: the original enqueue address no longer matches; it queues behind "
+           "the paused list without running");
+    expect(gsw_call(NID_SCE_GE_CONTINUE, 0u, 0u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_UPDATE_STALL_ADDR, a, 0u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, b, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x13u,
+           "paused duplicate: once continued and released both lists run to their END");
+    sr_hle_test_ge_lists_reset();
+
+    /* Stalled between a FINISH and its END: the saved address steps back over the FINISH. */
+    MEM_W32(dl, 0xcd000021u);         /* FOG1 0x21 */
+    MEM_W32(dl + 4u, 0x0f000000u);    /* FINISH */
+    MEM_W32(dl + 8u, 0x0c000000u);    /* END */
+    const uint32_t c = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl + 8u, 0xffffffffu, 0u);
+    expect(c == 0x35000000u && gsw_call(NID_SCE_GE_LIST_SYNC, c, 1u, 0u, 0u) == 3u &&
+               gsw_call(NID_SCE_GE_BREAK, 0u, 0u, 0u, 0u) == c,
+           "paused after FINISH: the list stalls before its END and pauses");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 4u, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "paused after FINISH: the saved address is the FINISH's (dl+4), BUSY");
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u,
+           "paused after FINISH: the refusal took no slot");
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+}
+
 /* A SIGNAL whose behaviour is JUMP (0x10), CALL (0x11), RET (0x12) or their relative (0x13,
  * 0x14) and origin (0x15, 0x16) forms, with the END after it, moves the list: the GE driver's
  * interrupt handler jumps, or saves the caller on the list's stack and calls, or returns
@@ -40956,6 +41019,49 @@ static void test_ge_timing_blocking_sync_cannot_wait(void) {
     expect(s_ge_tim_calls == 1u && ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 0u) == 0u &&
                ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 0u, 0u) == 0u,
            "GE timing: once the completion is delivered both blocking forms return 0");
+    sr_hle_test_ge_lists_reset();
+    ge_tim_teardown();
+}
+
+/* A list that ran to its END but is still drawing in the timing model has not left the
+ * driver's active queue: its address is BUSY for an SDK 2.00+ title until the completion is
+ * delivered (#3073 review; uofw src/kd/ge/ge.c 28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9: only
+ * the END interrupt removes a list from g_AwQueue; UNMEASURED on a PSP). The refused enqueue
+ * re-runs nothing (FOG1 keeps the first run's value although the guest rewrote the word) and
+ * fires no callback; once the list completes, the same address enqueues and runs the new word.
+ * MUTANT: leave DRAWING out of the duplicate check -- the duplicate is accepted while drawing. */
+static void test_ge_enqueue_busy_while_drawing(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_timing(1);
+    sr_hle_test_set_compiled_sdk_version(0x02080000u);
+    MEM_W32(GE_TIM_DL, 0xcd000031u);                                  /* FOG1 0x31 */
+    MEM_W32(GE_TIM_DL + 4u, 0x0f000000u | ge_tim_finish_id(GE_TIM_DL)); /* FINISH id */
+    MEM_W32(GE_TIM_DL + 8u, 0x0c000000u);                             /* END */
+    s_vtime_us = 1000u;
+    memset(&cpu, 0, sizeof(cpu));
+    const uint32_t qid = ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 2u && s_ge_tim_calls == 0u &&
+               ge_tim_sync(&cpu, NID_SCE_GE_GET_CMD, 0xcdu, 0u) == 0x31u,
+           "drawing duplicate: the list ran to its END and is still drawing");
+    MEM_W32(GE_TIM_DL, 0xcd000032u);                                  /* FOG1 0x32 */
+    expect(ge_tim_enqueue(&cpu, GE_TIM_DL) == 0x80000021u,
+           "drawing duplicate: its address is BUSY (0x80000021) before the completion");
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_GET_CMD, 0xcdu, 0u) == 0x31u && s_ge_tim_calls == 0u &&
+               ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 2u,
+           "drawing duplicate: the refusal ran no command and completed nothing");
+    s_vtime_us = 1100u;
+    scheduler_service_pending();
+    expect(s_ge_tim_calls == 1u && ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u,
+           "drawing duplicate: the list completes once its drawing time has passed");
+    const uint32_t again = ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect((again & 0xff000000u) == 0x35000000u &&
+               ge_tim_sync(&cpu, NID_SCE_GE_GET_CMD, 0xcdu, 0u) == 0x32u,
+           "drawing duplicate: after the completion the same address enqueues and runs");
+    s_vtime_us = 1200u;
+    scheduler_service_pending();
+    sr_hle_test_set_compiled_sdk_version(0u);
     sr_hle_test_ge_lists_reset();
     ge_tim_teardown();
 }
@@ -69688,6 +69794,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_sync_ids_match_psp();
     test_ge_enqueue_refuses_misaligned_addresses();
     test_ge_enqueue_busy_on_active_list();
+    test_ge_enqueue_busy_uses_the_paused_resume_address();
     test_ge_signal_jump_call_ret();
     test_ge_list_call_ret_faults_and_long_runs();
     test_ge_block_transfer_unmeasured_stride_is_named();
@@ -69701,6 +69808,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_finish_callback_waits_for_interrupts();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
+    test_ge_enqueue_busy_while_drawing();
     test_volatile_mem_output_preflight();
     test_osk_parameter_sizes();
     test_osk_update_and_shutdown_init_states();

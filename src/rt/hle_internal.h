@@ -1016,6 +1016,10 @@ typedef struct {
     uint32_t uid;
     uint32_t start_pc;
     uint32_t current_pc;
+    /* The address the driver keeps for the list (uofw SceGeDisplayList.list): the enqueue
+     * address, replaced by the saved resume address when sceGeBreak(0) pauses the list. It is
+     * what sceGeListEnQueue's duplicate check compares; current_pc is where the walker resumes. */
+    uint32_t driver_addr;
     uint32_t stall_addr;
     uint32_t cbid;
     uint32_t cbarg;

@@ -447,15 +447,23 @@ static uint32_t h_GeListEnQueue(CpuState *s) {
         if (signal_stacks >= 256u) return 0x80000104u;   /* SCE_ERROR_INVALID_SIZE */
     }
     /* A title compiled with SDK 2.00 or later may not enqueue a list whose address is already
-     * on the active queue (queued, stalled or paused), whichever mirror names it: the driver
-     * returns SCE_ERROR_BUSY before it takes a slot (uofw src/kd/ge/ge.c _sceGeListEnQueue,
-     * UCACHED compare; PPSSPP GPUCommon::EnqueueList agrees; UNMEASURED on a PSP). An older
-     * title's duplicate is queued. */
+     * on the driver's active queue, whichever mirror names it: the driver returns
+     * SCE_ERROR_BUSY before it takes a slot. An older title's duplicate is queued. Behaviour
+     * from uofw src/kd/ge/ge.c (28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9) _sceGeListEnQueue,
+     * which walks g_AwQueue.active_first and compares UCACHED(curDl->list); UNMEASURED on a PSP.
+     * - Which lists: every list on the active queue: queued, stalled, paused, and one that ran to
+     *   its END but whose completion the timing model has not delivered yet (DRAWING). The driver
+     *   removes a list from the queue only when its END interrupt completes it.
+     * - Which address: curDl->list (driver_addr here), the enqueue address until sceGeBreak(0)
+     *   pauses the list and saves its resume address there (uofw sceGeBreak); after that the
+     *   original enqueue address no longer matches. PPSSPP GPUCommon::EnqueueList compares the
+     *   list's current pc in every state instead; this follows the driver reconstruction. */
     if (g_sdk_version > 0x01FFFFFFu) {
         for (int i = 0; i < GE_LIST_MAX; i++) {
             int st = s_ge_lists[i].status;
-            if ((st == GE_LIST_QUEUED || st == GE_LIST_STALLED || st == GE_LIST_PAUSED) &&
-                ((s_ge_lists[i].start_pc ^ list) & 0x0FFFFFFFu) == 0u)
+            if ((st == GE_LIST_QUEUED || st == GE_LIST_STALLED || st == GE_LIST_PAUSED ||
+                 st == GE_LIST_DRAWING) &&
+                ((s_ge_lists[i].driver_addr ^ list) & 0x0FFFFFFFu) == 0u)
                 return GE_ERROR_LIST_BUSY;
         }
     }
@@ -476,6 +484,7 @@ static uint32_t h_GeListEnQueue(CpuState *s) {
     l->uid = list_id;
     l->start_pc = list;
     l->current_pc = list;
+    l->driver_addr = list;
     l->stall_addr = stall;
     l->cbid = cbid;
     l->cbarg = cbarg;
@@ -767,6 +776,22 @@ static uint32_t h_GeDrawSync(CpuState *s) {
     return 0;
 }
 
+/* sceGeBreak(0) saves where the stopped list resumes into the driver's list address (uofw
+ * src/kd/ge/ge.c 28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9 sceGeBreak: HW_GE_LISTADDR, one word
+ * back when the command before it is a SIGNAL or FINISH, two when it is an END; UNMEASURED on a
+ * PSP). The only active list here is stalled, so the GE stopped at current_pc. The driver's
+ * further two-word step for a pending SYNC signal cannot arise: a SIGNAL behaviour this model
+ * does not run stops the run by name before the list can stall behind it. */
+static void ge_break_save_driver_addr(GeListInfo *l) {
+    uint32_t addr = l->current_pc;
+    if (addr >= 4u && sr_guest_span_readable(addr - 4u, 4u)) {
+        const uint32_t op = MEM_R32(addr - 4u) >> 24;
+        if (op == 0x0eu || op == 0x0fu) addr -= 4u;        /* SIGNAL, FINISH */
+        else if (op == 0x0cu) addr -= 8u;                  /* END */
+    }
+    l->driver_addr = addr;
+}
+
 static uint32_t h_GeBreak(CpuState *s) {
     uint32_t mode = A0;
     uint32_t pparam = A1;
@@ -794,6 +819,7 @@ static uint32_t h_GeBreak(CpuState *s) {
             return GE_ERROR_NO_ACTIVE_LIST;
         }
         s_ge_lists[active_slot].status = GE_LIST_PAUSED;
+        ge_break_save_driver_addr(&s_ge_lists[active_slot]);
         SR_FLIGHT_RECORD_CLASS(SR_FLIGHT_CLASS_GE, SR_FLIGHT_KIND_GE_LIST_SYNC,
                                s_ge_lists[active_slot].uid, s_ge_lists[active_slot].start_pc,
                                s_ge_lists[active_slot].stall_addr, mode);
