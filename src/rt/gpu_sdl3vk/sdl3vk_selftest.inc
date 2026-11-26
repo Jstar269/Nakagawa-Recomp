@@ -2137,6 +2137,115 @@ static int sdl3vk_surface_selftest(void) {
         cases++;
     }
 
+    /* (f) A new surface lost at its first swapchain, and an unenqueued present whose rebuild finds
+     * the surface lost. A surface lost at the present is replaced in that present; when the new
+     * one is lost at once with the platform's window still there, every new surface would go the
+     * same way: terminal with one line, and no further surface is made. When the window went with
+     * it (Android clears SDL's window pointer before it abandons the surface), presents are not
+     * shown until the window is back, and then the surface is replaced. A present that was not
+     * enqueued rebuilds the swapchain to hand its image back; a surface lost there is replaced by
+     * the next present, for a game frame and for the pause overlay. */
+    for (int c = 0; c < 4; c++) {
+        const char *name = c == 0 ? "new surface lost at once, window still there"
+                         : c == 1 ? "new surface lost at once as the window goes"
+                         : c == 2 ? "unenqueued present, rebuild finds the surface lost"
+                                  : "pause overlay, unenqueued present, rebuild finds the surface lost";
+        if (!sdl3vk_init("Nakagawa GPU surface selftest")) {
+            fprintf(stderr, "surface: init before '%s' failed\n", name);
+            ok = 0;
+            break;
+        }
+        const int verr0 = sdl3vk_validation_error_count();
+        const int warm = surface_test_warm(px);
+        const uint64_t surf0 = s_surface_gen;
+        int got = 0, reached = 0, busy = 1, held_surfaces = 0, back = 0, after = 0, shown = 1;
+        int held_terminal = 0, held_marked = 0, want_got = -1, want_back = 1;
+        uint64_t want_surfaces = 1;
+        if (c < 2) {
+            sdl3vk_present_fault_inject(VK_ERROR_SURFACE_LOST_KHR);
+            s_swap_surface_lost_fault = c == 0 ? SWAP_LOST_CAPS : SWAP_LOST_CAPS_WINDOW_GONE;
+            got = sdl3vk_present_rgba(px);
+            reached = !s_present_fault_armed && s_swap_surface_lost_fault == SWAP_LOST_NONE;
+            sdl3vk_present_fault_clear();
+            s_swap_surface_lost_fault = SWAP_LOST_NONE;
+            for (int k = 0; k < 3; k++) {
+                const int r = sdl3vk_present_rgba(px);
+                busy &= r == (c == 0 ? -1 : SDL3VK_PRESENT_DISPLAY_BUSY);
+            }
+            held_terminal = sdl3vk_renderer_terminal();
+            held_surfaces = (int)(s_surface_gen - surf0);
+            held_marked = s_surface_withheld;
+            s_no_window_surface_fault = 0;
+            back = sdl3vk_present_rgba(px);
+            if (c == 0) {
+                want_back = -1;
+            } else {
+                want_surfaces = 2;
+                after = surface_test_warm(px);
+            }
+        } else if (c == 2) {
+            sdl3vk_present_fault_inject(VK_ERROR_OUT_OF_HOST_MEMORY);
+            s_swap_surface_lost_fault = SWAP_LOST_CREATE;
+            got = sdl3vk_present_rgba(px);
+            reached = !s_present_fault_armed && s_swap_surface_lost_fault == SWAP_LOST_NONE;
+            sdl3vk_present_fault_clear();
+            s_swap_surface_lost_fault = SWAP_LOST_NONE;
+            held_terminal = sdl3vk_renderer_terminal();
+            back = sdl3vk_present_rgba(px);
+            after = surface_test_warm(px);
+        } else {
+            int ow = 0, oh = 0, orgba = 0;
+            uint32_t *opx = NULL;
+            if (sdl3vk_overlay_extent(&ow, &oh, &orgba) &&
+                (opx = (uint32_t *)calloc((size_t)ow * (size_t)oh, 4u)) != NULL) {
+                shown = sdl3vk_present_overlay(opx, ow * 4) == 1;
+                s_pstep_fault = PSTEP_PRESENT;
+                s_pstep_fault_result = VK_ERROR_OUT_OF_HOST_MEMORY;
+                s_swap_surface_lost_fault = SWAP_LOST_CREATE;
+                got = sdl3vk_present_overlay(NULL, 0);
+                reached = s_pstep_fault == PSTEP_NONE && s_swap_surface_lost_fault == SWAP_LOST_NONE;
+                s_pstep_fault = PSTEP_NONE;
+                s_swap_surface_lost_fault = SWAP_LOST_NONE;
+                held_terminal = sdl3vk_renderer_terminal();
+                int ow2 = 0, oh2 = 0;
+                if (sdl3vk_overlay_extent(&ow2, &oh2, &orgba) && ow2 == ow && oh2 == oh)
+                    back = sdl3vk_present_overlay(opx, ow * 4);
+            } else {
+                shown = 0;
+            }
+            free(opx);
+            sdl3vk_overlay_release();
+            after = surface_test_warm(px);
+        }
+        const int terminal = sdl3vk_renderer_terminal();
+        const unsigned lines = s_terminal_lines;
+        const uint64_t surfaces = s_surface_gen - surf0;
+        const int verrors = sdl3vk_validation_error_count() - verr0;
+        sdl3vk_shutdown();
+        const int live = lifecycle_live_objects();
+        const int want_terminal = c == 0;
+        int bad = !warm || !shown || !reached || got != want_got || back != want_back ||
+                  terminal != want_terminal || lines != (unsigned)want_terminal ||
+                  surfaces != want_surfaces || verrors != 0 || live != 0;
+        if (c < 2) bad |= !busy || held_surfaces != 1 || held_terminal != want_terminal;
+        if (c == 1) bad |= !held_marked;
+        if (c >= 2) bad |= held_terminal;
+        if (c != 0) bad |= !after;
+        if (bad) {
+            fprintf(stderr, "surface: '%s': warm=%d shown=%d reached=%d present on the loss=%d "
+                            "(want -1) later presents as wanted=%d (want 1) terminal then=%d "
+                            "surfaces made by then %d (want 1) held back marked %d next "
+                            "present=%d (want %d) terminal=%d in %u line(s) (want %d) surfaces "
+                            "replaced %llu (want %llu) later shown=%d, %d validation error(s), %d "
+                            "object(s) alive after shutdown\n", name, warm, shown, reached, got,
+                    busy, held_terminal, held_surfaces, held_marked, back, want_back, terminal,
+                    lines, want_terminal, (unsigned long long)surfaces,
+                    (unsigned long long)want_surfaces, after, verrors, live);
+            ok = 0;
+        }
+        cases++;
+    }
+
     if (keep) vkDestroyInstance(keep, NULL);
     if (keep_video) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO);

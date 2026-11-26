@@ -516,14 +516,19 @@ static int      s_surface_create_fault = 0;
 static int      s_surface_support_fault = 0;
 static uint64_t s_surface_gen = 0;
 /* One-shot: the next swapchain creation finds the surface lost at its capabilities query
- * (SWAP_LOST_CAPS) or at vkCreateSwapchainKHR (SWAP_LOST_CREATE), which is not made. 0 in
- * production. */
-enum { SWAP_LOST_NONE, SWAP_LOST_CAPS, SWAP_LOST_CREATE };
+ * (SWAP_LOST_CAPS) or at vkCreateSwapchainKHR (SWAP_LOST_CREATE), which is not made.
+ * SWAP_LOST_CAPS_WINDOW_GONE is SWAP_LOST_CAPS with the platform's window taken away as the
+ * surface goes (it sets s_no_window_surface_fault), as Android does when it destroys the window.
+ * 0 in production. */
+enum { SWAP_LOST_NONE, SWAP_LOST_CAPS, SWAP_LOST_CREATE, SWAP_LOST_CAPS_WINDOW_GONE };
 static int      s_swap_surface_lost_fault = SWAP_LOST_NONE;
 
 static int swap_surface_lost_fault(int at) {
-    if (s_swap_surface_lost_fault != at) return 0;
+    const int window_gone = s_swap_surface_lost_fault == SWAP_LOST_CAPS_WINDOW_GONE &&
+                            at == SWAP_LOST_CAPS;
+    if (s_swap_surface_lost_fault != at && !window_gone) return 0;
     s_swap_surface_lost_fault = SWAP_LOST_NONE;
+    if (window_gone) s_no_window_surface_fault = 1;
     return 1;
 }
 
@@ -542,9 +547,9 @@ static int create_swapchain(void) {
     if (capr == VK_ERROR_SURFACE_LOST_KHR) {
         /* The window's surface went while the swapchain was being rebuilt (a rotation or fold
          * as Android destroys the window, #360): the old swapchain stays until the next
-         * present replaces the surface, and the renderer goes on. */
-        fprintf(stderr, "sdl3vk: the surface was lost while the swapchain was rebuilt; it is "
-                        "replaced at the next present\n");
+         * present replaces the surface, and the renderer goes on. A surface just made to
+         * replace a lost one is judged by surface_ready. */
+        fprintf(stderr, "sdl3vk: the surface was lost while its swapchain was made\n");
         s_surface_lost = 1;
         return 0;
     }
@@ -640,8 +645,7 @@ static int create_swapchain(void) {
          * was lost: then the next present replaces it and the renderer goes on (#360). */
         const int surface_lost = cr == VK_ERROR_SURFACE_LOST_KHR;
         if (surface_lost)
-            fprintf(stderr, "sdl3vk: vkCreateSwapchainKHR found the surface lost; it is replaced "
-                            "at the next present\n");
+            fprintf(stderr, "sdl3vk: vkCreateSwapchainKHR found the surface lost\n");
         else
             terminal_line("sdl3vk: vkCreateSwapchainKHR failed: %d; the renderer is terminal\n",
                           (int)cr);
@@ -772,8 +776,9 @@ static int replace_surface(void) {
 /* Before a present acquires: 1 when there is a swapchain to present to; 0 when the frame cannot
  * be shown now and nothing failed (the app is in the background, the platform has no window
  * surface, or the window has no pixels); -1 when the renderer is terminal. A swapchain that
- * cannot be made on a new surface of a window in the foreground with pixels is terminal, so a
- * renderer never goes on presenting nothing without a line saying so. */
+ * cannot be made on a new surface of a window in the foreground with pixels is terminal, and so
+ * is a new surface lost as its swapchain is made while the platform still has a window, so a
+ * renderer never goes on presenting nothing, or replacing surfaces, without a line saying so. */
 static int surface_ready(void) {
     if (s_app_background) return 0;
     if (s_surface_lost) {
@@ -783,13 +788,19 @@ static int surface_ready(void) {
     if (s_swap) return 1;
     if (create_swapchain()) return 1;
     if (s_renderer_terminal) return -1;
-    /* The new surface was lost too, as it was made (its line is printed): the next present
-     * replaces it again. */
-    if (s_surface_lost) return 0;
-    int w = 0, h = 0;
-    if (window_surface_absent() || sdl3vk_window_minimized() ||
-        !SDL_GetWindowSizeInPixels(s_win, &w, &h) || w <= 0 || h <= 0)
-        return 0;
+    /* Only a surface made by replace_surface reaches here without a swapchain. When it was lost
+     * at once too, that is the platform taking the window away (Android clears SDL's window
+     * pointer before it abandons the surface): the next present replaces it once there is a
+     * window again. A window still there means every new surface would be lost the same way, so
+     * that is terminal instead of a new surface on every present. */
+    if (s_surface_lost) {
+        if (window_surface_absent()) return 0;
+    } else {
+        int w = 0, h = 0;
+        if (window_surface_absent() || sdl3vk_window_minimized() ||
+            !SDL_GetWindowSizeInPixels(s_win, &w, &h) || w <= 0 || h <= 0)
+            return 0;
+    }
     terminal_line("sdl3vk: no swapchain could be made on the window's new surface; the renderer "
                   "is terminal\n");
     s_renderer_terminal = 1;
@@ -2837,7 +2848,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     poll_input(&quit);
     if (quit) { why = "window closed during present"; goto fail_quit; }
     /* A lost window surface is replaced first; while there is none (the app is in the
-     * background) the frame is not shown and nothing failed (#360). */
+     * background, or the platform has no window surface) the frame is not shown and nothing
+     * failed (#360). */
     if (s_app_background || s_surface_lost || !s_swap) {
         const int ready = surface_ready();
         if (ready < 0) { why = "the window's surface could not be replaced"; goto fail; }
@@ -2845,14 +2857,17 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             if (!s_surface_withheld) {
                 s_surface_withheld = 1;
                 s_withheld_from = s_present_busy_surface;
-                fprintf(stderr, "sdl3vk: the window has no surface (the app is in the background); "
-                                "frames are not shown until it has one again\n");
+                fprintf(stderr, "sdl3vk: %s; frames are not shown until the window can show "
+                                "them again\n",
+                        s_app_background ? "the app is in the background"
+                        : window_surface_absent() ? "the platform has no window surface now"
+                        : "the window has no pixels now (minimized)");
             }
             s_present_busy_surface++;
             goto display_busy;
         }
         if (s_surface_withheld) {
-            fprintf(stderr, "sdl3vk: the window has a surface again; presenting resumes after %llu "
+            fprintf(stderr, "sdl3vk: the window can show frames again; presenting resumes after %llu "
                             "frame(s) not shown\n",
                     (unsigned long long)(s_present_busy_surface - s_withheld_from));
             s_surface_withheld = 0;
