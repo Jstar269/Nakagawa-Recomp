@@ -2159,12 +2159,15 @@ static int sdl3vk_surface_selftest(void) {
         const int warm = surface_test_warm(px);
         const uint64_t surf0 = s_surface_gen;
         int got = 0, reached = 0, busy = 1, held_surfaces = 0, back = 0, after = 0, shown = 1;
-        int held_terminal = 0, held_marked = 0, want_got = -1, want_back = 1;
+        int held_terminal = 0, held_marked = 0, want_got = -1, want_back = 1, loss_terminal = 0;
         uint64_t want_surfaces = 1;
         if (c < 2) {
             sdl3vk_present_fault_inject(VK_ERROR_SURFACE_LOST_KHR);
             s_swap_surface_lost_fault = c == 0 ? SWAP_LOST_CAPS : SWAP_LOST_CAPS_WINDOW_GONE;
             got = sdl3vk_present_rgba(px);
+            /* With the window still there, the present that met the loss ends it: no second
+             * replacement is tried. */
+            loss_terminal = sdl3vk_renderer_terminal();
             reached = !s_present_fault_armed && s_swap_surface_lost_fault == SWAP_LOST_NONE;
             sdl3vk_present_fault_clear();
             s_swap_surface_lost_fault = SWAP_LOST_NONE;
@@ -2227,18 +2230,20 @@ static int sdl3vk_surface_selftest(void) {
         int bad = !warm || !shown || !reached || got != want_got || back != want_back ||
                   terminal != want_terminal || lines != (unsigned)want_terminal ||
                   surfaces != want_surfaces || verrors != 0 || live != 0;
-        if (c < 2) bad |= !busy || held_surfaces != 1 || held_terminal != want_terminal;
+        if (c < 2)
+            bad |= !busy || held_surfaces != 1 || held_terminal != want_terminal ||
+                   loss_terminal != want_terminal;
         if (c == 1) bad |= !held_marked;
         if (c >= 2) bad |= held_terminal;
         if (c != 0) bad |= !after;
         if (bad) {
             fprintf(stderr, "surface: '%s': warm=%d shown=%d reached=%d present on the loss=%d "
-                            "(want -1) later presents as wanted=%d (want 1) terminal then=%d "
+                            "(want -1) terminal at the loss=%d later presents as wanted=%d (want 1) terminal then=%d "
                             "surfaces made by then %d (want 1) held back marked %d next "
                             "present=%d (want %d) terminal=%d in %u line(s) (want %d) surfaces "
                             "replaced %llu (want %llu) later shown=%d, %d validation error(s), %d "
                             "object(s) alive after shutdown\n", name, warm, shown, reached, got,
-                    busy, held_terminal, held_surfaces, held_marked, back, want_back, terminal,
+                    loss_terminal, busy, held_terminal, held_surfaces, held_marked, back, want_back, terminal,
                     lines, want_terminal, (unsigned long long)surfaces,
                     (unsigned long long)want_surfaces, after, verrors, live);
             ok = 0;
