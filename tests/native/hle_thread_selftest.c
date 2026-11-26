@@ -19282,6 +19282,13 @@ static void load_audio_wait_fixture(uint32_t guest_us) {
     audio_sim_advance((uint32_t)((host_ns + 999u) / 1000u));
 }
 
+static uint32_t auto_load_panned_audio(CpuState *cpu, uint32_t pcm) {
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[6] = 0x8000u; /* left is muted, right is at unity */
+    cpu->r[7] = pcm;
+    return sr_syscall(cpu, 0x13f592bcu); /* sceAudioOutputPannedBlocking */
+}
+
 static void test_auto_load_disc_and_silent_audio(void) {
     static const char spec[] =
         "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
@@ -19413,6 +19420,30 @@ static void test_auto_load_disc_and_silent_audio(void) {
                    sched_fast_forward_speed() == 1u && s_audio_push_calls == 2u &&
                    s_audio_load_handoff[0] == -1,
                "automatic load: the first resumed block reaches the backend with the retained tail");
+
+        s_audio_load_pending_sound = 0;
+        s_audio_sim_q[0] = 0;
+        for (unsigned i = 0u; i < AUTO_LOAD_RECENT_VBLANKS; ++i) {
+            s_load_host_ns += 16683333u;
+            scheduler_progress_time();
+            sched_auto_load_vblank();
+        }
+        expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u,
+               "automatic load: fresh disc data after the audible cooldown");
+        sched_auto_load_vblank();
+        expect(sched_auto_load_active(), "automatic load: the gain test starts accelerated");
+
+        MEM_W16(PCM, 12345u);
+        const unsigned long before_muted = s_audio_push_calls;
+        expect(auto_load_panned_audio(&cpu, PCM) == 64u && sched_auto_load_active() &&
+                   hle_audio_queued(0) == 64 && s_audio_push_calls == before_muted,
+               "automatic load: nonzero PCM on a zero-gain side remains silent");
+        MEM_W16(PCM + 2u, (uint16_t)(int16_t)-23456);
+        const unsigned long before_audible = s_audio_push_calls;
+        expect(auto_load_panned_audio(&cpu, PCM) == 64u && sched_fast_forward_speed() == 1u &&
+                   s_audio_push_calls == before_audible + 1u && s_audio_push_first_r == -23456 &&
+                   s_audio_push_vol_l == 0 && s_audio_push_vol_r == 0x8000,
+               "automatic load: the first frame on the unchanged audible side still reaches the mixer at 1x");
         (void)audio_dispatch(&cpu, 0x810c4bc3u, fd, 0u, 0u); /* sceIoClose */
     }
     sched_auto_load_reset();
