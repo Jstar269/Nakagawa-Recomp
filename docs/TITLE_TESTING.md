@@ -156,6 +156,28 @@ Failure classes used by this route, all from the bring-up `failure_class` enum
 
 The raw player output is kept beside the report as `player-output.log`.
 
+A record that quotes a run (a row of [`COMPATIBILITY.md`](COMPATIBILITY.md#status-words), an issue comment, a
+pull request) cites the report's `build_evidence.source_revision`: the commit the run was built from (the build-and-smoke command refuses
+a tree with uncommitted changes to tracked files). That commit is on `main`, or it is the head of the
+pull request the record names; a local commit that is on neither is not cited.
+
+## Movie audio: the check for the next movie title run
+
+Movies are not on this route, and a retail movie runs only on a private route. The next run of a title through a
+movie records these, from `SR_MPEGAV=1` (also turned on by `SR_MPEGLOG=1`; the fields are described in
+[`DEBUGGING.md`](DEBUGGING.md)), as counters only; no capture or log leaves the private workspace:
+
+- from `PSMF_AV_PRESENT_FINAL:`, `adel`, `amatch`, `asuper` and `aevict`: audio blocks delivered, played, overwritten
+  by the title before they played, and pushed out of the measurement ring. A nonzero `asuper` is reported with the
+  movie's name;
+- `alead_mean_us` and `alead_max_us`, the host output queue's lead, and `av_submit_mean_us`: an `av_us` that is
+  all lead comes from the output stage, not the title's timing;
+- `drift_us`, and whether `av_us` stays flat across the `PSMF_AV_PRESENT:` windows;
+- whether the movie's sound was heard all the way through, as the person running it reports it.
+
+A movie decoded through `sceMpegAtracDecode` delivers no PCM through it, so its audio side is not measured by these
+lines; the record says so instead of giving zeros.
+
 ## Isolation
 
 Every launch runs in a temporary sandbox inside the title's build directory:

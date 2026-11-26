@@ -8560,5 +8560,153 @@ class TestLinkingBranchesAreCalls(unittest.TestCase):
                         self.fail(f"0x{word:08x}: a branch here that the analyzer does not follow")
 
 
+class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
+    """A replay that starts at an odd logic-update count (contract section 9.5, the replay checklist).
+
+    A title's own replay re-runs recorded input through its logic from a known state. Under a 60 Hz
+    package the update count is the run's, not the replay's: the attract loop, menus and loads
+    before the replay advance it too. These tests compile the generated code and start a replay
+    after an odd and after an even number of updates. A plain gate follows the parity of the run's
+    count, so after an odd count it runs on the other updates of the replay than in a recording
+    started on an even count; a gate_30hz_alt site keeps its own phase and makes the stock call
+    first whenever it is reached again, whatever the parity.
+    """
+
+    REPLAY = 12   # updates the replay re-runs; input k (0-based) is k + 1
+
+    def _gate_and_count(self, tmp: Path) -> tuple[str, str]:
+        """The generated gate definition and the boundary's count statement."""
+        elf_path = tmp / "synth.elf"
+        elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+        pkg, symbols = self._make_package_and_symbols(elf_bytes)
+        pkg_path = tmp / "replay.json"
+        pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+        (tmp / "replay.symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+        out_dir = tmp / "replay"
+        out_dir.mkdir()
+        rc, output, files = self._run_codegen(elf_path, out_dir / "out.c",
+                                              [f"--enhancement-package={pkg_path}"])
+        self.assertEqual(rc, 0, output)
+        header = files["out_funcs.h"].decode("utf-8")
+        gate_def = next(line for line in header.splitlines()
+                        if "int nk_enhancement_gate_30hz(void)" in line)
+        combined = b"\n".join(files.values()).decode("utf-8")
+        count_stmt = next(line.strip() for line in combined.splitlines()
+                          if "nk_enhancement_updates++" in line)
+        return gate_def, count_stmt
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
+    def test_a_plain_gate_follows_the_run_count_not_the_replay_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            gate_def, count_stmt = self._gate_and_count(tmp)
+            harness = tmp / "replay.c"
+            harness.write_text(
+                "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n"
+                "int nk_enhancement_on(void) { return 1; }\n"
+                "uint32_t nk_enhancement_updates;\n"
+                "void sr_enhancement_update_begin(void) {}\n"
+                f"{gate_def}\n"
+                "/* One logic update: the boundary counts it, then a gated accumulation\n"
+                " * (a gate_30hz addu) adds this update's input. */\n"
+                "static unsigned update(unsigned input, unsigned *x) {\n"
+                f"    {count_stmt}\n"
+                "    if (nk_enhancement_gate_30hz()) { *x += input; return 1; }\n"
+                "    return 0;\n"
+                "}\n"
+                "int main(int argc, char **argv) {\n"
+                "    unsigned before = argc > 1 ? (unsigned)atoi(argv[1]) : 0u, x = 0;\n"
+                "    for (unsigned u = 0; u < before; u++) { unsigned attract = 0; update(0, &attract); }\n"
+                f"    for (unsigned k = 0; k < {self.REPLAY}u; k++) printf(\"%u\", update(k + 1u, &x));\n"
+                "    printf(\" %u\\n\", x);\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "replay.exe"
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+            built = _run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
+                          "-o", str(exe), str(harness)], capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+
+            def replay(before: int) -> tuple[str, int]:
+                out = _run([str(exe), str(before)], check=True, capture_output=True, text=True).stdout
+                ran, total = out.split()
+                return ran, int(total)
+
+            # Section 9.5: a gated statement runs when the number of updates begun so far is even.
+            # A recording that starts with the run (count 0) runs it on replay updates 2, 4, ...
+            recorded = replay(0)
+            self.assertEqual(recorded, ("01" * (self.REPLAY // 2), sum(range(2, self.REPLAY + 1, 2))))
+            # After an even number of updates the replay sees the recording's phase exactly.
+            self.assertEqual(replay(8), recorded)
+            # After an odd number (7, 1 and 31 updates), every update of the replay is still one of
+            # an alternating pair, but the gate runs on updates 1, 3, ...: the other half of the
+            # same input, so the gated state the replay builds differs from the recording's.
+            for before in (7, 1, 31):
+                with self.subTest(before=before):
+                    ran, total = replay(before)
+                    self.assertEqual(ran, "10" * (self.REPLAY // 2))
+                    self.assertEqual(total, sum(range(1, self.REPLAY + 1, 2)))
+                    self.assertNotEqual(total, recorded[1])
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
+    def test_an_alt_gate_makes_the_stock_call_first_at_any_replay_start(self) -> None:
+        # The gate_30hz_alt fixture of TestAltGateStaticChecks, used through an instance so
+        # this class adds no second copy of it.
+        alt_fixture = TestAltGateStaticChecks("test_caller_refusals")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            statement = alt_fixture._site_statement(tmp, "alt", with_package=True)
+            callees = list(dict.fromkeys(re.findall(r"(\w+)\(s\); SR_TAIL_DRAIN", statement)))
+            self.assertEqual(len(callees), 3, statement)
+            stubs = "".join(f"static void {fn}(CpuState *s) {{ (void)s; putchar('{tag}'); }}\n"
+                            for fn, tag in zip(callees, "SAB"))
+            harness = tmp / "alt_replay.c"
+            harness.write_text(
+                "#include \"recomp.h\"\n"
+                "#undef SR_TAIL_DRAIN\n#define SR_TAIL_DRAIN(s) ((void)0)\n"
+                "#define sr_aot_return_boundary_begin(s, r, c, k) 0\n"
+                "#define sr_aot_return_boundary_end(s) 0\n"
+                "int nk_enhancement_on(void) { return 1; }\n"
+                "uint32_t nk_enhancement_updates;\n"
+                f"{stubs}"
+                f"static void site(CpuState *s) {{\n{statement}\n}}\n"
+                "/* Updates that reach the site (a race or its replay), then updates that do not\n"
+                " * (the menus and loads between them): each segment is a count of updates. */\n"
+                "static void segment(CpuState *s, unsigned updates, int visits) {\n"
+                "    for (unsigned u = 0; u < updates; u++) {\n"
+                "        nk_enhancement_updates++;\n"
+                "        if (visits) site(s);\n"
+                "    }\n"
+                "    if (visits) putchar('|');\n"
+                "}\n"
+                "int main(void) {\n"
+                "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
+                f"    segment(s, {self.REPLAY}u, 1);   /* the recording, from count 0 */\n"
+                "    segment(s, 7u, 0);   /* an odd gap: the replay starts at an odd count */\n"
+                f"    segment(s, {self.REPLAY}u, 1);\n"
+                "    segment(s, 6u, 0);   /* an even gap after the replay's even length */\n"
+                f"    segment(s, {self.REPLAY}u, 1);\n"
+                "    putchar('\\n');\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "alt_replay.exe"
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+            built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                          "-Wno-misleading-indentation", "-Wno-unused-variable",
+                          f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
+                         capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            out = _run([str(exe)], check=True, capture_output=True, text=True).stdout.strip()
+            # Sections 9.2 and 9.5: the site makes its alternates only in an update right after
+            # one in which it made the stock call, so each segment begins with the stock call
+            # (S), then the two alternates (AB), whatever the parity of the count it starts on.
+            pattern = "SAB" * (self.REPLAY // 2)
+            self.assertEqual(out.split("|")[:3], [pattern, pattern, pattern])
+
+
 if __name__ == "__main__":
     unittest.main()

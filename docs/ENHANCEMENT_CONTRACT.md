@@ -395,6 +395,20 @@ A gated statement (a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_store` site, an
 4. **Slowdown is reported.** An update that takes longer than one VBLANK of host time is followed by the title's own wait for the next VBLANK, so the logic runs below 60 updates per second while every per-update step stays halved: the game plays slower than the original. The generated start-up hands `nk_enhancement_updates` to the runtime (`sr_enhancement_register_updates()`), which compares it once a second. Logic that runs but stays under 57 updates per second for three seconds in a row is logged as `ENHANCEMENT_LOGIC_SLOWED` and shown in the game window as a red `60 FPS logic: <n>/s - SLOWED` line, with or without the F3 HUD. A second with no update at all (a load or a pause) clears the count.
 5. **Why it is declared, not inferred.** A `vblank_wait_2_to_1` site is the compare inside a title's wait loop, which can run several times in one update, so it does not mark where an update begins. The package names the boundary explicitly.
 
+**Checklist: replays.** A title's own replay (a race or a match re-run from recorded input) is checked before a package that gates its logic is released:
+
+- The count is the run's, not the replay's. `nk_enhancement_updates` is a variable of the generated host code, not guest memory, and the attract loop, the menus and the loads before a replay advance it too. A plain gate (`gate_30hz`, `gate_30hz_hold`, `gate_30hz_store`, and the unit steps and countdowns whose rewrite is a gate) follows its parity: a replay that starts after an odd number of updates runs the gated statements on the other half of its updates than a recording that started after an even number, so the state they build from the same input differs, and the replay can drift from what was recorded. The site's evidence shows that the title's recordings and replays start on the same parity, or that the replayed logic does not depend on the phase of its gates; otherwise its sites are moved to a transform that phases itself.
+- A `gate_30hz_alt` site phases itself on re-entry: after at least one update in which it was not reached, it makes the stock call first, whatever the parity of the count. A `gate_30hz_phase` site counts its own state's time (section 9.2), so a state entered for the replay starts at an even phase.
+- `SR_RECORD` and `SR_REPLAY` replay a whole run from a fresh start, so the count starts at zero in both. A recording and its replay are made with the same package and the same `SR_EXPERIMENTAL_60HZ` value.
+- `TestReplayAtOddUpdateCount` in `tools/test_enhancement_package.py` compiles the generated gate, boundary count and `gate_30hz_alt` statement and starts a replay after odd and even numbers of updates.
+
+**Checklist: logic rates above 60 Hz.** This section declares one rate: one logic update per VBLANK, twice the stock rate. A proposal for more updates per second (for a display above 60 Hz) is a new package format, not a new package, and answers each of these first:
+
+- Every transform of section 9.2 scales by a ratio of two (`count_x2`, `step_x0.5`, $\sqrt{m}$, $\kappa$ and $q$ from a two-update image), and a gate runs one update in two (the parity of the count). Another ratio needs its own transforms and a gate that runs one update in $N$.
+- `vblank_wait_2_to_1` makes the title wait one VBLANK per update; more than one update per VBLANK needs a new pacing rule.
+- Item 4's slowdown threshold (57 updates per second) is written for 60, and so is the HUD line.
+- Smooth motion (section 10.6) presents in-between pictures and changes no logic, so it is not a way to a higher logic rate.
+
 This package format is opt-in; whether a package is experimental is section 9.10.
 
 ### 9.6. Data Sites and Data Files
@@ -1060,7 +1074,8 @@ the Vulkan picture), `src/rt/gui.c` (the setting, the wing width and the softwar
   rounded down to a multiple of 4: 21:9 (about 635x272) has 76-pixel wings and 32:9 (about 967x272) has 240-pixel
   wings. The PSP's 480x272 is 30:17, about 16:9; a 16:9 window widens it by under 4 pixels, so 16:9 has none. One canvas
   holds both wings in a 512-column image, the GE's widest framebuffer, so the Vulkan canvas shares every target's size,
-  viewport and readback. That caps a wing at 256 pixels, a picture of 992x272 (about 32.8:9); a wider window (three
+  viewport and readback. The wings never use columns 480-511 of the guest's own 512-wide framebuffer: a title may keep
+  its palettes in that stride padding, beside the picture it draws. That caps a wing at 256 pixels, a picture of 992x272 (about 32.8:9); a wider window (three
   screens) gets the widest Fill and black beyond it.
 - **Off is the default.** With no wing width set, no canvas exists and no wing is drawn or submitted, and the window
   shows the frame alone, fitted as before. What Off still costs is a test per primitive in `src/rt/ge.c` (`s_wide_d`),
