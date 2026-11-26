@@ -1065,7 +1065,11 @@ int ace_det_flip(AceDetector *d, uint32_t vcount, int new_frame) {
     }
     if (d->have_last) {
         uint32_t gap = vcount - d->last_new_vcount;
-        d->back_to_back = gap < 2u;
+        /* Ahead of 30 Hz: less than two VBLANKs after the frame before it. Not so when that
+         * frame was late (three VBLANKs or more): this one is its catch-up, and the two are
+         * back on a 30 Hz pace. */
+        d->ahead = gap < 2u && d->last_gap < 3u;
+        d->last_gap = gap;
         /* A gap of a static stretch or longer is not a frame interval: the window keeps the
          * rate the game had, and frames that resume are judged from here. */
         if (gap < ACE_DET_STATIC_VBLANKS) {
@@ -1080,7 +1084,7 @@ int ace_det_flip(AceDetector *d, uint32_t vcount, int new_frame) {
 }
 
 int ace_det_holds(const AceDetector *d) {
-    return d && d->stable == ACE_RATE_K2 && !d->back_to_back;
+    return d && d->stable == ACE_RATE_K2 && !d->ahead;
 }
 
 /* ---- the speed readout ---------------------------------------------------------------------- */
@@ -1246,8 +1250,8 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         s_pace.owed = 0;
     }
     /* A frame is held only when the detector gives it a VBLANK of its own (ace_det_holds): at a
-     * stable 30, and not when it came one VBLANK after the frame before it. At that pace the
-     * next flip replaces a held frame before its present. */
+     * stable 30, and not when it runs ahead of that pace. A title that flips on every VBLANK
+     * replaces a held frame before its present. */
     const int hold = !s_ff_running && ace_det_holds(&s_det);
     ace_pace_flip(&s_pace, new_frame, hold ? s_det.stable : ACE_RATE_NONE, s_eff.smooth, now_ns);
     if (s_ff_running) {
