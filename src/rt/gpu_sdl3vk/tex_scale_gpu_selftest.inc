@@ -1976,7 +1976,8 @@ static int xst_dump_stretch(const char *dir) {
  * 0's file, named for its own content, is left byte for byte; an unchanged level is left and counted
  * as there. A file the player made at the name is kept byte for byte whatever the game draws: an
  * enlarged image, and one at the level's size that another program saved (here, the dump's bytes
- * with a tEXt chunk added). Failing before: the later dump counted the outdated level 1 as already
+ * with a tEXt chunk added), and one in a flat colour that the dump's encoder wrote. An outdated file
+ * of the dump's own whose replacement the host refuses is kept and the dump goes on. Failing before: the later dump counted the outdated level 1 as already
  * there and kept it. */
 static int xst_cell_dump_redump(int f) {
     (void)f;
@@ -2044,6 +2045,23 @@ static int xst_cell_dump_redump(int f) {
         goto done;
     }
 
+    /* 4b. The player's enlargement in one flat colour, written by the dump's own encoder: it
+     * compresses to fewer bytes than the dump can write for level 1, and re-encodes to its own
+     * bytes at its own size, so only the check that it is the level's size keeps it. */
+    free(mine);
+    mine = NULL;
+    for (int i = 0; i < XST_W * XST_H; i++) big[i] = 0xFF3366CCu;
+    if (!sr_png_encode_rgba(big, XST_W, XST_H, &mine, &mine_n) ||
+        mine_n > sr_png_encode_bound(XST_W / 2, XST_H / 2) || !xst_dump_write(dir, name1, mine, mine_n)) {
+        why = "the test could not write a flat enlargement within level 1's bound";
+        goto done;
+    }
+    written = s_dump.written;
+    if (!xst_dump_stretch(dir) || !xst_dump_bytes_are(dir, name1, mine, mine_n) || s_dump.written != written) {
+        why = "a later dump replaced the player's flat enlarged level 1 image";
+        goto done;
+    }
+
     /* 5. A level 1 at the level's size that another program saved (the dump's own bytes for lc with
      * a tEXt chunk after IHDR, which decodes to the same pixels): kept byte for byte. lc's bytes are
      * all below 144, each a fixed-Huffman literal of 8 bits, so the file stays within what the
@@ -2084,12 +2102,40 @@ static int xst_cell_dump_redump(int f) {
         why = "a later dump replaced a level 1 image at the level's size that another program saved";
         goto done;
     }
+
+    /* 6. The dump's own outdated level 1 whose replacement the host refuses (as Win32 refuses a
+     * rename over a file the player marked read-only): the old file is kept byte for byte and
+     * counted as there, said once, and the dump goes on, nothing counted as failed. Failing before:
+     * the refused rename counted as a failed write and stopped the whole dump. */
+    free(mine);
+    mine = NULL;
+    if (!sr_png_encode_rgba(lb, XST_W / 2, XST_H / 2, &mine, &mine_n) || !xst_dump_write(dir, name1, mine, mine_n)) {
+        why = "the test could not write the dump's own level 1 file";
+        goto done;
+    }
+    {
+        const unsigned long long failed = s_dump.failed;
+        written = s_dump.written;
+        present = s_dump.present;
+        s_dump_refuse_replace = 1;
+        const int drew = xst_dump_start(dir) && xst_dump_draw();
+        const TexDumpStop stop = s_dump.stop;
+        const int noted = s_dump.stale_noted;
+        gegpu_texdump_stop();
+        s_dump_refuse_replace = 0;
+        if (!drew || stop != TEX_DUMP_GOING || s_dump.failed != failed || s_dump.written != written ||
+            s_dump.present != present + 2u || !noted || !xst_dump_bytes_are(dir, name1, mine, mine_n)) {
+            why = "a refused replacement of an outdated level 1 file stopped the dump, or did not keep the old file";
+            goto done;
+        }
+    }
     {
         int tmp = 0;
         if (!nk_platform_list_files(dir, xst_dump_count_tmp, &tmp) || tmp != 0) why = "a temp file was left";
     }
 
 done:
+    s_dump_refuse_replace = 0;
     gegpu_texdump_stop();
     xst_dump_mip_state(l1, 0);
     memset(&s_dump, 0, sizeof(s_dump));
@@ -2098,7 +2144,8 @@ done:
     free(mine);
     if (why) return xst_dump_fail(why);
     printf("gpu texscale selftest: PASS %-12s a re-dump replaces the dump's own outdated mip level file, leaves "
-           "level 0's and an up-to-date one, and keeps the player's enlarged and re-saved images\n", "dump-redump");
+           "level 0's and an up-to-date one, keeps the player's enlarged and re-saved images, and keeps one it "
+           "cannot replace without stopping\n", "dump-redump");
     return 1;
 }
 

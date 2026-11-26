@@ -1606,11 +1606,15 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   the player enlarges in place is kept even when it is saved during the dump. The exception is a mip level's file
   the dump wrote itself: a level from 1 up is named for level 0's content, not its own, so the game can change
   the level under the same name. When a later dump finds such a file holding another level than the one drawn,
-  a worker replaces it (written whole to a temp file and renamed over it), counted in `written=` (one that cannot
-  be written is a failed write, below), and under the budget and file limit a new file has, but only when
+  a worker replaces it (written whole to a temp file and renamed over it), counted in `written=`, under the file
+  limit and the budget of disk bytes a new file has (the check's own reads and decodes are host memory beyond
+  that budget), but only when
   the file is the dump's own: a PNG at the level's size whose bytes are what the dump's encoder makes of its
   pixels. Any other file at the name (an enlarged image, or one another program saved, at any size) is the
   player's and is kept as it is, counted in `already_there=`, as is a file that already holds the level drawn.
+  A replacement that cannot be made (the temp file cannot be written, or the host refuses the rename, as Windows
+  does over a file the player marked read-only or holds open) removes its temp file and keeps the old file,
+  counted in `already_there=` and said once a stretch in a `TEX_DUMP: note:` line; it does not stop the dump.
   Level 0's file is named for its own content, so it is never outdated. The check and the rename are not one
   step: a file the player saves at that name in between is replaced. Every file call is the platform layer's
   wide-path one, so a user data folder under a user name that is not ASCII works. Nothing the guest can observe
@@ -1761,8 +1765,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   takes the job back, counts the level as left and leaves the dump's state alone, and the drawing thread's own end
   then lets the file land. Its `dump-redump` cell dumps a mip-mapped texture, changes level 1 only and dumps
   again: level 1's file is replaced and level 0's left byte for byte; drawn unchanged, both are left and counted
-  as there; and the player's level 1 enlarged 2 times, and one at the level's size that another program saved,
-  are each kept byte for byte. `hle-thread-selftest` runs two real stops in a child process, an
+  as there; the player's level 1 enlarged 2 times (in noise, and in one flat colour the dump's own encoder wrote,
+  small enough that only the size check keeps it), and one at the level's size that another program saved, are
+  each kept byte for byte; and an outdated file of the dump's own whose rename the host refuses (a test seam in
+  the rename's place) is kept, said once, and the dump goes on with nothing counted as failed. `hle-thread-selftest` runs two real stops in a child process, an
   unregistered NID (status 7) and `SR_WATCHDOG_EXIT` (status 1), with a probe in the dump's place, and requires
   that each reaches `sr_texdump_exit_finish` before the process ends. `tex-scale-selftest` checks the work jobs
   themselves: each runs once, on a worker thread, never the submitter's, and knows it is on one; held jobs stay
