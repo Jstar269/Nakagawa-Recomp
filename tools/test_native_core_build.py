@@ -303,6 +303,9 @@ class StandaloneTestBinTargetTests(unittest.TestCase):
         # The saves fault seams (#1883) compile into nk_zip.c and player_state.c here only.
         self.assertTrue(any("-DNK_SAVES_TEST_SEAMS" in c and "src/core/nk_zip.c" in c
                             and "src/player/player_state.c" in c for c in commands))
+        # The monitor's live-read seam (#306) compiles into player_state.c here only.
+        self.assertTrue(any("-DNK_PLAYER_STATE_TEST_SEAMS" in c
+                            and "src/player/player_state.c" in c for c in commands))
 
 
 class NkUiInventoryTests(unittest.TestCase):

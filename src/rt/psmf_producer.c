@@ -43,6 +43,7 @@
 #include <string.h>
 
 #define PSMF_HEADER_BYTES 2048u
+#define PSMF_PES_TIME_CYCLE (INT64_C(1) << 33)
 #define PSMF_MAGIC_0 'P'
 #define PSMF_MAGIC_1 'S'
 #define PSMF_MAGIC_2 'M'
@@ -108,6 +109,7 @@ struct SrPsmfProducer {
     SrPsmfSource source;
     uint64_t stream_start, stream_end, cursor;
     int64_t presentation_base;
+    int64_t wrapped_pts_end;
     uint32_t packet_count;
     int eof, failed;
     /* First reason the stream stopped being parseable, or NULL while it is accepted.
@@ -420,6 +422,16 @@ have_header:;
     return 1;
 }
 
+static int64_t normalize_au_timestamp(const SrPsmfProducer *p, int present,
+                                      int64_t raw_timestamp) {
+    const int64_t linear = raw_timestamp - p->presentation_base;
+    if (present && p->wrapped_pts_end &&
+        linear < -(PSMF_PES_TIME_CYCLE / 2) &&
+        raw_timestamp < p->wrapped_pts_end - PSMF_PES_TIME_CYCLE)
+        return linear + PSMF_PES_TIME_CYCLE;
+    return linear;
+}
+
 static int emit_au(SrPsmfProducer *p, SrPsmfAuKind kind, uint32_t len) {
     Track *t = &p->track[kind];
     AuQueue *q = &p->queue[kind];
@@ -433,8 +445,8 @@ static int emit_au(SrPsmfProducer *p, SrPsmfAuKind kind, uint32_t len) {
     au.raw_pts = au.has_pts ? m->pts : 0;
     au.raw_dts = au.has_dts ? m->dts : au.raw_pts;
     au.ps_offset = m ? m->ps_offset : 0;
-    au.pts = au.raw_pts - p->presentation_base;
-    au.dts = au.raw_dts - p->presentation_base;
+    au.pts = normalize_au_timestamp(p, au.has_pts, au.raw_pts);
+    au.dts = normalize_au_timestamp(p, au.has_dts || au.has_pts, au.raw_dts);
     if (len > SR_PSMF_MAX_AU_BYTES) {
         p->stats.parser_failures++;
         p->failed = 1;
@@ -756,6 +768,20 @@ SrPsmfProducer *sr_psmf_producer_open(const SrPsmfSource *source,
     p->stream_start = start;
     p->stream_end = end;
     p->cursor = start;
+
+    /* Only a short declared window crossing the first PES wrap anchors low
+     * timestamps in the next epoch. This range uses the low five bytes of
+     * the PSMF start/end fields, so wider header clocks leave the window off. */
+    const uint8_t *first = header + 0x54;
+    const uint8_t *last = header + 0x5a;
+    if (first[0] == 0 && last[0] == 0) {
+        const int64_t first_pts = ((int64_t)first[1] << 32) | be32(first + 2);
+        const int64_t end_pts = ((int64_t)last[1] << 32) | be32(last + 2);
+        if (presentation_base == first_pts && first_pts < PSMF_PES_TIME_CYCLE &&
+            end_pts > PSMF_PES_TIME_CYCLE &&
+            end_pts - first_pts < PSMF_PES_TIME_CYCLE / 2)
+            p->wrapped_pts_end = end_pts;
+    }
 
     uint32_t streams = be16(header + 0x80);
     if (streams > 128u || 0x82u + streams * 16u > PSMF_HEADER_BYTES) {

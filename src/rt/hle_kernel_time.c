@@ -299,35 +299,62 @@ static uint32_t h_GetSystemTime(CpuState *s) {
     (void)s;
     return rtc_write_u64(A0, now_usec()) ? 0u : RTC_ILLEGAL_ADDR;
 }
-/* sceKernelSysClock2USec receives the low/high word pair of the same
- * microsecond clock exposed by GetSystemTime and writes that 64-bit value as
- * low/high output words. Read the complete input before writing either output
- * so overlapping guest spans remain deterministic. */
+/* PPSSPP-derived, not PSP-measured for the pointer API or other Wide input
+ * values: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelTime.cpp, sceKernelSysClock2USec and sceKernelSysClock2USecWide.
+ * This is the unsigned clock bit pattern split with 32-bit output truncation.
+ * Signed behavior for high-bit inputs has no PSP measurement here. */
+static void sysclock_split_usec(uint64_t clock, uint32_t *sec, uint32_t *usec) {
+    *sec = (uint32_t)(clock / 1000000u);
+    *usec = (uint32_t)(clock % 1000000u);
+}
+
+static void sysclock_note_derived(const char *name, int *noted) {
+    if (*noted) return;
+    *noted = 1;
+    fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: %s clock arithmetic\n", name);
+}
+
+/* Both outputs must be writable before either is changed. This is the
+ * runtime's safety policy. Read both clock words before the two ordered writes
+ * so input/output overlap uses a complete snapshot. */
 static uint32_t h_SysClock2USec(CpuState *s) {
     (void)s;
     if (!A0 || !sr_guest_span_readable(A0, 8u) ||
         !A1 || !A2 || !sr_guest_span_writable(A1, 4u) ||
         !sr_guest_span_writable(A2, 4u))
         return HLE_KERNEL_ERROR_ILLEGAL_ADDR;
-    uint32_t low = MEM_R32(A0);
-    uint32_t high = MEM_R32(A0 + 4u);
-    MEM_W32(A1, low);
-    MEM_W32(A2, high);
+    static int noted;
+    sysclock_note_derived("sceKernelSysClock2USec", &noted);
+    uint64_t clock = (uint64_t)MEM_R32(A0) | ((uint64_t)MEM_R32(A0 + 4u) << 32);
+    uint32_t sec, usec;
+    sysclock_split_usec(clock, &sec, &usec);
+    MEM_W32(A1, sec);
+    MEM_W32(A2, usec);
     return 0;
 }
-/* sceKernelSysClock2USecWide(SceInt64 clock, unsigned *low, unsigned *high): the 64-bit
- * clock is passed by value, so under the o32 convention its low word is $a0 and its high
- * word is $a1, with the two output pointers in $a2 and $a3 (PSPSDK pspthreadman.h). It
- * uses the same microsecond clock representation as h_SysClock2USec, so the split is the
- * identity on the value. Both output spans are validated before either word is written. */
+
+/* The Wide ABI passes the clock in $a0/$a1 and output pointers in $a2/$a3.
+ * PSP-KERNEL-MISC-001 sysclock-wide (public confirmation on PR #3078):
+ * 1234567890 us returned 0 and wrote 1234 s and 567890 us to valid outputs.
+ * That one by-value call is the measured arithmetic cell. Pointer validity
+ * and alias handling retain the runtime's policy and remain unmeasured. */
 static uint32_t h_SysClock2USecWide(CpuState *s) {
     (void)s;
     if (!A2 || !A3 || !sr_guest_span_writable(A2, 4u) || !sr_guest_span_writable(A3, 4u))
         return HLE_KERNEL_ERROR_ILLEGAL_ADDR;
-    MEM_W32(A2, A0);
-    MEM_W32(A3, A1);
+    uint64_t clock = (uint64_t)A0 | ((uint64_t)A1 << 32);
+    if (clock != UINT64_C(1234567890)) {
+        static int noted;
+        sysclock_note_derived("sceKernelSysClock2USecWide", &noted);
+    }
+    uint32_t sec, usec;
+    sysclock_split_usec(clock, &sec, &usec);
+    MEM_W32(A2, sec);
+    MEM_W32(A3, usec);
     return 0;
 }
+
 /* The runtime models SceKernelSysClock as a microsecond count split into low/high
  * words, so converting an unsigned microsecond duration is an identity with a
  * zero high word. Validate the complete guest span before either write. The input
