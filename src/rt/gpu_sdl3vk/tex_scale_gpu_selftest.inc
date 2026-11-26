@@ -49,6 +49,9 @@
  *                    the address and found by the pack at another address;
  *   dump-pal         a CLUT8 texture is dumped under PPSSPP's name with its palette's colours;
  *   dump-mip         a mip-mapped texture's levels are dumped each at its size, level 1 as "_1";
+ *   dump-redump      a later dump replaces a mip level's outdated file the dump wrote itself, leaves
+ *                    level 0's file and an up-to-date one, and keeps the player's enlarged image and
+ *                    one another program saved at the level's size, byte for byte;
  *   guest-bytes      after every cell, no guest VRAM byte outside the drawn frame and no CLUT
  *                    byte changes while the scales land;
  *   smart2d          at a render scale above 1, a 1:1 linear sprite samples nearest (every
@@ -1846,39 +1849,51 @@ static int xst_cell_dump_palette(int f) {
     return 1;
 }
 
+/* Level 1 (8x8) of the mip-mapped texture the dump-mip and dump-redump cells draw. */
+#define XST_MIP1_N ((XST_W / 2) * (XST_H / 2))
+
+/* The state that draws the 16x16 8888 texture at XST_TEX with its level 1 at `l1` (`on`), or puts
+ * the single-level state back (`on` 0). */
+static void xst_dump_mip_state(uint32_t l1, int on) {
+    if (on) {
+        xst_state(XST_BASE, XST_TEX, 3u, 0, 1);
+        s_ge->tex_filter |= 4u;          /* mipmapped minification: the levels are sampled */
+        s_ge->tex_max_level = 1u;
+        s_ge->tex_level_mode = 1u;       /* constant level */
+        s_ge->tex_lod_bias = 0.0f;
+        s_ge->tex_mip_addr[0] = l1;
+        s_ge->tex_mip_bufw[0] = XST_W / 2;
+        s_ge->tex_mip_wlog2[0] = 3u;
+        s_ge->tex_mip_hlog2[0] = 3u;
+    } else {
+        s_ge->tex_filter &= ~4u;
+        s_ge->tex_max_level = 0u;
+        s_ge->tex_level_mode = 0u;
+    }
+    ge_state_note_external_write();
+}
+
 /* A mip-mapped texture is dumped level by level: level 0 under the pack name, level 1 as "_1",
  * each at its own size. */
 static int xst_cell_dump_mip(int f) {
     (void)f;
-    uint32_t t0[XST_W * XST_H], t1[(XST_W / 2) * (XST_H / 2)];
+    uint32_t t0[XST_W * XST_H], t1[XST_MIP1_N];
     char dir[400], name0[64], name1[72];
     xst_dump_folder(dir, sizeof(dir), "texdump_gpu_mip");
     xst_reset();
     nk_tex_scale_set_sync(1);
     memset(&s_dump, 0, sizeof(s_dump));
     xst_pattern(t0, 501u);
-    for (int i = 0; i < (XST_W / 2) * (XST_H / 2); i++) t1[i] = 0xFF000000u | xst_hash(600u + (uint32_t)i);
+    for (int i = 0; i < XST_MIP1_N; i++) t1[i] = 0xFF000000u | xst_hash(600u + (uint32_t)i);
     xst_repl_name(t0, name0, sizeof(name0));   /* also uploads level 0 */
     const uint32_t l1 = XST_TEX + sizeof(t0);
     memcpy(SR_HOST(l1), t1, sizeof(t1));
     xst_wrote(l1, sizeof(t1));
     snprintf(name1, sizeof(name1), "%.*s_1.png", (int)(strlen(name0) - 4u), name0);
-    xst_state(XST_BASE, XST_TEX, 3u, 0, 1);
-    s_ge->tex_filter |= 4u;          /* mipmapped minification: the levels are sampled */
-    s_ge->tex_max_level = 1u;
-    s_ge->tex_level_mode = 1u;       /* constant level */
-    s_ge->tex_lod_bias = 0.0f;
-    s_ge->tex_mip_addr[0] = l1;
-    s_ge->tex_mip_bufw[0] = XST_W / 2;
-    s_ge->tex_mip_wlog2[0] = 3u;
-    s_ge->tex_mip_hlog2[0] = 3u;
-    ge_state_note_external_write();
+    xst_dump_mip_state(l1, 1);
     int ok = xst_dump_start(dir) && xst_dump_draw();
     gegpu_texdump_stop();
-    s_ge->tex_filter &= ~4u;
-    s_ge->tex_max_level = 0u;
-    s_ge->tex_level_mode = 0u;
-    ge_state_note_external_write();
+    xst_dump_mip_state(l1, 0);
     memset(&s_dump, 0, sizeof(s_dump));
     if (!ok) return xst_dump_fail("the mip-mapped draw failed");
     uint32_t w0 = 0, h0 = 0, w1 = 0, h1 = 0;
@@ -1886,6 +1901,199 @@ static int xst_cell_dump_mip(int f) {
         w0 != XST_W || h0 != XST_H || w1 != XST_W / 2 || h1 != XST_H / 2)
         return xst_dump_fail("a mip-mapped texture's levels are not each dumped at their own size");
     printf("gpu texscale selftest: PASS %-12s a mip-mapped texture's levels are dumped, level 1 as _1\n", "dump-mip");
+    return 1;
+}
+
+static uint32_t xst_crc32(const unsigned char *p, size_t n);   /* below, with the dump-exit cell */
+static bool xst_dump_count_tmp(const char *name, void *ctx);
+
+/* dir/name's bytes, malloc'd (1 MiB at most), or NULL. */
+static uint8_t *xst_dump_read(const char *dir, const char *name, size_t *len) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = nk_fopen_utf8(path, "rb");
+    if (!fp) return NULL;
+    uint8_t *b = (uint8_t *)malloc(1u << 20);
+    const size_t n = b ? fread(b, 1, 1u << 20, fp) : 0u;
+    fclose(fp);
+    if (!b || n == 0u || n >= (1u << 20)) {
+        free(b);
+        return NULL;
+    }
+    *len = n;
+    return b;
+}
+
+/* Whether dir/name holds exactly the `n` bytes `want`. */
+static int xst_dump_bytes_are(const char *dir, const char *name, const uint8_t *want, size_t n) {
+    size_t got_n = 0;
+    uint8_t *got = xst_dump_read(dir, name, &got_n);
+    const int ok = got && got_n == n && memcmp(got, want, n) == 0;
+    free(got);
+    return ok;
+}
+
+/* Whether the PNG bytes `b` (`n`) decode, as a pack image is, to exactly level 1's 8x8 `want`. */
+static int xst_png_is_level1(const uint8_t *b, size_t n, const uint32_t *want) {
+    uint32_t *px = NULL;
+    int w = 0, h = 0;
+    char why[96];
+    const int ok = b && nk_texrepl_decode_png(b, n, 0, &px, &w, &h, why, sizeof(why)) && w == XST_W / 2 &&
+                   h == XST_H / 2 && memcmp(px, want, sizeof(uint32_t) * XST_MIP1_N) == 0;
+    free(px);
+    return ok;
+}
+
+static int xst_dump_holds_level1(const char *dir, const char *name, const uint32_t *want) {
+    size_t n = 0;
+    uint8_t *b = xst_dump_read(dir, name, &n);
+    const int ok = xst_png_is_level1(b, n, want);
+    free(b);
+    return ok;
+}
+
+static int xst_dump_write(const char *dir, const char *name, const uint8_t *b, size_t n) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = nk_fopen_utf8(path, "wb");
+    if (!fp) return 0;
+    int ok = fwrite(b, 1, n, fp) == n;
+    if (fclose(fp) != 0) ok = 0;
+    return ok;
+}
+
+/* One dump stretch: on, one draw, off. */
+static int xst_dump_stretch(const char *dir) {
+    const int ok = xst_dump_start(dir) && xst_dump_draw();
+    gegpu_texdump_stop();
+    return ok;
+}
+
+/* A re-dump of a mip-mapped texture (#1880). A mip level's file is named for level 0's content
+ * ("<level 0's name>_1.png"), so the game can change level 1 and keep the name. A later dump that
+ * finds level 1's file holding another level than the one drawn replaces it when the file is the
+ * dump's own (at the level's size, and its bytes what the dump's encoder makes of its pixels); level
+ * 0's file, named for its own content, is left byte for byte; an unchanged level is left and counted
+ * as there. A file the player made at the name is kept byte for byte whatever the game draws: an
+ * enlarged image, and one at the level's size that another program saved (here, the dump's bytes
+ * with a tEXt chunk added). Failing before: the later dump counted the outdated level 1 as already
+ * there and kept it. */
+static int xst_cell_dump_redump(int f) {
+    (void)f;
+    uint32_t t0[XST_W * XST_H], la[XST_MIP1_N], lb[XST_MIP1_N], big[XST_W * XST_H];
+    char dir[400], name0[64], name1[72];
+    const char *why = NULL;
+    uint8_t *b0 = NULL, *b1 = NULL, *mine = NULL;
+    size_t n0 = 0, n1 = 0, mine_n = 0;
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_redump");
+    xst_reset();
+    nk_tex_scale_set_sync(1);
+    memset(&s_dump, 0, sizeof(s_dump));
+    xst_pattern(t0, 901u);
+    for (int i = 0; i < XST_MIP1_N; i++) {
+        la[i] = 0xFF000000u | xst_hash(1000u + (uint32_t)i);
+        lb[i] = 0xFF000000u | xst_hash(1200u + (uint32_t)i);
+    }
+    for (int i = 0; i < XST_W * XST_H; i++) big[i] = 0xFF000000u | xst_hash(1400u + (uint32_t)i);
+    xst_repl_name(t0, name0, sizeof(name0));   /* also uploads level 0 */
+    snprintf(name1, sizeof(name1), "%.*s_1.png", (int)(strlen(name0) - 4u), name0);
+    const uint32_t l1 = XST_TEX + sizeof(t0);
+    xst_dump_mip_state(l1, 1);
+    unsigned long long written = 0, present = 0;
+
+    /* 1. The first dump writes both levels, level 1 holding la. */
+    memcpy(SR_HOST(l1), la, sizeof(la));
+    xst_wrote(l1, sizeof(la));
+    if (!xst_dump_stretch(dir) || s_dump.written != 2u || !xst_dump_holds_level1(dir, name1, la) ||
+        !(b0 = xst_dump_read(dir, name0, &n0))) {
+        why = "the first dump did not write both levels";
+        goto done;
+    }
+
+    /* 2. Level 1 is now lb, level 0 as it was: level 1's file is replaced, level 0's left. */
+    memcpy(SR_HOST(l1), lb, sizeof(lb));
+    xst_wrote(l1, sizeof(lb));
+    written = s_dump.written;
+    present = s_dump.present;
+    if (!xst_dump_stretch(dir) || !xst_dump_holds_level1(dir, name1, lb) || !xst_dump_bytes_are(dir, name0, b0, n0) ||
+        s_dump.written != written + 1u || s_dump.present != present + 1u) {
+        why = "a later dump kept the outdated level 1 file it wrote itself, or rewrote level 0's file";
+        goto done;
+    }
+
+    /* 3. Drawn again unchanged: both files left as they are and counted as there. */
+    if (!(b1 = xst_dump_read(dir, name1, &n1))) { why = "level 1's file cannot be read"; goto done; }
+    written = s_dump.written;
+    present = s_dump.present;
+    if (!xst_dump_stretch(dir) || !xst_dump_bytes_are(dir, name1, b1, n1) || s_dump.written != written ||
+        s_dump.present != present + 2u) {
+        why = "a later dump rewrote an up-to-date level 1 file, or did not count it as there";
+        goto done;
+    }
+
+    /* 4. The player's level 1, enlarged 2 times: kept byte for byte though the game's level is la now. */
+    memcpy(SR_HOST(l1), la, sizeof(la));
+    xst_wrote(l1, sizeof(la));
+    if (!sr_png_encode_rgba(big, XST_W, XST_H, &mine, &mine_n) || !xst_dump_write(dir, name1, mine, mine_n)) {
+        why = "the test could not write the player's enlarged image";
+        goto done;
+    }
+    written = s_dump.written;
+    if (!xst_dump_stretch(dir) || !xst_dump_bytes_are(dir, name1, mine, mine_n) || s_dump.written != written) {
+        why = "a later dump replaced the player's enlarged level 1 image";
+        goto done;
+    }
+
+    /* 5. A level 1 at the level's size that another program saved (the dump's own bytes for lb with
+     * a tEXt chunk after IHDR, which decodes to the same pixels): kept byte for byte. */
+    free(mine);
+    mine = NULL;
+    {
+        uint8_t *enc = NULL;
+        size_t enc_n = 0;
+        static const unsigned char text[] = { 't', 'E', 'X', 't', 'S', 'o', 'f', 't', 'w', 'a', 'r', 'e', 0,
+                                              'P', 'a', 'i', 'n', 't' };
+        const uint32_t text_len = (uint32_t)sizeof(text) - 4u;
+        const size_t ihdr_end = 8u + 12u + 13u;
+        if (sr_png_encode_rgba(lb, XST_W / 2, XST_H / 2, &enc, &enc_n) && enc_n > ihdr_end &&
+            (mine = (uint8_t *)malloc(enc_n + 12u + text_len)) != NULL) {
+            const uint32_t crc = xst_crc32(text, sizeof(text));
+            memcpy(mine, enc, ihdr_end);
+            uint8_t *c = mine + ihdr_end;
+            c[0] = (uint8_t)(text_len >> 24); c[1] = (uint8_t)(text_len >> 16);
+            c[2] = (uint8_t)(text_len >> 8); c[3] = (uint8_t)text_len;
+            memcpy(c + 4, text, sizeof(text));
+            c += 4u + sizeof(text);
+            c[0] = (uint8_t)(crc >> 24); c[1] = (uint8_t)(crc >> 16); c[2] = (uint8_t)(crc >> 8); c[3] = (uint8_t)crc;
+            memcpy(c + 4, enc + ihdr_end, enc_n - ihdr_end);
+            mine_n = enc_n + 12u + text_len;
+        }
+        free(enc);
+    }
+    if (!mine || !xst_png_is_level1(mine, mine_n, lb) || !xst_dump_write(dir, name1, mine, mine_n)) {
+        why = "the test could not make another program's level 1 image (it must decode to lb)";
+        goto done;
+    }
+    written = s_dump.written;
+    if (!xst_dump_stretch(dir) || !xst_dump_bytes_are(dir, name1, mine, mine_n) || s_dump.written != written) {
+        why = "a later dump replaced a level 1 image at the level's size that another program saved";
+        goto done;
+    }
+    {
+        int tmp = 0;
+        if (!nk_platform_list_files(dir, xst_dump_count_tmp, &tmp) || tmp != 0) why = "a temp file was left";
+    }
+
+done:
+    gegpu_texdump_stop();
+    xst_dump_mip_state(l1, 0);
+    memset(&s_dump, 0, sizeof(s_dump));
+    free(b0);
+    free(b1);
+    free(mine);
+    if (why) return xst_dump_fail(why);
+    printf("gpu texscale selftest: PASS %-12s a re-dump replaces the dump's own outdated mip level file, leaves "
+           "level 0's and an up-to-date one, and keeps the player's enlarged and re-saved images\n", "dump-redump");
     return 1;
 }
 
@@ -2215,6 +2423,74 @@ done:
     return 1;
 }
 
+/* The same end on another thread with a file being written (#1880 review of #2364): with the
+ * workers held and one level handed to them, the other thread's end must not let the hold go, wait
+ * for the workers or take the job back; it counts the file it leaves (s_dump_exit_dropped) and
+ * leaves the dump's state alone. The drawing thread's own end then lets the file land and counts
+ * nothing as left. */
+static int xst_cell_dump_thread_busy(int f) {
+    (void)f;
+    uint32_t t[XST_W * XST_H];
+    char dir[400], name[64];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_thread_busy");
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(0);
+    nk_tex_scale_set_hold(1);
+    s_dump_exit_wait_ms = 200u;   /* an end that waited despite the rule gives up soon, and fails below */
+    const char *why = NULL;
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+    xst_pattern(t, 811u);
+    xst_repl_name(t, name, sizeof(name));   /* also uploads it */
+    xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    if (s_dump.inflight != 1u || nk_tex_scale_work_pending(tex_dump_job_run) != 1 || !s_dump.owner) {
+        why = "the drawn level was not held by the workers";
+        goto done;
+    }
+    const void *names = s_dump.names;
+    const uint32_t *scratch = s_dumpscratch;
+    s_dump_exit_dropped = 0u;
+    SDL_Thread *th = SDL_CreateThread(xst_dump_end_elsewhere, "xst-dump-end-busy", NULL);
+    if (!th) { why = "the other thread could not be started"; goto done; }
+    SDL_WaitThread(th, NULL);
+    if (s_dump_exit_dropped != 1u || s_dump.inflight != 1u || nk_tex_scale_work_pending(tex_dump_job_run) != 1 ||
+        !s_dump.on || s_dump.names != names || s_dumpscratch != scratch || xst_dump_has(dir, name)) {
+        why = "an end on another thread with a file being written waited for it, took it back, did not count "
+              "it as left, or cleared the dump's state";
+        goto done;
+    }
+    s_dump_exit_wait_ms = TEX_DUMP_EXIT_WAIT_MS;
+    tex_dump_shutdown();   /* the drawing thread's own end: lets the hold go and waits */
+    if (s_dump.on || s_dump.starts || s_dump_exit_dropped != 0u || !xst_dump_has(dir, name) ||
+        !xst_dump_png_crcs_ok(dir, name))
+        why = "the drawing thread's end did not let the held file land whole";
+
+done:
+    s_dump_exit_wait_ms = TEX_DUMP_EXIT_WAIT_MS;
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    {
+        void *ctx = NULL;
+        while (nk_tex_scale_take_work(tex_dump_job_run, &ctx)) {   /* a job a failed check left behind */
+            TexDumpJob *j = (TexDumpJob *)ctx;
+            free(j->rgba);
+            free(j);
+        }
+    }
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);
+    if (why) {
+        fprintf(stderr, "gpu texscale selftest: FAIL dump-thread-busy: %s\n", why);
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s an end on another thread with a file being written counted it as "
+           "left and did not wait; the drawing thread's end let it land\n", "dump-thread-busy");
+    return 1;
+}
+
 int gegpu_texrepl_only_prepare(const char *build_root) {
     char dir[400], path[480];
     snprintf(dir, sizeof(dir), "%s/texrepl_gpu_only_pack", build_root);
@@ -2426,13 +2702,14 @@ int gegpu_texscale_selftest(void) {
     static int (*const cells[])(int) = { xst_cell_scaled_draw, xst_cell_large, xst_cell_upload_cap,
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
                                          xst_cell_replace_palette, xst_cell_dump, xst_cell_dump_xxh,
-                                         xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async,
-                                         xst_cell_dump_exit, xst_cell_dump_stuck, xst_cell_dump_thread,
-                                         xst_cell_budget,
+                                         xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_redump,
+                                         xst_cell_dump_async, xst_cell_dump_exit, xst_cell_dump_stuck,
+                                         xst_cell_dump_thread, xst_cell_dump_thread_busy, xst_cell_budget,
                                          xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
                                          "replace", "replace-pal", "dump", "dump-xxh",
-                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "dump-stuck", "dump-thread", "budget", "rtt", "color-test",
+                                         "dump-pal", "dump-mip", "dump-redump", "dump-async", "dump-exit",
+                                         "dump-stuck", "dump-thread", "dump-thread-busy", "budget", "rtt", "color-test",
                                          "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */

@@ -1600,10 +1600,19 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   until its content has held still for 300 presents (a font cache that has finished typing, a streaming slot that
   settled); then it is dumped again. A texture skipped as a movie picture or for its changing address is looked at
   again once that no longer holds, so a texture the game loads where a movie played is not lost. A file already in
-  the folder is never written again or replaced:
+  the folder is never written again or replaced, with one exception below:
   each PNG (compressed with fixed-Huffman deflate, `sr_png_encode_rgba`) is written to a temporary file and moved
   into place only while no file has the name (`sr_file_publish_new_tagged`, `nk_rename_noreplace_utf8`), so an image
-  the player enlarges in place is kept even when it is saved during the dump. Every file call is the platform layer's
+  the player enlarges in place is kept even when it is saved during the dump. The exception is a mip level's file
+  the dump wrote itself: a level from 1 up is named for level 0's content, not its own, so the game can change
+  the level under the same name. When a later dump finds such a file holding another level than the one drawn,
+  a worker replaces it (written whole to a temp file and renamed over it), counted in `written=` (one that cannot
+  be written is a failed write, below), and under the budget and file limit a new file has, but only when
+  the file is the dump's own: a PNG at the level's size whose bytes are what the dump's encoder makes of its
+  pixels. Any other file at the name (an enlarged image, or one another program saved, at any size) is the
+  player's and is kept as it is, counted in `already_there=`, as is a file that already holds the level drawn.
+  Level 0's file is named for its own content, so it is never outdated. The check and the rename are not one
+  step: a file the player saves at that name in between is replaced. Every file call is the platform layer's
   wide-path one, so a user data folder under a user name that is not ASCII works. Nothing the guest can observe
   changes: each texture is decoded from guest memory, on the guest thread, into a buffer of its own, and written to
   disk, never to guest memory; files are written only inside the folder. The encode and the write run on the
@@ -1646,7 +1655,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   calls `sr_texdump_exit_finish` beside its video recording's finish (`SR_EXIT_AT_VBLANK`, `SR_WATCHDOG_EXIT`, the
   `SR_FBDUMP` capture exit and its no-framebuffer stop, an unsupported import, an unregistered NID, a guest fault,
   a failed route check, a refused `SR_SAMPLE_SPEC`, the libfont start-up stop, an enhancement data mismatch, and a
-  failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). An end reached on a
+  failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). One `_Exit` finishes
+  neither: the verify harness's `--hard-exit` (`src/rt/verify_harness.c`, a verify build's own test program), which
+  links no renderer, display or player, so no dump or recording can run there. An end reached on a
   thread other than the one that draws does not wait and says what it leaves. A crash, or an `abort()`, finishes
   nothing: what was queued is lost and a temp file can be left. The PNG encoder's CRC table is constant, so the
   workers share no state while they encode.
@@ -1745,7 +1756,13 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   is written on its next draw. Its `dump-exit` cell holds 20 levels with the workers and calls what the exit at
   `SR_EXIT_AT_VBLANK` calls: every level is written whole by both workers at once, each file's CRCs right, and no
   temp file is left. Its `dump-stuck` cell holds both workers with jobs that do not finish: the end gives up after
-  its bounded wait and counts the levels it left. `hle-thread-selftest` runs two real stops in a child process, an
+  its bounded wait and counts the levels it left. Its `dump-thread` cell ends the run on another thread with
+  nothing being written, and `dump-thread-busy` with a level held by the workers: that end neither waits nor
+  takes the job back, counts the level as left and leaves the dump's state alone, and the drawing thread's own end
+  then lets the file land. Its `dump-redump` cell dumps a mip-mapped texture, changes level 1 only and dumps
+  again: level 1's file is replaced and level 0's left byte for byte; drawn unchanged, both are left and counted
+  as there; and the player's level 1 enlarged 2 times, and one at the level's size that another program saved,
+  are each kept byte for byte. `hle-thread-selftest` runs two real stops in a child process, an
   unregistered NID (status 7) and `SR_WATCHDOG_EXIT` (status 1), with a probe in the dump's place, and requires
   that each reaches `sr_texdump_exit_finish` before the process ends. `tex-scale-selftest` checks the work jobs
   themselves: each runs once, on a worker thread, never the submitter's, and knows it is on one; held jobs stay
