@@ -304,8 +304,9 @@ void sr_trace_window_record(uint32_t pc, const char *text);
 
 /* ---- SR_WATCH: guest stores intersecting one address range ----
  * SR_WATCH=ADDR:LEN is probed once during runtime initialization. Store helpers
- * check the exported flag before entering the recorder, so the disabled path
- * adds only a predicted-false branch and no diagnostic call. */
+ * check the exported flag once and hand an armed store to recomp.h's cold
+ * sr_watch_armed_store, so the disabled path adds only a predicted-false branch
+ * and no diagnostic call. */
 extern int g_sr_watch_enabled;
 #define SR_WATCH_ACTIVE() (g_sr_watch_enabled)
 void sr_watch_configure(void);
@@ -319,11 +320,6 @@ int sr_watch_last_hit(SrWatchHit *out);
 /* The scheduler registers its current-thread uid query here (sched_init). */
 typedef uint32_t (*SrWatchThreadSource)(void);
 void sr_watch_set_thread_source(SrWatchThreadSource source);
-/* recomp.h's sr_watch_note_store gathers the hit's register and thread context. */
-#define SR_WATCH_STORE_IF_ARMED(pc, addr, value, width, old_value) do { \
-    if (__builtin_expect(g_sr_watch_enabled, 0)) \
-        sr_watch_note_store((pc), (addr), (value), (width), (old_value)); \
-} while (0)
 
 void sr_flight_init(void);
 /* Marks the run as enhanced (Ace Mode, ace.h): the bundle's runtime block then carries
@@ -415,7 +411,6 @@ static inline const SrTraceWindowIndices *sr_trace_window_indices(void) { return
 static inline void sr_trace_window_record(uint32_t pc, const char *text) {
     (void)pc; (void)text;
 }
-#define SR_WATCH_STORE_IF_ARMED(pc, addr, value, width, old_value) ((void)(old_value))
 #define SR_WATCH_ACTIVE() 0
 static inline void sr_watch_configure(void) {}
 static inline void sr_watch_note_vblank(uint32_t vblank) { (void)vblank; }
