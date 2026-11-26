@@ -900,7 +900,7 @@ jobs:
     #   routes:      the pinned gu-cube player smoke and the profile-zero route,
     #                each of which builds its own player and guest
     # #3166: over the 20 newest successful full runs (2026-11-25 and 26), translation
-    # was the longest Linux job (median 20.1 min, p90 25.8) and player took 16.1, so
+    # was the longest native_tools part (median 20.1 min, p90 25.8) and player took 16.1, so
     # the GPU steps left translation for gpu and the two routes left player for
     # routes; no step moved in the file or changed. Expected minutes (step medians
     # plus the part's setup; no hosted run has measured this layout): core 12.9,

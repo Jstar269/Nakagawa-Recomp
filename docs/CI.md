@@ -504,7 +504,7 @@ dropped, runs in more than one part, or changes its command, and pins the steps 
 and `routes` parts by name.
 
 Until #3166 the job ran three parts. Over the 20 newest successful first-attempt full runs
-(2026-11-25 20:44 to 2026-11-26 18:05 UTC), `translation` was the longest Linux job (median
+(2026-11-25 20:44 to 2026-11-26 18:05 UTC), `translation` was the longest `native_tools` part (median
 20.1 minutes, p90 25.8) and `player` took 16.1, so the GPU steps moved from `translation` to
 `gpu` and the `gu-cube` smoke and the profile-zero route from `player` to `routes`. No step
 moved in the workflow or changed anything but its part. Expected minutes per part, the step
@@ -2193,7 +2193,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 18 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 20 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.
@@ -2389,7 +2389,7 @@ developer runs locally, without private inputs:
   gate rebuilds the fixture itself and fails if any byte differs from `SHA256SUMS`.
   The make target runs the route case at the full test tier, and the step sets
   `NK_PROFILE_ZERO_REQUIRED=1`, so a missing Vulkan SDK or SDL3 fails it rather than
-  skipping it. The `player` part of `native_tools` runs the same gate on Linux, where
+  skipping it. The `routes` part of `native_tools` runs the same gate on Linux, where
   PSPDEV is installed and the guest is rebuilt from source. On both hosts the gate also
   runs each package on the deterministic guest clock and compares digests of its
   result file, save and first rasterized frame with the values pinned in
