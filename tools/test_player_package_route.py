@@ -1245,6 +1245,70 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("add the disc from the player's library", completed.stderr)
         self.assertTrue((self.user_root / "experimental" / DISC_ID / "profile.json").is_file())
 
+    def run_prepare(self, *args: str) -> subprocess.CompletedProcess:
+        """The player's --prepare (RecompLauncher's headless setup step) in self.user_root."""
+        return subprocess.run(
+            [str(self.player), "--prepare", f"--user-data-root={self.user_root}", *args],
+            cwd=ROOT, env=self._isolated_profile_env(), capture_output=True, text=True,
+            timeout=120,
+        )
+
+    def assert_prepare_progress(self, stdout: str) -> list[float]:
+        """Every `progress <0..1> <text>` line is well formed and the bar never goes back."""
+        lines = re.findall(r"^progress (\S+) (.*)$", stdout, re.M)
+        self.assertTrue(lines, stdout)
+        fractions = []
+        for fraction, text in lines:
+            self.assertRegex(fraction, r"^[01]\.\d{3}$")
+            self.assertTrue(text.strip(), stdout)
+            fractions.append(float(fraction))
+        self.assertEqual(fractions, sorted(fractions), stdout)
+        self.assertLessEqual(fractions[-1], 1.0)
+        return fractions
+
+    def test_prepare_refuses_another_disc_before_writing_anything(self):
+        """--expect-disc names the one game the setup step may set up: another disc is refused
+        with code 2, naming both, before a profile, a staged file or a library entry is written.
+        """
+        self.skip_if_toolchain_unavailable()
+        iso_path = self.root / "another game.iso"
+        create_test_iso_with_executables(
+            iso_path, build_plain_mips_elf() + bytes(i % 251 for i in range(70000)),
+            disc_id=DISC_ID, title="Synthetic Experimental Disc",
+        )
+        for leftover in ("library.json", "experimental"):
+            path = self.user_root / leftover
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+        completed = self.run_prepare("--expect-disc=UCUS-98701", f"--game={iso_path}")
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn(f"This disc image is {DISC_ID}", completed.stderr)
+        self.assertIn("not UCUS-98701", completed.stderr)
+        self.assert_prepare_progress(completed.stdout)
+        self.assertFalse((self.user_root / "experimental" / DISC_ID).exists())
+        self.assertFalse((self.user_root / "library.json").exists())
+        self.assertFalse((self.user_root / "packages").exists())
+
+    def test_prepare_on_an_uncatalogued_disc_stops_at_the_title_list(self):
+        """--prepare takes the --stage-only route first: a disc outside the title list stops
+        there with code 3 and no build, after progress lines a launcher can show."""
+        self.skip_if_toolchain_unavailable()
+        iso_path = self.root / "uncatalogued-prepare.iso"
+        create_test_iso_with_executables(
+            iso_path, build_plain_mips_elf() + bytes(i % 251 for i in range(70000)),
+            disc_id=DISC_ID, title="Synthetic Experimental Disc",
+        )
+        completed = self.run_prepare(f"--expect-disc={DISC_ID.lower()}", f"--game={iso_path}")
+        self.assertEqual(completed.returncode, 3, completed.stdout + completed.stderr)
+        self.assertIn(f"STAGING_RESULT status=FAIL disc_id={DISC_ID}", completed.stdout)
+        self.assertIn("not in Nakagawa's title list yet", completed.stderr)
+        self.assertNotIn("PREPARE_RESULT status=PASS", completed.stdout)
+        self.assertNotIn("Building the game", completed.stdout)
+        self.assert_prepare_progress(completed.stdout)
+        self.assertFalse((self.user_root / "packages" / DISC_ID / "package.json").exists())
+
     def homebrew_folder(self, eboot: Path, folder: str, files: dict[str, bytes]) -> Path:
         """Put the built package in its own folder, as on a PSP's Memory Stick, beside files."""
         game: Path = self.root / "stick" / "PSP" / "GAME" / folder

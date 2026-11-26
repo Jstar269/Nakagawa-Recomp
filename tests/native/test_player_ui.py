@@ -2823,6 +2823,9 @@ class NativePlayerUiTests(unittest.TestCase):
             (("--launch-title",), "--launch-title needs a value"),
             (("--user-data-root",), "--user-data-root needs a value"),
             (("--stage-only=yes",), "--stage-only takes no value"),
+            (("--prepare=yes",), "--prepare takes no value"),
+            (("--expect-disc",), "--expect-disc needs a value"),
+            (("--game",), "--game needs a value"),
             (("game.iso",), "Unexpected argument 'game.iso'"),
         )
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
@@ -2833,6 +2836,50 @@ class NativePlayerUiTests(unittest.TestCase):
                     self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
                     self.assertIn(message, completed.stderr)
                     self.assertIn("--help", completed.stderr)
+
+    def test_prepare_refuses_a_command_line_it_cannot_finish(self) -> None:
+        """--prepare is a launcher's headless setup step (RecompLauncher's prepare): it needs a
+        disc image, sets one game up and exits, so a second route on the same command line, a
+        second disc image or an --expect-disc without it is refused with code 2 before anything
+        is read or written."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            data = scratch / "data"
+            cases = (
+                (("--prepare",), "--prepare requires --game=<path>"),
+                (("--iso=one.iso", "--stage-only", "--expect-disc=UCUS98701"),
+                 "--expect-disc is read only with --prepare"),
+                (("--prepare", "--game=one.iso", "--launch-title=UCUS98701"),
+                 "--prepare sets a game up and exits"),
+                (("--prepare", "--game=one.iso", "--launch-now"),
+                 "--prepare sets a game up and exits"),
+                (("--prepare", "--iso=one.iso", "--game=two.iso"),
+                 "--iso and --game name different files"),
+            )
+            for args, message in cases:
+                with self.subTest(args=args):
+                    completed = self.run_player_args(scratch, f"--user-data-root={data}", *args)
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                    self.assertIn(message, completed.stderr)
+                    self.assertFalse((data / "library.json").exists())
+
+    def test_prepare_reports_progress_and_a_file_that_is_no_disc_image(self) -> None:
+        """--prepare prints `progress <0..1> <text>` lines on stdout from its first step, and a
+        file that is no disc image ends it with code 1 and the reason last, with the library
+        untouched. --game is --iso's other name."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            data = scratch / "data"
+            not_a_disc = scratch / "not a disc.iso"
+            not_a_disc.write_bytes(b"\0" * 4096)
+            completed = self.run_player_args(scratch, "--prepare", f"--user-data-root={data}",
+                                             "--expect-disc=UCUS98701", "--game", str(not_a_disc))
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        progress = re.findall(r"^progress (\d\.\d{3}) (.+)$", completed.stdout, re.M)
+        self.assertEqual(progress[0], ("0.000", "Reading your disc image"), completed.stdout)
+        self.assertIn("Failed to inspect ISO", completed.stderr)
+        self.assertNotIn("Unknown option", completed.stderr)
+        self.assertFalse((data / "library.json").exists())
 
     def test_version_prints_one_line_and_exits_zero(self) -> None:
         """--version names the version and, when the build knows it, the commit, on one line;
@@ -2885,7 +2932,8 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(completed.stdout.startswith("Usage: nakagawa_player"), completed.stdout)
         for option in ("--user-data-root", "--iso", "--launch-now", "--launch-title",
-                       "--launch-index", "--version", "--help", "--cheats-file"):
+                       "--launch-index", "--version", "--help", "--cheats-file", "--prepare",
+                       "--game", "--expect-disc"):
             self.assertIn(option, completed.stdout)
         self.assertIn("Exit codes", completed.stdout)
 
