@@ -709,26 +709,29 @@ jobs:
     # fixture), not hygiene: hygiene runs beside it and ci_required still requires its
     # result (docs/CI.md, "Hygiene beside the substantive gates").
     needs: [classify, public_export]
-    # The suite is ~58 minutes serially on a hosted runner under coverage (the
-    # median of five landing-batch runs, 2026-11-10). Four runners split the test files with
-    # tools/ci_test_shards.py: a deterministic longest-first bin packing over the
-    # measured per-module durations in tools/ci_test_weights.json (#693). Every
-    # file runs exactly once across the shards, shards never share a working
+    # The suite is 4645 s (77.4 minutes) serially on a hosted runner under coverage (the
+    # sum of per-module medians over seven full-matrix runs, 2026-11-25 to 2026-11-26). Six
+    # runners split it with tools/ci_test_shards.py: a deterministic longest-first bin
+    # packing over the measured durations in tools/ci_test_weights.json (#693), whose
+    # units are test modules and, for a module listed under split there, its test
+    # classes (MODULE.CLASS). Every test file (every class of a split module) runs
+    # exactly once across the shards, shards never share a working
     # tree, and modules that mutate tracked state never share a shard.
     # needs.python_tools.result is the aggregate of all shards, so ci_required is
-    # unchanged. The shard list comes from the classifier: four shards over every
+    # unchanged. The shard list comes from the classifier: six shards over every
     # module, or -- when a recipe-only Makefile edit is the only reason to run
-    # Python (#702) -- four shards over the modules that can observe that edit.
-    # test_production_smoke alone takes about 16 minutes and has a shard to itself;
-    # the other three plan to about 14 minutes each, and a fifth shard would not
-    # shorten the job. Four keep a full run inside the free plan's 20 concurrent
-    # jobs (docs/CI.md, "Jobs per run").
+    # Python (#702) -- six shards over the modules that can observe that edit.
+    # test_production_smoke.TestSanitizedBringup (831.75 s, its median over those runs)
+    # has a shard to itself; the other five plan to 762.49-762.5 s each, five shards would
+    # plan to 928.84-928.85 s each, and a seventh would not shorten the job. These are
+    # expected times; no hosted run has measured six shards yet. Six add two jobs to a
+    # full run (docs/CI.md, "Jobs per run").
     strategy:
       fail-fast: false
       matrix:
         # The fallback only keeps the expression parseable when classify produced no
         # outputs; the job's own condition skips it in that case.
-        shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3]') }}
+        shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3, 4, 5]') }}
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
           needs.public_export.result == 'success' &&

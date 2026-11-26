@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
+import contextlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -16,7 +19,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from typing import ClassVar, cast
+from typing import ClassVar, Iterator, Sequence, cast
 
 try:
     import ci_paths
@@ -27,14 +30,16 @@ except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_ci_tes
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "tools"
 TOOL = ROOT / "tools" / "ci_test_shards.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 MUTATING_PAIR = frozenset({"test_title_catalog", "test_publication_policy_gate"})
 
 
-def _data(weights: dict[str, float], *, default: float = 0.5, separate: list[list[str]] | None = None):
+def _data(weights: dict[str, float], *, default: float = 0.5, separate: list[list[str]] | None = None,
+          split: list[str] | None = None):
     return ci_test_shards.parse_weight_data(
-        {"default_seconds": default, "weights": weights, "separate": separate or []}
+        {"default_seconds": default, "weights": weights, "separate": separate or [], "split": split or []}
     )
 
 
@@ -109,10 +114,51 @@ def _step_bash() -> tuple[str | None, str]:
                   + (", ".join(checked) if checked else "no Git install location known") + ")")
 
 
+@contextlib.contextmanager
+def _importable_from(folder: Path) -> Iterator[None]:
+    """Put ``folder`` first on sys.path for the block, as ``PYTHONPATH=tools`` does in CI."""
+    sys.path.insert(0, str(folder))
+    try:
+        yield
+    finally:
+        sys.path.remove(str(folder))
+
+
+def _test_ids(suite: unittest.TestSuite) -> Counter[str]:
+    ids: Counter[str] = Counter()
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            ids.update(_test_ids(item))
+        else:
+            ids[item.id()] += 1
+    return ids
+
+
+def _loader_drift(module: str, units: Sequence[str], folder: Path) -> list[str]:
+    """How the planner's class units of ``module`` differ from unittest's own loading of it.
+
+    The module is imported from ``folder`` and loaded with ``loadTestsFromModule``; the
+    units are loaded with ``loadTestsFromNames``, as ``python -m unittest`` loads the
+    shard's arguments. Empty when both give the same test ids the same number of times."""
+    loader = unittest.TestLoader()
+    with _importable_from(folder):
+        whole = _test_ids(loader.loadTestsFromModule(importlib.import_module(module)))
+        by_unit = _test_ids(loader.loadTestsFromNames(list(units)))
+    problems = []
+    if set(whole) != set(by_unit):
+        problems.append(f"{module}: only unittest's loader finds {sorted(set(whole) - set(by_unit))}; "
+                        f"only the units find {sorted(set(by_unit) - set(whole))}")
+    twice = sorted(test for test in set(whole) & set(by_unit) if whole[test] != by_unit[test])
+    if twice:
+        problems.append(f"{module}: these tests run a different number of times: {twice}")
+    return problems
+
+
 class LiveRepositoryPlanTests(unittest.TestCase):
     """The committed data and the tracked test modules, exactly as CI consumes them."""
 
     modules: ClassVar[list[str]]
+    units: ClassVar[list[str]]
     data: ClassVar[ci_test_shards.WeightData]
     python_job: ClassVar[str]
     num_shards: ClassVar[int]
@@ -121,6 +167,7 @@ class LiveRepositoryPlanTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.modules = ci_test_shards.discover_modules()
         cls.data = ci_test_shards.load_weight_data()
+        cls.units = ci_test_shards.expand_units(cls.modules, cls.data)
         workflow = WORKFLOW.read_text(encoding="utf-8")
         cls.python_job = workflow.split("\n  python_tools:", 1)[1].split("\n  native_tools:", 1)[0]
         cls.num_shards = ci_paths.PYTHON_SHARDS_FULL
@@ -134,19 +181,30 @@ class LiveRepositoryPlanTests(unittest.TestCase):
                 names = result.stdout.splitlines()
                 self.assertTrue(names, f"shard {shard} is empty")
                 scheduled.extend(names)
-        self.assertEqual(len(scheduled), len(set(scheduled)), "a module is scheduled on two shards")
+        self.assertEqual(len(scheduled), len(set(scheduled)), "a unit is scheduled on two shards")
         return scheduled
+
+    def assert_each_module_once(self, scheduled: list[str], expected_modules: list[str]) -> None:
+        """Every module runs once: whole, or (a split module) as each of its classes once, never both."""
+        whole = [name for name in scheduled if "." not in name]
+        by_class = sorted(name for name in scheduled if "." in name)
+        class_modules = sorted({ci_test_shards.unit_module(name) for name in by_class})
+        self.assertEqual(sorted(whole + class_modules), expected_modules)
+        self.assertEqual(class_modules, sorted(set(self.data.split) & set(expected_modules)))
+        self.assertEqual(sorted(set(whole) & set(self.data.split)), [], "a split module is also scheduled whole")
+        self.assertEqual(by_class, [unit for unit in self.units if ci_test_shards.unit_module(unit) in class_modules])
 
     def test_every_test_module_runs_exactly_once_across_the_cli_shards(self) -> None:
         scheduled = self.run_shards(self.num_shards, "all")
         expected = sorted(path.stem for path in (ROOT / "tools").glob("test_*.py"))
-        self.assertEqual(sorted(scheduled), expected)
+        self.assert_each_module_once(scheduled, expected)
         self.assertIn("test_ci_test_shards", scheduled)
+        self.assertIn("test_production_smoke.TestSanitizedBringup", scheduled)
 
     def test_makefile_selection_runs_each_coupled_module_exactly_once(self) -> None:
         scheduled = self.run_shards(ci_paths.PYTHON_SHARDS_MAKEFILE, "makefile")
         coupled = ci_test_shards.makefile_coupled_modules(self.modules)
-        self.assertEqual(sorted(scheduled), coupled)
+        self.assert_each_module_once(scheduled, coupled)
         # Modules that read the Makefile text or build through make must be in it.
         for module in ("test_title_runtime_config", "test_build_truth", "test_public_ci_wiring",
                        "test_ci_paths", "test_production_smoke"):
@@ -155,7 +213,7 @@ class LiveRepositoryPlanTests(unittest.TestCase):
     def test_mutating_modules_are_declared_separate_and_never_share_a_shard(self) -> None:
         self.assertIn(MUTATING_PAIR, [group & MUTATING_PAIR for group in self.data.separate],
                       "the weight data must keep the tracked-state mutators in one separation group")
-        plan = ci_test_shards.plan_shards(self.modules, self.data, self.num_shards)
+        plan = ci_test_shards.plan_shards(self.units, self.data, self.num_shards)
         homes = [index for index, shard in enumerate(plan.shards) for name in shard if name in MUTATING_PAIR]
         self.assertEqual(len(homes), 2)
         self.assertNotEqual(homes[0], homes[1])
@@ -165,27 +223,28 @@ class LiveRepositoryPlanTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_balance_beats_the_round_robin_it_replaces(self) -> None:
-        plan = ci_test_shards.plan_shards(self.modules, self.data, self.num_shards)
+        plan = ci_test_shards.plan_shards(self.units, self.data, self.num_shards)
 
         def cost(name: str) -> float:
             return cast(float, self.data.weights.get(name, self.data.default_seconds))
 
         round_robin = [0.0] * self.num_shards
-        for index, name in enumerate(self.modules):
+        for index, name in enumerate(self.units):
             round_robin[index % self.num_shards] += cost(name)
         self.assertLessEqual(max(plan.loads), max(round_robin))
-        # Greedy placement bound: the module that finished the heaviest shard joined
+        # Greedy placement bound: the unit that finished the heaviest shard joined
         # it when that shard was the lightest, i.e. at most the mean load.
-        bound = sum(plan.loads) / self.num_shards + max(cost(name) for name in self.modules)
+        bound = sum(plan.loads) / self.num_shards + max(cost(name) for name in self.units)
         self.assertLessEqual(max(plan.loads), bound + 1e-6)
 
-    def test_each_shard_count_is_the_fewest_at_which_the_heaviest_module_sets_the_job(self) -> None:
-        """A shard cannot finish before its heaviest module, so the classifier's counts
-        are the fewest shards whose slowest shard is within 5% of that module's weight:
-        one shard fewer must leave a slower shard, and more would only add runners."""
+    def test_each_shard_count_is_the_fewest_at_which_the_heaviest_unit_sets_the_job(self) -> None:
+        """A shard cannot finish before its heaviest unit (a module, or a class of a split
+        module), so the classifier's counts are the fewest shards whose slowest shard is
+        within 5% of that unit's weight: one shard fewer must leave a slower shard, and
+        more would only add runners."""
 
-        def slowest(modules: list[str], num_shards: int) -> float:
-            loads: tuple[float, ...] = ci_test_shards.plan_shards(modules, self.data, num_shards).loads
+        def slowest(units: list[str], num_shards: int) -> float:
+            loads: tuple[float, ...] = ci_test_shards.plan_shards(units, self.data, num_shards).loads
             return max(loads)
 
         for select, modules, count in (
@@ -193,17 +252,28 @@ class LiveRepositoryPlanTests(unittest.TestCase):
             ("makefile", ci_test_shards.makefile_coupled_modules(self.modules), ci_paths.PYTHON_SHARDS_MAKEFILE),
         ):
             with self.subTest(select=select):
-                floor = max(cast(float, self.data.weights.get(name, self.data.default_seconds)) for name in modules)
-                self.assertLessEqual(slowest(modules, count), floor * 1.05,
-                                     f"{count} shards leave the slowest shard well above its heaviest module")
-                self.assertGreater(slowest(modules, count - 1), floor * 1.05,
-                                   f"{count - 1} shards already reach the heaviest module; {count} wastes a runner")
+                units = ci_test_shards.expand_units(modules, self.data)
+                floor = max(cast(float, self.data.weights.get(name, self.data.default_seconds)) for name in units)
+                self.assertLessEqual(slowest(units, count), floor * 1.05,
+                                     f"{count} shards leave the slowest shard well above its heaviest unit")
+                self.assertGreater(slowest(units, count - 1), floor * 1.05,
+                                   f"{count - 1} shards already reach the heaviest unit; {count} wastes a runner")
         self.assertEqual(ci_test_shards.DEFAULT_NUM_SHARDS, ci_paths.PYTHON_SHARDS_FULL)
+
+    def test_split_modules_run_exactly_the_tests_unittests_loader_finds(self) -> None:
+        """Drift guard: the class units of every split module, loaded by name, are the
+        tests unittest's own loader finds in the module, none dropped and none twice."""
+        self.assertIn("test_production_smoke", self.data.split)
+        for module in self.data.split:
+            with self.subTest(module=module):
+                units = [unit for unit in self.units if ci_test_shards.unit_module(unit) == module]
+                self.assertTrue(units)
+                self.assertEqual(_loader_drift(module, units, TOOLS), [])
 
     def test_workflow_takes_its_shards_from_the_classifier_and_fails_closed(self) -> None:
         self.assertNotIn("(NR-1)%4", self.python_job, "the alphabetical round-robin must be gone")
         self.assertIn(
-            "shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3]') }}", self.python_job
+            "shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3, 4, 5]') }}", self.python_job
         )
         fallback = re.search(r"python_shards \|\| '(\[[^']*\])'", self.python_job)
         self.assertIsNotNone(fallback)
@@ -889,6 +959,11 @@ class WeightDataValidationTests(unittest.TestCase):
             "negative weight": {**good, "weights": {"test_a": -1}},
             "infinite weight": {**good, "weights": {"test_a": float("inf")}},
             "non-test key": {**good, "weights": {"helper": 1.0}},
+            "key with two dots": {**good, "weights": {"test_a.B.test_c": 1.0}},
+            "class key that is not an identifier": {**good, "weights": {"test_a.B-C": 1.0}},
+            "split not a list": {**good, "split": "test_a"},
+            "split entry not a test module": {**good, "split": ["helper"]},
+            "repeated split entry": {**good, "split": ["test_a", "test_a"]},
             "empty weights": {**good, "weights": {}},
             "singleton group": {**good, "separate": [["test_a"]]},
             "repeated group member": {**good, "separate": [["test_a", "test_a"]]},
@@ -925,6 +1000,278 @@ class WeightDataValidationTests(unittest.TestCase):
             result = _run_cli("--check", "--weights", str(stale))
         self.assertEqual(result.returncode, 1)
         self.assertIn("test_module_that_was_deleted", result.stderr)
+
+
+def _classes(source: str, name: str = "test_synth") -> list[str]:
+    """split_test_classes over ``source`` written to a temporary ``name``.py."""
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / f"{name}.py"
+        path.write_text(textwrap.dedent(source), encoding="utf-8")
+        return cast(list[str], ci_test_shards.split_test_classes(path))
+
+
+class SplitClassReadingTests(unittest.TestCase):
+    """A split module's classes are read statically and fail closed on what the reading cannot decide."""
+
+    def test_direct_and_inherited_test_cases_are_found_and_helpers_ignored(self) -> None:
+        found = _classes("""\
+            import unittest
+            import unittest as ut
+            from unittest import TestCase
+            from unittest import TestCase as Base
+            from unittest import mock
+            from dataclasses import dataclass
+
+            @dataclass
+            class Record:
+                value: int = 0
+
+            class Helper:
+                def test_not_a_test(self): pass
+
+            class Mixin(object):
+                pass
+
+            class Direct(unittest.TestCase):
+                def test_a(self): pass
+
+            class Imported(TestCase): pass
+            class Aliased(Base): pass
+            class ModuleAlias(ut.TestCase): pass
+            class Async(unittest.IsolatedAsyncioTestCase): pass
+
+            @unittest.skipUnless(True, "always")
+            @mock.patch("os.getcwd")
+            class Child(Mixin, Direct): pass
+
+            class GrandChild(Child): pass
+
+            class NotATest(Mixin, Helper, Exception): pass
+
+            def helper():
+                class Local(unittest.TestCase): pass
+                return Local
+
+            if __name__ == "__main__":
+                unittest.main()
+            """)
+        self.assertEqual(found, ["Direct", "Imported", "Aliased", "ModuleAlias", "Async", "Child", "GrandChild"])
+
+    def test_each_undecidable_construct_fails_with_its_module_and_construct(self) -> None:
+        head = "import unittest\nfrom unittest import TestCase\n"
+        cases = {
+            "unresolved base": ("from helpers import Base\nclass A(Base): pass\n",
+                                "base Base of class A cannot be resolved inside the module"),
+            "call base": ("class A(type('B', (TestCase,), {})): pass\n", "cannot be resolved inside the module"),
+            "starred base": ("BASES = (TestCase,)\nclass A(*BASES): pass\n", "base *BASES of class A"),
+            "keyword splat": ("KW = {}\nclass A(TestCase, **KW): pass\n", "class A takes ** keywords"),
+            "rebound unittest": ("unittest = None\nclass A(unittest.TestCase): pass\n",
+                                 "base unittest.TestCase of class A cannot be resolved"),
+            "unknown decorator": ("import functools\n@functools.total_ordering\nclass A(TestCase): pass\n",
+                                  "decorator functools.total_ordering on class A may replace the class"),
+            "load_tests": ("class A(TestCase): pass\ndef load_tests(loader, tests, pattern): return tests\n",
+                           "a load_tests function"),
+            "load_tests assigned": ("class A(TestCase): pass\nload_tests = None\n", "a load_tests function"),
+            "module __getattr__": ("class A(TestCase): pass\ndef __getattr__(name): raise AttributeError\n",
+                                   "a module-level __getattr__"),
+            "module __dir__": ("class A(TestCase): pass\ndef __dir__(): return []\n", "a module-level __dir__"),
+            "class in if": ("if True:\n    class A(TestCase): pass\n",
+                            "class A is defined inside a module-level if block"),
+            "class in try": ("try:\n    pass\nexcept ImportError:\n    class A(TestCase): pass\n",
+                             "class A is defined inside a module-level try block"),
+            "class in with": ("import contextlib\nwith contextlib.nullcontext():\n    class A(TestCase): pass\n",
+                              "class A is defined inside a module-level with block"),
+            "class in for": ("for _ in range(1):\n    class A(TestCase): pass\n",
+                             "class A is defined inside a module-level for block"),
+            "class in while": ("while False:\n    class A(TestCase): pass\n",
+                               "class A is defined inside a module-level while block"),
+            "class in match": ("match 1:\n    case _:\n        class A(TestCase): pass\n",
+                               "class A is defined inside a module-level match block"),
+            "star import": ("from helpers import *\nclass A(TestCase): pass\n", "a star import from helpers"),
+            "second name": ("class A(TestCase): pass\nB = A\n",
+                            "a module-level binding gives test class A a second name"),
+            "second name by unpacking": ("class A(TestCase): pass\nB, C = A, 1\n", "gives test class A a second name"),
+            "second name by walrus": ("class A(TestCase): pass\n(B := A)\n", "gives test class A a second name"),
+            "second name by loop": ("class A(TestCase): pass\nfor B in (A,): pass\n",
+                                    "gives test class A a second name"),
+            "rebound class name": ("class A(TestCase): pass\nA = None\n",
+                                   "class name A is rebound (an assignment)"),
+            "second class statement": ("class A(TestCase): pass\nclass A: pass\n",
+                                       "class name A is rebound (a second class statement)"),
+            "deleted class": ("class A(TestCase): pass\ndel A\n", "class name A is rebound (a del statement)"),
+            "imported over a class": ("class A(TestCase): pass\nfrom helpers import A\n",
+                                      "class name A is rebound (an import)"),
+            "global rebinding": ("class A(TestCase): pass\ndef f():\n    global A\n    A = None\n",
+                                 "class name A is rebound (a global statement in a function)"),
+        }
+        for label, (body, construct) in cases.items():
+            with self.subTest(label), self.assertRaises(ci_test_shards.ShardDataError) as raised:
+                _classes(head + body, "test_undecidable")
+            message = str(raised.exception)
+            self.assertIn("test_undecidable cannot be split into test classes", message)
+            self.assertIn(construct, message)
+
+    def test_an_unparsable_module_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ci_test_shards.ShardDataError, "cannot read test_broken.py"):
+            _classes("def broken(:\n", "test_broken")
+
+    def test_a_split_module_without_a_test_class_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "test_empty.py").write_text("class Helper: pass\n", encoding="utf-8")
+            data = ci_test_shards.parse_weight_data(
+                {"default_seconds": 1, "weights": {"test_other": 1}, "split": ["test_empty"]})
+            with self.assertRaisesRegex(ci_test_shards.ShardDataError,
+                                        "test_empty is listed under split but defines no unittest.TestCase class"):
+                ci_test_shards.expand_units(["test_empty"], data, Path(scratch))
+
+    def test_the_drift_guard_fails_where_the_loader_sees_tests_the_reading_does_not(self) -> None:
+        """An imported TestCase is not read (see ci_test_shards), so the reading accepts the
+        module; unittest's loader would also run the imported class, and the guard must say so."""
+        with tempfile.TemporaryDirectory() as scratch:
+            folder = Path(scratch)
+            (folder / "nk_drift_helper_cases.py").write_text(
+                "import unittest\nclass Shared(unittest.TestCase):\n    def test_shared(self): pass\n",
+                encoding="utf-8")
+            (folder / "test_nk_drift_synth.py").write_text(
+                "import unittest\nfrom nk_drift_helper_cases import Shared\n"
+                "class Own(unittest.TestCase):\n    def test_own(self): pass\n", encoding="utf-8")
+            (folder / "test_nk_drift_clean.py").write_text(
+                "import unittest\nclass Mixin:\n    def test_mixed(self): pass\n"
+                "class Own(Mixin, unittest.TestCase):\n    def test_own(self): pass\n"
+                "class More(Own):\n    def test_more(self): pass\n", encoding="utf-8")
+            names = ("nk_drift_helper_cases", "test_nk_drift_synth", "test_nk_drift_clean")
+            try:
+                data = ci_test_shards.parse_weight_data(
+                    {"default_seconds": 1, "weights": {"test_x": 1},
+                     "split": ["test_nk_drift_synth", "test_nk_drift_clean"]})
+                drifting = ci_test_shards.expand_units(["test_nk_drift_synth"], data, folder)
+                self.assertEqual(drifting, ["test_nk_drift_synth.Own"])
+                problems = _loader_drift("test_nk_drift_synth", drifting, folder)
+                clean = ci_test_shards.expand_units(["test_nk_drift_clean"], data, folder)
+                self.assertEqual(clean, ["test_nk_drift_clean.More", "test_nk_drift_clean.Own"])
+                self.assertEqual(_loader_drift("test_nk_drift_clean", clean, folder), [])
+                # Loading a class twice is caught too, even though the set of ids is equal.
+                self.assertTrue(any("different number of times" in problem for problem in _loader_drift(
+                    "test_nk_drift_clean", clean + ["test_nk_drift_clean.More"], folder)))
+            finally:
+                for name in names:
+                    sys.modules.pop(name, None)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("only unittest's loader finds ['nk_drift_helper_cases.Shared.test_shared']", problems[0])
+
+
+class SplitPlanningTests(unittest.TestCase):
+    """Units of a split module are planned like modules and keep the separation groups."""
+
+    def test_units_of_a_separated_split_module_avoid_the_other_members_but_not_each_other(self) -> None:
+        data = _data({"test_big.A": 10, "test_big.B": 9, "test_big.C": 1, "test_other": 9.5, "test_free": 2},
+                     separate=[["test_big", "test_other"]], split=["test_big"])
+        units = ["test_big.A", "test_big.B", "test_big.C", "test_free", "test_other"]
+        plan = ci_test_shards.plan_shards(units, data, 2)
+        # A->0, other->1, B->0 (shard 1 holds test_other), free->1, C->0 (same module as A and B).
+        self.assertEqual(plan.shards, (("test_big.A", "test_big.B", "test_big.C"), ("test_free", "test_other")))
+        self.assertEqual(plan.loads, (20.0, 11.5))
+        # Unconstrained, B would join the lighter shard beside test_other.
+        free = ci_test_shards.plan_shards(units, _data(dict(data.weights), split=["test_big"]), 2)
+        self.assertEqual(free.shards, (("test_big.A", "test_big.C", "test_free"), ("test_big.B", "test_other")))
+        self.assertEqual(ci_test_shards.check_plan(units, data, plan), [])
+
+    def test_a_split_module_scheduled_whole_fails_the_check(self) -> None:
+        data = ci_test_shards.parse_weight_data(
+            {"default_seconds": 1, "weights": {"test_a": 1}, "split": ["test_big"]})
+        units = ["test_a", "test_big.A"]
+        plan = ci_test_shards.ShardPlan(shards=(("test_a", "test_big"), ("test_big.A",)), loads=(0.0, 0.0),
+                                        unmeasured=())
+        errors = ci_test_shards.check_plan(units, data, plan)
+        self.assertIn("plan schedules split modules whole: test_big", errors)
+
+
+class SplitCliTests(unittest.TestCase):
+    """The CLI's units, in a temporary tools directory with its own weight file."""
+
+    SPLIT_MODULE = textwrap.dedent("""\
+        import unittest
+        MAKEFILE = "Makefile"
+
+        class Fast(unittest.TestCase):
+            def test_a(self): pass
+
+        class Slow(unittest.TestCase):
+            def test_b(self): pass
+        """)
+
+    def run_in(self, files: dict[str, str], weights: dict[str, object], *args: str
+               ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as scratch:
+            folder = Path(scratch)
+            for name, text in files.items():
+                (folder / name).write_text(text, encoding="utf-8")
+            (folder / "weights.json").write_text(json.dumps(weights), encoding="utf-8")
+            return _run_cli(*args, "--weights", str(folder / "weights.json"), "--tools-dir", scratch)
+
+    def good_weights(self) -> dict[str, object]:
+        return {"default_seconds": 1, "split": ["test_split"],
+                "weights": {"test_plain": 3, "test_split.Slow": 5, "test_split.Fast": 0.5}}
+
+    def files(self) -> dict[str, str]:
+        return {"test_split.py": self.SPLIT_MODULE, "test_plain.py": "VALUE = 1\n",
+                "test_coupled.py": "TARGET = 'Makefile'\n"}
+
+    def test_shard_and_plan_print_class_units(self) -> None:
+        first = self.run_in(self.files(), self.good_weights(), "--shard", "0", "--num-shards", "2")
+        second = self.run_in(self.files(), self.good_weights(), "--shard", "1", "--num-shards", "2")
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        # Slow (5) -> 0, plain (3) -> 1, coupled (default 1) -> 1, Fast (0.5) -> 1.
+        self.assertEqual(first.stdout.split(), ["test_split.Slow"])
+        self.assertEqual(second.stdout.split(), ["test_coupled", "test_plain", "test_split.Fast"])
+        self.assertIn("3 units, estimated 4.5s", second.stderr)
+        plan = self.run_in(self.files(), self.good_weights(), "--plan", "--num-shards", "2")
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        summary = json.loads(plan.stdout)
+        self.assertEqual([shard["units"] for shard in summary["shards"]],
+                         [["test_split.Slow"], ["test_coupled", "test_plain", "test_split.Fast"]])
+        self.assertEqual([shard["estimated_seconds"] for shard in summary["shards"]], [5.0, 4.5])
+        self.assertEqual(summary["unmeasured"], ["test_coupled"])
+        check = self.run_in(self.files(), self.good_weights(), "--check", "--num-shards", "2")
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_the_makefile_selection_takes_every_unit_of_a_selected_split_module(self) -> None:
+        result = self.run_in(self.files(), self.good_weights(), "--shard", "0", "--num-shards", "1",
+                             "--select", "makefile")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["test_coupled", "test_split.Fast", "test_split.Slow"])
+
+    def test_an_undecidable_split_module_stops_the_shard_without_a_list(self) -> None:
+        files = {**self.files(), "test_split.py": self.SPLIT_MODULE + "Alias = Fast\n"}
+        result = self.run_in(files, self.good_weights(), "--shard", "0", "--num-shards", "2")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("test_split cannot be split into test classes", result.stderr)
+
+    def test_check_rejects_each_inconsistent_split_entry_or_class_weight(self) -> None:
+        good = self.good_weights()
+        weights = cast(dict[str, float], good["weights"])
+        cases: dict[str, tuple[dict[str, object], int, str]] = {
+            "split names no test module": (
+                {**good, "split": ["test_split", "test_missing"]}, 1,
+                "split names modules that are not test modules: test_missing"),
+            "class weight of a module that is not split": (
+                {**good, "weights": {**weights, "test_plain.Thing": 1}}, 1,
+                "weights name classes of modules that are not split: test_plain.Thing"),
+            "class weight of a class that does not exist": (
+                {**good, "weights": {**weights, "test_split.Gone": 1}}, 1,
+                "weights name test classes that do not exist: test_split.Gone"),
+            "module-level weight of a split module": (
+                {**good, "weights": {**weights, "test_split": 1}}, 1,
+                "weights give a module-level weight to split modules: test_split"),
+            "duplicate split entry": (
+                {**good, "split": ["test_split", "test_split"]}, 2, "split repeats a module: test_split"),
+        }
+        for label, (data, code, message) in cases.items():
+            with self.subTest(label):
+                result = self.run_in(self.files(), data, "--check", "--num-shards", "2")
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":

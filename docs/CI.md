@@ -23,7 +23,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the profile-zero fixture build and `CI required`, whatever the changed paths |
 | Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required; Python tooling (the whole suite) when a module under `tools/` names a changed document's file name, since a Python test can pin its text (`docs/SETUP.md`'s Network use list, for one) | native/translation, Windows; Python tooling when no `tools/` module names any changed document |
 | Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
-| Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over four shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
+| Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over six shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
 | Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all four groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
 | Pull request, full run, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
@@ -57,9 +57,10 @@ change, a manual run, the nightly schedule, a merge group) used to need 23 jobs,
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
 shard makes 16, a fourth Windows group makes 17, the short coverage upload job
-(`coverage_upload`), which starts only after the Python shards end, makes 18, and installer and
+(`coverage_upload`), which starts only after the Python shards end, makes 18, a fifth and a sixth
+Python shard make 20, and installer and
 Windows-runtime changes add one path-gated Windows installer job. The nightly schedule and a manual
-run add the informational C coverage job (`c_coverage`): 20 jobs in all, with the installer job
+run add the informational C coverage job (`c_coverage`): 22 jobs in all, with the installer job
 they also run. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
@@ -84,7 +85,7 @@ The jobs:
 | `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
 | `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
-| `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
+| `python_tools` | 6 shards, 4.2-18.2 min | 6 shards, `test_production_smoke` planned class by class: its `TestSanitizedBringup` class alone, 831.75 s (about 13.9 min), and five planned to about 12.7 min each (expected; no hosted run has measured this layout yet) |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
@@ -113,9 +114,10 @@ The jobs:
   The Python, native and Windows jobs wait for this job as before; native now also waits for
   the fixture builds: about 25 seconds for the profile-zero fixture, plus a few seconds for
   the two homebrew programs (3 seconds locally in WSL).
-- **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
-  (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
-  about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
+- **Python.** Six shards over the full suite, and six over the Makefile-coupled subset
+  (see [Python test sharding](#python-test-sharding)). `test_production_smoke` is planned class
+  by class; its `TestSanitizedBringup` class alone takes about 14 minutes (831.75 s) and has a
+  shard to itself, so a seventh shard would not shorten the job.
 - **Windows.** The five parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
   and run in four matrix groups: `smoke`, `routes`, `ladder-fuzz` (ladder, fuzz)
   and `selftests`. A group runs the shared setup and the runtime-object
@@ -1109,40 +1111,73 @@ Bash, or WSL.**
 
 ## Python test sharding
 
-`python_tools` runs `tools/test_*.py` on parallel runners. The module lists come
+`python_tools` runs `tools/test_*.py` on parallel runners. The unit lists come
 from [`tools/ci_test_shards.py`](../tools/ci_test_shards.py), not from the file
-names: it packs modules longest-first onto the least-loaded shard (ties broken by
-name and then shard index) using the measured per-module seconds in
-[`tools/ci_test_weights.json`](../tools/ci_test_weights.json). A module without a
-measurement uses the file's `default_seconds`, so a new test needs no data edit to
+names: it packs units longest-first onto the least-loaded shard (ties broken by
+name and then shard index) using the measured seconds in
+[`tools/ci_test_weights.json`](../tools/ci_test_weights.json). A unit is a test module,
+or, for a module the file lists under `split` (now only `test_production_smoke`), one of
+its test classes, named `MODULE.CLASS` and weighted under that key; `python -m unittest`
+accepts such a name where it accepts a module name, so the shard step runs either the
+same way. A split module is never scheduled whole and has no module-level weight. A unit
+without a measurement uses the file's `default_seconds`, so a new test needs no data edit to
 run. Modules in one `separate` group never share a shard; `test_title_catalog` and
 `test_publication_policy_gate` deliberately mutate tracked repository state and
-form such a group. The plan depends only on the tracked module names and the data
-file, so every runner computes the same partition independently.
+form such a group (a split member's classes keep apart from the group's other members
+and may share a shard with each other). The plan depends only on the tracked module
+names, the split modules' source and the data file, so every runner computes the same
+partition independently.
+
+The classes of a split module are read from its source with `ast`, never by importing it:
+the `class` statements in the module body whose base is `unittest.TestCase` through the
+module's own imports, or another class of the module that is one. The reading stops the
+planner by name on anything it cannot decide or that would make unittest's loader see a
+different set of tests: a base it cannot resolve inside the module, an unknown class
+decorator, a `load_tests` function, a module-level `__getattr__` or `__dir__`, a `class`
+statement inside a module-level `if`, `try`, `with`, `for`, `while` or `match` block, a star
+import, and a binding that rebinds a class name or gives a test class a second name. A split
+module with no test class is an error too. It cannot see a `TestCase` that the module imports
+from another module, nor dynamic bindings, so `tools/test_ci_test_shards.py` keeps a drift
+guard in the hosted suite itself: it loads every split module with unittest's own loader and
+its units by name, and fails unless both give the same tests the same number of times.
 
 `tools/test_ci_test_shards.py` runs the planner exactly as the workflow does and
-proves that every `tools/test_*.py` module is scheduled on exactly one shard, that
+proves that every `tools/test_*.py` module is scheduled on exactly one shard (every
+class of a split module on exactly one, and no split module whole), that
 the separated modules stay apart, and that the workflow captures the planner's
 output before using it (a failing planner must stop the step instead of handing
 `unittest` an empty module list, which would fall back to discovery). Refresh the
 weights when the suite's cost moves materially, or when the shards' step times drift
 apart. The shard step runs `unittest -v`, and every hosted log line carries a
-timestamp, so each module's time on the hosted runner, under coverage, is the time
-from its first test line to the next module's first test line (a shard's last module
-ends at unittest's `Ran N tests` line). The current weights are the per-module medians
-of five landing-batch runs on 2026-11-10 (runs 42735543679, 42740278379, 42752233270,
-42756075084 and 42806248089), because one hosted runner can be half again as slow as
-another: `test_production_smoke` took 10 to 17.5 minutes across them. Those runs used three
-shards planned from run 42270920833's weights (2026-11-06); every shard planned to 945
-seconds, but the suite had grown to about 58 minutes, and the slowest shard took 21 to 24
-minutes. The suite now runs on four shards: `test_production_smoke` alone, about 16
-minutes, and three of about 14 minutes each, for the full suite and the Makefile-coupled
-subset alike. That is the fewest shards at which the heaviest module sets the job, the rule
-`tools/test_ci_test_shards.py` holds both counts to; see [Jobs per run](#jobs-per-run).
+timestamp, so each test's time on the hosted runner, under coverage, is the gap between
+its status line and the previous test's status line; the gaps are summed per module (per
+class for a split module). The current weights are the medians of those sums over seven
+full-matrix runs on 2026-11-25 and 2026-11-26 (runs 45873179145, 45872648666, 45808599921,
+45802877726, 45784843478, 45774834677 and 45770760314), because one hosted runner can be
+half again as slow as another: `test_production_smoke` took 800 to 1272 seconds across them
+(median 1071.8), and its `TestSanitizedBringup` class has a median of 831.75 seconds, the
+other twelve classes 239 seconds together. A module measured below 0.01 seconds is recorded
+as 0.01. Those runs used four shards planned from the previous weights (five landing-batch
+runs on 2026-11-10), which summed to 3456 seconds while the module medians now sum to 4645
+seconds (77.4 minutes); the plan said 971, 829, 829 and 829 seconds, and the four unit-test
+steps took 1062, 919, 1154 and 1400 seconds (medians over the 20 newest successful
+full-matrix runs from 2026-11-25 20:44 to 2026-11-26 18:05 UTC). With whole modules as units,
+no shard count could plan the job below `test_production_smoke`'s own 1071.8 seconds.
+
+The suite now runs on six shards, for the full suite and the Makefile-coupled subset alike.
+`--plan` gives the full suite `test_production_smoke.TestSanitizedBringup` alone at 831.75
+seconds and five shards of 762.49 to 762.5 seconds, and the Makefile-coupled subset that class
+alone and five shards of 758.08 to 758.09 seconds; five shards would plan to 928.84 to 928.85
+seconds each (924.43 to 924.44 for the subset). These are expected times: no hosted run has
+measured six shards yet. Six is the fewest shards at which the heaviest unit sets the job, the
+rule `tools/test_ci_test_shards.py` holds both counts to; see [Jobs per run](#jobs-per-run).
 The job limit stays at 60 minutes: on the busy self-hosted pool a step that planned to
 about 7 minutes took 17-20 minutes on 2026-11-01.
 `python tools/ci_test_shards.py --check` rejects weights for modules that no longer
-exist, and `--plan` prints the resulting partition with per-shard estimates.
+exist, a `split` entry that is not a test module, a `MODULE.CLASS` weight whose module is
+not split or has no such class, and a module-level weight for a split module (a repeated
+`split` entry is a data error), and `--plan` prints the resulting partition with per-shard
+estimates.
 
 ### Python test tiers
 
@@ -1447,8 +1482,8 @@ to prevent that, and `tools/test_ci_paths.py` asserts each one:
   revision cannot provide. A recipe-only edit still runs the native and Windows
   gates, which execute recipes. Python runs only the modules whose transitive tool
   closure reads the `Makefile` or runs `make` (`ci_test_shards.py --select
-  makefile`), on four shards; any other Python-routing change in the same diff
-  restores the full suite, also on four. That closure covers most of the suite's
+  makefile`), on six shards; any other Python-routing change in the same diff
+  restores the full suite, also on six. That closure covers most of the suite's
   weight, because most heavy modules build through `make`, so the saving is the
   unrelated modules rather than the Python job as a whole or a runner.
 - **The published surface is derived, not listed.** `_is_public_surface` asks the

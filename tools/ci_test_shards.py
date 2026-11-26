@@ -7,40 +7,49 @@ The hosted ``python_tools`` job runs the ``tools/test_*.py`` modules on several
 runners.  Alphabetical round-robin put the heaviest modules on the same runner by
 accident, so one shard set the job's wall clock while the others idled.  This tool
 replaces it with Longest-Processing-Time-first (LPT) bin packing over measured
-per-module durations:
+durations of units:
 
-1. every module gets a weight -- its measured seconds from
-   ``tools/ci_test_weights.json``, or that file's ``default_seconds`` when the module
+1. a unit is a module, or, for a module the data file lists under ``split``, one of
+   its test classes, named ``MODULE.CLASS`` (a name ``python -m unittest`` accepts
+   where it accepts a module name); a split module is never scheduled whole;
+2. every unit gets a weight -- its measured seconds from
+   ``tools/ci_test_weights.json``, or that file's ``default_seconds`` when the unit
    has not been measured yet (a new test therefore never needs a data edit to run);
-2. modules are taken heaviest first, ties broken by name, and each goes to the
+3. units are taken heaviest first, ties broken by name, and each goes to the
    least-loaded shard, ties broken by the lowest shard index;
-3. a module that belongs to a ``separate`` group never joins a shard that already
-   holds another member of that group.
+4. a unit whose module belongs to a ``separate`` group never joins a shard that
+   already holds a unit of another member of that group (units of one module may
+   share a shard).
 
-The partition depends only on the discovered module names and the data file, so
-every runner computes the same plan independently and no coordination is needed.
-Each shard's modules are printed in name order, matching the order unittest used for
-the round-robin lists, so moving a module between shards never changes the relative
-order of the modules that share a runner.
+The partition depends only on the discovered module names, the split modules'
+source text and the data file, so every runner computes the same plan independently
+and no coordination is needed.  Each shard's units are printed in name order,
+matching the order unittest used for the round-robin lists, so moving a unit between
+shards never changes the relative order of the units that share a runner.
 
 Usage::
 
-    python tools/ci_test_shards.py --shard 0          # module names for shard 0
+    python tools/ci_test_shards.py --shard 0          # unit names for shard 0
     python tools/ci_test_shards.py --plan             # whole plan with estimates
     python tools/ci_test_shards.py --check            # validate the data and plan
 
 ``--check`` fails (exit 1) when the data names a module that no longer exists, a
-weight is not a positive finite number, a separation group is malformed or larger
-than the shard count, or the plan does not schedule every discovered module exactly
-once.  Unmeasured modules are reported but are not an error.  Any usage or data
-error exits 2 without printing a module list, so a caller that captures the list
-can never mistake a failure for an empty shard.
+split entry is not an existing test module, a ``MODULE.CLASS`` weight names a module
+that is not split or a class it does not have, a split module also has a module-level
+weight, or the plan does not schedule every unit exactly once (or schedules a split
+module whole).  A weight that is not a positive finite number, a malformed or
+repeated split entry, a separation group that is malformed or larger than the shard
+count, and a split module whose classes cannot be read (see
+``split_test_classes``) are data errors.  Unmeasured units are reported but are not an
+error.  Any usage or data error exits 2 without printing a unit list, so a caller that
+captures the list can never mistake a failure for an empty shard.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 from dataclasses import dataclass
 import json
 import math
@@ -55,7 +64,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = ROOT / "tools"
 DEFAULT_WEIGHTS = TOOLS_DIR / "ci_test_weights.json"
-DEFAULT_NUM_SHARDS = 4  # tools/ci_paths.py PYTHON_SHARDS_FULL; the tests keep them equal
+DEFAULT_NUM_SHARDS = 6  # tools/ci_paths.py PYTHON_SHARDS_FULL; the tests keep them equal
 TEST_GLOB = "test_*.py"
 SELECTIONS = ("all", "makefile")
 #: TOOLCHAIN_MISSING: a test that needs gcc found none; hosted python_tools fails on any (F-6a8c715a).
@@ -103,6 +112,7 @@ class WeightData:
     default_seconds: float
     weights: Mapping[str, float]
     separate: tuple[frozenset[str], ...]
+    split: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,6 +120,15 @@ class ShardPlan:
     shards: tuple[tuple[str, ...], ...]
     loads: tuple[float, ...]
     unmeasured: tuple[str, ...]
+
+
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def unit_module(unit: str) -> str:
+    """The module a unit belongs to: the unit itself, or the part before ``.CLASS``."""
+
+    return unit.split(".", 1)[0]
 
 
 def discover_modules(tools_dir: Path = TOOLS_DIR) -> list[str]:
@@ -133,7 +152,7 @@ def parse_weight_data(raw: object) -> WeightData:
 
     if not isinstance(raw, dict):
         raise ShardDataError("weight data must be a JSON object")
-    unknown_keys = sorted(set(raw) - {"description", "default_seconds", "separate", "weights"})
+    unknown_keys = sorted(set(raw) - {"description", "default_seconds", "separate", "split", "weights"})
     if unknown_keys:
         raise ShardDataError(f"weight data has unknown keys: {', '.join(unknown_keys)}")
     default_seconds = _positive_seconds(raw.get("default_seconds"), "default_seconds")
@@ -143,9 +162,21 @@ def parse_weight_data(raw: object) -> WeightData:
         raise ShardDataError("weights must be a non-empty object of module -> seconds")
     weights: dict[str, float] = {}
     for module, seconds in weights_raw.items():
-        if not isinstance(module, str) or not module.startswith("test_"):
-            raise ShardDataError(f"weights key {module!r} is not a test module name")
+        # A key is a module name, or MODULE.CLASS for a class of a split module.
+        parts = module.split(".") if isinstance(module, str) else []
+        if (not isinstance(module, str) or not module.startswith("test_") or not 1 <= len(parts) <= 2
+                or not all(_IDENTIFIER.fullmatch(part) for part in parts)):
+            raise ShardDataError(f"weights key {module!r} is not a test module name or MODULE.CLASS")
         weights[module] = _positive_seconds(seconds, f"weights[{module!r}]")
+
+    split_raw = raw.get("split", [])
+    if not isinstance(split_raw, list) or not all(
+            isinstance(name, str) and name.startswith("test_") and _IDENTIFIER.fullmatch(name)
+            for name in split_raw):
+        raise ShardDataError("split must be a list of test module names")
+    if len(set(split_raw)) != len(split_raw):
+        repeated = sorted({name for name in split_raw if split_raw.count(name) > 1})
+        raise ShardDataError(f"split repeats a module: {', '.join(repeated)}")
 
     separate_raw = raw.get("separate", [])
     if not isinstance(separate_raw, list):
@@ -161,7 +192,7 @@ def parse_weight_data(raw: object) -> WeightData:
         if len(set(group)) != len(group):
             raise ShardDataError(f"separate[{index}] repeats a module")
         separate.append(frozenset(group))
-    return WeightData(default_seconds, weights, tuple(separate))
+    return WeightData(default_seconds, weights, tuple(separate), tuple(split_raw))
 
 
 def load_weight_data(path: Path = DEFAULT_WEIGHTS) -> WeightData:
@@ -174,20 +205,21 @@ def load_weight_data(path: Path = DEFAULT_WEIGHTS) -> WeightData:
     return parse_weight_data(raw)
 
 
-def plan_shards(modules: Iterable[str], data: WeightData, num_shards: int) -> ShardPlan:
-    """Partition ``modules`` into ``num_shards`` shards with constrained LPT.
+def plan_shards(units: Iterable[str], data: WeightData, num_shards: int) -> ShardPlan:
+    """Partition ``units`` (module names and ``MODULE.CLASS`` names, see
+    ``expand_units``) into ``num_shards`` shards with constrained LPT.
 
     Raises ``ShardDataError`` when the request cannot be satisfied: no shards, a
-    duplicated module name, or a separation group with more present members than
+    duplicated unit name, or a separation group with more present members than
     there are shards.
     """
 
     if isinstance(num_shards, bool) or not isinstance(num_shards, int) or num_shards < 1:
         raise ShardDataError(f"num_shards must be a positive integer, got {num_shards!r}")
-    module_list = list(modules)
-    if len(set(module_list)) != len(module_list):
-        raise ShardDataError("module list contains duplicates")
-    present = set(module_list)
+    unit_list = list(units)
+    if len(set(unit_list)) != len(unit_list):
+        raise ShardDataError("unit list contains duplicates")
+    present = {unit_module(unit) for unit in unit_list}
 
     groups_of: dict[str, list[frozenset[str]]] = {}
     for group in data.separate:
@@ -199,27 +231,29 @@ def plan_shards(modules: Iterable[str], data: WeightData, num_shards: int) -> Sh
         for member in members:
             groups_of.setdefault(member, []).append(members)
 
-    def weight(module: str) -> float:
-        return data.weights.get(module, data.default_seconds)
+    def weight(unit: str) -> float:
+        return data.weights.get(unit, data.default_seconds)
 
     shards: list[list[str]] = [[] for _ in range(num_shards)]
     loads = [0.0] * num_shards
-    for module in sorted(module_list, key=lambda name: (-weight(name), name)):
+    for unit in sorted(unit_list, key=lambda name: (-weight(name), name)):
+        module = unit_module(unit)
         blocked: set[int] = set()
         for members in groups_of.get(module, ()):
+            others = members - {module}
             for index, shard in enumerate(shards):
-                if members.intersection(shard):
+                if any(unit_module(placed) in others for placed in shard):
                     blocked.add(index)
         candidates = [index for index in range(num_shards) if index not in blocked]
         # Unreachable while every group fits in num_shards (checked above): a group
         # of k members blocks at most k - 1 shards before its last member lands.
         if not candidates:
-            raise ShardDataError(f"no shard can accept {module} without breaking a separation group")
+            raise ShardDataError(f"no shard can accept {unit} without breaking a separation group")
         target = min(candidates, key=lambda index: (loads[index], index))
-        shards[target].append(module)
-        loads[target] += weight(module)
+        shards[target].append(unit)
+        loads[target] += weight(unit)
 
-    unmeasured = tuple(sorted(module for module in module_list if module not in data.weights))
+    unmeasured = tuple(sorted(unit for unit in unit_list if unit not in data.weights))
     return ShardPlan(
         shards=tuple(tuple(sorted(shard)) for shard in shards),
         loads=tuple(round(load, 3) for load in loads),
@@ -233,35 +267,63 @@ def check_plan(
     plan: ShardPlan,
     *,
     tracked: Sequence[str] | None = None,
+    split_classes: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
     """Return every reason the data or plan is not acceptable for CI (empty when clean).
 
-    ``modules`` are the planned modules; ``tracked`` (default: the same) are every
-    module that exists, against which the data is checked for stale names.
+    ``modules`` are the planned units (``expand_units``); ``tracked`` (default: the
+    modules of the units) are every module that exists, against which the data is
+    checked for stale names; ``split_classes`` (default: read from the units) maps each
+    existing split module to its test classes, against which ``MODULE.CLASS`` weights
+    are checked.
     """
 
     errors: list[str] = []
     present = set(modules)
-    existing = set(tracked if tracked is not None else modules)
-    stale = sorted(set(data.weights) - existing)
+    existing = set(tracked if tracked is not None else (unit_module(unit) for unit in modules))
+    if split_classes is None:
+        derived: dict[str, list[str]] = {}
+        for unit in modules:
+            if "." in unit:
+                derived.setdefault(unit_module(unit), []).append(unit.split(".", 1)[1])
+        split_classes = derived
+    split = set(data.split)
+    stale = sorted(key for key in data.weights if unit_module(key) not in existing)
     if stale:
         errors.append("weights name modules that no longer exist: " + ", ".join(stale))
+    missing_split = sorted(split - existing)
+    if missing_split:
+        errors.append("split names modules that are not test modules: " + ", ".join(missing_split))
+    whole = sorted(key for key in data.weights if key in split)
+    if whole:
+        errors.append("weights give a module-level weight to split modules: " + ", ".join(whole))
+    class_keys = [key for key in data.weights if "." in key and unit_module(key) in existing]
+    unsplit = sorted(key for key in class_keys if unit_module(key) not in split)
+    if unsplit:
+        errors.append("weights name classes of modules that are not split: " + ", ".join(unsplit))
+    absent = sorted(key for key in class_keys if unit_module(key) in split
+                    and key.split(".", 1)[1] not in split_classes.get(unit_module(key), ()))
+    if absent:
+        errors.append("weights name test classes that do not exist: " + ", ".join(absent))
     for group in data.separate:
         missing = sorted(group - existing)
         if missing:
             errors.append(f"separation group {sorted(group)} names missing modules: {', '.join(missing)}")
-    scheduled = [module for shard in plan.shards for module in shard]
+    scheduled = [unit for shard in plan.shards for unit in shard]
     if sorted(scheduled) != sorted(modules):
-        duplicated = sorted({module for module in scheduled if scheduled.count(module) > 1})
+        duplicated = sorted({unit for unit in scheduled if scheduled.count(unit) > 1})
         dropped = sorted(present - set(scheduled))
         extra = sorted(set(scheduled) - present)
         errors.append(
-            f"plan does not schedule every module exactly once (duplicated={duplicated}, "
+            f"plan does not schedule every unit exactly once (duplicated={duplicated}, "
             f"dropped={dropped}, unknown={extra})"
         )
+    scheduled_whole = sorted(split.intersection(scheduled))
+    if scheduled_whole:
+        errors.append("plan schedules split modules whole: " + ", ".join(scheduled_whole))
     for group in data.separate:
         for index, shard in enumerate(plan.shards):
-            together = sorted(group.intersection(shard))
+            together = sorted(group.intersection(unit_module(unit) for unit in shard))
             if len(together) > 1:
                 errors.append(f"plan puts separated modules together on shard {index}: {', '.join(together)}")
     if len(modules) >= len(plan.shards):
@@ -269,6 +331,272 @@ def check_plan(
             if not shard:
                 errors.append(f"shard {index} is empty")
     return errors
+
+
+# ---- Class units of split modules --------------------------------------------------
+#
+# A split module runs as one unit per test class, so the classes must be exactly the
+# ones unittest's loader finds in the module (``loadTestsFromModule``: every module
+# attribute that is a ``unittest.TestCase`` subclass).  They are read from the source
+# with ``ast`` and never by importing it, so every runner computes the same plan from the
+# tracked bytes.  A test class is a ``class`` statement in the module body whose base,
+# decided statically, is ``unittest.TestCase`` (or ``IsolatedAsyncioTestCase``) through
+# the module's own imports (``import unittest``, ``from unittest import TestCase``, any
+# ``as`` name), or another class of the module that is one, transitively.  A class whose
+# bases are all such classes that are not tests, or builtins the module does not rebind
+# (``object``, ``Exception``), is a helper and is ignored.
+#
+# The reading fails closed, naming the module and the construct, on anything it cannot
+# decide or that would let the loader see a different set of tests:
+#
+# * a base it cannot resolve inside the module (an imported class other than unittest's
+#   test cases, a call or subscript, a starred base, a ``**`` keyword): it may or may not
+#   be a TestCase;
+# * a class decorator other than unittest's skip family, unittest.mock's patch family or
+#   ``dataclasses.dataclass``: a decorator can replace the class;
+# * a ``load_tests`` function (the loader would call it instead of collecting classes),
+#   and a module-level ``__getattr__`` or ``__dir__`` (they change the attributes the
+#   loader sees);
+# * a ``class`` statement inside a module-level ``if``, ``try``, ``with``, ``for``,
+#   ``while`` or ``match`` block: whether it exists depends on running the module;
+# * a star import: it can bring in any TestCase;
+# * a module-level binding that rebinds a class name (a second ``class`` statement, an
+#   assignment, ``del``, an import, a ``global`` in a function) or rebinds a name the base
+#   or decorator resolution relies on; and an assignment, walrus or ``for`` loop that
+#   binds a second name to a test class, which the loader would run twice.
+#
+# What it does not see: a name imported from another module is not read, so an imported
+# TestCase subclass would join the loader's collection but no unit.  Nor can it see
+# dynamic bindings (``globals()``, ``setattr`` on the module).  The drift guard in
+# tools/test_ci_test_shards.py loads every split module both ways on the live tree and
+# fails on any difference, so such a module fails CI before it lands.
+
+_TEST_BASES = frozenset({"unittest.TestCase", "unittest.IsolatedAsyncioTestCase"})
+_CLASS_DECORATORS = frozenset({
+    "unittest.skip", "unittest.skipIf", "unittest.skipUnless", "unittest.expectedFailure",
+    "unittest.mock.patch", "unittest.mock.patch.object", "unittest.mock.patch.dict",
+    "unittest.mock.patch.multiple", "dataclasses.dataclass",
+})
+_MODULE_HOOKS = {
+    "load_tests": "a load_tests function (unittest's loader would call it instead of collecting classes)",
+    "__getattr__": "a module-level __getattr__ (it changes the attributes unittest's loader sees)",
+    "__dir__": "a module-level __dir__ (it changes the attributes unittest's loader sees)",
+}
+_BLOCKS: dict[type[ast.AST], str] = {
+    ast.If: "if", ast.Try: "try", ast.TryStar: "try", ast.With: "with", ast.AsyncWith: "async with",
+    ast.For: "for", ast.AsyncFor: "async for", ast.While: "while", ast.Match: "match",
+}
+_REBINDINGS = {
+    "assign": "an assignment", "del": "a del statement", "import": "an import", "def": "a def statement",
+    "global": "a global statement in a function", "for": "a for loop target", "with": "a with target",
+    "except": "an except target", "match": "a match capture",
+}
+_BUILTIN_TYPES = frozenset(name for name, value in vars(builtins).items() if isinstance(value, type))
+
+
+def _bound_names(target: ast.AST) -> list[str]:
+    """The names an assignment, ``for`` or ``with`` target, or a ``del``, binds."""
+
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Starred):
+        return _bound_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _bound_names(element)]
+    return []  # an attribute or subscript target binds no module name
+
+
+def _pattern_names(pattern: ast.AST) -> list[str]:
+    names = []
+    for node in ast.walk(pattern):
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names.append(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.append(node.rest)
+    return names
+
+
+def _module_level_nodes(body: list[ast.stmt]) -> Iterable[tuple[ast.AST, str | None]]:
+    """Every node that runs at module level, with the keyword of the innermost
+    module-level block around it (None: directly in the module body).
+
+    Function, class and lambda bodies are not entered (their own name is still yielded
+    through the defining statement)."""
+
+    stack: list[tuple[ast.AST, str | None]] = [(statement, None) for statement in reversed(body)]
+    while stack:
+        node, block = stack.pop()
+        yield node, block
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            # Decorators, bases and defaults run at module level; the body does not.
+            outer: list[ast.AST] = list(getattr(node, "decorator_list", []))
+            if isinstance(node, ast.ClassDef):
+                outer += [*node.bases, *(keyword.value for keyword in node.keywords)]
+            else:
+                outer += [*node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
+            stack.extend((child, block) for child in reversed(outer))
+            continue
+        # Everything inside a block (its handlers and cases included) is inside that block.
+        inner = _BLOCKS.get(type(node), block)
+        stack.extend((child, inner) for child in reversed(list(ast.iter_child_nodes(node))))
+
+
+def split_test_classes(path: Path) -> list[str]:
+    """Return the names of ``path``'s unittest.TestCase classes in source order, read
+    statically; raise ``ShardDataError`` naming the module and the construct when the
+    reading cannot decide them (see the comment above)."""
+
+    module = path.stem
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+        raise ShardDataError(f"cannot read {path.name} for its test classes: {exc}") from exc
+
+    def refuse(node: ast.AST, construct: str) -> ShardDataError:
+        return ShardDataError(
+            f"{module} cannot be split into test classes: line {getattr(node, 'lineno', '?')}: {construct}")
+
+    # Every module-level binding: name -> [(kind, import source or None, node)].
+    bindings: dict[str, list[tuple[str, str | None, ast.AST]]] = {}
+
+    def bind(name: str, kind: str, node: ast.AST, source: str | None = None) -> None:
+        bindings.setdefault(name, []).append((kind, source, node))
+
+    classes: list[ast.ClassDef] = []
+    second_names: list[tuple[ast.AST, ast.AST]] = []  # (binding statement, bound value)
+    for node, block in _module_level_nodes(tree.body):
+        if isinstance(node, ast.ClassDef):
+            if block:
+                raise refuse(node, f"class {node.name} is defined inside a module-level {block} block")
+            classes.append(node)
+            bind(node.name, "class", node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bind(node.name, "def", node)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bind(alias.asname, "import", node, alias.name)
+                else:
+                    first = alias.name.split(".")[0]
+                    bind(first, "import", node, first)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    raise refuse(node, f"a star import from {node.module or '.'}")
+                source = f"{node.module}.{alias.name}" if node.module and not node.level else None
+                bind(alias.asname or alias.name, "import", node, source)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets: list[ast.expr] = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for name in _bound_names(target):
+                    bind(name, "assign", node)
+            if node.value is not None:
+                second_names.append((node, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            bind(node.target.id, "assign", node)
+            second_names.append((node, node.value))
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                for name in _bound_names(target):
+                    bind(name, "del", node)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            for name in _bound_names(node.target):
+                bind(name, "for", node)
+            second_names.append((node, node.iter))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    for name in _bound_names(item.optional_vars):
+                        bind(name, "with", node)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bind(node.name, "except", node)
+        elif isinstance(node, ast.match_case):
+            for name in _pattern_names(node.pattern):
+                bind(name, "match", node)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            for name in node.names:
+                bind(name, "global", node)
+    for name, construct in _MODULE_HOOKS.items():
+        if name in bindings:
+            raise refuse(bindings[name][0][2], construct)
+
+    def imported(name: str) -> str | None:
+        """The import source of a name every binding of which is that one import."""
+        found = bindings.get(name, [])
+        sources = {source for kind, source, _node in found}
+        if found and all(kind == "import" for kind, _source, _node in found) and len(sources) == 1:
+            return next(iter(sources))
+        return None
+
+    def dotted(expr: ast.expr) -> str | None:
+        if isinstance(expr, ast.Name):
+            return imported(expr.id)
+        if isinstance(expr, ast.Attribute):
+            root = dotted(expr.value)
+            return f"{root}.{expr.attr}" if root else None
+        return None
+
+    by_name: dict[str, ast.ClassDef] = {}
+    for node in classes:
+        others = [kind for kind, _source, _node in bindings[node.name] if kind != "class"]
+        if len(bindings[node.name]) > 1:
+            what = "a second class statement" if not others else _REBINDINGS[others[0]]
+            raise refuse(node, f"class name {node.name} is rebound ({what})")
+        by_name[node.name] = node
+
+    verdicts: dict[str, bool] = {}
+
+    def is_test(node: ast.ClassDef, seen: frozenset[str] = frozenset()) -> bool:
+        if node.name in verdicts:
+            return verdicts[node.name]
+        if node.name in seen:
+            raise refuse(node, f"class {node.name} inherits from itself")
+        if any(keyword.arg is None for keyword in node.keywords):
+            raise refuse(node, f"class {node.name} takes ** keywords")
+        verdict = False
+        for base in node.bases:
+            if isinstance(base, ast.Name) and base.id in by_name:
+                verdict = is_test(by_name[base.id], seen | {node.name}) or verdict
+            elif dotted(base) in _TEST_BASES:
+                verdict = True
+            elif isinstance(base, ast.Name) and base.id in _BUILTIN_TYPES and base.id not in bindings:
+                continue
+            else:
+                raise refuse(base, f"base {ast.unparse(base)} of class {node.name} cannot be resolved "
+                                   "inside the module")
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if dotted(target) not in _CLASS_DECORATORS:
+                raise refuse(decorator, f"decorator {ast.unparse(target)} on class {node.name} may "
+                                        "replace the class")
+        verdicts[node.name] = verdict
+        return verdict
+
+    tests = [node.name for node in classes if is_test(node)]
+    test_names = set(tests)
+    for statement, value in second_names:
+        elements = value.elts if isinstance(value, (ast.Tuple, ast.List, ast.Set)) else [value]
+        for element in elements:
+            if isinstance(element, ast.Name) and element.id in test_names:
+                raise refuse(statement, f"a module-level binding gives test class {element.id} a second name")
+    return tests
+
+
+def expand_units(modules: Iterable[str], data: WeightData, tools_dir: Path = TOOLS_DIR) -> list[str]:
+    """Return the sorted planning units of ``modules``: a split module contributes
+    ``MODULE.CLASS`` for each of its test classes, every other module itself."""
+
+    units: list[str] = []
+    for module in modules:
+        if module not in data.split:
+            units.append(module)
+            continue
+        classes = split_test_classes(tools_dir / f"{module}.py")
+        if not classes:
+            raise ShardDataError(f"{module} is listed under split but defines no unittest.TestCase class")
+        units.extend(f"{module}.{name}" for name in classes)
+    return sorted(units)
 
 
 # ---- Makefile-coupled selection (#702) ---------------------------------------------
@@ -642,7 +970,7 @@ def _plan_summary(plan: ShardPlan) -> dict[str, object]:
         "num_shards": len(plan.shards),
         "unmeasured": list(plan.unmeasured),
         "shards": [
-            {"index": index, "estimated_seconds": load, "modules": list(shard)}
+            {"index": index, "estimated_seconds": load, "units": list(shard)}
             for index, (shard, load) in enumerate(zip(plan.shards, plan.loads, strict=True))
         ],
     }
@@ -651,7 +979,7 @@ def _plan_summary(plan: ShardPlan) -> dict[str, object]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--shard", type=int, help="print this shard's module names, one per line")
+    mode.add_argument("--shard", type=int, help="print this shard's unit names, one per line")
     mode.add_argument("--plan", action="store_true", help="print the whole plan as JSON")
     mode.add_argument("--check", action="store_true", help="validate the weight data and the plan")
     mode.add_argument(
@@ -694,7 +1022,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             modules = makefile_coupled_modules(modules, args.tools_dir)
             if not modules:
                 raise ShardDataError("the Makefile-coupled selection is empty")
-        plan = plan_shards(modules, data, args.num_shards)
+        # A selected split module contributes all its class units.
+        units = expand_units(modules, data, args.tools_dir)
+        plan = plan_shards(units, data, args.num_shards)
     except ShardDataError as exc:
         print(f"ci_test_shards: {exc}", file=sys.stderr)
         return 2
@@ -705,10 +1035,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         # Stale or unmeasured data never stops a shard from running its tests (the
         # --check gate owns that); a plan that drops, duplicates or co-locates
-        # modules, or leaves this shard empty, does.
+        # units, schedules a split module whole, or leaves this shard empty, does.
         blocking = [
             error
-            for error in check_plan(modules, data, plan, tracked=tracked)
+            for error in check_plan(units, data, plan, tracked=tracked)
             if error.startswith(("plan ", f"shard {args.shard} "))
         ]
         if blocking:
@@ -717,25 +1047,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         shard = plan.shards[args.shard]
         print(
-            f"ci_test_shards: shard {args.shard} of {args.num_shards} ({args.select}): {len(shard)} modules, "
+            f"ci_test_shards: shard {args.shard} of {args.num_shards} ({args.select}): {len(shard)} units, "
             f"estimated {plan.loads[args.shard]:.1f}s "
             f"(shard estimates: {', '.join(f'{load:.1f}s' for load in plan.loads)})",
             file=sys.stderr,
         )
-        for module in shard:
-            print(module)
+        for unit in shard:
+            print(unit)
         return 0
 
     if args.plan:
         print(json.dumps(_plan_summary(plan), indent=2))
         return 0
 
-    errors = check_plan(modules, data, plan, tracked=tracked)
+    try:
+        # Every existing split module, selected or not, so a class weight is checked against it.
+        split_classes = {module: split_test_classes(args.tools_dir / f"{module}.py")
+                         for module in data.split if module in tracked}
+    except ShardDataError as exc:
+        print(f"ci_test_shards: {exc}", file=sys.stderr)
+        return 2
+    errors = check_plan(units, data, plan, tracked=tracked, split_classes=split_classes)
     for index, (shard, load) in enumerate(zip(plan.shards, plan.loads, strict=True)):
-        print(f"shard {index}: {len(shard)} modules, estimated {load:.1f}s")
+        print(f"shard {index}: {len(shard)} units, estimated {load:.1f}s")
     if plan.unmeasured:
         print(
-            f"{len(plan.unmeasured)} unmeasured modules use default_seconds={data.default_seconds:g}: "
+            f"{len(plan.unmeasured)} unmeasured units use default_seconds={data.default_seconds:g}: "
             + ", ".join(plan.unmeasured)
         )
     for error in errors:

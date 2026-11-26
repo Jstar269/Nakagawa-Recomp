@@ -1710,18 +1710,18 @@ def run_tier(event_name: str, event: Mapping[str, object]) -> tuple[str, str]:
 
 #: Python shards for the full suite and for a change whose only build-system edit is a
 #: recipe-only Makefile edit. Each count is the fewest shards at which the heaviest
-#: module, test_production_smoke (about 16 hosted minutes by the weights in
-#: tools/ci_test_weights.json), sets the slowest shard: three shards plan to about 19
-#: minutes each, four to that module alone and about 14 minutes for each of the others,
-#: and a fifth would leave the slowest shard unchanged. Four keep a whole CI run at 17
-#: jobs (18 with the Windows installer job), inside the free plan's 20 concurrent jobs
-#: (docs/CI.md, "Jobs per run").
+#: unit, test_production_smoke.TestSanitizedBringup (831.75 s by the weights in
+#: tools/ci_test_weights.json; the planner schedules that module class by class), sets
+#: the slowest shard: over the full suite five shards plan to 928.84-928.85 s each, six to
+#: that class alone and 762.49-762.5 s for each of the others (the Makefile-coupled subset:
+#: 924.43-924.44 s, and 758.08-758.09 s beside it), and a seventh would leave the slowest
+#: shard unchanged. Six add two jobs to a whole CI run (docs/CI.md, "Jobs per run").
 #: tools/test_ci_test_shards.py holds both counts to that rule. The Makefile-coupled
 #: subset (tools/ci_test_shards.py --select makefile) is nearly the whole suite by
-#: measured weight, because most heavy modules run make, so it keeps the same four
+#: measured weight, because most heavy modules run make, so it keeps the same six
 #: runners and saves the unrelated modules rather than a runner.
-PYTHON_SHARDS_FULL = 4
-PYTHON_SHARDS_MAKEFILE = 4
+PYTHON_SHARDS_FULL = 6
+PYTHON_SHARDS_MAKEFILE = 6
 
 
 _MAKEFILE_INCLUDE_RE = re.compile(r"^[ \t]*include[ \t]+(mk/[A-Za-z0-9_./-]+\.mk)[ \t]*$")
@@ -1895,7 +1895,7 @@ def classify(
     )
     run_python = python_full or makefile_recipe_only
     # #702: when the recipe-only Makefile edit is the only reason to run Python, run
-    # just the modules that can observe it, on the same four shards
+    # just the modules that can observe it, on the same six shards
     # (``PYTHON_SHARDS_MAKEFILE``). Anything else that routes Python restores the
     # complete suite.
     python_scope = "all" if python_full or not makefile_recipe_only else "makefile"
