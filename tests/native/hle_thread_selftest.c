@@ -47075,8 +47075,11 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
     expect(sas_env_cell_grain(&cpu, core, out) == 0x3FB79F36u,
            "exponential decay of rate 0x12345 for 255 samples below the top");
 
-    /* A linear decay that lands exactly on the sustain level stays in the decay for that step
-     * (the switch is height < level) and leaves on the next one: 0x1FF00000 is then held. */
+    /* A linear decay that lands exactly on the sustain level ends there: for the linear decay the
+     * switch is height <= level, so 0x20000000 is held. PPSSPP's model switched only below the level
+     * and held 0x1FF00000; PSP-SAS-002 measures the PSP stopping a linear decay on the level (its
+     * bound runs, at 0x30000000; test_sas_adsr_psp_sas_002_curve_runs). The exponential and DIRECT
+     * decays keep PPSSPP's below-the-level switch (test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule). */
     sas_env_cell_begin(&cpu, core, pcm, 256u);
     expect(sas_env_cell_call(&cpu, rates, core, 7, 0x40000000u, 0x00100000u, 0, 0) == 0,
            "ADSR: attack, decay 0x100000, sustain held");
@@ -47086,8 +47089,8 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
     sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
     expect(sas_env_cell_grain(&cpu, core, out) == 0x30100000u, "linear decay after 255 steps");
     expect(sas_env_cell_grain(&cpu, core, out) == 0x20100000u, "linear decay after 511 steps");
-    expect(sas_env_cell_grain(&cpu, core, out) == 0x1FF00000u,
-           "the decay passes the sustain level by one step, then the sustain holds it");
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x20000000u,
+           "the decay stops on the sustain level, then the sustain holds it");
 
     /* SimpleADSR with an exponential sustain (env2 bits 14-15 = 3) takes its rate from the
      * exponent table: code 0x20 is 0x70000, not the linear table's 0x1C0000. */
@@ -47157,6 +47160,508 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
     expect(MEM_R32(heights) == 0u, "GetAllEnvelopeHeights reads 0 for the ended voice");
     cpu.r[4] = core;
     expect((sr_syscall(&cpu, NID_SAS_GET_END) & 1u) != 0, "the ended one-shot voice sets its end flag");
+}
+
+/* ---- PSP-SAS-002 (sas-adsr): the probe's envelope sequences through production dispatch (#2807) ----
+ *
+ * The record is one acceptance-eligible launch of the probe built from 06a6c942c on a PSP-3000 (system
+ * software 6.61), boot 208, in the game context, on 2026-11-13 (UTC): 696 records and the done record, all
+ * PASS. Every record's result and out words equal the 2026-11-05 and 2026-11-10 runs
+ * (tools/psp_oracle/manifest.json PSP-SAS-002; docs/HARDWARE_ORACLE.md; the values are in
+ * tests/fixtures/psp_oracle/README.md, sas-adsr). These cells replay run_sas_adsr in
+ * tests/fixtures/psp_oracle/probe.c call for call, with its arguments and in its order. That is one core
+ * (32 voices, output mode 0, 44100 Hz), initialised again before every run, and one looping synthetic VAG
+ * voice (64 blocks of filter 0, shift 0 and nibbles 0x71, loop flags 0x06 and 0x03) at volume
+ * 0x1000/0x1000/0/0. The height is read after every __sceSasCore. Each call that the probe records
+ * enters its NID through sr_syscall with a named constant.
+ *
+ * The README publishes these values, and the cells assert them as measured:
+ * - init, SetVoice, SetVolume, SetSimpleADSR, SetADSR and SetSL return 0 in every run;
+ * - the height is 0 before KeyOn, and 0 after KeyOn until the first __sceSasCore;
+ * - __sceSasSetADSRmode takes attack curves 0, 2 and 4, decay and release curves 1, 3 and 5, and sustain
+ *   curves 0 to 5. It returns 0x80420013 for attack 1, 3 or 5, decay or release 0, 2 or 4, sustain 6, and
+ *   all four at 5. A refused row's heights equal the baseline's, so nothing is applied in part. A curve in
+ *   a phase the mask leaves out is not checked: mask 1 with decay 0, sustain 6 and release 0 returns 0,
+ *   with the baseline's heights. The top bit is ignored: such a row returns 0 with the heights of the
+ *   same row without it. A release-only mask leaves the heights before KeyOff alone;
+ * - the end flag after the last grain is 0xfffffffe for pairs p3 and p4 and for the grain-64 p1 and p2
+ *   runs, and 0xffffffff for every other run;
+ * - with a sustain level of 0x30000000 or 0x30080000, a linear decay of 0x00100000 per step from the top
+ *   stops at 0x30000000 in both runs: the decay steps while the height is above the level and does not
+ *   clamp to it;
+ * - the exponent attack at grain 64 reads at grain 3 the height that grain 256 reads at grain 0;
+ * - pair p8's height reaches 0 at grain 585.
+ *
+ * PPSSPP's model holds 0x2ff00000 in the bound run, because its decay leaves for the sustain only below
+ * the level; sas_envelope.h ends a linear decay at the level, as the record shows. bound pins that
+ * equality, and bound-half, whose step overshoots the level, is the control that passes either way.
+ * Both runs use the linear decay, so the record says nothing about the exponential or DIRECT decay at
+ * the level; those keep PPSSPP's rule (test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule).
+ *
+ * Published values this runtime does not reproduce. The cells print each as a named KNOWN DEVIATION line
+ * and do not assert it:
+ * - The exponent attack's height at grain 0 of the grain-256 run is 0x00a76d9d on the PSP and 0x00bf40cd
+ *   here. This runtime's exponent curve at rate 0x00020000 gives 0x00a76d9d after 224 steps and
+ *   0x00bf40cd after 256. The runtime steps 256 times in that grain, because it has no key-on delay
+ *   (sas_envelope.h leaves out PPSSPP's 32 silent samples after a key-on, #1296). So the curve agrees and
+ *   the start does not. Every absolute height after KeyOn moves with that delay, and the cells assert
+ *   none of them.
+ * - Pair p1 (0x30fb/0x102c) reads end flag 0xffffffff after grain 1023 on the PSP and 0xfffffffe here.
+ *   PPSSPP's exponential release, code 0x0c, needs about 395 grains from the top, and the PSP's ends
+ *   within 384. The record publishes no p1 height, so it does not pin the right curve.
+ * - KeyOff returns 0x80420016 on the PSP once the envelope has reached 0 (pairs p0, p5 and p8, and mode
+ *   row 13). This runtime's __sceSasSetKeyOff returns 0 there. KeyOff is not reviewed here.
+ * The probe makes one call it does not record, __sceSasCore; its result is checked only as a runtime
+ * precondition. */
+#define NID_SAS_ADSR_SET_MODE   0x9ec3676au
+#define NID_SAS_ADSR_SET_RATES  0x019b25ebu
+#define NID_SAS_ADSR_SET_SL     0x5f9529f6u
+#define NID_SAS_ADSR_SET_SIMPLE 0xcbcd4f79u
+#define NID_SAS_ADSR_GET_HEIGHT 0x74ae582au
+#define SAS_ADSR_CORE           0x08030000u
+#define SAS_ADSR_OUT            0x08010000u
+#define SAS_ADSR_VAG            0x08020000u
+#define SAS_ADSR_VAG_BLOCKS     64u
+#define SAS_ADSR_PAIR_ON        640u
+#define SAS_ADSR_PAIR_OFF       384u
+#define SAS_ADSR_MODE_ON        8u
+#define SAS_ADSR_MODE_OFF       8u
+#define SAS_ADSR_EVERYTHING     0xfu
+#define SAS_ADSR_TOP            0x80000000u
+#define SAS_ADSR_ENDED          0xffffffffu
+#define SAS_ADSR_VOICE0_PLAYING 0xfffffffeu
+#define SAS_ADSR_P8_ZERO_GRAIN  585u
+#define SAS_ADSR_BOUND_HEIGHT   0x30000000u
+#define SAS_ADSR_EXPATK_GRAIN0  0x00a76d9du
+
+typedef struct {
+    uint32_t calls[16];
+    uint32_t heights[SAS_ADSR_PAIR_ON + SAS_ADSR_PAIR_OFF];
+    int core_failed;   /* a __sceSasCore that did not return 0 (runtime precondition, not a record word) */
+} SasAdsrReplay;
+
+static SasAdsrReplay s_sas_adsr_replay;
+static SasAdsrReplay s_sas_adsr_baseline;
+
+/* The probe's VAG (run_sas_adsr), written once per cell; every run re-inits the core over it. */
+static void sas_adsr_cell_begin(CpuState *cpu) {
+    reset_fixture(); sr_hle_init(); sr_hle_test_sas_reset();
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    for (uint32_t b = 0; b < SAS_ADSR_VAG_BLOCKS; b++) {
+        const uint32_t blk = SAS_ADSR_VAG + b * 16u;
+        MEM_W8(blk, 0x00u);
+        MEM_W8(blk + 1u, b == 0u ? 0x06u : (b + 1u == SAS_ADSR_VAG_BLOCKS ? 0x03u : 0x00u));
+        for (uint32_t i = 2; i < 16u; i++) MEM_W8(blk + i, 0x71u);
+    }
+}
+
+/* __sceSasInit(core, grain, 32, 0, 44100), __sceSasSetVoice(core, 0, vag, 1024, 1) and
+ * __sceSasSetVolume(core, 0, 0x1000, 0x1000, 0, 0), their results in words[0..2]. */
+static void sas_adsr_voice(CpuState *cpu, uint32_t grain, uint32_t *words) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = grain; cpu->r[6] = 32u; cpu->r[7] = 0u; cpu->r[8] = 44100u;
+    words[0] = sr_syscall(cpu, NID_SAS_INIT);
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = SAS_ADSR_VAG;
+    cpu->r[7] = SAS_ADSR_VAG_BLOCKS * 16u; cpu->r[8] = 1u;
+    words[1] = sr_syscall(cpu, NID_SAS_SET_VOICE);
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = 0x1000u; cpu->r[7] = 0x1000u;
+    cpu->r[8] = 0u; cpu->r[9] = 0u;
+    words[2] = sr_syscall(cpu, NID_SAS_SET_VOLUME);
+}
+
+static uint32_t sas_adsr_set_mode(CpuState *cpu, uint32_t mask, uint32_t a, uint32_t d, uint32_t s, uint32_t r) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = mask; cpu->r[7] = a;
+    cpu->r[8] = d; cpu->r[9] = s; cpu->r[10] = r;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_MODE);
+}
+
+static uint32_t sas_adsr_set_rates(CpuState *cpu, uint32_t mask, uint32_t a, uint32_t d, uint32_t s, uint32_t r) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = mask; cpu->r[7] = a;
+    cpu->r[8] = d; cpu->r[9] = s; cpu->r[10] = r;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_RATES);
+}
+
+static uint32_t sas_adsr_set_level(CpuState *cpu, uint32_t level) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = level;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_SL);
+}
+
+static uint32_t sas_adsr_set_simple(CpuState *cpu, uint32_t env1, uint32_t env2) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = env1; cpu->r[7] = env2;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_SIMPLE);
+}
+
+static uint32_t sas_adsr_height(CpuState *cpu) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u;
+    return sr_syscall(cpu, NID_SAS_ADSR_GET_HEIGHT);
+}
+
+static uint32_t sas_adsr_key_on(CpuState *cpu) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u;
+    return sr_syscall(cpu, NID_SAS_SET_KEY_ON);
+}
+
+/* `on` grains, KeyOff (its result in *key_off), then `off` grains: __sceSasCore and the height after each. */
+static void sas_adsr_grains(CpuState *cpu, uint32_t on, uint32_t off, SasAdsrReplay *out, uint32_t *key_off) {
+    for (uint32_t g = 0; g < on + off; g++) {
+        if (g == on) {
+            cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u;
+            *key_off = sr_syscall(cpu, NID_SAS_SET_KEY_OFF);
+        }
+        cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = SAS_ADSR_OUT;
+        if (sr_syscall(cpu, NID_SAS_CORE) != 0u) out->core_failed = 1;
+        out->heights[g] = sas_adsr_height(cpu);
+    }
+}
+
+static uint32_t sas_adsr_end_flag(CpuState *cpu) {
+    cpu->r[4] = SAS_ADSR_CORE;
+    return sr_syscall(cpu, NID_SAS_GET_END);
+}
+
+/* The probe's nine __sceSasSetSimpleADSR pairs {env1, env2} (k_sas_adsr_pairs) and, from the README,
+ * the end flag each run reads after its last grain. `deviates` marks the one this runtime does not
+ * reproduce (p1, see above). */
+static const struct { uint32_t env1, env2, end_flag; int deviates; } k_sas_adsr_simple_pairs[] = {
+    {0x10c7u, 0x500au, SAS_ADSR_ENDED, 0},           /* p0 */
+    {0x30fbu, 0x102cu, SAS_ADSR_ENDED, 1},           /* p1 */
+    {0xb083u, 0x900eu, SAS_ADSR_ENDED, 0},           /* p2 */
+    {0x40cfu, 0xc830u, SAS_ADSR_VOICE0_PLAYING, 0},  /* p3 */
+    {0xb800u, 0x5fdfu, SAS_ADSR_VOICE0_PLAYING, 0},  /* p4 */
+    {0x0049u, 0x481eu, SAS_ADSR_ENDED, 0},           /* p5 */
+    {0x7f0fu, 0x002cu, SAS_ADSR_ENDED, 0},           /* p6 */
+    {0x20a5u, 0x8c24u, SAS_ADSR_ENDED, 0},           /* p7 */
+    {0x100fu, 0x510au, SAS_ADSR_ENDED, 0},           /* p8 */
+};
+#define SAS_ADSR_SIMPLE_PAIRS (sizeof(k_sas_adsr_simple_pairs) / sizeof(k_sas_adsr_simple_pairs[0]))
+
+/* sas_adsr_pair: calls[0..10] are env1, env2, init, SetVoice, SetVolume, SetSimpleADSR, KeyOn, the
+ * height after KeyOn, KeyOff, the end flag after the last grain, the height before KeyOn. */
+static void sas_adsr_replay_pair(CpuState *cpu, uint32_t pair, SasAdsrReplay *out) {
+    memset(out, 0, sizeof(*out));
+    out->calls[0] = k_sas_adsr_simple_pairs[pair].env1;
+    out->calls[1] = k_sas_adsr_simple_pairs[pair].env2;
+    sas_adsr_voice(cpu, 256u, &out->calls[2]);
+    out->calls[5] = sas_adsr_set_simple(cpu, out->calls[0], out->calls[1]);
+    out->calls[10] = sas_adsr_height(cpu);
+    out->calls[6] = sas_adsr_key_on(cpu);
+    out->calls[7] = sas_adsr_height(cpu);
+    sas_adsr_grains(cpu, SAS_ADSR_PAIR_ON, SAS_ADSR_PAIR_OFF, out, &out->calls[8]);
+    out->calls[9] = sas_adsr_end_flag(cpu);
+}
+
+static void test_sas_simple_adsr_psp_sas_002_pairs(void) {
+    CpuState cpu;
+    sas_adsr_cell_begin(&cpu);
+    int setters = 1, before_key_on = 1, after_key_on = 1, key_on = 1, core = 1;
+    for (uint32_t pair = 0; pair < SAS_ADSR_SIMPLE_PAIRS; pair++) {
+        SasAdsrReplay *r = &s_sas_adsr_replay;
+        sas_adsr_replay_pair(&cpu, pair, r);
+        if (r->calls[2] != 0u || r->calls[3] != 0u || r->calls[4] != 0u || r->calls[5] != 0u) setters = 0;
+        if (r->calls[10] != 0u) before_key_on = 0;
+        if (r->calls[7] != 0u) after_key_on = 0;
+        if (r->calls[6] != 0u) key_on = 0;
+        if (r->core_failed) core = 0;
+        if (k_sas_adsr_simple_pairs[pair].deviates) {
+            printf("sas-adsr: KNOWN DEVIATION SimpleADSR p%u (0x%04x/0x%04x) end flag after grain 1023 "
+                   "got=0x%08x want=0x%08x (PSP-SAS-002 sas-adsr-p%u-calls out9; exponential release)\n",
+                   (unsigned)pair, (unsigned)r->calls[0], (unsigned)r->calls[1], (unsigned)r->calls[9],
+                   (unsigned)k_sas_adsr_simple_pairs[pair].end_flag, (unsigned)pair);
+        } else {
+            char what[160];
+            snprintf(what, sizeof(what),
+                     "SimpleADSR p%u (0x%04x/0x%04x): the end flag after grain 1023 is 0x%08x "
+                     "(PSP-SAS-002 sas-adsr-p%u-calls out9)",
+                     (unsigned)pair, (unsigned)r->calls[0], (unsigned)r->calls[1],
+                     (unsigned)k_sas_adsr_simple_pairs[pair].end_flag, (unsigned)pair);
+            expect(r->calls[9] == k_sas_adsr_simple_pairs[pair].end_flag, what);
+        }
+        if (pair == 8u) {
+            expect(r->heights[SAS_ADSR_P8_ZERO_GRAIN - 1u] != 0u && r->heights[SAS_ADSR_P8_ZERO_GRAIN] == 0u,
+                   "SimpleADSR p8 (0x100f/0x510a): the sustain reaches height 0 at grain 585, not before "
+                   "(PSP-SAS-002 sas-adsr-p8-h24 out8 and out9)");
+        }
+    }
+    expect(setters,
+           "SimpleADSR pairs: __sceSasInit, SetVoice, SetVolume and __sceSasSetSimpleADSR return 0 for all "
+           "nine pairs (PSP-SAS-002 sas-adsr-p0..p8-calls out2..out5)");
+    expect(before_key_on,
+           "SimpleADSR pairs: __sceSasGetEnvelopeHeight reads 0 before KeyOn (sas-adsr-pN-calls out10)");
+    expect(after_key_on,
+           "SimpleADSR pairs: __sceSasGetEnvelopeHeight reads 0 after KeyOn, before the first __sceSasCore "
+           "(sas-adsr-pN-calls out7)");
+    expect(key_on && core, "SimpleADSR pairs: KeyOn and every __sceSasCore return 0 (runtime precondition)");
+}
+
+/* The probe's __sceSasSetADSRmode table (k_sas_adsr_mode_rows) and, from the README, each row's result:
+ * 0, or 0x80420013 when a phase in the mask names a curve that phase does not take. `same_as` names the
+ * row whose heights a top-bit row must repeat, -1 for none. */
+static const struct { uint32_t mask, attack, decay, sustain, release, result; int same_as; } k_sas_adsr_mode_table[] = {
+    {0xfu, 0u, 1u, 0u, 1u, 0u, -1}, {0xfu, 2u, 1u, 0u, 1u, 0u, -1}, {0xfu, 4u, 1u, 0u, 1u, 0u, -1},
+    {0xfu, 0u, 3u, 0u, 1u, 0u, -1}, {0xfu, 0u, 5u, 0u, 1u, 0u, -1}, {0xfu, 0u, 1u, 0u, 3u, 0u, -1},
+    {0xfu, 0u, 1u, 0u, 5u, 0u, -1},
+    {0xfu, 0u, 1u, 1u, 1u, 0u, -1}, {0xfu, 0u, 1u, 2u, 1u, 0u, -1}, {0xfu, 0u, 1u, 3u, 1u, 0u, -1},
+    {0xfu, 0u, 1u, 4u, 1u, 0u, -1}, {0xfu, 0u, 1u, 5u, 1u, 0u, -1},
+    {0x1u, 4u, 5u, 3u, 5u, 0u, -1}, {0x2u, 4u, 5u, 3u, 5u, 0u, -1}, {0x4u, 4u, 5u, 3u, 5u, 0u, -1},
+    {0x8u, 4u, 5u, 3u, 5u, 0u, -1},
+    {0xfu, 1u, 1u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 3u, 1u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 5u, 1u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 0u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 0u, 2u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 4u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 1u, 0u, 0u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 0u, 1u, 0u, 2u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 1u, 0u, 4u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 1u, 6u, 1u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 5u, 5u, 5u, 5u, SAS_ERROR_ADSR_MODE, -1},
+    {0x1u, 0u, 0u, 6u, 0u, 0u, -1},
+    {0xfu, SAS_ADSR_TOP | 2u, 1u, 0u, 1u, 0u, 1}, {0xfu, 0u, SAS_ADSR_TOP | 3u, 0u, 1u, 0u, 3},
+    {0xfu, 0u, 1u, SAS_ADSR_TOP | 1u, 1u, 0u, 7}, {0xfu, 0u, 1u, 0u, SAS_ADSR_TOP | 3u, 0u, 5},
+};
+#define SAS_ADSR_MODE_TABLE_ROWS (sizeof(k_sas_adsr_mode_table) / sizeof(k_sas_adsr_mode_table[0]))
+#define SAS_ADSR_MODE_MASKED_OUT_ROW 27u
+#define SAS_ADSR_MODE_RELEASE_ONLY_ROW 15u
+
+/* sas_adsr_mode_row: calls[0..15] are the mask and four curves as passed, init, SetVoice, SetVolume, the
+ * baseline SetADSRmode, SetADSR and SetSL, the row's SetADSRmode, KeyOn, the height after KeyOn, KeyOff
+ * and the height before KeyOn. row < 0 is the baseline alone: the same calls without the row's own
+ * SetADSRmode, which is what a call that changes nothing leaves. */
+static void sas_adsr_replay_mode_row(CpuState *cpu, int row, SasAdsrReplay *out) {
+    memset(out, 0, sizeof(*out));
+    if (row >= 0) {
+        out->calls[0] = k_sas_adsr_mode_table[row].mask;
+        out->calls[1] = k_sas_adsr_mode_table[row].attack;
+        out->calls[2] = k_sas_adsr_mode_table[row].decay;
+        out->calls[3] = k_sas_adsr_mode_table[row].sustain;
+        out->calls[4] = k_sas_adsr_mode_table[row].release;
+    }
+    sas_adsr_voice(cpu, 256u, &out->calls[5]);
+    /* The baseline: linear attack, decays and release; attack 0x00400000, decay 0x00100000, sustain
+     * 0x00004000 and release 0x00040000 per step; sustain level 0x20000000. */
+    out->calls[8] = sas_adsr_set_mode(cpu, SAS_ADSR_EVERYTHING, 0u, 1u, 1u, 1u);
+    out->calls[9] = sas_adsr_set_rates(cpu, SAS_ADSR_EVERYTHING, 0x00400000u, 0x00100000u, 0x00004000u,
+                                       0x00040000u);
+    out->calls[10] = sas_adsr_set_level(cpu, 0x20000000u);
+    if (row >= 0) {
+        out->calls[11] = sas_adsr_set_mode(cpu, out->calls[0], out->calls[1], out->calls[2], out->calls[3],
+                                           out->calls[4]);
+    }
+    out->calls[15] = sas_adsr_height(cpu);
+    out->calls[12] = sas_adsr_key_on(cpu);
+    out->calls[13] = sas_adsr_height(cpu);
+    sas_adsr_grains(cpu, SAS_ADSR_MODE_ON, SAS_ADSR_MODE_OFF, out, &out->calls[14]);
+}
+
+static int sas_adsr_same_heights(const SasAdsrReplay *a, const SasAdsrReplay *b, uint32_t grains) {
+    return memcmp(a->heights, b->heights, grains * sizeof(a->heights[0])) == 0;
+}
+
+static void test_sas_adsr_mode_psp_sas_002_table(void) {
+    CpuState cpu;
+    static SasAdsrReplay rows[SAS_ADSR_MODE_TABLE_ROWS];
+    sas_adsr_cell_begin(&cpu);
+    sas_adsr_replay_mode_row(&cpu, -1, &s_sas_adsr_baseline);
+    const uint32_t grains = SAS_ADSR_MODE_ON + SAS_ADSR_MODE_OFF;
+    int setters = 1, before_key_on = 1, after_key_on = 1, key_on = 1, core = 1;
+    int results = 1, refused_as_baseline = 1, top_bit = 1;
+    for (uint32_t i = 0; i < SAS_ADSR_MODE_TABLE_ROWS; i++) {
+        sas_adsr_replay_mode_row(&cpu, (int)i, &rows[i]);
+        const SasAdsrReplay *r = &rows[i];
+        if (r->calls[5] != 0u || r->calls[6] != 0u || r->calls[7] != 0u || r->calls[8] != 0u ||
+            r->calls[9] != 0u || r->calls[10] != 0u)
+            setters = 0;
+        if (r->calls[15] != 0u) before_key_on = 0;
+        if (r->calls[13] != 0u) after_key_on = 0;
+        if (r->calls[12] != 0u) key_on = 0;
+        if (r->core_failed) core = 0;
+        if (r->calls[11] != k_sas_adsr_mode_table[i].result) results = 0;
+        if (k_sas_adsr_mode_table[i].result != 0u && !sas_adsr_same_heights(r, &s_sas_adsr_baseline, grains))
+            refused_as_baseline = 0;
+        if (k_sas_adsr_mode_table[i].same_as >= 0 &&
+            !sas_adsr_same_heights(r, &rows[k_sas_adsr_mode_table[i].same_as], grains))
+            top_bit = 0;
+    }
+    expect(setters,
+           "ADSRmode table: __sceSasInit, SetVoice, SetVolume, the baseline SetADSRmode, __sceSasSetADSR and "
+           "__sceSasSetSL return 0 in all 32 rows (PSP-SAS-002 sas-adsr-m00..m31-calls out5..out10)");
+    expect(results,
+           "ADSRmode table: each row's __sceSasSetADSRmode returns the PSP's word: 0 for attack 0/2/4, decay "
+           "and release 1/3/5 and sustain 0..5, 0x80420013 for any other curve in the mask "
+           "(sas-adsr-mNN-calls out11)");
+    expect(refused_as_baseline,
+           "ADSRmode table: the eleven refused rows leave the baseline's 16 heights, so nothing is applied in "
+           "part (sas-adsr-m16..m26-h)");
+    expect(rows[SAS_ADSR_MODE_MASKED_OUT_ROW].calls[11] == 0u &&
+               sas_adsr_same_heights(&rows[SAS_ADSR_MODE_MASKED_OUT_ROW], &s_sas_adsr_baseline, grains),
+           "ADSRmode table: mask 1 with decay 0, sustain 6 and release 0 returns 0 with the baseline's heights: "
+           "a curve outside the mask is not checked (sas-adsr-m27-calls, sas-adsr-m27-h)");
+    expect(top_bit,
+           "ADSRmode table: a curve with the top bit set returns 0 and gives the heights of the same curve "
+           "without it (sas-adsr-m28..m31 against m01, m03, m07 and m05)");
+    expect(sas_adsr_same_heights(&rows[SAS_ADSR_MODE_RELEASE_ONLY_ROW], &s_sas_adsr_baseline, SAS_ADSR_MODE_ON),
+           "ADSRmode table: a release-only mask leaves the 8 heights before KeyOff as the baseline's "
+           "(sas-adsr-m15-h out0..out7)");
+    expect(before_key_on,
+           "ADSRmode table: __sceSasGetEnvelopeHeight reads 0 before KeyOn (sas-adsr-mNN-calls out15)");
+    expect(after_key_on,
+           "ADSRmode table: __sceSasGetEnvelopeHeight reads 0 after KeyOn, before the first __sceSasCore "
+           "(sas-adsr-mNN-calls out13)");
+    expect(key_on && core, "ADSRmode table: KeyOn and every __sceSasCore return 0 (runtime precondition)");
+}
+
+/* The probe's explicit-curve runs (k_sas_adsr_runs). simple != 0 sets the envelope with SetSimpleADSR;
+ * otherwise SetADSRmode sets the curves and SetADSR and SetSL the rates and level. end_flag is the
+ * README's word after the last grain. */
+static const struct {
+    const char *name;
+    uint32_t grain, simple, env1, env2, attack, decay, sustain, release;
+    uint32_t rate_a, rate_d, rate_s, rate_r, level, on, off, end_flag;
+} k_sas_adsr_curve_runs[] = {
+    {"expatk", 256u, 0u, 0u, 0u, 4u, 1u, 1u, 1u, 0x00020000u, 0x00100000u, 0u, 0x00040000u, 0x20000000u,
+     64u, 16u, SAS_ADSR_ENDED},
+    {"expatk-g64", 64u, 0u, 0u, 0u, 4u, 1u, 1u, 1u, 0x00020000u, 0x00100000u, 0u, 0x00040000u, 0x20000000u,
+     128u, 32u, SAS_ADSR_ENDED},
+    {"bound", 256u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 0x00400000u, 0x00100000u, 0u, 0x00100000u, 0x30000000u,
+     16u, 16u, SAS_ADSR_ENDED},
+    {"bound-half", 256u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 0x00400000u, 0x00100000u, 0u, 0x00100000u, 0x30080000u,
+     16u, 16u, SAS_ADSR_ENDED},
+    {"g64-p1", 64u, 1u, 0x30fbu, 0x102cu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 128u, 32u,
+     SAS_ADSR_VOICE0_PLAYING},
+    {"g64-p2", 64u, 1u, 0xb083u, 0x900eu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 128u, 32u,
+     SAS_ADSR_VOICE0_PLAYING},
+};
+#define SAS_ADSR_CURVE_RUNS (sizeof(k_sas_adsr_curve_runs) / sizeof(k_sas_adsr_curve_runs[0]))
+
+/* sas_adsr_curve_run: calls[0..13] are the grain, init, SetVoice, SetVolume, SetSimpleADSR or
+ * SetADSRmode, SetADSR, SetSL, KeyOn, the height after KeyOn, KeyOff, the end flag, the height before
+ * KeyOn, and the grains on and off. */
+static void sas_adsr_replay_curve_run(CpuState *cpu, uint32_t idx, SasAdsrReplay *out) {
+    memset(out, 0, sizeof(*out));
+    const uint32_t grain = k_sas_adsr_curve_runs[idx].grain;
+    out->calls[0] = grain;
+    out->calls[12] = k_sas_adsr_curve_runs[idx].on;
+    out->calls[13] = k_sas_adsr_curve_runs[idx].off;
+    sas_adsr_voice(cpu, grain, &out->calls[1]);
+    if (k_sas_adsr_curve_runs[idx].simple) {
+        out->calls[4] = sas_adsr_set_simple(cpu, k_sas_adsr_curve_runs[idx].env1, k_sas_adsr_curve_runs[idx].env2);
+    } else {
+        out->calls[4] = sas_adsr_set_mode(cpu, SAS_ADSR_EVERYTHING, k_sas_adsr_curve_runs[idx].attack,
+                                          k_sas_adsr_curve_runs[idx].decay, k_sas_adsr_curve_runs[idx].sustain,
+                                          k_sas_adsr_curve_runs[idx].release);
+        out->calls[5] = sas_adsr_set_rates(cpu, SAS_ADSR_EVERYTHING, k_sas_adsr_curve_runs[idx].rate_a,
+                                           k_sas_adsr_curve_runs[idx].rate_d, k_sas_adsr_curve_runs[idx].rate_s,
+                                           k_sas_adsr_curve_runs[idx].rate_r);
+        out->calls[6] = sas_adsr_set_level(cpu, k_sas_adsr_curve_runs[idx].level);
+    }
+    out->calls[11] = sas_adsr_height(cpu);
+    out->calls[7] = sas_adsr_key_on(cpu);
+    out->calls[8] = sas_adsr_height(cpu);
+    sas_adsr_grains(cpu, k_sas_adsr_curve_runs[idx].on, k_sas_adsr_curve_runs[idx].off, out, &out->calls[9]);
+    out->calls[10] = sas_adsr_end_flag(cpu);
+}
+
+static void test_sas_adsr_psp_sas_002_curve_runs(void) {
+    CpuState cpu;
+    static SasAdsrReplay runs[SAS_ADSR_CURVE_RUNS];
+    sas_adsr_cell_begin(&cpu);
+    int setters = 1, before_key_on = 1, after_key_on = 1, key_on = 1, core = 1, end_flags = 1;
+    for (uint32_t i = 0; i < SAS_ADSR_CURVE_RUNS; i++) {
+        sas_adsr_replay_curve_run(&cpu, i, &runs[i]);
+        const SasAdsrReplay *r = &runs[i];
+        if (r->calls[1] != 0u || r->calls[2] != 0u || r->calls[3] != 0u || r->calls[4] != 0u ||
+            r->calls[5] != 0u || r->calls[6] != 0u)
+            setters = 0;
+        if (r->calls[11] != 0u) before_key_on = 0;
+        if (r->calls[8] != 0u) after_key_on = 0;
+        if (r->calls[7] != 0u) key_on = 0;
+        if (r->core_failed) core = 0;
+        if (r->calls[10] != k_sas_adsr_curve_runs[i].end_flag) end_flags = 0;
+    }
+    expect(setters,
+           "curve runs: __sceSasInit, SetVoice, SetVolume, __sceSasSetADSRmode (curves 4/1/1/1 and 0/1/1/1), "
+           "__sceSasSetADSR, __sceSasSetSL and __sceSasSetSimpleADSR return 0 in all six runs "
+           "(PSP-SAS-002 sas-adsr-<run>-calls out1..out6)");
+    expect(before_key_on && after_key_on,
+           "curve runs: __sceSasGetEnvelopeHeight reads 0 before KeyOn and after KeyOn, before the first "
+           "__sceSasCore (sas-adsr-<run>-calls out11 and out8)");
+    expect(end_flags,
+           "curve runs: the end flag after the last grain is 0xffffffff for expatk, expatk-g64, bound and "
+           "bound-half and 0xfffffffe for g64-p1 and g64-p2 (sas-adsr-<run>-calls out10)");
+    /* bound and bound-half: the attack reaches the top in one grain and the decay steps 0x00100000 to
+     * 0x30000000 in one more; whatever the key-on delay, grains 2..15 follow both. */
+    for (uint32_t i = 2; i < 4; i++) {
+        int held = 1;
+        for (uint32_t g = 2; g < k_sas_adsr_curve_runs[i].on; g++)
+            if (runs[i].heights[g] != SAS_ADSR_BOUND_HEIGHT) held = 0;
+        char what[200];
+        snprintf(what, sizeof(what),
+                 "curve run %s: SetSL 0x%08x, a linear decay of 0x00100000 per step from the top stops at "
+                 "0x30000000 and holds it through grain 15 (sas-adsr-%s-h00 out2..out15)",
+                 k_sas_adsr_curve_runs[i].name, (unsigned)k_sas_adsr_curve_runs[i].level,
+                 k_sas_adsr_curve_runs[i].name);
+        expect(held, what);
+    }
+    expect(runs[1].heights[3] == runs[0].heights[0] && runs[0].heights[0] != 0u,
+           "curve runs: the exponent attack at grain 64 reads at grain 3 the height grain 256 reads at grain 0 "
+           "(sas-adsr-expatk-g64-h00 out3 and sas-adsr-expatk-h00 out0)");
+    expect(key_on && core, "curve runs: KeyOn and every __sceSasCore return 0 (runtime precondition)");
+    if (runs[0].heights[0] != SAS_ADSR_EXPATK_GRAIN0)
+        printf("sas-adsr: KNOWN DEVIATION expatk height at grain 0 got=0x%08x want=0x%08x "
+               "(PSP-SAS-002 sas-adsr-expatk-h00 out0; no key-on delay, #1296)\n",
+               (unsigned)runs[0].heights[0], (unsigned)SAS_ADSR_EXPATK_GRAIN0);
+}
+
+/* Controls for the decay curves PSP-SAS-002 does not measure at the sustain level (#2807). The record's
+ * bound runs pin the linear decay ending at the level; these two pin that the exponential and DIRECT
+ * decays keep PPSSPP's rule of ending only below it. This is PPSSPP-derived behaviour kept, not
+ * PSP-measured. Each uses the probe's core and voice, a one-step linear attack (0x40000000) and
+ * sustain level 0x30000000, and reads the height after the first two grains of 256.
+ * - Exponential decay, rate 0x40000000, zero-rate linear sustain. The first decay step gives
+ *   0x40000000 - (0x40000000 + 3) / 4 = 0x30000000, exactly the level, so the decay steps again:
+ *   0x30000000 + ((0x10000000 * 0x40000000) >> 32) - 0x10000000 = 0x24000000, below the level, which
+ *   the sustain then holds. Ending at the level would hold 0x30000000.
+ * - DIRECT decay with rate 0x30000000, the level, and a linear sustain of 0x00100000 per step. DIRECT
+ *   sets the height to 0x30000000 on every step and never goes below the level, so the envelope stays
+ *   in the decay at 0x30000000. Ending at the level would start the sustain and read
+ *   0x30000000 - 254 * 0x00100000 = 0x20200000 after the first grain. */
+#define SAS_ADSR_CURVE_LINEAR_INC  0u   /* __sceSasSetADSRmode curve numbers (PspSasADSRCurveModes) */
+#define SAS_ADSR_CURVE_LINEAR_DEC  1u
+#define SAS_ADSR_CURVE_EXP_DEC     3u
+#define SAS_ADSR_CURVE_DIRECT      5u
+#define SAS_ADSR_CONTROL_LEVEL     0x30000000u
+#define SAS_ADSR_CONTROL_EXP_HELD  0x24000000u
+static void test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule(void) {
+    CpuState cpu;
+    static const struct {
+        uint32_t decay_curve, decay_rate, sustain_rate, held;
+        const char *what;
+    } controls[] = {
+        {SAS_ADSR_CURVE_EXP_DEC, 0x40000000u, 0u, SAS_ADSR_CONTROL_EXP_HELD,
+         "exponential decay 0x40000000 that lands on sustain level 0x30000000 steps once more and holds "
+         "0x24000000 (PPSSPP-derived, not PSP-measured)"},
+        {SAS_ADSR_CURVE_DIRECT, SAS_ADSR_CONTROL_LEVEL, 0x00100000u, SAS_ADSR_CONTROL_LEVEL,
+         "DIRECT decay at the sustain level stays in the decay at 0x30000000; the falling sustain never "
+         "starts (PPSSPP-derived, not PSP-measured)"},
+    };
+    sas_adsr_cell_begin(&cpu);
+    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
+        uint32_t words[3];
+        sas_adsr_voice(&cpu, 256u, words);
+        const uint32_t mode = sas_adsr_set_mode(&cpu, SAS_ADSR_EVERYTHING, SAS_ADSR_CURVE_LINEAR_INC,
+                                                controls[i].decay_curve, SAS_ADSR_CURVE_LINEAR_DEC,
+                                                SAS_ADSR_CURVE_LINEAR_DEC);
+        const uint32_t rates = sas_adsr_set_rates(&cpu, SAS_ADSR_EVERYTHING, 0x40000000u, controls[i].decay_rate,
+                                                  controls[i].sustain_rate, 0x00040000u);
+        const uint32_t level = sas_adsr_set_level(&cpu, SAS_ADSR_CONTROL_LEVEL);
+        const uint32_t key_on = sas_adsr_key_on(&cpu);
+        expect(words[0] == 0u && words[1] == 0u && words[2] == 0u && mode == 0u && rates == 0u &&
+                   level == 0u && key_on == 0u,
+               "decay control: the core, voice and envelope set up");
+        uint32_t heights[2];
+        for (int g = 0; g < 2; g++) {
+            cpu.r[4] = SAS_ADSR_CORE; cpu.r[5] = SAS_ADSR_OUT;
+            (void)sr_syscall(&cpu, NID_SAS_CORE);
+            heights[g] = sas_adsr_height(&cpu);
+        }
+        expect(heights[0] == controls[i].held && heights[1] == controls[i].held, controls[i].what);
+    }
 }
 
 static void test_sas_reinit_is_a_fresh_init(void) {
@@ -70691,6 +71196,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_reinit_is_a_fresh_init();
     test_sas_envelope_follows_its_rates_and_curves();
     test_sas_envelope_curve_paths_and_refusals();
+    test_sas_simple_adsr_psp_sas_002_pairs();
+    test_sas_adsr_mode_psp_sas_002_table();
+    test_sas_adsr_psp_sas_002_curve_runs();
+    test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule();
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();

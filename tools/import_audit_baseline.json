@@ -28,7 +28,7 @@
     "classification": "dedicated",
     "handler": "h_SasSetADSR",
     "name": "__sceSasSetADSR",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x0282a3bd": {
     "classification": "controlled_unsupported",
@@ -1684,7 +1684,7 @@
     "classification": "dedicated",
     "handler": "h_SasSetSL",
     "name": "__sceSasSetSL",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x5fb86ab0": {
     "classification": "dedicated",
@@ -2740,7 +2740,7 @@
     "classification": "dedicated",
     "handler": "h_SasSetADSRmode",
     "name": "__sceSasSetADSRmode",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x9f9b46b9": {
     "classification": "dedicated",
