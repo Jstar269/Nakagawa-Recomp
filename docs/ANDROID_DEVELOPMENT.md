@@ -92,11 +92,14 @@ device tests; a release build keeps that activity private.
    The APK is `android/app/build/outputs/apk/debug/app-debug.apk`. Without `nk.demos` and
    `nk.titles` it carries the launcher alone.
 
-**An APK built with `nk.demos` is a local development build: do not share or publish it.** Its
-demo packages record the build machine's absolute paths, which can include your user name, in
-files the launcher's check requires (the build's dependency, profile and map files), so they
-cannot be left out. Install it only on your own device. Packages without those paths are a known
-limit, not yet done; the launcher-only APK (hosted CI's artifact) carries none of this.
+**An APK built with `nk.demos` is still a local development build: do not share or publish it.**
+`showcase.py build` installs each package trimmed to the files its rewritten completion manifest lists
+(the planner's dependency, object and map files are dropped; the launcher's check needs none of them),
+and `showcase.py audit` finds no file in the demos folder that names the build folder or your home
+folder, so the demo packages no longer carry your user name. The APK as a whole has not been audited
+for build paths (Gradle's outputs and the `nk.titles` libraries are not), and no emulator or device
+has run the trimmed packages, so install it only on your own device. The launcher-only APK (hosted
+CI's artifact) carries none of this.
 
 `nk.demos` bundles each package's `completion-manifest.json` and exactly the files it lists, each
 demo's disc image and the demos' notices, as `demos/`; Gradle refuses a package missing a listed
@@ -409,7 +412,7 @@ translation, with no "isn't responding" dialog; on a device it is not yet measur
 
 | Area | Status |
 | --- | --- |
-| Launcher library | An APK built with `nk.demos` lists the showcase demos and Play starts them from the files folder: checked on the PC against the same packages, and in the emulator under ARM translation, where both start, run and return to their detail page with exit code 0 ([Run in the emulator](#run-in-the-emulator)); no device has run it. Such an APK holds the build machine's paths and is for local use only ([Build](#build)); demo packages without those paths are not done. Other bundled titles (`nk.titles`) are not listed; they start from `adb` (above). |
+| Launcher library | An APK built with `nk.demos` lists the showcase demos and Play starts them from the files folder: checked on the PC against the same packages, and in the emulator under ARM translation, where both start, run and return to their detail page with exit code 0 ([Run in the emulator](#run-in-the-emulator)); no device has run it. Such an APK is for local use only until it is audited for build paths ([Build](#build)); its demo packages carry none, and the trimmed packages have not run in the emulator. Other bundled titles (`nk.titles`) are not listed; they start from `adb` (above). |
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
 | Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Only the showcase demos reach the phone, inside the APK (`nk.demos`); copying another package to it is not wired. |
 | Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the default APK; `-Pnk.toolchain` bundles them for arm64-v8a, and nothing runs them yet. |
