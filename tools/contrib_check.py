@@ -26,8 +26,9 @@ A source whose SDK header is not installed is ``SKIP``; one that includes a
 header only a build step writes, when that step has not run, is ``NOT_RUN``.
 
 The Python gate names failing unittest cases alongside its short output excerpt.
-It runs the selected modules in parallel processes planned from the measured
-weights (``plan_unit_batches``), each with a time limit scaled to its work.
+Each unittest process gets a time limit scaled to its measured work; with
+``CONTRIB_TEST_JOBS`` above 1 the modules run in that many parallel processes
+planned from the measured weights (``plan_unit_batches``).
 The publication audit's provenance self-consistency leg compares the working
 tree against the checked-in ledger, which only a maintainer holding the private
 trusted ledger can regenerate.  Those findings are therefore reported as
@@ -934,12 +935,14 @@ def _unittest_failure_notes(stderr: str) -> list[str]:
 UNIT_MIN_TIMEOUT = 1800
 #: Local seconds allowed per measured hosted second (``tools/ci_test_weights.json``).  Those weights
 #: were taken under coverage on hosted runners.  A Windows workstation ran 31 selected modules in one
-#: process in 2.7 times their weight, and in four parallel processes the slowest took about 4.6 times
-#: its own, so the limit allows six.
+#: process in 2.7 times their weight; in four parallel processes, on a machine other sessions were
+#: also loading, one process took 5.0 times its own, so the limit allows six.
 UNIT_TIMEOUT_PER_MEASURED_SECOND = 6
 #: Measured seconds of work that justify one more parallel unittest process.
 UNIT_SECONDS_PER_PROCESS = 300
-#: Environment variable that caps the parallel unittest processes (``1`` runs them serially).
+#: Environment variable that sets the parallel unittest processes.  The default is one: the modules
+#: share one checkout and the workstation's RAM lock grants one slot, and two parallel runs of the
+#: #2981 selection each failed a different test that passes alone.
 UNIT_JOBS_ENV = "CONTRIB_TEST_JOBS"
 
 
@@ -966,7 +969,7 @@ def _unit_jobs() -> int:
         if jobs < 1:
             raise ValueError(f"{UNIT_JOBS_ENV} must be a positive integer, got {raw!r}")
         return jobs
-    return max(1, min(ci_test_shards.DEFAULT_NUM_SHARDS, os.cpu_count() or 1))
+    return 1
 
 
 def plan_unit_batches(modules: list[str], data: ci_test_shards.WeightData, jobs: int) -> tuple[

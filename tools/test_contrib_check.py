@@ -662,6 +662,11 @@ class TestUnitGateScalesWithSelectedWork(unittest.TestCase):
         self.assertCountEqual(calls[0][0], heavy)
         self.assertEqual(calls[0][1], 6 * sum(self.HEAVY.values()))
 
+    def test_default_is_one_process_for_the_shared_checkout(self) -> None:
+        with mock.patch.dict(os.environ):
+            os.environ.pop(contrib_check.UNIT_JOBS_ENV, None)
+            self.assertEqual(contrib_check._unit_jobs(), 1)
+
     def test_small_selection_keeps_one_process_and_the_minimum_limit(self) -> None:
         _gate, calls = self._gate(self._modules("test_unmeasured_a", "test_unmeasured_b"))
         self.assertEqual(calls, [(("tools.test_unmeasured_a", "tools.test_unmeasured_b"), 1800)])
