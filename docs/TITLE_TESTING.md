@@ -175,8 +175,10 @@ movie records these, from `SR_MPEGAV=1` (also turned on by `SR_MPEGLOG=1`; the f
 - `drift_us`, and whether `av_us` stays flat across the `PSMF_AV_PRESENT:` windows;
 - whether the movie's sound was heard all the way through, as the person running it reports it.
 
-A movie decoded through `sceMpegAtracDecode` delivers no PCM through it, so its audio side is not measured by these
-lines; the record says so instead of giving zeros.
+The audio counters cover both decode paths. A block is delivered when `scePsmfPlayerGetAudioData` returns it or
+`sceMpegAtracDecode` decodes it into the guest's buffer, and it plays at the first `sceAudioOutput*` submit that
+covers it: at the address it was written to, or, for an `sceMpegAtracDecode` block the title copies into its own
+output buffer first, by its bytes (counted in `acontent`).
 
 ## Isolation
 
