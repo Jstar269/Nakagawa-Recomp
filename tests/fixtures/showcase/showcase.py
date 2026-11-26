@@ -198,7 +198,7 @@ def is_android_library(path: Path) -> bool:
         return False
     with path.open("rb") as stream:
         head = stream.read(20)
-    if len(head) < 20 or head[:4] != b"ELF" or head[5] != 1:
+    if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] != 1:
         return False
     return struct.unpack_from("<H", head, 18)[0] == _EM_AARCH64
 
