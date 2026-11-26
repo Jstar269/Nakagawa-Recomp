@@ -487,14 +487,15 @@ class PspOracleProtocolTests(unittest.TestCase):
 
 class NewProbeResultParserTests(unittest.TestCase):
     def _row(self, test_id: str, case_id: str, count: int, *,
-             status: str = "PASS", values: dict[int, int] | None = None) -> str:
+             status: str = "PASS", values: dict[int, int] | None = None,
+             result: int = 0) -> str:
         outputs = values or {}
         fields = " ".join(
             f"out{i}=0x{outputs.get(i, 0):08x}" for i in range(count)
         )
         return (
             f"NAKAGAWA_PSP_TEST schema=1 test_id={test_id} case_id={case_id} "
-            f"status={status} result=0x00000000 {fields}\n"
+            f"status={status} result=0x{result:08x} {fields}\n"
         )
 
     def _stream(self, rows: list[str]) -> str:
@@ -916,11 +917,22 @@ class NewProbeResultParserTests(unittest.TestCase):
 
 
     def test_campaign_probe_parsers_accept_complete_synthetic_records(self) -> None:
+        # The solid triangle's parser also binds its pinned input digests, its guard words and
+        # each row's index, so an all-zero stream is not a complete one for it. Its rows carry
+        # those words here; GeCorpusGateTests covers each refusal.
+        solid = protocol.GE_SOLID_TRIANGLE_CASE
+        bound = {
+            f"{solid}-input": dict(enumerate(protocol.ge_solid_triangle_input_words())),
+            f"{solid}-guard": dict(enumerate((480, 272, 0x200000, 2))),
+        }
+        row_index = {f"{solid}-r{row}": row for row in range(16)}
         for campaign_case, (spec, out_counts) in CAMPAIGN_PROBE_CASES.items():
             rows = [
                 self._row(
                     spec.test_id, case_id, out_counts[case_id],
-                    values={0: spec.terminal_count} if case_id == spec.terminal_case else None,
+                    values=({0: spec.terminal_count} if case_id == spec.terminal_case
+                            else bound.get(case_id)),
+                    result=row_index.get(case_id, 0),
                 )
                 for case_id in spec.ordered_cases
             ]
@@ -1471,7 +1483,7 @@ int main(void) {
     def test_solid_triangle_refuses_unload_when_worker_stops_with_pending_restore(self) -> None:
         compiler = shutil.which("gcc")
         if compiler is None:
-            self.skipTest("host GCC is required for the module-stop mock")
+            self.skipTest("TOOLCHAIN_MISSING: gcc is unavailable for the module-stop mock")
         probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe_ge_sample.c").read_text(
             encoding="utf-8")
         result = self._solid_module_stop_control(probe, compiler)
@@ -13301,7 +13313,25 @@ class GeSampleProbeTests(unittest.TestCase):
     def test_writer_round_trip_and_lifecycle_are_the_hle_issues_copies(self) -> None:
         shared = self.issues[self.issues.index("static int s_log_failed;\n"):
                              self.issues.index("/* ---", self.issues.index("int module_stop("))]
-        self.assertIn(shared, self.probe)
+        # module_stop adds two refusals that only the solid-triangle case compiles: a restore
+        # that did not verify keeps the PRX resident. Exactly these two blocks, once each;
+        # with them taken out the text is the hle_issues copy, which every other case compiles.
+        solid_only = (
+            "#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE\n"
+            "    /* A wedged GE may still reference this PRX's list and vertices. */\n"
+            "    if (s_solid_restore_pending) return 1;\n"
+            "#endif\n",
+            "#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE\n"
+            "    /* The worker could enter the draw before it observed the stop request.\n"
+            "       Its exit does not release the GE's references to the PRX. */\n"
+            "    if (s_solid_restore_pending) return 1;\n"
+            "#endif\n",
+        )
+        probe = self.probe
+        for block in solid_only:
+            self.assertEqual(probe.count(block), 1, block)
+            probe = probe.replace(block, "")
+        self.assertIn(shared, probe)
 
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
