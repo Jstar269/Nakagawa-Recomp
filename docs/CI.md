@@ -86,7 +86,7 @@ The jobs:
 | `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
-| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7), medians 7.3-25.0 min over the 20 full runs of 2026-11-25 to 2026-11-26 (smoke 25.0, selftests 20.1, routes 13.6, ladder-fuzz 7.3); since #3166, 6 groups, expected 9.3-13.3 min (smoke-ladder-fuzz 13.1, player 10.1, homebrew 10.5, routes 13.3, cosim 9.3, selftests 12.4), not yet measured |
+| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7), medians 7.3-25.0 min over the 20 full runs of 2026-11-25 to 2026-11-26 (smoke 25.0, selftests 20.1, routes 13.6, ladder-fuzz 7.3); since #3166, 6 groups, expected 9.3-13.6 min (smoke-ladder-fuzz 13.1, player 10.1, homebrew 10.5, cosim 9.3, selftests 12.4, each the sum of its steps' medians, about half a minute under a whole job; routes unchanged at its measured 13.6), not yet measured |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged on a full run; does not run on a quick one |
@@ -141,7 +141,7 @@ The jobs:
   `homebrew` and `cosim`, each a group of its own, and put `smoke` in one group with the ladder
   and the fuzzer; no step moved in the workflow and no command changed. From those runs' step
   medians plus the shared setup, the groups are expected to take `smoke-ladder-fuzz` 13.1
-  minutes, `player` 10.1, `homebrew` 10.5, `routes` 13.3, `cosim` 9.3 and `selftests` 12.4; no
+  minutes, `player` 10.1, `homebrew` 10.5, `cosim` 9.3 and `selftests` 12.4, and `routes` stays at its measured 13.6; no
   hosted run has measured the layout yet. Steps that read what another step builds share its
   part: the staged production smoke follows the production smoke (`smoke`), and the installer
   package and the staging smoke use `build/nakagawa_player.exe` from the player build
@@ -173,9 +173,8 @@ only when `run_installer` is true. The Markdown lint, the main smoke and the fix
 two always-required jobs they now belong to, so `tools/ci_required.py` no longer takes a result
 or run flag of their own. Each merged job's `timeout-minutes` covers its parts: hygiene 35
 (15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part plus the own
-limit of a step added to an existing part since (smoke-ladder-fuzz 75, player 25, homebrew 25,
-routes 25, cosim 25, selftests 45 with the Windows-only Python tests' 20; the homebrew import
-routes' own 15 lie inside their part's 25), and each Python shard 60, twice the former 30 because it
+limit of each step in it (smoke-ladder-fuzz 75, player 25, homebrew 40 with the homebrew import
+routes' 15, routes 25, cosim 25, selftests 45 with the Windows-only Python tests' 20), and each Python shard 60, twice the former 30 because it
 does about twice the work.
 
 The trade-offs: a step that fails stops the later steps of its own job, so a pull request that
@@ -184,7 +183,7 @@ fails, for example, the Windows smoke part does not learn about its ladder part 
 slowest shard, and the longest Windows group about 13 minutes instead of 10-12, which is still
 shorter than a Python shard, so a run on idle runners takes about as long as before, and less
 time waiting when other runs are queued. The smoke group later grew to the 25.0-minute median
-above; since #3166 the longest Windows group is expected at 13.3 minutes (`routes`), for two
+above; since #3166 the longest Windows groups are expected at about 13 to 14 minutes (`routes` and `smoke-ladder-fuzz`), for two
 more Windows runners per run.
 `tools/test_public_ci_wiring.py` (`PublicExportJobTests`, `WindowsRuntimePartitionTests`)
 pins the merged jobs: every former step with its command and condition, its order, every
@@ -2194,7 +2193,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 18 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 20 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.
@@ -2431,17 +2430,18 @@ developer runs locally, without private inputs:
   found no Memory Stick folder in the import and the second-folder test was not stopped; with
   the launch booting the program from its disc image, the probe wrote
   `ARGV0=disc0:/PSP_GAME/SYSDIR/EBOOT.BIN` and `DATA_BYTES=-1`, and the test failed on it.
-  **Minutes added:** not yet measured on a hosted runner. Locally the step took 419 seconds
+  **Minutes added:** a median of 510 seconds on hosted runners (below). Locally the step took 419 seconds
   (Windows 11, `-j4`, a shared host, no compiler cache), most of it the player build and the
   two package builds. No compiler-cache saving is assumed: the player and its two test
   programs are each compiled and linked by one command, which the cache does not store, and
   the builds run under a fresh temporary folder. The step's own limit is 15 minutes. The steps
   ran in `smoke`, measured at 8.1 minutes, rather than in `routes`, measured at 13.9, so that
   the longest Windows group stayed below a Python shard, and the `smoke` group's limit was 40,
-  its former 25 plus those 15. Since #3166 they are the `homebrew` part and group, whose 25
-  minutes hold the step's 15. Over the 20 full runs of 2026-11-25 to 2026-11-26, in the `smoke`
+  its former 25 plus those 15. Since #3166 they are the `homebrew` part and group, with the
+  same limit of 40. Over the 20 full runs of 2026-11-25 to 2026-11-26, in the `smoke`
   group after its player build, the step took a median of 510 seconds and at most 554. The first
-  full run records the real figure here.
+  full run of the `homebrew` group, which starts without a restored compiler cache, records
+  the figure for the new layout here.
   The same job builds Nakagawa Font Copy (`src/psp_companion/Makefile`), the PSP app
   behind the player's font import, through its user-mode import gate; nothing from
   that build is uploaded. Public

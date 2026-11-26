@@ -1152,19 +1152,16 @@ _WINDOWS_GROUPS = {
 }
 
 #: Each group's time limit (docs/CI.md, "Jobs per run"): 25 minutes per part, plus the own
-#: limit of a step added to an existing part since (_WINDOWS_ADDED_STEP_LIMITS). The homebrew
-#: import routes' own 15 minutes (#2143) lie inside the 25 of the part they have to
-#: themselves since #3166.
+#: limit of every step in its parts: the homebrew import routes' 15 (#2143) and the
+#: Windows-only Python tests' 20.
 _WINDOWS_GROUP_TIMEOUTS = {
     "smoke-ladder-fuzz": 75,
     "player": 25,
-    "homebrew": 25,
+    "homebrew": 40,
     "routes": 25,
     "cosim": 25,
     "selftests": 45,
 }
-#: The own step limits added to a part's 25 minutes: the Windows-only Python tests' 20.
-_WINDOWS_ADDED_STEP_LIMITS = {"selftests": 20}
 
 #: Every step each Windows part runs, in the workflow's order (#3166). A step outside
 #: _WINDOWS_EVERY_PART and _WINDOWS_MAIN_SAVE runs in exactly the one part listed here.
@@ -1287,8 +1284,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         self.assertNotIn("matrix.part ", text)
         self.assertNotIn("matrix.part}", text)
         # A group's limit is the sum of its parts' former 25-minute limits, plus the own
-        # limit of each step added to one of its existing parts since; a step's own limit
-        # in a part of its own (the homebrew routes since #3166) lies inside that part's 25.
+        # limit of each step added to one of its parts since (#2143).
         self.assertIn("    timeout-minutes: ${{ matrix.timeout }}", text)
         step_limits: dict[str, int] = {}
         for name, step in self.steps.items():
@@ -1299,17 +1295,11 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
                 required_part = _required(part, f"{name}: a step with its own limit must be in a part")
                 step_limits[required_part] = step_limits.get(required_part, 0) + int(limit.group(1))
         self.assertEqual(step_limits, {"homebrew": 15, "selftests": 20})
-        for part, limit in step_limits.items():
-            with self.subTest(part=part):
-                if part in _WINDOWS_ADDED_STEP_LIMITS:
-                    self.assertEqual(limit, _WINDOWS_ADDED_STEP_LIMITS[part])
-                else:
-                    self.assertLess(limit, 25, f"{part}: a step's own limit must lie inside its part's 25")
         entries = _windows_matrix_entries(self.block)
         self.assertEqual({group: timeout for group, (_parts, timeout) in entries.items()}, _WINDOWS_GROUP_TIMEOUTS)
         for group, (parts, timeout) in entries.items():
             with self.subTest(group=group):
-                self.assertEqual(timeout, sum(25 + _WINDOWS_ADDED_STEP_LIMITS.get(part, 0) for part in parts))
+                self.assertEqual(timeout, sum(25 + step_limits.get(part, 0) for part in parts))
         self.assertIn("      fail-fast: false", text)
 
     def test_windows_only_python_tests_run_from_the_planner_and_fail_closed(self) -> None:
@@ -1543,6 +1533,8 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
     def test_every_step_runs_in_exactly_its_pinned_part_in_order(self) -> None:
         """#3166: the layout of the eight parts, step by step, in the workflow's order."""
         self.assertEqual(sorted(_WINDOWS_PART_STEPS), sorted(self.parts))
+        names = [line.strip() for line in self.block if line.startswith("      - name: ")]
+        self.assertEqual(len(names), len(set(names)), "two Windows steps share a name")
         pinned = [name for steps in _WINDOWS_PART_STEPS.values() for name in steps]
         self.assertEqual(len(pinned), len(set(pinned)), "a step is pinned to two parts")
         shared = set(_WINDOWS_EVERY_PART) | set(_WINDOWS_MAIN_SAVE)
