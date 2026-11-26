@@ -318,6 +318,7 @@ target_include_directories(test_player_state PRIVATE
 target_compile_definitions(test_player_state PRIVATE
     NK_TITLE_MANIFEST_TEST_SEAMS
     NK_SAVES_TEST_SEAMS
+    NK_PLAYER_STATE_TEST_SEAMS
     SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 target_link_libraries(test_player_state PRIVATE nakagawa_core)
