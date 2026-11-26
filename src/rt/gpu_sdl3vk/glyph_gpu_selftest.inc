@@ -15,6 +15,8 @@
  *              one; a cell whose texels did not change keeps its tile;
  *   rewrite-gap a rewrite the cache's content hash does not see (it samples part of a page) draws its new tile;
  *   rewrite-back a cell rewritten, synced stale, then written back to its first glyph draws its tile again;
+ *   abutting-edge updating only the shared edge of the second cell rebuilds just that tile and leaves
+ *              the first sprite byte-identical in a warm cache;
  *   gradient   fade bars of one colour (shallow, steep, four texels, two) and a box shadow draw without a reversal along their rows and columns;
  *   cap        more new rectangles in one present than NK_GLYPH_PER_PRESENT: exactly that many are
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
@@ -339,6 +341,81 @@ static int gst_cell_rewrite(void) {
     return 1;
 }
 
+/* Exactly abutting atlas cells and destinations. Change only the first column
+ * of B, the column that 1x linear sampling could accidentally borrow for A. */
+static int gst_cell_abutting_edge(void) {
+    enum { AX = 32, BX = AX + GST_CW, Y = 32, B = GST_CW, EDGE_FIRST = 3, EDGE_LAST = 11 };
+    static uint32_t page[GST_W * GST_H], tile_a[GST_CW * 6 * GST_CH * 6],
+                    tile_b[GST_CW * 6 * GST_CH * 6];
+    gst_reset();
+    gst_page(page, 0, 1, 0x00FFFFFFu);
+    for (int y = 0; y < GST_CH; ++y) {
+        uint32_t *row = page + y * GST_W;
+        memmove(row + B, row + 16, GST_CW * sizeof(*row));
+        for (int x = B + GST_CW; x < 16 + GST_CW; ++x) row[x] = 0x00123456u;
+        if (y >= EDGE_FIRST && y < EDGE_LAST) row[B] = 0x40FFFFFFu;
+    }
+    gst_put(GST_PAGE, page);
+    gst_state(GST_PAGE, GST_W, GST_H);
+    xst_clear_fb();
+    int ok = gst_cell(0, AX, Y) && gst_cell(B, BX, Y);
+    uint32_t *cold = ok ? gst_device() : NULL;
+    if (!cold) return gst_fail("abutting-edge", "cold draw or readback failed");
+    const uint64_t warm_built = s_cnt_gl_built, warm_decoded = s_cnt_gl_decodes;
+    xst_clear_fb();
+    ok = gst_cell(0, AX, Y) && gst_cell(B, BX, Y);
+    uint32_t *warm = ok ? gst_device() : NULL;
+    if (!warm) {
+        free(cold);
+        return gst_fail("abutting-edge", "warm draw or readback failed");
+    }
+    const int identical_warm = gst_diff_region(cold, warm, 0, 0, SCL_W / s_scale, SCL_H / s_scale) == 0;
+    free(cold);
+    if (!identical_warm || s_cnt_gl_built != warm_built || s_cnt_gl_decodes != warm_decoded) {
+        free(warm);
+        return gst_fail("abutting-edge", "warm redraw changed the frame or rebuilt the page");
+    }
+    const uint64_t built0 = s_cnt_gl_built, kept0 = s_cnt_gl_kept, stale0 = s_cnt_gl_stale,
+                   bound0 = s_cnt_gl_bound, decode0 = s_cnt_gl_decodes, images0 = s_cnt_gl_images;
+    for (int y = EDGE_FIRST; y < EDGE_LAST; ++y) {
+        uint32_t index = (uint32_t)(y * GST_W + B);
+        uint32_t byte = GST_PAGE + index * 4u + 3u;
+        page[index] = 0x68FFFFFFu;
+        *(uint8_t *)SR_HOST(byte) = 104;
+        sr_gpu_vram_dirty(byte, 1);
+    }
+    ge_state_note_external_write();
+    xst_clear_fb();
+    ok = gst_cell(0, AX, Y) && gst_cell(B, BX, Y);
+    uint32_t *after = ok ? gst_device() : NULL;
+    if (!after) {
+        free(warm);
+        return gst_fail("abutting-edge", "updated draw or readback failed");
+    }
+    const int changed_a = gst_diff_region(warm, after, AX, Y, GST_CW, GST_CH);
+    const int changed_b = gst_diff_region(warm, after, BX, Y, GST_CW, GST_CH);
+    const int rebuilt =
+        nk_glyph_rebuild(page, GST_W, GST_H, 0, 0, GST_CW, GST_CH, s_scale, tile_a) == NK_GLYPH_OK &&
+        nk_glyph_rebuild(page, GST_W, GST_H, B, 0, GST_CW, GST_CH, s_scale, tile_b) == NK_GLYPH_OK;
+    const int off_a = rebuilt ? gst_off_tile(after, AX, Y, GST_CW, GST_CH, tile_a) : -1;
+    const int off_b = rebuilt ? gst_off_tile(after, BX, Y, GST_CW, GST_CH, tile_b) : -1;
+    free(warm);
+    free(after);
+    if (changed_a || changed_b == 0 || off_a || off_b)
+        return gst_fail("abutting-edge", "changed A/B %d/%d, differences from CPU tiles %d/%d",
+                        changed_a, changed_b, off_a, off_b);
+    const uint64_t built = s_cnt_gl_built - built0, kept = s_cnt_gl_kept - kept0,
+                   stale = s_cnt_gl_stale - stale0, bound = s_cnt_gl_bound - bound0,
+                   decoded = s_cnt_gl_decodes - decode0, images = s_cnt_gl_images - images0;
+    if (built != 1 || kept != 1 || stale != 1 || bound != 2 || decoded != 1 || images != 0)
+        return gst_fail("abutting-edge", "built/kept/stale/bound/decode/images %llu/%llu/%llu/%llu/%llu/%llu",
+                        (unsigned long long)built, (unsigned long long)kept, (unsigned long long)stale,
+                        (unsigned long long)bound, (unsigned long long)decoded, (unsigned long long)images);
+    printf("gpu glyph selftest: PASS %-12s scale %d: A unchanged, B changed at %d device pixels, one tile rebuilt\n",
+           "abutting-edge", s_scale, changed_b);
+    return 1;
+}
+
 /* A cell the guest rewrites and then writes back (blinking text, a double-buffered font page): a sync while the
  * cell held the other glyph marks its tile stale, and once the page holds the first glyph again the draw must bind
  * a tile of those texels, never stay on the game's own picture for the rest of the entry's life. */
@@ -638,7 +715,7 @@ int gegpu_glyph_selftest(void) {
         return gst_cell_sharp();
     }
     int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_color_test() && gst_cell_rewrite() && gst_cell_rewrite_gap() &&
-             gst_cell_rewrite_back() && gst_cell_gradient() &&
+             gst_cell_rewrite_back() && gst_cell_abutting_edge() && gst_cell_gradient() &&
              gst_cell_cap();
     if (ok) {
         /* No guest byte moved: the page and the CLUT are what the CPU left. */

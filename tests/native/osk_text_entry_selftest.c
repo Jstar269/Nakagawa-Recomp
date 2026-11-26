@@ -336,24 +336,24 @@ int main(void) {
 
 static int s_box_calls;
 
-/* This host has no native box: the real one answers cancelled at once. */
+/* This host has no native box. The production seam cannot supply a live answer. */
 int sr_osk_input(const wchar_t *desc, const wchar_t *initial, wchar_t *out, int cap) {
     (void)desc;
     (void)initial;
     (void)out;
     (void)cap;
     s_box_calls++;
-    return 0;
+    return SR_OSK_TEXT_UNAVAILABLE;
 }
 
 int main(void) {
     wchar_t out[16];
     set_env("SR_VIDEO", NULL);
     wcscpy(out, L"old");
-    check(sr_osk_text_entry_poll(L"Enter name.", L"old", out, 16, 0) == 0,
-          "without a native box the field is answered cancelled at once");
+    check(sr_osk_text_entry_poll(L"Enter name.", L"old", out, 16, 0) == SR_OSK_TEXT_UNAVAILABLE,
+          "without a native box the host reports unavailability");
     check(s_box_calls == 1 && wcscmp(out, L"old") == 0,
-          "the cancelled answer leaves the caller's buffer untouched");
+          "an unavailable host leaves the caller's buffer untouched");
     set_env("SR_VIDEO", "offscreen");
     check(sr_osk_text_entry_poll(L"Enter name.", L"", out, 16, 0) == SR_OSK_TEXT_PENDING,
           "under the offscreen presenter the request stays pending");
@@ -369,6 +369,12 @@ int main(void) {
     sr_osk_overlay_key(OSK_KEY_CONFIRM);
     check(sr_osk_text_entry_poll(L"Enter name.", L"old", out, 16, 0) == 1 && wcscmp(out, L"old") == 0,
           "start answers the overlay request");
+    check(sr_osk_text_entry_poll(L"Enter name.", L"old", out, 16, 0) == SR_OSK_TEXT_PENDING,
+          "a subsequent overlay request still opens");
+    sr_osk_overlay_key(OSK_KEY_CANCEL);
+    check(sr_osk_text_entry_poll(L"Enter name.", L"old", out, 16, 0) == 0 &&
+              s_box_calls == 1 && wcscmp(out, L"old") == 0,
+          "the person's overlay cancellation remains distinct and leaves the buffer untouched");
     sr_osk_text_entry_abandon();
     sr_osk_overlay_set_host(0);
     printf("osk_text_entry_selftest: %d checks, %d failures\n", s_checks, s_failures);

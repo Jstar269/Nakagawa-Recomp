@@ -641,7 +641,12 @@ SrCoro *sr_coro_main(void) {
 }
 
 SrCoro *sr_coro_create(SrCoroFn fn, void *arg, size_t stack_size) {
-    SrCoro *c = (SrCoro *)calloc(1, sizeof(*c));
+    /* getcontext() below is a returns-twice call, so GCC at -O3 (-Wclobbered) will not keep a plain
+     * local across it. The second return can never be taken here: makecontext() rewrites the saved
+     * context to start at coro_trampoline, so nothing ever resumes at the getcontext() call, and `c`
+     * is not assigned after it. The volatile pointer states that to the compiler and costs one
+     * reload on a creation path. */
+    SrCoro *volatile c = (SrCoro *)calloc(1, sizeof(*c));
     if (!c) return NULL;
     c->fn = fn;
     c->arg = arg;

@@ -19,6 +19,7 @@ job builds the PRXs on Linux this way and the packages on Windows.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -33,6 +34,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools"))
+from nk_core import package_cache
 from ge_stat_windows import (WINDOW_VBLANKS, GeStatWindow, GeStatWindowError, first_window,
                              parse_windows)
 from prxload import Prx
@@ -52,6 +54,12 @@ SCREENSHOT_ROOT = BUILD_ROOT / "screenshots"
 HEADLESS_CAPTURE_WINDOW = (60, 71)
 SECTOR = 2048
 PSP_PRX_ELF_TYPE = 0xFFA0
+# Where a demo's executable looks for the SDL3 libraries on Linux, relative to its own
+# folder. The install holds `<player folder>/demos/packages/<disc id>/<executable>` (the
+# layout player_app_discover_showcase reads), and the player folder holds the libraries
+# beside the player, so three folders up is that folder. Read by the Makefile as
+# RUNTIME_RUNPATH_ORIGIN; nothing else about a build changes with it.
+RUNTIME_RUNPATH_ORIGIN = "../../.."
 
 # The first-frame checkpoint is guest progress: the first SR_GESTAT window whose
 # counters show the demo's own drawing ("frame_counters" below), at whatever vblank
@@ -109,6 +117,205 @@ DEMOS = (
 
 class ShowcaseError(RuntimeError):
     """An explicit failure in the optional showcase build route."""
+
+
+# ELF loader records, read without a toolchain so the audit runs wherever the build did.
+_PT_LOAD, _PT_DYNAMIC = 1, 2
+_DT_NEEDED, _DT_STRTAB, _DT_RPATH, _DT_RUNPATH = 1, 5, 15, 29
+
+
+def elf_run_paths(path: Path) -> tuple[list[str], list[str]] | None:
+    """The libraries an ELF object needs and the folders it searches for them.
+
+    Returns (DT_NEEDED names, entries of DT_RUNPATH and DT_RPATH), or None for a file that
+    is not a little-endian ELF object. A static executable or relocatable object has no
+    dynamic section and returns two empty lists.
+    """
+    with path.open("rb") as stream:
+        head = stream.read(20)
+        if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] != 1 or head[4] not in (1, 2):
+            return None
+        stream.seek(0)
+        data = stream.read()
+    wide = data[4] == 2
+    if wide:
+        phoff, = struct.unpack_from("<Q", data, 0x20)
+        phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+    else:
+        phoff, = struct.unpack_from("<I", data, 0x1C)
+        phentsize, phnum = struct.unpack_from("<HH", data, 0x2A)
+    loads: list[tuple[int, int, int]] = []
+    dynamic: tuple[int, int] | None = None
+    for index in range(phnum):
+        base = phoff + index * phentsize
+        if wide:
+            kind, _, offset, vaddr, _, filesz, _, _ = struct.unpack_from("<IIQQQQQQ", data, base)
+        else:
+            kind, offset, vaddr, _, filesz, _, _, _ = struct.unpack_from("<IIIIIIII", data, base)
+        if kind == _PT_LOAD:
+            loads.append((vaddr, offset, filesz))
+        elif kind == _PT_DYNAMIC:
+            dynamic = (offset, filesz)
+    if dynamic is None:
+        return [], []
+    entry_size = 16 if wide else 8
+    entries: list[tuple[int, int]] = []
+    for position in range(dynamic[0], dynamic[0] + dynamic[1], entry_size):
+        tag, value = struct.unpack_from("<qQ" if wide else "<iI", data, position)
+        if tag == 0:
+            break
+        entries.append((tag, value))
+    strtab = next((value for tag, value in entries if tag == _DT_STRTAB), None)
+    if strtab is None:
+        return [], []
+    table = next((offset + (strtab - vaddr) for vaddr, offset, filesz in loads
+                  if vaddr <= strtab < vaddr + filesz), None)
+    if table is None:
+        raise ShowcaseError(f"{path}: the dynamic string table lies outside every loaded segment")
+
+    def text(offset: int) -> str:
+        end = data.index(b"\0", table + offset)
+        return data[table + offset:end].decode("utf-8", errors="replace")
+
+    needed = [text(value) for tag, value in entries if tag == _DT_NEEDED]
+    folders = [folder for tag, value in entries if tag in (_DT_RUNPATH, _DT_RPATH)
+               for folder in text(value).split(":")]
+    return needed, folders
+
+
+_EM_AARCH64 = 183  # the ELF machine of an arm64 library (Gradle's nk.demos check uses the same)
+
+
+def is_android_library(path: Path) -> bool:
+    """True for `lib<game>.so` built for arm64: the library an Android package ships (#360).
+
+    `showcase.py build --target android` links each demo as the shared library TitleActivity
+    loads. It runs inside the APK, where the app's own library folder holds SDL3, so it has
+    no run path and none is owed. A desktop demo is never both named `lib*.so` and an arm64
+    object, so this cannot excuse a Linux package that lost its run path.
+    """
+    if not (path.name.startswith("lib") and path.name.endswith(".so")):
+        return False
+    with path.open("rb") as stream:
+        head = stream.read(20)
+    if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] != 1:
+        return False
+    return struct.unpack_from("<H", head, 18)[0] == _EM_AARCH64
+
+
+def audit_run_paths(paths: list[Path]) -> list[str]:
+    """Name every run path entry of the given ELF files that is not relative to the file.
+
+    A shipped executable finds the libraries beside it through `$ORIGIN`; an entry that is
+    an absolute folder names the machine that linked it (a developer's `/usr/local/lib`),
+    and a bare relative entry is resolved against the caller's working directory. Files
+    that are not ELF objects are skipped.
+    """
+    problems = []
+    for path in paths:
+        records = elf_run_paths(path)
+        if records is None:
+            continue
+        for folder in records[1]:
+            if not (folder in ("$ORIGIN", "${ORIGIN}") or folder.startswith(("$ORIGIN/", "${ORIGIN}/"))):
+                problems.append(f"{path}: run path entry '{folder}' is not relative to $ORIGIN")
+    return problems
+
+
+def audit_required_run_path(paths: list[Path], required: str,
+                            library_prefix: str = "libSDL3.so") -> list[str]:
+    """Name every ELF executable that needs SDL3 but does not search `required` for it.
+
+    A run path that is only well formed is not enough: a demo linked with none still starts
+    on a machine whose loader cache holds an SDL3 and fails on one that does not. Each ELF
+    file that lists a library starting with `library_prefix` must carry `required` (for the
+    demos `$ORIGIN/../../..`, the player's folder) among its run path entries.
+    """
+    problems = []
+    for path in paths:
+        records = elf_run_paths(path)
+        if records is None or not any(name.startswith(library_prefix) for name in records[0]):
+            continue
+        if required not in records[1]:
+            found = ", ".join(records[1]) or "none"
+            problems.append(f"{path}: needs {library_prefix} but its run path ({found}) lacks {required}")
+    return problems
+
+
+def system_library_files(prefix: str) -> list[Path]:
+    """The real files of the system's copies of a library, from the loader's cache (Linux)."""
+    listing = subprocess.run(["/sbin/ldconfig", "-p"], check=False, capture_output=True, text=True)
+    found = {Path(line.rsplit("=>", 1)[1].strip()).resolve()
+             for line in listing.stdout.splitlines()
+             if line.strip().startswith(prefix) and "=>" in line}
+    return sorted(found)
+
+
+def unresolved_libraries(executable: Path, prefix: str = "libSDL3.so") -> list[str]:
+    """What `ldd` cannot resolve for `executable` with every system copy of a library hidden.
+
+    The system copies are hidden by binding an empty file over each of them inside a private
+    mount namespace (no privileges needed, nothing outside the namespace changes), and the
+    run starts with no LD_LIBRARY_PATH, so what resolves is what the executable's own run
+    path reaches: the library installed beside it, or nothing. Returns the lines `ldd` could
+    not resolve; raises ShowcaseError where the namespace cannot be made.
+    """
+    hidden = [str(path) for path in system_library_files(prefix)]
+    script = ('for f in "$@"; do mount --bind /dev/null "$f" || exit 97; done; '
+              'ldd "$NK_AUDITED" 2>&1')
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NK_AUDITED": str(executable)}
+    run = subprocess.run(["unshare", "-rm", "sh", "-c", script, "sh", *hidden], check=False,
+                         capture_output=True, text=True, env=env)
+    if run.returncode == 97 or "unshare:" in run.stderr:
+        raise ShowcaseError(f"a private mount namespace is not available: {run.stderr.strip()}")
+    return [line.strip() for line in run.stdout.splitlines()
+            if "not found" in line or "file too short" in line or "cannot open" in line
+            or "invalid ELF" in line]
+
+
+def files_naming(root: Path, needles: list[str]) -> list[str]:
+    """The files under `root`, as relative paths, whose bytes spell any of the given folders.
+
+    Each folder is also tried with the other slash and with JSON escaping, so a Windows
+    path matches however a tool wrote it.
+    """
+    spellings: set[bytes] = set()
+    for needle in needles:
+        if not needle:
+            continue
+        forward = needle.replace("\\", "/")
+        backward = forward.replace("/", "\\")
+        for form in (needle, forward, backward, backward.replace("\\", "\\\\")):
+            spellings.add(form.encode("utf-8"))
+    hits = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if any(spelling in data for spelling in spellings):
+            hits.append(path.relative_to(root).as_posix())
+    return hits
+
+
+def audit_demo_root(demo_root: Path) -> list[str]:
+    """What stops the staged demos from being moved to another machine, one line each.
+
+    Every ELF file in a package folder must have only `$ORIGIN`-relative run paths, an
+    executable that needs SDL3 must search the player's folder for it (the arm64 `lib<game>.so`
+    of an Android demos folder is exempt: it loads SDL3 from the APK), and no file in the demo
+    folder may name this checkout, the showcase build folder or the user's home folder.
+    """
+    executables = [path for path in sorted((demo_root / "packages").glob("*/*")) if path.is_file()]
+    problems = audit_run_paths(executables)
+    desktop = [path for path in executables if not is_android_library(path)]
+    problems.extend(audit_required_run_path(desktop, f"$ORIGIN/{RUNTIME_RUNPATH_ORIGIN}"))
+    needles = [str(ROOT), ROOT.as_posix(), str(BUILD_ROOT), BUILD_ROOT.as_posix()]
+    home = Path.home()
+    if home.parent != home:  # not the file system root
+        needles.extend([str(home), home.as_posix()])
+    problems.extend(f"{demo_root / name}: names the build folder"
+                    for name in files_naming(demo_root, needles))
+    return problems
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -569,8 +776,79 @@ def _prebuilt_license(prebuilt_dir: Path) -> bytes:
     return notice
 
 
+def title_runtime_sources(names: set[str]) -> set[str]:
+    """The files of a package folder that `nk_add_title_runtime` compiles (CMakeLists.txt).
+
+    The Android `nk.titles` route (docs/ANDROID_DEVELOPMENT.md) builds a title's runtime
+    library from the package it is pointed at: `<id>_recomp.c`, `<id>_recomp_*.c`,
+    `nk_lib_*.c` and `sr_title_config.h`, plus the generated header they include. Those
+    are not run-time files of the PC player but they hold no builder path, so the trim keeps
+    them. `names` are file names at the top of the package folder.
+    """
+    return {name for name in names
+            if fnmatch.fnmatchcase(name, "*_recomp.c") or fnmatch.fnmatchcase(name, "*_recomp_*.c")
+            or fnmatch.fnmatchcase(name, "nk_lib_*.c") or name == "sr_title_config.h"
+            or fnmatch.fnmatchcase(name, "*_recomp_funcs.h")}
+
+
+def package_game_name(demo: dict[str, object]) -> str:
+    """The game name the planner gave this demo's package, taken from the same code.
+
+    The executable's file name is not it: an Android library is `lib<game>.so`.
+    """
+    import title_codegen_plan  # imported here: the module is large and only the build needs it
+
+    manifest = json.loads((ROOT / str(demo["manifest"])).read_text(encoding="utf-8"))
+    return str(title_codegen_plan._package_game_name(manifest, None))
+
+
+def trim_to_runtime_package(package_dir: Path, game_name: str) -> int:
+    """Drop the build's own files from a package folder, as `nk_cli build-package` does (#306).
+
+    The planner leaves the build's files beside the runtime: dependency files, objects, the
+    link map and response file and the build stamps. The compiler and linker wrote the folder
+    the build ran in into them, so a package that carries them names the builder's machine
+    and cannot move. The runtime package (schema 3) declares no generated objects, so none
+    of them is a runtime file; the player's own route removes the same set
+    (nk_cli._remove_package_build_outputs) and writes the completion manifest over what
+    remains. This does the same, then runs the full package check on the result, so the
+    manifest still lists every remaining file and its digest, and a damaged package is
+    refused before and after. The generated C that the title runtime route compiles stays
+    (title_runtime_sources). Call it on the copy that is installed, never on the build
+    folder. Returns how many files were removed.
+    """
+    import nk_cli  # imported here: the module is large and the build route needs it only once
+
+    valid, reason = package_cache.validate_package_cache(package_dir)
+    if not valid:
+        raise ShowcaseError(f"the planner's package is not valid, so it is not trimmed: {reason}")
+    try:
+        package = package_cache.read_bounded_json(package_dir / "package.json")
+        completion = package_cache.read_bounded_json(package_dir / "completion-manifest.json")
+    except (OSError, ValueError) as exc:
+        raise ShowcaseError(f"package metadata is unreadable: {exc}") from exc
+    if package.get("schema_version") != 3 or package.get("generated_objects") != []:
+        raise ShowcaseError("only a runtime package (schema 3, no generated objects) is trimmed")
+    key = package_cache.package_cache_key(package_dir)
+    if key is None:
+        raise ShowcaseError("the package carries no cache key")
+    outputs = nk_cli._package_build_output_paths(package_dir)
+    kept = title_runtime_sources({name for name in outputs if "/" not in name})
+    removed, _ = nk_cli._remove_package_build_outputs(package_dir, game_name, outputs - kept)
+    for folder in sorted((p for p in package_dir.rglob("*") if p.is_dir()), reverse=True):
+        if not any(folder.iterdir()):
+            folder.rmdir()
+    package_cache.write_completion_manifest(
+        package_dir, key, title_input_identity=package["title_input_identity"],
+        backends=completion.get("backends"), limits=completion.get("limits"))
+    valid, reason = package_cache.validate_package_cache(package_dir, expected_key=key)
+    if not valid:
+        raise ShowcaseError(f"the trimmed package failed its check: {reason}")
+    return int(removed)
+
+
 def _build_one(demo: dict[str, object], license_notice: bytes,
-               prebuilt_prx_dir: Path | None = None) -> None:
+               prebuilt_prx_dir: Path | None = None, target: str = "host") -> None:
     title_id = str(demo["id"])
     stage = BUILD_ROOT / title_id
     if prebuilt_prx_dir is None:
@@ -584,7 +862,11 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     write_iso(iso_path, str(demo["disc_id"]), str(demo["display_name"]), icon,
               prx.read_bytes(), license_notice)
 
-    package_stage = stage / f"package-{_package_fingerprint(demo, prx)}"
+    # A host and an Android package of the same inputs are different builds: each has its
+    # own stage, so neither reuses the other's objects or executable.
+    fingerprint = _package_fingerprint(demo, prx)
+    package_stage = stage / (f"package-{fingerprint}" if target == "host"
+                             else f"package-{target}-{fingerprint}")
     if package_stage.is_symlink():
         raise ShowcaseError(f"refusing to use symlink package output: {package_stage}")
     package_stage.mkdir(parents=True, exist_ok=True)
@@ -592,8 +874,16 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
         sys.executable, str(ROOT / "tools" / "title_codegen_plan.py"),
         str(ROOT / str(demo["manifest"])), "--package", "--public-safe",
         "--game-elf", str(prx), "--output-dir", str(package_stage),
+        "--target", target,
     ]
-    result = subprocess.run(command, cwd=ROOT, check=False)
+    # The runtime looks for the SDL3 libraries beside the player it ships under (Linux; the
+    # Makefile ignores the setting elsewhere), never in a folder of the building machine.
+    env = dict(os.environ)
+    if target == "host":
+        env["RUNTIME_RUNPATH_ORIGIN"] = RUNTIME_RUNPATH_ORIGIN
+    else:
+        env.pop("RUNTIME_RUNPATH_ORIGIN", None)  # the APK's own library folder holds SDL3
+    result = subprocess.run(command, cwd=ROOT, env=env, check=False)
     if result.returncode:
         raise ShowcaseError(f"analyze/codegen/package failed for {title_id} (exit {result.returncode})")
     package_meta = json.loads((package_stage / "package.json").read_text(encoding="utf-8"))
@@ -607,6 +897,8 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     _clear_owned(release_dir, DEMO_ROOT / "packages")
     release_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(package_stage, release_dir)
+    # Only the installed copy loses the build's files; the build folder stays whole.
+    trim_to_runtime_package(release_dir, package_game_name(demo))
     image = DEMO_ROOT / "images" / f"{demo['disc_id']}.iso"
     image.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(iso_path, image)
@@ -617,12 +909,18 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     print(f"SHOWCASE_PACKAGE: {demo['disc_id']} {release_dir}")
 
 
-def build_all(prebuilt_prx_dir: Path | None = None) -> None:
+def build_all(prebuilt_prx_dir: Path | None = None, target: str = "host") -> None:
     """Build every demo's image and package into DEMO_ROOT.
 
     With `prebuilt_prx_dir` (what `build-prx` wrote, on a host that has PSPDEV) the
     PSPDEV step is skipped and those PRXs and that license notice are used, so a host
     without PSPDEV, such as the Windows release job, builds the same packages.
+
+    `target` is the system the packages run on: `host`, or `android` for the packages the
+    Android app bundles (title_codegen_plan.py --target android: each package's executable
+    is the library lib<game>.so, and the build needs CC naming an Android Clang and
+    ANDROID_SDL3_INCLUDE and ANDROID_SDL3_LIBDIR naming the APK's SDL3;
+    docs/ANDROID_DEVELOPMENT.md). The demos folder has the same layout either way.
     """
     if prebuilt_prx_dir is None:
         _check_pspdev()
@@ -630,7 +928,7 @@ def build_all(prebuilt_prx_dir: Path | None = None) -> None:
     else:
         license_notice = _prebuilt_license(prebuilt_prx_dir)
     for demo in DEMOS:
-        _build_one(demo, license_notice, prebuilt_prx_dir)
+        _build_one(demo, license_notice, prebuilt_prx_dir, target)
 
 
 def build_prx_all(out_dir: Path) -> None:
@@ -1252,7 +1550,10 @@ def smoke_all() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action",
-                        choices=("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke"))
+                        choices=("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke",
+                                 "audit", "audit-run-paths"))
+    parser.add_argument("files", nargs="*", type=Path,
+                        help="audit-run-paths: the ELF files whose run paths are audited")
     parser.add_argument("--out-dir", type=Path,
                         help="stage-iso: directory that receives TEST00007.iso; "
                              "build-prx: directory that receives each demo's PRX and "
@@ -1260,12 +1561,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prebuilt-prx-dir", type=Path,
                         help="build: use the PRXs and license notice build-prx wrote there "
                              "instead of running PSPDEV")
+    parser.add_argument("--target", choices=("host", "android"), default=None,
+                        help="build: the system the packages run on (default host); android "
+                             "builds the packages the Android app bundles")
     args = parser.parse_args(argv)
     if args.prebuilt_prx_dir is not None and args.action != "build":
         parser.error("--prebuilt-prx-dir applies only to build")
+    if args.files and args.action != "audit-run-paths":
+        parser.error("files apply only to audit-run-paths")
+    if args.action == "audit-run-paths" and not args.files:
+        parser.error("audit-run-paths requires at least one file")
+    if args.target is not None and args.action != "build":
+        parser.error("--target applies only to build")
     try:
         if args.action == "build":
-            build_all(args.prebuilt_prx_dir)
+            build_all(args.prebuilt_prx_dir, args.target or "host")
         elif args.action == "build-prx":
             if args.out_dir is None:
                 parser.error("build-prx requires --out-dir")
@@ -1274,6 +1584,14 @@ def main(argv: list[str] | None = None) -> int:
             smoke_all()
         elif args.action == "loadexec-smoke":
             loadexec_smoke()
+        elif args.action in ("audit", "audit-run-paths"):
+            problems = (audit_demo_root(DEMO_ROOT) if args.action == "audit"
+                        else audit_run_paths(args.files))
+            for problem in problems:
+                print(f"SHOWCASE_AUDIT: {problem}", file=sys.stderr)
+            if problems:
+                raise ShowcaseError(f"{len(problems)} run path or build path finding(s)")
+            print(f"SHOWCASE_AUDIT: ok ({args.action})")
         else:
             if args.out_dir is None:
                 parser.error("stage-iso requires --out-dir")

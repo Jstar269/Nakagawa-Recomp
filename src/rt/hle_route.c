@@ -11,6 +11,7 @@
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "../core/nk_shared_helpers.h"
 #include "ge_scene.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
 #include "replay_checkpoint.h" /* sr_replay_pad_skip, sr_replay_pad_sample */
@@ -982,6 +983,9 @@ int sr_route_load(const char *path) {
     char line[4096];
     int lineno = 0, bad = 0;
     FILE *fp;
+    int trace_route = sr_perf_windows_enabled;
+    NkSha256 route_sha;
+    uint64_t hashed_bytes = 0u;
 
     s_route_ncp = s_route_nsteps = s_route_nlegacy = 0;
     s_route_pc = 0;
@@ -1005,17 +1009,27 @@ int sr_route_load(const char *path) {
                    "a pad script with an unknown read budget", getenv("SR_PADSCRIPT_READ_BUDGET"));
         return 0;
     }
-    fp = fopen(path, "r");
+    /* Hash the same bytes passed to the route parser, preserving CRLF as bytes.
+     * The parser already uses both CR and LF as token delimiters. */
+    fp = fopen(path, trace_route ? "rb" : "r");
     if (!fp) {
         /* A named route that cannot be read must not become an unscripted run on the default
          * START pulse: the run fails like any other unusable route file. */
         route_fail("cannot open route file '%s'; refusing to run without the route it names", path);
         return 0;
     }
+    if (trace_route) nk_sha256_init(&route_sha);
     while (fgets(line, sizeof line, fp)) {
+        if (trace_route) {
+            size_t length = strlen(line);
+            nk_sha256_update(&route_sha, (const uint8_t *)line, length);
+            hashed_bytes += length;
+        }
         lineno++;
         if (route_parse_line(line, lineno, path) != 0) { bad = 1; break; }
     }
+    long source_bytes = trace_route ? ftell(fp) : 0;
+    int matched_source = trace_route && !ferror(fp) && source_bytes >= 0 && (uint64_t)source_bytes == hashed_bytes;
     fclose(fp);
     if (bad) {
         route_fail("route file '%s' is not usable; refusing to run an unverified route", path);
@@ -1034,6 +1048,14 @@ int sr_route_load(const char *path) {
         if (route_finalize_checkpoints(path) != 0) {
             route_fail("route file '%s' has checkpoints that cannot be told apart", path);
             return 0;
+        }
+        if (trace_route) {
+            uint32_t observable_steps = 0;
+            while (observable_steps < (uint32_t)s_route_nsteps && s_route_prog[observable_steps].op != ROUTE_OP_END)
+                observable_steps++;
+            uint8_t digest[32];
+            if (matched_source) nk_sha256_finish(&route_sha, digest);
+            sr_perf_window_route_loaded(matched_source ? digest : NULL, observable_steps);
         }
         s_route_state = ROUTE_RUNNING;
         fprintf(stderr, "ROUTE: program loaded from %s (%d steps, %d checkpoints, grid %dx%d, "
@@ -1076,6 +1098,7 @@ int sr_route_load(const char *path) {
         }
         return 1;
     }
+    if (trace_route) sr_perf_window_route_loaded(NULL, 0u);
     if (s_route_nlegacy > 0) {
         uint32_t rf[ROUTE_MAX_LEGACY], rm[ROUTE_MAX_LEGACY], rw[ROUTE_MAX_LEGACY], rs[ROUTE_MAX_LEGACY];
         int stick_rows = 0;
@@ -1180,8 +1203,14 @@ static void route_load_once(void) {
 }
 
 /* A finished step disarms its PRESS_UNTIL_NID flag, so its call cannot complete the next step. */
-static void route_advance(void) {
+static void route_advance(uint32_t v) {
     s_route_pc++;
+    if (sr_perf_windows_enabled) {
+        extern int sched_vbl_paced(void);
+        int paced = sched_vbl_paced() && !sched_clock_deterministic() && !sched_fast_forward_on();
+        sr_perf_window_step((uint32_t)s_route_pc, v, sched_vtime_us(), g_ge_vertex_cache_hits,
+                            paced, sched_fast_forward_epoch());
+    }
     s_route_step_started = 0;
     route_until_nid_arm(0, 0u);
 }
@@ -1222,6 +1251,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             s_route_state = ROUTE_DONE;
             route_nid_watch(0);
             route_until_nid_arm(0, 0u);
+            if (sr_perf_windows_enabled) sr_perf_window_route_done();
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_nsteps, v);
             return keys;
         }
@@ -1259,20 +1289,20 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                 return keys;
             }
             if (!sr_input_delivered(&s_input)) return keys | st->a;
-            route_advance();
+            route_advance(v);
             continue;
         case ROUTE_OP_DELAY:
             /* Released for `n` samples and until the guest has read the release, so the
              * press before it and the press after it reach the guest as two presses. */
             if (st->a > 0u && !sr_input_delivered(&s_input)) return keys;
-            route_advance();
+            route_advance(v);
             continue;
         case ROUTE_OP_UNTIL: {
             int d = 255;
             if (sig && route_matches(st->name, sig, &d)) {
                 fprintf(stderr, "ROUTE: reached %s at vblank %u (step %d, d=%d, after %u vblanks)\n",
                         st->name, v, s_route_pc, d, el);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->d) {
@@ -1291,7 +1321,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                 fprintf(stderr, "ROUTE: guest called %s (0x%08x) at vblank %u (step %d, after %u "
                                 "vblanks; the press repeated until then)\n",
                         nm ? nm : "an unnamed import", st->nid, v, s_route_pc, el);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->d) {
@@ -1311,7 +1341,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                     fprintf(stderr, "ROUTE: left %s at vblank %u (step %d, after %u vblanks)\n",
                             st->name, v, s_route_pc, el);
                     s_route_while_seen = 0;
-                    route_advance();
+                    route_advance(v);
                     continue;
                 }
             } else if (sig) {
@@ -1335,7 +1365,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             if (sig && route_matches(st->name, sig, &d)) {
                 fprintf(stderr, "ROUTE: reached %s at vblank %u (step %d, d=%d)\n",
                         st->name, v, s_route_pc, d);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->a) {
@@ -1363,7 +1393,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             if (route_matches(st->name, sig, &d)) {
                 fprintf(stderr, "ROUTE: confirmed %s at vblank %u (step %d, d=%d)\n",
                         st->name, v, s_route_pc, d);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             {
@@ -1383,7 +1413,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
                 fprintf(stderr, "ROUTE: guest called %s (0x%08x) at vblank %u (step %d, after "
                                 "%u vblanks)\n",
                         nm ? nm : "an unnamed import", st->b, v, s_route_pc, el);
-                route_advance();
+                route_advance(v);
                 continue;
             }
             if (el >= st->a) {
@@ -1400,6 +1430,7 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
             s_route_state = ROUTE_DONE;
             route_nid_watch(0);
             route_until_nid_arm(0, 0u);
+            if (sr_perf_windows_enabled) sr_perf_window_route_done();
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_pc + 1, v);
             return keys;
         default:
