@@ -111,6 +111,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_update_check",
     "build/test_cover_art",
     "build/test_adhoc_servers",
+    "build/test_cheat_db",
     "build/test_discord_presence",
     "build/test_xb_parser",
     "build/test_disc_expand",
