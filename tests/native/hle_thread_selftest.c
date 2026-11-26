@@ -19014,13 +19014,16 @@ static void test_audio_regular_contract_safety(void) {
            "the negative queue sentinel takes the open-loop path after one query");
 }
 
-/* sceAudioChReserve with a negative channel takes the highest free regular channel, searching
- * down from 7. PSPAutotests tests/audio/sceaudio/reserve.expected at
- * ea71108f00933712c4662276261b39cd42249b1e (recorded on a PSP; corroborative here) gives 7 for
- * channels -9, -7, -2, -1 and 0x80000000 with all eight free, and 0x80260005 once all eight are
- * reserved; PPSSPP agrees (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
- * Core/HLE/sceAudio.cpp, GetFreeChannel runs from PSP_AUDIO_CHANNEL_MAX - 1 down). A game that
- * reserves one channel with -1 and another by number then gets both, as on the PSP. */
+/* sceAudioChReserve with a negative channel. Two evidence tiers, asserted apart:
+ * - All eight free, and all eight held (the first block): PSPAutotests
+ *   tests/audio/sceaudio/reserve.expected at ea71108f00933712c4662276261b39cd42249b1e (reference
+ *   output recorded on a PSP; corroborative here) gives 7 for channels -9, -7, -2, -1 and
+ *   0x80000000 with every channel free, and 0x80260005 once all eight are reserved.
+ * - Partly occupied (the second block): the downward search order is
+ *   PPSSPP-derived, not PSP-measured (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
+ *   Core/HLE/sceAudio.cpp, GetFreeChannel runs from PSP_AUDIO_CHANNEL_MAX - 1 down); reserve.expected
+ *   records no such cell.
+ * A game that reserves one channel with -1 and another by number then gets both. */
 static void test_audio_reserve_auto_channel_order(void) {
     CpuState cpu;
     int reserved = -1;
@@ -19028,6 +19031,22 @@ static void test_audio_reserve_auto_channel_order(void) {
     reset_fixture();
     sr_hle_init();
     sr_hle_test_audio_reset();
+    /* Recorded tier: each channel value of reserve.expected's "Channel values" block with every
+     * channel free, released after each call as the test program does. */
+    static const uint32_t recorded_auto[] = {0xfffffff7u, 0xfffffff9u, 0xfffffffeu, 0xffffffffu,
+                                             0x80000000u};
+    for (unsigned i = 0; i < sizeof(recorded_auto) / sizeof(recorded_auto[0]); i++) {
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, recorded_auto[i], 1024u, 0u) == 7u,
+               "recorded: AudioChReserve(negative) with every channel free takes channel 7");
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 7u, 0u, 0u);
+    }
+    for (uint32_t ch = 0u; ch < 8u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, ch, 1024u, 0u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 0x80260005u,
+           "recorded: AudioChReserve(-1) with all eight reserved returns 0x80260005");
+    for (uint32_t ch = 0u; ch < 8u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, ch, 0u, 0u);
+    /* PPSSPP-derived tier: the search order once some channels are held. */
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 7u,
            "AudioChReserve(-1) with every channel free takes channel 7, the highest");
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 1024u, 0u) == 0u,

@@ -90,11 +90,17 @@ static int audio_regular_sample_count_valid(uint32_t frames) {
            (frames & 63u) == 0u;
 }
 
-/* A negative channel takes the highest free one, searching down from 7. Corroborative, not
- * measured here: PSPAutotests tests/audio/sceaudio/reserve.expected at
- * ea71108f00933712c4662276261b39cd42249b1e records 7 for channels -9 .. -1 and 0x80000000 with
- * all eight free, and PPSSPP (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
- * Core/HLE/sceAudio.cpp, GetFreeChannel) searches downward. */
+/* A negative channel asks for a free channel. Two evidence tiers, kept apart:
+ * - All eight free: channel 7. PSPAutotests tests/audio/sceaudio/reserve.expected at
+ *   ea71108f00933712c4662276261b39cd42249b1e (reference output recorded on a PSP; corroborative,
+ *   not measured by this project) records 7 for channels -9, -7, -2, -1 and 0x80000000 with every
+ *   channel free, and 0x80260005 once all eight are reserved. Those are the only automatic cells
+ *   it records.
+ * - Some channels held: the highest free one, searching down from 7. PPSSPP-derived, not
+ *   PSP-measured: hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp,
+ *   GetFreeChannel (runs from PSP_AUDIO_CHANNEL_MAX - 1 down). Logged once per run, the first
+ *   time the search passes a held channel. */
+static int s_audio_auto_order_noted;
 static uint32_t h_AudioChReserve(CpuState *s) {
     int32_t ch = (int32_t)A0;
     if (ch < 0) {
@@ -103,6 +109,13 @@ static uint32_t h_AudioChReserve(CpuState *s) {
             if (!s_audio_ch[i]) { ch = i; break; }
         }
         if (ch < 0) return SCE_AUDIO_ERROR_NOT_FOUND;
+        if (ch < 7 && !s_audio_auto_order_noted) {
+            s_audio_auto_order_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceAudioChReserve(%d) with "
+                            "channel 7 held takes the highest free channel (%d)
+",
+                    (int)(int32_t)A0, (int)ch);
+        }
     }
     if (ch >= 8) return SCE_AUDIO_ERROR_INVALID_CH;
     if (!audio_regular_sample_count_valid(A1)) return SCE_AUDIO_ERROR_INVALID_SIZE;
