@@ -13521,7 +13521,7 @@ class GeSolidTriangleProbeTests(unittest.TestCase):
 
     def test_guard_record_is_written_before_the_refusal_and_before_any_write(self) -> None:
         run = _c_code(self.tested[self.tested.index("static int hle_run(void)"):])
-        order = [run.index(text) for text in (
+        steps = (
             'hle_step("display-and-ge-guard");',
             "solid_guard_read(guard);",
             'hle_record(HLE_CAMPAIGN_ID "-guard", solid_guard_accepts(guard) ? "PASS" : "SKIP", 0, guard,',
@@ -13540,7 +13540,10 @@ class GeSolidTriangleProbeTests(unittest.TestCase):
             "if (restore[0] == 0 && restore[1] == 0) s_solid_restore_pending = 0;",
             'hle_record(HLE_CAMPAIGN_ID "-draw"',
             'hle_record(HLE_CAMPAIGN_ID "-restore"',
-        )]
+        )
+        for text in steps:
+            self.assertIn(text, run)
+        order = [run.index(text) for text in steps]
         self.assertEqual(order, sorted(order))
         # One place forms the EDRAM pointer and one place queues a list.
         self.assertEqual(run.count("solid_target("), 1)

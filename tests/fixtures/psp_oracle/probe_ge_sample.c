@@ -5179,13 +5179,13 @@ static int hle_run(void)
    display mode and both scanout slots itself and leaves the display untouched. It records
    what it read (`-guard`, sixteen words) before it acts on them, so a refusal names its
    cause, and it refuses before any write unless the EDRAM is the 2 MiB block at 0x04000000,
-   the GE is idle and the scanout is in one of the two states it recognises as clear of
-   EDRAM [0,1024):
+   the GE is idle, the display mode is the LCD's 480 by 272 and the scanout is in one of the
+   two states it recognises as clear of EDRAM [0,1024):
      - both slots hold a known buffer inside EDRAM that starts at or after offset 1024; or
      - both slots hold no framebuffer at all (the call returns 0 with a null top address).
        That is what standalone PSPLink, the game context after a PSPLink reset, reports
        (PSP-CPU-TIMING-001, boots 47 and 49), and what sceDisplaySetFrameBuf(NULL, ...)
-       leaves: nothing is scanned out, so no visible span exists to overlap the target.
+       leaves: no user buffer is scanned out, so no visible span exists to overlap the target.
    Every other state is refused: a failed call, an address outside the canonical EDRAM range
    or in a mirror, an unknown stride or format, a buffer that covers the target, and the
    two slots in different states (a pending change: somebody else is driving the display).
@@ -5236,7 +5236,7 @@ enum {
     SOLID_GUARD_MODE,
     SOLID_GUARD_WIDTH,
     SOLID_GUARD_HEIGHT,
-    SOLID_GUARD_SLOT0,          /* sceDisplayGetFrameBuf(IMMEDIATE): result, address, stride, format */
+    SOLID_GUARD_SLOT0,          /* the IMMEDIATE slot: result, address, stride, format */
     SOLID_GUARD_SLOT1 = SOLID_GUARD_SLOT0 + 4, /* the same four for NEXTFRAME */
     SOLID_GUARD_VERDICT = SOLID_GUARD_SLOT1 + 4,
     SOLID_GUARD_COUNT,
