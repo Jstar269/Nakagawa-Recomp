@@ -177,7 +177,18 @@ tags `nakagawa-title` and `nakagawa`.
 
 `adb install --abi arm64-v8a` installs the arm64 libraries instead, which an x86_64 Google APIs
 image runs through its ARM translation layer: a functional check of the arm64 build, not a
-measurement of a real device.
+measurement of a real device. An APK built for arm64-v8a alone, such as the `nk.demos` APK,
+installs with plain `adb install` and runs the same way.
+
+One such run of the `nk.demos` APK (Android 17 x86_64 image, ARM translation, SwiftShader, no
+host GPU) measured the demo route: the first start unpacked the demos in about 8.5 s with no
+"isn't responding" dialog, the library listed both demos, and **Play** loaded each demo's
+`lib<game>.so` from the files folder and drew it. The launcher then reported "Game couldn't
+start" for each, because the title process's environment (its pid, exit and boot-event files
+and the app folder, which `TitleActivity` sets from Java) did not reach an arm64 library loaded
+by path under translation. The title library now applies that environment itself first
+(`nk_platform_android_import_environment` in `nk_android_title_main`); that has not been run in
+the emulator again yet. None of this is a device result.
 
 ## Test on a phone
 
@@ -222,16 +233,18 @@ needs route B.
    ```
 
 4. Start the launcher from the app drawer. An APK built with `nk.demos` carries the showcase
-   demos where the library looks for them; whether a device lists them and starts them with
-   **Play** has not been checked yet ([Limits](#limits)). The `adb shell am start` command under
+   demos where the library looks for them. The emulator lists them and starts them with
+   **Play** ([Run in the emulator](#run-in-the-emulator)); no phone has been checked yet
+   ([Limits](#limits)). The `adb shell am start` command under
    [Run in the emulator](#run-in-the-emulator) starts one directly. On a phone, `<app files>` is
    the same `/data/user/0/io.github.jstar269.nakagawa/files`.
 
 ### What to try
 
 - **Launcher start.** It opens, draws the library screen and responds to touch or a gamepad.
-- **A showcase demo** (route B). The library lists both demos, and **Play** starts one in
-  landscape; it animates, with sound. If the library is empty, the log says why
+- **A showcase demo** (route B). The library lists both demos, and **Play** starts one; it
+  animates, with sound, and returning leaves no "Game couldn't start" message. Note whether it
+  turns to landscape: in the portrait emulator it stayed portrait, letterboxed. If the library is empty, the log says why
   (`Showcase <disc> (<id>) skipped: ...`).
 - **Rotate** the phone while the demo runs.
 - **Fold and unfold** while the demo runs. The screen size changes, so the presenter has to
@@ -381,14 +394,14 @@ package can be incomplete, never a mix of two builds. The launcher's check of ea
 file it lists, by digest) leaves such a package out of the library and logs which file did not
 match. A `demos/` or `titles/` folder an earlier APK unpacked is deleted when the installed APK
 carries none, so an update to the launcher-only APK leaves no old demo listed. The copy runs on
-the first start's main thread before the launcher shows; its duration on a device is not yet
-measured.
+the first start's main thread before the launcher shows: about 8.5 s in the emulator under ARM
+translation, with no "isn't responding" dialog; on a device it is not yet measured.
 
 ## Limits
 
 | Area | Status |
 | --- | --- |
-| Launcher library | An APK built with `nk.demos` lists the showcase demos and Play starts them from the files folder, checked on the PC against the same packages; no device or emulator has run it yet. Such an APK holds the build machine's paths and is for local use only ([Build](#build)); demo packages without those paths are not done. Other bundled titles (`nk.titles`) are not listed; they start from `adb` (above). |
+| Launcher library | An APK built with `nk.demos` lists the showcase demos and Play starts them from the files folder: checked on the PC against the same packages, and in the emulator under ARM translation, where both drew ([Run in the emulator](#run-in-the-emulator)); the fix for the "Game couldn't start" report that followed has not been run there yet, and no device has run it. Such an APK holds the build machine's paths and is for local use only ([Build](#build)); demo packages without those paths are not done. Other bundled titles (`nk.titles`) are not listed; they start from `adb` (above). |
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
 | Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Only the showcase demos reach the phone, inside the APK (`nk.demos`); copying another package to it is not wired. |
 | Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the default APK; `-Pnk.toolchain` bundles them for arm64-v8a, and nothing runs them yet. |
