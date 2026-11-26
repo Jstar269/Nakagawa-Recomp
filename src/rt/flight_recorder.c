@@ -71,6 +71,8 @@ static uint64_t s_watch_start;
 static uint64_t s_watch_end;
 static uint32_t s_watch_vblank;
 static uint64_t s_watch_matches;
+static SrWatchHit s_watch_last_hit;
+static int s_watch_have_hit;
 int g_sr_watch_enabled;
 
 /* Watch-class byte shadow (schema 7): the last value the recorder saw stored to each watched
@@ -121,19 +123,41 @@ void sr_watch_note_vblank(uint32_t vblank) {
     s_watch_vblank = vblank;
 }
 
-void sr_watch_store(uint32_t pc, uint32_t addr, uint32_t value, uint32_t width) {
-    if (!g_sr_watch_enabled || width == 0u) return;
+int sr_watch_covers(uint32_t addr, uint32_t width) {
+    if (!g_sr_watch_enabled || width == 0u) return 0;
     const uint64_t store_start = (uint64_t)addr;
     const uint64_t store_end = store_start + (uint64_t)width;
-    if (store_start >= s_watch_end || store_end <= s_watch_start) return;
+    return store_start < s_watch_end && store_end > s_watch_start;
+}
+
+/* The report line keeps the fields it always had, in the same order, and appends the context
+ * (#2809), so a reader matching the old prefix still matches. */
+void sr_watch_store(const SrWatchHit *hit) {
+    if (!hit || !sr_watch_covers(hit->addr, hit->width)) return;
     s_watch_matches++;
+    s_watch_last_hit = *hit;
+    s_watch_have_hit = 1;
+    char registers[48];
+    if (hit->has_cpu)
+        snprintf(registers, sizeof registers, "ra=0x%08" PRIx32 " sp=0x%08" PRIx32, hit->ra,
+                 hit->sp);
+    else
+        snprintf(registers, sizeof registers, "ra=none sp=none");
     fprintf(stderr,
-            "SR_WATCH: pc=0x%08" PRIx32 " addr=0x%08" PRIx32 " val=0x%08" PRIx32 " width=%" PRIu32 " vblank=%" PRIu32 "\n",
-            pc, addr, value, width, s_watch_vblank);
-    watch_flight_note(pc, addr, value, width);
+            "SR_WATCH: pc=0x%08" PRIx32 " addr=0x%08" PRIx32 " val=0x%08" PRIx32 " width=%" PRIu32 " vblank=%" PRIu32
+            " %s thread=0x%08" PRIx32 " old=0x%08" PRIx32 "\n",
+            hit->pc, hit->addr, hit->value, hit->width, s_watch_vblank, registers, hit->thread,
+            hit->old_value);
+    watch_flight_note(hit->pc, hit->addr, hit->value, hit->width);
 }
 
 uint64_t sr_watch_match_count(void) { return s_watch_matches; }
+
+int sr_watch_last_hit(SrWatchHit *out) {
+    if (!s_watch_have_hit) return 0;
+    if (out) *out = s_watch_last_hit;
+    return 1;
+}
 
 static int parse_trigger_number(const char *text, const char *end, uint32_t minimum,
                                 uint32_t maximum, uint32_t *out);

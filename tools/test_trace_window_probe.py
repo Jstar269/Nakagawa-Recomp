@@ -193,11 +193,15 @@ class TraceWindowProbeTests(unittest.TestCase):
         self.assertIn("length > (UINT32_MAX + 1ULL) - start", configure)
         self.assertIn("if (s_watch_configured) return;", configure)
 
+        covers = body_of(WINDOW_C, "int sr_watch_covers(")
+        self.assertIn("store_start < s_watch_end && store_end > s_watch_start", covers)
         store = body_of(WINDOW_C, "void sr_watch_store(")
-        self.assertIn("store_start >= s_watch_end || store_end <= s_watch_start", store)
+        self.assertIn("sr_watch_covers(hit->addr, hit->width)", store)
+        # The fields before #2809 keep their order; the context is appended after them.
         self.assertIn(
             '"SR_WATCH: pc=0x%08" PRIx32 " addr=0x%08" PRIx32 " val=0x%08" PRIx32'
-            ' " width=%" PRIu32 " vblank=%" PRIu32 "\\n"',
+            ' " width=%" PRIu32 " vblank=%" PRIu32\n'
+            '            " %s thread=0x%08" PRIx32 " old=0x%08" PRIx32 "\\n"',
             store,
         )
         self.assertIn("s_watch_matches++", store)
@@ -249,6 +253,9 @@ class TraceWindowProbeTests(unittest.TestCase):
             self.assertIn(f"{helper}_slow(a, v, pc);", body)
             slow = body_of(RECOMP_H, f"static inline __attribute__((noinline)) void {helper}_slow(")
             self.assertIn("SR_WATCH_STORE_IF_ARMED(pc, a, v", slow)
+            # #2809: the replaced bytes are read before the store lands.
+            self.assertLess(slow.index("sr_watch_old_bytes(a, "),
+                            slow.index("SR_WATCH_STORE_IF_ARMED(pc, a, v"))
 
         self.assertIn("MEM_W32_PC(", CODEGEN_PY,
                       "generated AOT stores must keep their guest instruction PC")

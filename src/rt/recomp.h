@@ -842,6 +842,40 @@ static inline int sr_guest_memmove(uint32_t dst, uint32_t src, uint32_t size) {
     return ok;
 }
 
+/* SR_WATCH hit context (#2809). A store the armed watch covers reads the bytes it is about to
+ * replace first, through the CPU read-prepare hook, so a VRAM byte the GPU wrote since the
+ * last CPU read is the value a guest load would see. A store outside the range, or any store
+ * with the watch off, reads nothing. */
+static inline uint32_t sr_watch_old_bytes(uint32_t a, uint32_t width) {
+    if (!__builtin_expect(SR_WATCH_ACTIVE(), 0) || !sr_watch_covers(a, width)) return 0u;
+    sr_guest_vram_read_prepare_bytes(a, width);
+    uint32_t old = 0u;
+    for (uint32_t i = 0u; i < width; i++)
+        old |= (uint32_t)SR_HOST(a + i)[0] << (8u * i);
+    return old;
+}
+
+uint32_t sched_current_uid(void); /* 0 when no thread is current; declared again below */
+
+/* ra and sp come from the scheduler's current register file, s_cpu, which is the running
+ * thread's CpuState ($ra is r[31], $sp is r[29]). Under the opt-in --promote-registers build a
+ * store inside a promoted run sees the values written back at the run's start, and an HLE
+ * host store reports the thread that made the call. */
+static inline void sr_watch_note_store(uint32_t pc, uint32_t a, uint32_t v, uint32_t width,
+                                       uint32_t old) {
+    SrWatchHit hit;
+    hit.pc = pc;
+    hit.addr = a;
+    hit.value = v;
+    hit.width = width;
+    hit.old_value = old;
+    hit.has_cpu = s_cpu != NULL;
+    hit.ra = s_cpu ? s_cpu->r[31] : 0u;
+    hit.sp = s_cpu ? s_cpu->r[29] : 0u;
+    hit.thread = sched_current_uid();
+    sr_watch_store(&hit);
+}
+
 /* The full scalar accessors. They stay out of line so the inline fast paths below stay
  * small in generated code, and stay `inline` so a unit that never calls one emits nothing;
  * GCC reports that pair under -Wattributes. */
@@ -900,6 +934,7 @@ static inline __attribute__((noinline)) void sr_w8_pc_slow(uint32_t a, uint8_t v
     if (sr_check_mem_watch_width(a, 1u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 1u, v, pc);
     if (sr_inrange(a)) {
+        const uint32_t watch_old = sr_watch_old_bytes(a, 1u);
         if (sr_vram_cpu_aperture(a)) {
             if (__builtin_expect(g_sr_vram_read_pending, 0))
                 sr_guest_vram_write_prepare_bytes(a, 1u);
@@ -908,7 +943,7 @@ static inline __attribute__((noinline)) void sr_w8_pc_slow(uint32_t a, uint8_t v
         } else {
             *(uint8_t *)SR_HOST_LINEAR(a) = v;
         }
-        SR_WATCH_STORE_IF_ARMED(pc, a, v, 1u);
+        SR_WATCH_STORE_IF_ARMED(pc, a, v, 1u, watch_old);
     } else sr_oor(a, v, 1);
 }
 static inline __attribute__((noinline)) void sr_w16_pc_slow(uint32_t a, uint16_t v, uint32_t pc) {
@@ -917,6 +952,7 @@ static inline __attribute__((noinline)) void sr_w16_pc_slow(uint32_t a, uint16_t
     if (sr_check_mem_watch_width(a, 2u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 2u, v, pc);
     if (sr_inrange_n(a, 2)) {
+        const uint32_t watch_old = sr_watch_old_bytes(a, 2u);
         if (sr_vram_cpu_span_touches(a, 2u)) {
             if (__builtin_expect(g_sr_vram_read_pending, 0))
                 sr_guest_vram_write_prepare_bytes(a, 2u);
@@ -926,7 +962,7 @@ static inline __attribute__((noinline)) void sr_w16_pc_slow(uint32_t a, uint16_t
         } else {
             memcpy(SR_HOST_LINEAR(a), &v, sizeof v);
         }
-        SR_WATCH_STORE_IF_ARMED(pc, a, v, 2u);
+        SR_WATCH_STORE_IF_ARMED(pc, a, v, 2u, watch_old);
     } else sr_oor(a, v, 1);
 }
 static inline __attribute__((noinline)) void sr_w32_pc_slow(uint32_t a, uint32_t v, uint32_t pc) {
@@ -935,6 +971,7 @@ static inline __attribute__((noinline)) void sr_w32_pc_slow(uint32_t a, uint32_t
     if (sr_check_mem_watch_width(a, 4u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 4u, v, pc);
     if (sr_inrange_n(a, 4)) {
+        const uint32_t watch_old = sr_watch_old_bytes(a, 4u);
         if (sr_vram_cpu_span_touches(a, 4u)) {
             if (__builtin_expect(g_sr_vram_read_pending, 0))
                 sr_guest_vram_write_prepare_bytes(a, 4u);
@@ -944,7 +981,7 @@ static inline __attribute__((noinline)) void sr_w32_pc_slow(uint32_t a, uint32_t
         } else {
             memcpy(SR_HOST_LINEAR(a), &v, sizeof v);
         }
-        SR_WATCH_STORE_IF_ARMED(pc, a, v, 4u);
+        SR_WATCH_STORE_IF_ARMED(pc, a, v, 4u, watch_old);
     } else sr_oor(a, v, 1);
 }
 #if defined(__GNUC__) && !defined(__clang__)

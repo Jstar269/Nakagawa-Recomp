@@ -273,6 +273,25 @@ enum {
     SR_FLIGHT_DIVERGENCE_NONE = 3   /* the record had stopped or held no event: nothing armed */
 };
 
+/* One SR_WATCH hit (#2809): the store and the context it ran in. The store helpers in
+ * recomp.h fill it. ra and sp are r[31] and r[29] of the scheduler's current register file
+ * (the running thread's CpuState) at the store; has_cpu is 0 when no register file is current,
+ * and ra and sp are then 0 and reported as "none". thread is the running thread's uid, 0 when
+ * none is current. old_value holds the bytes the store replaced, read just before it, in the
+ * same little-endian layout as value. */
+typedef struct {
+    uint32_t pc;
+    uint32_t addr;
+    uint32_t value;
+    uint32_t width;
+    uint32_t old_value;
+    uint32_t ra;
+    uint32_t sp;
+    uint32_t thread;
+    uint32_t has_cpu;
+} SrWatchHit;
+#define SR_WATCH_HIT_CONTEXT 1 /* a hit carries the context above (#2809) */
+
 #if defined(SR_FLIGHT_RECORDER_LINKED) && !defined(SR_FLIGHT_RECORDER_STANDALONE)
 
 void sr_trace_window_configure(void);   /* lazy env probe; host start and vblank hooks */
@@ -290,11 +309,16 @@ extern int g_sr_watch_enabled;
 #define SR_WATCH_ACTIVE() (g_sr_watch_enabled)
 void sr_watch_configure(void);
 void sr_watch_note_vblank(uint32_t vblank);
-void sr_watch_store(uint32_t pc, uint32_t addr, uint32_t value, uint32_t width);
+void sr_watch_store(const SrWatchHit *hit);
+/* 1 when SR_WATCH is armed and [addr, addr + width) overlaps its range. */
+int sr_watch_covers(uint32_t addr, uint32_t width);
 uint64_t sr_watch_match_count(void);
-#define SR_WATCH_STORE_IF_ARMED(pc, addr, value, width) do { \
+/* Copies the most recent reported hit to *out and returns 1, or returns 0 before the first. */
+int sr_watch_last_hit(SrWatchHit *out);
+/* recomp.h's sr_watch_note_store gathers the hit's register and thread context. */
+#define SR_WATCH_STORE_IF_ARMED(pc, addr, value, width, old_value) do { \
     if (__builtin_expect(g_sr_watch_enabled, 0)) \
-        sr_watch_store((pc), (addr), (value), (width)); \
+        sr_watch_note_store((pc), (addr), (value), (width), (old_value)); \
 } while (0)
 
 void sr_flight_init(void);
@@ -387,14 +411,17 @@ static inline const SrTraceWindowIndices *sr_trace_window_indices(void) { return
 static inline void sr_trace_window_record(uint32_t pc, const char *text) {
     (void)pc; (void)text;
 }
-#define SR_WATCH_STORE_IF_ARMED(pc, addr, value, width) ((void)0)
+#define SR_WATCH_STORE_IF_ARMED(pc, addr, value, width, old_value) ((void)(old_value))
 #define SR_WATCH_ACTIVE() 0
 static inline void sr_watch_configure(void) {}
 static inline void sr_watch_note_vblank(uint32_t vblank) { (void)vblank; }
-static inline void sr_watch_store(uint32_t pc, uint32_t addr, uint32_t value, uint32_t width) {
-    (void)pc; (void)addr; (void)value; (void)width;
+static inline void sr_watch_store(const SrWatchHit *hit) { (void)hit; }
+static inline int sr_watch_covers(uint32_t addr, uint32_t width) {
+    (void)addr; (void)width;
+    return 0;
 }
 static inline uint64_t sr_watch_match_count(void) { return 0u; }
+static inline int sr_watch_last_hit(SrWatchHit *out) { (void)out; return 0; }
 
 static inline void sr_flight_init(void) {}
 static inline void sr_flight_set_enhancements(const char *ace_line) { (void)ace_line; }
