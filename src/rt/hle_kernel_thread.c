@@ -408,8 +408,7 @@ static uint32_t h_ReferThreadRunStatus(CpuState *s) {
         if (!s_refer_run_status_order_noted) {
             s_refer_run_status_order_noted = 1;
             fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelReferThreadRunStatus "
-                            "checks thread 0x%x before its output pointer 0x%08x
-", A0, out);
+                            "checks thread 0x%x before its output pointer 0x%08x\n", A0, out);
         }
         return SCE_KERNEL_ERROR_UNKNOWN_THID;
     }
