@@ -183,6 +183,26 @@ def elf_run_paths(path: Path) -> tuple[list[str], list[str]] | None:
     return needed, folders
 
 
+_EM_AARCH64 = 183  # the ELF machine of an arm64 library (Gradle's nk.demos check uses the same)
+
+
+def is_android_library(path: Path) -> bool:
+    """True for `lib<game>.so` built for arm64: the library an Android package ships (#360).
+
+    `showcase.py build --target android` links each demo as the shared library TitleActivity
+    loads. It runs inside the APK, where the app's own library folder holds SDL3, so it has
+    no run path and none is owed. A desktop demo is never both named `lib*.so` and an arm64
+    object, so this cannot excuse a Linux package that lost its run path.
+    """
+    if not (path.name.startswith("lib") and path.name.endswith(".so")):
+        return False
+    with path.open("rb") as stream:
+        head = stream.read(20)
+    if len(head) < 20 or head[:4] != b"ELF" or head[5] != 1:
+        return False
+    return struct.unpack_from("<H", head, 18)[0] == _EM_AARCH64
+
+
 def audit_run_paths(paths: list[Path]) -> list[str]:
     """Name every run path entry of the given ELF files that is not relative to the file.
 
@@ -281,12 +301,14 @@ def audit_demo_root(demo_root: Path) -> list[str]:
     """What stops the staged demos from being moved to another machine, one line each.
 
     Every ELF file in a package folder must have only `$ORIGIN`-relative run paths, an
-    executable that needs SDL3 must search the player's folder for it, and no file in the
-    demo folder may name this checkout, the showcase build folder or the user's home folder.
+    executable that needs SDL3 must search the player's folder for it (the arm64 `lib<game>.so`
+    of an Android demos folder is exempt: it loads SDL3 from the APK), and no file in the demo
+    folder may name this checkout, the showcase build folder or the user's home folder.
     """
     executables = [path for path in sorted((demo_root / "packages").glob("*/*")) if path.is_file()]
     problems = audit_run_paths(executables)
-    problems.extend(audit_required_run_path(executables, f"$ORIGIN/{RUNTIME_RUNPATH_ORIGIN}"))
+    desktop = [path for path in executables if not is_android_library(path)]
+    problems.extend(audit_required_run_path(desktop, f"$ORIGIN/{RUNTIME_RUNPATH_ORIGIN}"))
     needles = [str(ROOT), ROOT.as_posix(), str(BUILD_ROOT), BUILD_ROOT.as_posix()]
     home = Path.home()
     if home.parent != home:  # not the file system root
@@ -856,7 +878,11 @@ def _build_one(demo: dict[str, object], license_notice: bytes,
     ]
     # The runtime looks for the SDL3 libraries beside the player it ships under (Linux; the
     # Makefile ignores the setting elsewhere), never in a folder of the building machine.
-    env = {**os.environ, "RUNTIME_RUNPATH_ORIGIN": RUNTIME_RUNPATH_ORIGIN}
+    env = dict(os.environ)
+    if target == "host":
+        env["RUNTIME_RUNPATH_ORIGIN"] = RUNTIME_RUNPATH_ORIGIN
+    else:
+        env.pop("RUNTIME_RUNPATH_ORIGIN", None)  # the APK's own library folder holds SDL3
     result = subprocess.run(command, cwd=ROOT, env=env, check=False)
     if result.returncode:
         raise ShowcaseError(f"analyze/codegen/package failed for {title_id} (exit {result.returncode})")

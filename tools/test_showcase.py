@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 from unittest import mock
 import zlib
@@ -631,13 +632,16 @@ class ShowcasePrebuiltPrxTests(unittest.TestCase):
         layout the desktop showcase discovery reads (packages/<disc>, images/<disc>.iso)."""
         packaged: list[list[str]] = []
 
-        def fake_package(command: list[str], **_: object) -> subprocess.CompletedProcess:
+        environments: list[dict[str, str]] = []
+
+        def fake_package(command: list[str], **options: object) -> subprocess.CompletedProcess:
             packaged.append(command)
+            environments.append(options["env"])  # type: ignore[arg-type]
             out = Path(command[command.index("--output-dir") + 1])
-            (out / "package.json").write_text(
-                '{"format": "nakagawa-aot-package", "executable": {"path": "libdemo.so"}}',
-                encoding="utf-8")
-            (out / "libdemo.so").write_bytes(b"\x7fELF")
+            # What the planner leaves for an Android target: a package the check accepts, whose
+            # executable is lib<game>.so and whose image is lib<game>_image.bin, with the
+            # build's own files (these name the build folder) beside it.
+            _synthetic_package(out.parent, executable="libdemo.so", into=out)
             return subprocess.CompletedProcess(command, 0)
 
         with tempfile.TemporaryDirectory() as temp:
@@ -657,8 +661,27 @@ class ShowcasePrebuiltPrxTests(unittest.TestCase):
                 stage = Path(command[command.index("--output-dir") + 1])
                 self.assertEqual(stage.name, "package-android-" + "0" * 16)
                 disc = str(demo["disc_id"])
-                self.assertTrue((demos / "packages" / disc / "libdemo.so").is_file())
+                installed = demos / "packages" / disc
+                self.assertTrue((installed / "libdemo.so").is_file())
                 self.assertEqual(inspect_iso(demos / "images" / f"{disc}.iso").disc_id, disc)
+                # The Android demos folder is trimmed like the desktop one (#306): nk.demos
+                # bundles exactly what the completion manifest lists and the launcher checks
+                # each package as the desktop player does, so the rewritten manifest and the
+                # library and image the check requires are all it needs. The build files, which
+                # name the build folder, are not in it; the build stage keeps them.
+                valid, reason = package_cache.validate_package_cache(installed)
+                self.assertTrue(valid, reason)
+                self.assertEqual(showcase.files_naming(installed, [BUILD_HOME]), [])
+                self.assertTrue((installed / "libdemo_image.bin").is_file())
+                self.assertEqual(sorted(path.name for path in installed.glob("*.d")), [])
+                self.assertTrue((stage / "demo_recomp_0.d").is_file())
+                listed = {entry["path"] for entry in json.loads(
+                    (installed / "completion-manifest.json").read_text(encoding="utf-8"))["artifacts"]}
+                self.assertIn("libdemo.so", listed)
+                self.assertNotIn("demo_recomp_0.d", listed)
+            # An Android library finds SDL3 in the APK: no run path is asked of it.
+            for environment in environments:
+                self.assertNotIn("RUNTIME_RUNPATH_ORIGIN", environment)
 
 
 ON_LINUX = sys.platform.startswith("linux")
@@ -823,6 +846,68 @@ class LinuxRequiredRunPathTests(unittest.TestCase):
             self.assertEqual(showcase.audit_demo_root(demo_root), [])
 
 
+def _arm64_library(directory: Path, name: str, *flags: str) -> Path:
+    """An ELF shared object that needs libSDL3.so.0 and says it is for arm64, as the Android
+    package's library is (only the ELF machine field differs from a host build)."""
+    probe = _sdl_probe(directory, name + "-host", *flags)
+    data = bytearray(probe.read_bytes())
+    data[18:20] = (183).to_bytes(2, "little")
+    target = directory / name
+    target.write_bytes(bytes(data))
+    return target
+
+
+@unittest.skipUnless(ON_LINUX and HAS_GCC, "ELF run paths are a Linux link-time property")
+class AndroidDemoAuditTests(unittest.TestCase):
+    """The audit refuses a Linux demo without its run path but not a correct Android package (#360)."""
+
+    REQUIRED = "$ORIGIN/" + showcase.RUNTIME_RUNPATH_ORIGIN
+
+    def _folder(self, temp: str, executable: Path, name: str) -> Path:
+        demo_root = Path(temp) / "demos"
+        package = demo_root / "packages" / "TEST00001"
+        package.mkdir(parents=True)
+        shutil.copy2(executable, package / name)
+        return demo_root
+
+    def test_an_android_library_with_no_run_path_passes_the_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            library = _arm64_library(Path(temp), "libdemo.so")
+            self.assertTrue(showcase.is_android_library(library))
+            self.assertIn("libSDL3.so.0", showcase.elf_run_paths(library)[0])
+            demo_root = self._folder(temp, library, "libdemo.so")
+            self.assertEqual(showcase.audit_demo_root(demo_root), [])
+
+    def test_the_android_exemption_is_only_for_an_arm64_lib_so(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            # A desktop executable that lost its run path is refused, however it is named.
+            for name in ("demo", "libdemo.so"):
+                with self.subTest(name=name):
+                    host = _sdl_probe(directory, "host-" + name.replace(".", "-"))
+                    self.assertFalse(showcase.is_android_library(host))
+                    demo_root = self._folder(temp + "/" + name.replace(".", "-"), host, name)
+                    problems = showcase.audit_demo_root(demo_root)
+                    self.assertEqual(len(problems), 1, problems)
+                    self.assertIn(self.REQUIRED, problems[0])
+            # An arm64 library not named lib<game>.so is not an Android package library either.
+            odd = _arm64_library(directory, "demo")
+            self.assertFalse(showcase.is_android_library(odd))
+            self.assertEqual(len(showcase.audit_demo_root(self._folder(temp + "/odd", odd, "demo"))), 1)
+
+    def test_an_android_library_is_still_held_to_the_other_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            library = _arm64_library(Path(temp), "libdemo.so", "-Wl,-rpath,/opt/builder/lib")
+            problems = showcase.audit_demo_root(self._folder(temp, library, "libdemo.so"))
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("/opt/builder/lib", problems[0])
+            demo_root = Path(temp) / "demos"
+            (demo_root / "packages" / "TEST00001" / "build.log").write_text(
+                "built in " + str(showcase.BUILD_ROOT) + "\n", encoding="utf-8")
+            self.assertTrue(any("build.log" in problem
+                                for problem in showcase.audit_demo_root(demo_root)))
+
+
 def _make_dry_run(*arguments: str) -> str:
     result = subprocess.run(["make", "-n", "-B", *arguments], cwd=ROOT, check=False,
                             capture_output=True, text=True)
@@ -888,14 +973,15 @@ class LinuxLinkLineTests(unittest.TestCase):
 BUILD_HOME = "/srv/builder/nk-build-7f3a"
 
 
-def _synthetic_package(root: Path, build_dir: str = BUILD_HOME) -> Path:
+def _synthetic_package(root: Path, build_dir: str = BUILD_HOME, executable: str = "demo",
+                       into: Path | None = None) -> Path:
     """A runtime package the way the planner leaves it: runtime files and the build's own.
 
     The `.d`, `.o` and `.map` files carry the folder the build ran in, as a compiler and
     linker write it, and the completion manifest lists every file, as the planner's does.
     """
-    inputs = {"manifest": {"sha256": "1" * 64}, "executable": {"sha256": "2" * 64},
-              "modules": [], "psp_header": None}
+    inputs: dict[str, Any] = {"manifest": {"sha256": "1" * 64}, "executable": {"sha256": "2" * 64},
+                              "modules": [], "psp_header": None}
     identity = package_cache.build_title_input_identity(
         manifest={"id": "synthetic-cache-test", "schema_version": 1},
         executable_name="EBOOT.BIN", executable_sha256="2" * 64, modules=[],
@@ -910,10 +996,10 @@ def _synthetic_package(root: Path, build_dir: str = BUILD_HOME) -> Path:
         target="x86_64-test", runtime_source_digest="5" * 64, compile_flags="-O0",
         link_flags="-lm")
     cache = package_cache.cache_metadata(key, {"profile": "none", "funcs_per_chunk": 2000})
-    package_dir = root / "package"
-    package_dir.mkdir()
-    (package_dir / "demo").write_bytes(b"\x7fELF native")
-    (package_dir / "demo_image.bin").write_bytes(b"image")
+    package_dir = into if into is not None else root / "package"
+    package_dir.mkdir(exist_ok=True)
+    (package_dir / executable).write_bytes(b"\x7fELF native")
+    (package_dir / f"{Path(executable).stem}_image.bin").write_bytes(b"image")
     (package_dir / "demo_recomp_0.c").write_text("/* generated */\n", encoding="utf-8")
     (package_dir / "demo_recomp_0.o").write_bytes(
         b"\x7fELF\0" + f"{build_dir}/demo_recomp_0.c".encode() + b"\0")
@@ -936,7 +1022,8 @@ def _synthetic_package(root: Path, build_dir: str = BUILD_HOME) -> Path:
         "format": "nakagawa-aot-package", "schema_version": 3,
         "title": {"id": identity["manifest"]["id"], "manifest_sha256": "1" * 64},
         "title_input_identity": identity, "cache": cache, "inputs": inputs,
-        "executable": {"path": "demo", "sha256": package_cache.sha256_file(package_dir / "demo")},
+        "executable": {"path": executable,
+                       "sha256": package_cache.sha256_file(package_dir / executable)},
         "generated_objects": [],
     }
     (package_dir / "package.json").write_text(package_cache.canonical_json(package),
