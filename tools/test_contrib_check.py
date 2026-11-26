@@ -660,7 +660,7 @@ class TestUnitGateScalesWithSelectedWork(unittest.TestCase):
         _gate, calls = self._gate(heavy, jobs="1")
         self.assertEqual(len(calls), 1, calls)
         self.assertCountEqual(calls[0][0], heavy)
-        self.assertEqual(calls[0][1], 4 * sum(self.HEAVY.values()))
+        self.assertEqual(calls[0][1], 6 * sum(self.HEAVY.values()))
 
     def test_small_selection_keeps_one_process_and_the_minimum_limit(self) -> None:
         _gate, calls = self._gate(self._modules("test_unmeasured_a", "test_unmeasured_b"))
@@ -701,7 +701,8 @@ class TestUnitGateScalesWithSelectedWork(unittest.TestCase):
 
     def test_no_process_gets_less_time_than_its_measured_work_allows(self) -> None:
         """Failing-before on the production path: the heaviest measured modules of the #2981 selection
-        ran in one process under 1800 s, about 2.2 times their measured hosted seconds."""
+        ran in one process under 1800 s, about 2.2 times their measured hosted seconds; a
+        workstation needed 2.7 times serially and about 4.6 in four parallel processes."""
         import ci_test_shards
 
         weights = ci_test_shards.load_weight_data().weights
@@ -723,7 +724,7 @@ class TestUnitGateScalesWithSelectedWork(unittest.TestCase):
                               [f"tools.{name}" for name in names])
         for selected, timeout in calls:
             planned = sum(weights[module.rsplit(".", 1)[-1]] for module in selected)
-            self.assertGreaterEqual(timeout, 4 * planned, (selected, timeout))
+            self.assertGreaterEqual(timeout, 6 * planned, (selected, timeout))
 
     def test_the_real_weight_data_plans_every_selected_module_once(self) -> None:
         data = contrib_check.ci_test_shards.load_weight_data()

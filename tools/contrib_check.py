@@ -51,6 +51,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -932,9 +933,10 @@ def _unittest_failure_notes(stderr: str) -> list[str]:
 #: The time limit of one unittest process never falls below this.
 UNIT_MIN_TIMEOUT = 1800
 #: Local seconds allowed per measured hosted second (``tools/ci_test_weights.json``).  Those weights
-#: were taken under coverage on hosted runners; a Windows workstation ran 31 selected modules in 2.7
-#: times their weight, so the limit allows four.
-UNIT_TIMEOUT_PER_MEASURED_SECOND = 4
+#: were taken under coverage on hosted runners.  A Windows workstation ran 31 selected modules in one
+#: process in 2.7 times their weight, and in four parallel processes the slowest took about 4.6 times
+#: its own, so the limit allows six.
+UNIT_TIMEOUT_PER_MEASURED_SECOND = 6
 #: Measured seconds of work that justify one more parallel unittest process.
 UNIT_SECONDS_PER_PROCESS = 300
 #: Environment variable that caps the parallel unittest processes (``1`` runs them serially).
@@ -1003,11 +1005,13 @@ def plan_unit_batches(modules: list[str], data: ci_test_shards.WeightData, jobs:
     return tuple(parallel), alone
 
 
-def _unit_batch_gate(unit: UnitBatch) -> Gate:
-    return _run(
+def _unit_batch_gate(unit: UnitBatch) -> tuple[Gate, float]:
+    started = time.monotonic()
+    gate = _run(
         "python-unittest", [GATE_PYTHON, "-m", "unittest", *unit.modules], timeout=unit.timeout,
         failure_notes=_unittest_failure_notes,
     )
+    return gate, time.monotonic() - started
 
 
 def _timeout_detail(unit: UnitBatch) -> str:
@@ -1028,8 +1032,13 @@ def unit_gate(modules: list[str]) -> Gate:
         print(f"  unittest: {len(parallel)} parallel process(es)"
               + (f", then {len(alone[0].modules)} module(s) alone" if alone else ""))
     with ThreadPoolExecutor(max_workers=max(1, len(parallel))) as pool:
-        results = list(pool.map(_unit_batch_gate, parallel))
-    results.extend(_unit_batch_gate(unit) for unit in alone)
+        timed = list(pool.map(_unit_batch_gate, parallel))
+    timed.extend(_unit_batch_gate(unit) for unit in alone)
+    results = [gate for gate, _elapsed in timed]
+    if len(batches) > 1:
+        for unit, (gate, elapsed) in zip(batches, timed, strict=True):
+            print(f"  unittest process: {len(unit.modules)} module(s), {unit.planned_seconds:g}s measured, "
+                  f"limit {unit.timeout}s, took {elapsed:.0f}s, {gate.status}")
     failed = [(unit, gate) for unit, gate in zip(batches, results, strict=True) if gate.status != PASS]
     if not failed:
         return Gate("python-unittest", PASS)
