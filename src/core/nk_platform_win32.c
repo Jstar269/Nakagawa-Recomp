@@ -2446,6 +2446,11 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name) {
 }
 
 /* Nothing to prepare on Windows: the player and runtime start as ordinary processes. */
+bool nk_platform_android_import_environment(void *jni_env) {
+    (void)jni_env;
+    return true;
+}
+
 bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;

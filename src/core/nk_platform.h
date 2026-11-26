@@ -901,6 +901,17 @@ bool nk_platform_harden_library_search(void);
    nothing changes. Call after nk_platform_set_app_data_dir_override. */
 void nk_platform_setup_standard_streams(const char *fallback_log_name);
 
+/* Android: apply the variables the activity set (NakagawaHost.nativeEnvironment: the launcher's
+   NK_ANDROID_PID_FILE, NK_ANDROID_EXIT_FILE, SR_BOOT_EVENT_FILE, NK_ANDROID_APP_DIR and the rest)
+   to this library's own C library, through jni_env, the JNIEnv of the calling Java thread. Java's
+   Os.setenv reaches only the C library the app process runs on; an arm64 library under an ARM
+   translation layer runs on another. A library Java loads does this in JNI_OnLoad; a title's
+   library loaded by path (dlopen) gets no JNI_OnLoad, so its process start calls this first.
+   Setting a variable again to the value it has changes nothing, so a second call is harmless.
+   False, after an NK_ENV_IMPORT_FAILED line in the system log, when a variable could not be
+   applied. Everywhere else it does nothing and returns true. */
+bool nk_platform_android_import_environment(void *jni_env);
+
 /* Process start, for hosts whose application model needs it. Android: copy stdout and stderr to
    the system log under log_tag (and to NK_ANDROID_LOG_FILE when set), and make the folder the app
    unpacked its bundled files to (NK_ANDROID_APP_DIR) the working directory, which is where
