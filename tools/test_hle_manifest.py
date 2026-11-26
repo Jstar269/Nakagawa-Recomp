@@ -1014,6 +1014,105 @@ class LiveManifestTests(unittest.TestCase):
         self.assertNotEqual(sas[0x9EC3676A]["handler"], sas[0xCBCD4F79]["handler"])
         self.assertTrue(all(r["handler"] != "h_ok" for r in sas.values()))
 
+    def test_sas_envelope_setters_are_partial_on_their_psp_sas_002_cells(self) -> None:
+        """#2807: SetADSRmode, SetADSR and SetSL are reviewed on the PSP-SAS-002 cells they reproduce only."""
+        from psp_oracle import parse_golden
+
+        cells = ("test_sas_adsr_mode_psp_sas_002_table", "test_sas_adsr_psp_sas_002_curve_runs")
+        graduated = {
+            0x9EC3676A: (
+                "__sceSasSetADSRmode", "h_SasSetADSRmode", "NID_SAS_ADSR_SET_MODE", "sas_adsr_set_mode",
+                ("0x80420013", "top bit", "baseline's heights", "mask 1", "release-only mask",
+                 "0x00a76d9d", "0x00bf40cd", "224", "key-on delay"),
+            ),
+            0x019B25EB: (
+                "__sceSasSetADSR", "h_SasSetADSR", "NID_SAS_ADSR_SET_RATES", "sas_adsr_set_rates",
+                ("mask 0xf", "0x00400000, 0x00100000, 0, 0x00100000", "0x30000000", "refusals",
+                 "key-on delay"),
+            ),
+            0x5F9529F6: (
+                "__sceSasSetSL", "h_SasSetSL", "NID_SAS_ADSR_SET_SL", "sas_adsr_set_level",
+                ("0x20000000", "0x30000000", "0x30080000", "a linear decay ends at the first step at or below the level",
+                 "the exponential and DIRECT decays keep PPSSPP's rule", "0x2ff00000"),
+            ),
+        }
+        record = next(
+            row
+            for row in json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))["tests"]
+            if row["id"] == "PSP-SAS-002"
+        )
+        self.assertEqual(record["hardware_evidence"], "MEASURED")
+        self.assertIn("acceptance-eligible", record["measurement_note"])
+        self.assertIn("06a6c942c", record["measurement_note"])
+        source = hle_manifest.SELFTEST_C.read_text(encoding="utf-8")
+        dispatched = hle_manifest.selftest_dispatched_nids(source)
+        for nid, (name, handler, constant, helper, needles) in graduated.items():
+            with self.subTest(handler=handler):
+                registration = self.regs[nid]
+                self.assertEqual(registration["name"], name)
+                self.assertIn(name, record["apis"])
+                self.assertEqual(registration["handler"], handler)
+                self.assertEqual(registration["classification"], "dedicated")
+                self.assertEqual(registration["status"], "partial")
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertEqual(
+                    evidence,
+                    [
+                        "docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)",
+                        *(f"tests/native/hle_thread_selftest.c:{cell}" for cell in cells),
+                    ],
+                )
+                self._assert_cited_cells_are_manifest_cells(evidence)
+                limitation = meta.HANDLER_LIMITATIONS[handler]
+                for needle in (
+                    "measured cells only", "acceptance-eligible launch", "PSP-3000", "6.61", "06a6c942c",
+                    "voice 0", "before KeyOn", "unmeasured", "not reviewed here", "(#2807)", *needles,
+                ):
+                    self.assertIn(needle, limitation)
+                # Every case id the limitation names is one the sas-adsr stream registers.
+                for case in re.findall(r"sas-adsr-[a-z0-9-]+", limitation):
+                    self.assertIn(case, parse_golden.SAS_ADSR_CASES)
+                # The NID is entered through sr_syscall with its named constant, in the helper the
+                # replay uses, and the selftest credits it.
+                define = _matched(
+                    re.search(rf"^#define {constant}[ \t]+0x{nid:08x}u$", source, re.MULTILINE)
+                ).group(0)
+                body = _matched(
+                    re.search(rf"^static uint32_t {helper}\(CpuState \*cpu, .*?^\}}\n", source,
+                              re.MULTILINE | re.DOTALL)
+                ).group(0)
+                self.assertIn(f"sr_syscall(cpu, {constant})", body)
+                self.assertEqual(hle_manifest.selftest_dispatched_nids(f"{define}\n{body}"), {nid})
+                self.assertIn(nid, dispatched)
+        # Both cells run from the selftest's main and replay the probe through production dispatch.
+        for cell in cells:
+            body = _matched(
+                re.search(rf"^static void {cell}\(void\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+            ).group(0)
+            self.assertIn("sas_adsr_cell_begin(&cpu);", body)
+            self.assertRegex(source, rf"(?m)^    {cell}\(\);$")
+        self.assertIn("sr_hle_init();", _matched(
+            re.search(r"^static void sas_adsr_cell_begin\(CpuState \*cpu\) \{\n.*?^\}\n", source,
+                      re.MULTILINE | re.DOTALL)
+        ).group(0))
+        self.assertRegex(source, r"(?m)^#define SAS_ADSR_BOUND_HEIGHT[ \t]+0x30000000u$")
+        # The record also names these handlers. They stay unreviewed: pair p1's end flag and the
+        # exponent attack's height at grain 0 differ from the record, and the probe records no
+        # __sceSasCore result. The selftest prints the two differences as named deviations.
+        for nid, name, handler in (
+            (0xCBCD4F79, "__sceSasSetSimpleADSR", "h_SasSetSimpleADSR"),
+            (0x74AE582A, "__sceSasGetEnvelopeHeight", "h_SasGetEnvelopeHeight"),
+            (0xA3589D81, "__sceSasCore", "h_SasCore"),
+        ):
+            with self.subTest(left_unreviewed=handler):
+                self.assertIn(name, record["apis"])
+                self.assertNotIn(handler, meta.HANDLER_METADATA)
+                self.assertEqual(self.regs[nid]["handler"], handler)
+                self.assertEqual(self.regs[nid]["status"], "unreviewed")
+        self.assertIn("KNOWN DEVIATION SimpleADSR p%u", source)
+        self.assertIn("KNOWN DEVIATION expatk height at grain 0", source)
+        self.assertRegex(source, r"(?m)^#define SAS_ADSR_EXPATK_GRAIN0[ \t]+0x00a76d9du$")
+
     def test_iofilemgr_sweep_imports_have_named_production_handlers(self) -> None:
         """Common file-manager NIDs must resolve to named live handlers."""
         expected = {
