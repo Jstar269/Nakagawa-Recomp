@@ -2161,6 +2161,7 @@ static int sdl3vk_surface_selftest(void) {
         const uint64_t surf0 = s_surface_gen;
         int got = 0, reached = 0, busy = 1, held_surfaces = 0, back = 0, after = 0, shown = 1;
         int held_terminal = 0, held_marked = 0, want_got = -1, want_back = 1, loss_terminal = 0;
+        int held_extent = 0;
         uint64_t want_surfaces = 1;
         if (c < 2) {
             sdl3vk_present_fault_inject(VK_ERROR_SURFACE_LOST_KHR);
@@ -2175,6 +2176,13 @@ static int sdl3vk_surface_selftest(void) {
             for (int k = 0; k < 3; k++) {
                 const int r = sdl3vk_present_rgba(px);
                 busy &= r == (c == 0 ? -1 : SDL3VK_PRESENT_DISPLAY_BUSY);
+            }
+            /* With the window gone there is no swapchain: the pause overlay's extent query
+             * says there is nothing to show now (0), not a terminal renderer (-1), so a pause
+             * open in this state goes on waiting for the window. */
+            if (c == 1) {
+                int ew = 0, eh = 0, ergba = 0;
+                held_extent = sdl3vk_overlay_extent(&ew, &eh, &ergba);
             }
             held_terminal = sdl3vk_renderer_terminal();
             held_surfaces = (int)(s_surface_gen - surf0);
@@ -2234,18 +2242,20 @@ static int sdl3vk_surface_selftest(void) {
         if (c < 2)
             bad |= !busy || held_surfaces != 1 || held_terminal != want_terminal ||
                    loss_terminal != want_terminal;
-        if (c == 1) bad |= !held_marked;
+        if (c == 1) bad |= !held_marked || held_extent != 0;
         if (c >= 2) bad |= held_terminal;
         if (c != 0) bad |= !after;
         if (bad) {
             fprintf(stderr, "surface: '%s': warm=%d shown=%d reached=%d present on the loss=%d "
                             "(want -1) terminal at the loss=%d later presents as wanted=%d "
-                            "(want 1) terminal then=%d "
+                            "(want 1) overlay extent query then=%d (want 0 as the window goes) "
+                            "terminal then=%d "
                             "surfaces made by then %d (want 1) held back marked %d next "
                             "present=%d (want %d) terminal=%d in %u line(s) (want %d) surfaces "
                             "replaced %llu (want %llu) later shown=%d, %d validation error(s), %d "
                             "object(s) alive after shutdown\n", name, warm, shown, reached, got,
-                    loss_terminal, busy, held_terminal, held_surfaces, held_marked, back,
+                    loss_terminal, busy, held_extent, held_terminal, held_surfaces, held_marked,
+                    back,
                     want_back, terminal,
                     lines, want_terminal, (unsigned long long)surfaces,
                     (unsigned long long)want_surfaces, after, verrors, live);
@@ -2364,6 +2374,11 @@ static int sdl3vk_surface_selftest(void) {
         const uint64_t surf0 = s_surface_gen;
         s_window_minimized_fault = 1;
         const int minimized = sdl3vk_window_minimized();
+        /* Minimized before the loss: the pause overlay's extent query says there is nothing to
+         * show now (0), not a terminal renderer (-1). */
+        int ew = 0, eh = 0, ergba = 0;
+        const int min_extent = sdl3vk_overlay_extent(&ew, &eh, &ergba);
+        const int min_terminal = sdl3vk_renderer_terminal();
         s_surface_lost = 1;   /* as an acquire or a present loss leaves it */
         s_swap_surface_lost_fault = SWAP_LOST_CAPS;
         const int got = sdl3vk_present_rgba(px);
@@ -2376,13 +2391,14 @@ static int sdl3vk_surface_selftest(void) {
         const int verrors = sdl3vk_validation_error_count() - verr0;
         sdl3vk_shutdown();
         const int live = lifecycle_live_objects();
-        if (!warm || !minimized || !reached || got != -1 || !terminal || lines != 1 ||
-            surfaces != 1 || verrors != 0 || live != 0) {
-            fprintf(stderr, "surface: '%s': warm=%d minimized=%d reached=%d present=%d (want -1) "
+        if (!warm || !minimized || min_extent != 0 || min_terminal || !reached || got != -1 ||
+            !terminal || lines != 1 || surfaces != 1 || verrors != 0 || live != 0) {
+            fprintf(stderr, "surface: '%s': warm=%d minimized=%d overlay extent query=%d "
+                            "terminal=%d (want 0, 0) reached=%d present=%d (want -1) "
                             "terminal=%d in %u line(s) (want 1, 1) surfaces replaced %llu "
                             "(want 1), %d validation error(s), %d object(s) alive after "
-                            "shutdown\n", name, warm, minimized, reached, got, terminal, lines,
-                    (unsigned long long)surfaces, verrors, live);
+                            "shutdown\n", name, warm, minimized, min_extent, min_terminal,
+                    reached, got, terminal, lines, (unsigned long long)surfaces, verrors, live);
             ok = 0;
         }
         cases++;
