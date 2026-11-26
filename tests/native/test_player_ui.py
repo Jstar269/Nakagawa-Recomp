@@ -9911,9 +9911,13 @@ class PlayerUiStringSourceTests(unittest.TestCase):
     """Keep launcher copy in the English catalog, including text built before draw calls."""
 
     SOURCES = ("src/player/ui", "src/ui")
+    # The in-game overlay's pages (#2953) resolve the same catalog through the shared UI core.
+    OVERLAY_SOURCES = ("src/rt/overlay",)
     # These files provide data or backend diagnostics rather than composing screen text.
     # Still check their text-sink calls. New files get the full check by default.
     SINK_ONLY = frozenset({
+        # The overlay host's errors are stderr diagnostics for gui.c, never drawn on a page.
+        "src/rt/overlay/overlay_host.c",
         "src/player/ui/love_all_credits.c",
         "src/player/ui/player_ui_art.c",
         "src/player/ui/player_ui_at3.c",
@@ -9965,6 +9969,13 @@ class PlayerUiStringSourceTests(unittest.TestCase):
         '"display-smoke-v1"', '"synthetic-allegrex-v1"', '"pspdev-phase5-v1"',
         '"synthetic-title2-v1"', '"showcase-scene-v1"', '"showcase-breakout-v1"',
         '"UCUS98701"', '"UCUS-98701"', '"PAC-MAN Championship Edition"',
+    })
+    OVERLAY_KEY_NAMES = frozenset({
+        '"up"', '"down"', '"left"', '"right"', '"lshift"', '"rshift"',
+        '"lctrl"', '"rctrl"', '"lalt"', '"ralt"',
+    })
+    OVERLAY_GE_FORMATS = frozenset({
+        '"CLUT4"', '"CLUT8"', '"CLUT16"', '"CLUT32"', '"DXT1"', '"DXT3"', '"DXT5"', '"DEPTH16"',
     })
     # These strings are protocol names, paths, units or proper names. Keep the
     # source/call context with each exception to catch the same word in copy.
@@ -10070,6 +10081,14 @@ class PlayerUiStringSourceTests(unittest.TestCase):
             return re.fullmatch(r'"input-prompts/[a-z0-9_]+\.png"', token) is not None
         if path == "src/ui/nk_ui_theme.c":
             return re.fullmatch(r'"assets/fonts/ui/[\w/-]+\.ttf"', token) is not None
+        if path == "src/rt/overlay/overlay_controls.c":
+            # Input-profile key names looked up by nk_host_key_from_name, never shown.
+            return (token in cls.OVERLAY_KEY_NAMES
+                    and re.search(r"\bk_(?:arrows|shift|ctrl|alt)\[\]\s*=\s*\{", before) is not None)
+        if path == "src/rt/overlay/overlay_dev.c":
+            # The GE's texture format mnemonics and a hexadecimal guest address, shown verbatim.
+            return ((token in cls.OVERLAY_GE_FORMATS and re.fullmatch(r'\s*(?:"\w+",\s*)*', before) is not None)
+                    or token == '"0x%08X"')
         return False
 
     @classmethod
@@ -10128,6 +10147,47 @@ class PlayerUiStringSourceTests(unittest.TestCase):
                     continue
                 problems.extend(self.problems(relative, path.read_text(encoding="utf-8")))
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_overlay_strings_come_from_the_catalog(self) -> None:
+        """#2953: the in-game overlay's pages take their copy from the catalog too."""
+        problems = []
+        scanned = 0
+        for directory in self.OVERLAY_SOURCES:
+            for path in sorted((ROOT / directory).rglob("*")):
+                if path.suffix not in {".c", ".h", ".inc"}:
+                    continue
+                scanned += 1
+                problems.extend(self.problems(path.relative_to(ROOT).as_posix(),
+                                              path.read_text(encoding="utf-8")))
+        self.assertGreater(scanned, 0, "no overlay sources found")
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_guard_finds_overlay_copy_and_keeps_its_data(self) -> None:
+        source = (
+            'static const char *const k_arrows[] = {"up", "down", "left", "right"};\n'
+            'static const NkUiPromptItem prompts[] = {{NK_UI_PROMPT_ACT_BACK, "Back"}};\n'
+            'key_group(keys, taken, count, k_arrows, 4u, "Arrow keys", words, list);\n'
+            'nk_ui_button(ui, NK_OVERLAY_ID_RESUME, NK_UI_STR(OVERLAY_BUTTON_RESUME), 0u);\n'
+        )
+        problems = self.problems("src/rt/overlay/overlay_controls.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["2", "3"])
+        # Key names are data only in the controls file's key tables.
+        self.assertEqual(len(self.problems("src/rt/overlay/overlay_pause.c", source)), 6)
+        source = (
+            'static const char *const names[] = {\n'
+            '    "5650", "CLUT4", "DXT1",\n'
+            '};\n'
+            '(void)snprintf(text, sizeof(text), "0x%08X", (unsigned)w->addr);\n'
+            'return "UNKNOWN";\n'
+            'nk_ui_text(ui, DEV_ID_EMPTY, "CLUT4", &empty);\n'
+        )
+        problems = self.problems("src/rt/overlay/overlay_dev.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["5", "6"])
+        # The host's diagnostics stay literal, but a string drawn there still needs the catalog.
+        host = ('host_error(error, error_size, "out of memory");\n'
+                'nk_ui_text(ui, id, "Raw overlay copy", &style);\n')
+        self.assertEqual([p.split(":")[1] for p in self.problems("src/rt/overlay/overlay_host.c", host)],
+                         ["2"])
 
     def test_guard_finds_direct_descriptor_and_formatted_copy(self) -> None:
         source = (
