@@ -24,9 +24,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 183 | 88 |
+| `ppsspp-derived` | 184 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 320 | 183 |
+| `synthetic` | 319 | 183 |
 | `unverified` | 153 | 22 |
 | total | 720 | 367 |
 
@@ -79,7 +79,7 @@ a title that translates none has generated code unchanged.
 | `0x011f03c1` | `sceRtcGetAccumulativeTime` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x01562ba3` | `sceAudioOutput2Reserve` | audio | `hardware-measured` | PSP oracle PSP-HLE-AUDIO-SRC-001 |
 | `0x01977054` | `sceMpegGetUserdataAu` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
-| `0x019b25eb` | `__sceSasSetADSR` | audio | `synthetic` | HLE selftest dispatch |
+| `0x019b25eb` | `__sceSasSetADSR` | audio | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x0282a3bd` | `sceHttpGetContentLength` | network | `synthetic` | HLE selftest dispatch |
 | `0x02baad91` | `sceCtrlGetSamplingCycle` | input | `unverified` | no recorded evidence |
 | `0x03444eb4` | `sceGeListSync` | ge | `hardware-measured` | PSP oracle PSP-GE-CONTROL-001 |
@@ -352,7 +352,7 @@ a title that translates none has generated code unchanged.
 | `0x5ec81c55` | `sceAudioChReserve` | audio | `unverified` | no recorded evidence; unlinked hardware note |
 | `0x5f10d406` | `sceKernelCpuResumeIntr` | kernel_interrupt | `synthetic` | HLE selftest dispatch |
 | `0x5f32beaa` | `sceKernelReferVTimerStatus` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-VTIMER-001, PSP-HLE-VTIMER-002 |
-| `0x5f9529f6` | `__sceSasSetSL` | audio | `synthetic` | HLE selftest dispatch |
+| `0x5f9529f6` | `__sceSasSetSL` | audio | `ppsspp-derived` | registry notes name PPSSPP; unlinked hardware note |
 | `0x5fb86ab0` | `sceGeListDeQueue` | ge | `hardware-measured` | PSP oracle PSP-GE-CONTROL-001 |
 | `0x60107536` | `sceKernelDeleteLwMutex` | kernel_sync | `unverified` | no recorded evidence; unlinked hardware note |
 | `0x606a4649` | `sceMpegDelete` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
@@ -527,7 +527,7 @@ a title that translates none has generated code unchanged.
 | `0x9d9a5ba1` | `sceKernelGetBlockHeadAddr` | kernel_memory | `synthetic` | HLE selftest dispatch |
 | `0x9dcfb7ea` | `sceMpegChangeGetAuMode` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x9df81198` | `sceNetAdhocPtpAccept` | network | `ppsspp-derived` | handler comment names PPSSPP; sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
-| `0x9ec3676a` | `__sceSasSetADSRmode` | audio | `synthetic` | HLE selftest dispatch |
+| `0x9ec3676a` | `__sceSasSetADSRmode` | audio | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0x9f9b46b9` | `sceKernelCreateNotifyCallback` | kernel_thread | `unverified` | no recorded evidence |
 | `0x9fa03cd3` | `sceKernelDeleteThread` | kernel_thread | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xa0229362` | `sceNetAdhocGameModeDeleteMaster` | network | `synthetic` | HLE selftest dispatch |
