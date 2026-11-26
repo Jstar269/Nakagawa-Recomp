@@ -1157,10 +1157,13 @@ def _is_pointer_array_walker(elf, entry, memo=None, depth=0):
                     slots.pop(simm, None)
                 else:
                     slots[simm] = value(rt)
-        elif op in (0x02, 0x03):  # j / jal: a call, or a tail jump that ends the function
+        elif op in (0x02, 0x03):  # j / jal: a call or one of the linked or tail continuations
             target = jump_target(pc, word)
             if op == 0x03:
                 write(31, None)
+                if is_jal_pc_read(pc, word) and _relocated_as(_relocated_jumps(elf), pc, "jump26"):
+                    pc += 4
+                    continue  # same body, including the slot and every subsequent word
             else:
                 stop_at = pc + 8
             pending = (pc + 8, target, op == 0x02)
@@ -1247,7 +1250,10 @@ def _constant_arguments_at_calls(elf, covered, relocated):
             consts = {}
             continue
         if op in (0x02, 0x03):
-            pending = (address, jump_target(address, word))
+            if op == 0x03:
+                consts.pop(31, None)  # JAL writes the link before its slot reads the arguments.
+            target = None if is_jal_pc_read(address, word) else jump_target(address, word)
+            pending = (address, target)
         elif (op == 0 and (word & 0x3F) in (0x08, 0x09)) or branch_target(address, word) is not None:
             pending = (address, None)
 
@@ -1388,7 +1394,9 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                 continue
             if op == 3:  # jal: direct call, returns -> continue past delay slot
                 target = jump_target(pc, word)
-                if in_ranges(target, ranges) or in_ranges(target, file_exec_ranges):
+                if not is_jal_pc_read(pc, word) and (
+                    in_ranges(target, ranges) or in_ranges(target, file_exec_ranges)
+                ):
                     if target not in calls:
                         calls.add(target)
                         new_calls.append(target)
@@ -1653,6 +1661,11 @@ def jump_target(source, word):
     return ((source + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2)
 
 
+def is_jal_pc_read(source, word):
+    """Whether a pseudo-direct JAL targets the next instruction after its delay slot."""
+    return word >> 26 == 3 and jump_target(source, word) == ((source + 8) & 0xFFFFFFFF)
+
+
 def branch_target(source, word):
     """PC-relative branch target of ``word`` at ``source``, or ``None``.
 
@@ -1743,6 +1756,15 @@ def direct_branch_edges(elf, ranges, targets=None):
 #: most landing pads one goto may name. A wider mask is left unresolved.
 COMPUTED_GOTO_WINDOW = 16
 COMPUTED_GOTO_MAX_TARGETS = 64
+
+
+def _discard_transfer_link(tracked, word):
+    """Drop the old link destination before decoding the transfer's delay slot."""
+    op = word >> 26
+    if op == 3 or (op == 1 and ((word >> 16) & 31) in REGIMM_LINK_RT):
+        tracked.pop(31, None)
+    elif op == 0 and (word & 63) == 9:
+        tracked.pop((word >> 11) & 31, None)
 
 
 def _gpr_writes(word):
@@ -1858,7 +1880,9 @@ def bounded_computed_goto_targets(elf, ranges):
                 break
             sign = -1 if funct == 0x23 else 1
             pads = {(base + sign * value) & 0xFFFFFFFF for value in values}
-            if all(in_ranges(pad, ranges) for pad in pads):
+            # A `jr` to an unaligned address raises an address error and lands nowhere, so a
+            # base that is not word-aligned names no pad at all.
+            if all((pad & 3) == 0 and in_ranges(pad, ranges) for pad in pads):
                 targets.update(pads)
             break
     return frozenset(targets)
@@ -1933,14 +1957,22 @@ def code_pointer_evidence(elf, ranges):
     jumps = _relocated_jumps(elf)
 
     hireg = {}
-    clear_next = False
+    # A control transfer ends the straight-line run after its delay slot, which still
+    # executes first: an `la` whose low half sits there (`lui a1, hi; jal f; addiu a1, a1,
+    # lo`) is a pointer argument, and the analyzer's sweep makes its target an entry on it
+    # (_seed_address_materializations). The slot therefore reads the state from before the
+    # transfer, and only what the slot itself wrote outlives it. `slot_at` is the address of
+    # the pending delay slot; a transfer with no such word (the end of a range) has none.
+    slot_at = None
     for addr, word in _iter_code_words(elf, ranges):
-        if clear_next:
+        in_slot = slot_at == addr
+        if slot_at is not None and not in_slot:
             hireg.clear()
-            clear_next = False
+        slot_at = None
+        wrote = None  # the register this word left a tracked value in
         op = word >> 26
         rs, rt = (word >> 21) & 0x1F, (word >> 16) & 0x1F
-        if op == 3:  # jal
+        if op == 3 and not is_jal_pc_read(addr, word):
             target = jump_target(addr, word)
             if in_ranges(target, ranges) and _relocated_as(jumps, addr, "jump26"):
                 evidence["jal"].add(target)
@@ -1952,6 +1984,7 @@ def code_pointer_evidence(elf, ranges):
         if op == 0x0F:  # lui rt, imm
             if rt:
                 hireg[rt] = (word & 0xFFFF) << 16
+                wrote = rt
         elif op in (0x09, 0x0D):  # addiu / ori: the low half of an `la`
             base = hireg.get(rs)
             if isinstance(base, int):
@@ -1965,6 +1998,7 @@ def code_pointer_evidence(elf, ranges):
                     evidence["immediate"].add(value)
                 if rt:
                     hireg[rt] = value
+                    wrote = rt
             elif rt:
                 hireg.pop(rt, None)
         else:
@@ -1977,10 +2011,13 @@ def code_pointer_evidence(elf, ranges):
                 for register in writes:
                     if register:
                         hireg.pop(register, None)
-        if branch_target(addr, word) is not None or op in (2, 3) or (
+        if in_slot:
+            hireg = {} if wrote is None else {wrote: hireg[wrote]}
+        elif branch_target(addr, word) is not None or op in (2, 3) or (
             op == 0 and (word & 0x3F) in (0x08, 0x09)
         ):
-            clear_next = True
+            _discard_transfer_link(hireg, word)
+            slot_at = addr + 4
 
     # `sections` is absent on the owned synthetic word images, which carry no data
     # segment; treat that as no data evidence.
@@ -2371,9 +2408,6 @@ def _seed_address_materializations(d):
 
             is_branch = branch_target(addr, word) is not None
             is_jump_or_call = op in (2, 3) or (op == 0 and (word & 0x3F) in (0x08, 0x09))
-            if (is_branch or is_jump_or_call) and clear_at is None:
-                clear_at = addr + 8
-
             if op == 0x0F:  # lui rt, imm
                 rt_reg = (word >> 16) & 0x1F
                 if rt_reg:
@@ -2465,6 +2499,11 @@ def _seed_address_materializations(d):
                     for register in writes:
                         if register:
                             hireg.pop(register, None)
+            # Consume an indirect target before its link write changes the slot's input.
+            if (is_branch or is_jump_or_call) and clear_at is None:
+                _discard_transfer_link(hireg, word)
+                clear_at = addr + 8
+
 
 
 #: What became of a miss seed (`analyze`'s `report["miss_seeds"]`), decided by comparing the build
@@ -3240,7 +3279,9 @@ class _BodyWalk:
         if word is None:
             return True
         op, funct = word >> 26, word & 0x3F
-        if op == 3 or (op == 0 and funct == 0x09 and (word >> 11) & 0x1F):  # jal, linked jalr
+        if op == 3:
+            return not (_relocated_as(self.jumps, pc, "jump26") and is_jal_pc_read(pc, word))
+        if op == 0 and funct == 0x09 and (word >> 11) & 0x1F:             # linked jalr
             return True
         if op == 0 and funct == 0x0D:                                       # break
             return True

@@ -376,6 +376,11 @@ extern volatile int g_sr_vram_read_pending;
 void sr_ge_vram_read_prepare(uint32_t physical_addr, uint32_t width);
 void sr_ge_vram_write_prepare(uint32_t physical_addr, uint32_t width);
 void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width);
+/* Watch CPU stores in the visible rows of one validated GPU scanout.
+ * first/end are canonical VRAM addresses, end exclusive. Zero disables it.
+ * Rearming after an accepted present clears the previous write indication. */
+void ge_watch_cpu_scanout(uint32_t first, uint32_t end, uint32_t pitch, uint32_t visible_row);
+int ge_scanout_cpu_written(void);
 static inline void sr_guest_vram_read_prepare_bytes(uint32_t addr, uint32_t width);
 
 /* --- Guest-memory span validation (issue #15) --------------------------------
@@ -989,11 +994,13 @@ static inline void sr_w8 (uint32_t a, uint8_t v) { sr_w8_pc(a, v, 0); }
 static inline void sr_w16(uint32_t a, uint16_t v) { sr_w16_pc(a, v, 0); }
 static inline void sr_w32(uint32_t a, uint32_t v) { sr_w32_pc(a, v, 0); }
 
-/* Native bulk copy/fill bodies for generated stubs that replace a title's own
- * memmove/memset (#1170).  They keep the same VRAM coherence contract as the
- * MEM_* accessors and h_Memcpy/h_Memset: a renderer-owned source is read back
- * before the host pointer is formed, and the destination is prepared and
- * committed so GPU targets and cached textures observe the store.  A span
+/* Native bulk copy/fill bodies (#1170).  The generated stubs that called them in
+ * place of a title's own copy and fill routines were retired under #363, so no
+ * generated code reaches them now; the native selftests still do.  They keep
+ * the same VRAM coherence contract as the MEM_* accessors and
+ * h_Memcpy/h_Memset: a renderer-owned source is read back before the host
+ * pointer is formed, and the destination is prepared and committed so GPU
+ * targets and cached textures observe the store.  A span
  * through a swizzled VRAM mirror is copied in measured-contiguous pieces
  * (sr_guest_memmove/sr_guest_fill, #1049), as the translated body's scalar
  * stores would land it. */
@@ -1060,8 +1067,8 @@ static inline uint32_t sr_null_span_checked(uint32_t address, uint32_t size, con
 #endif
 
 /* Generated bulk code forms a host pointer only through SR_HOST(SR_DATA_SPAN(a, n)), and the
- * native memmove/memset stubs check both spans the same way, so a null base stops as it would
- * in the translated loop it replaces. */
+ * native memmove/memset bodies check both spans the same way, so a null base stops as it would
+ * in a translated loop. */
 #ifdef SR_NULL_PAGE_GUARD
 #define SR_DATA_SPAN(a, n) sr_null_span_checked((uint32_t)(a), (uint32_t)(n), __func__)
 static inline void sr_native_memmove_checked(uint32_t dest, uint32_t src, uint32_t size, uint32_t pc,
@@ -1130,6 +1137,11 @@ void sr_compat_fired(const char *collection, uint32_t anchor, const char *name);
  * Returns the full formatted length, as printf does. */
 int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
                          char *buf, int cap);
+
+/* Bounded SysclibForKernel snprintf subset. The caller validates the guest format
+ * string. Returns the rendered length or -1 for an unsupported call. */
+#define SR_SYSCLIB_SNPRINTF_LIMIT 4096
+int sr_guest_format_sysclib_snprintf(CpuState *s, uint32_t fmt, char *buf, int cap);
 
 /* VFPU source/destination prefix application (ARCHITECTURE section 6.4), ported from
  * PPSSPP. sr_vread reads n lanes from physical indices idx[], then applies a source
@@ -2426,6 +2438,8 @@ int      gui_stick_dead_zone(void);              /* the input profile's stick de
                                                     counts (ace_stick_host_counts); 0 without one */
 int      gui_pad_present(void);                  /* 1 when a game controller is connected */
 void     gui_ace_vblank(uint32_t vcount);        /* Ace Mode's smooth motion: a held frame's VBLANK */
+/* The GPU presenter reports an accepted image that bypassed guest CPU bytes. */
+void     sr_display_note_gpu_present(void);
 /* Returns 1 only when the selected presenter accepted the validated frame. */
 int      gui_present(uint32_t fbaddr, int fmt, uint32_t stride);
 void     gui_pump(void);                         /* service the window's pending events */
@@ -2632,6 +2646,17 @@ int sched_fast_forward_on(void);
 uint32_t sched_fast_forward_speed(void);
 /* How many times fast forward has started in this run (0 before the first). */
 uint32_t sched_fast_forward_epoch(void);
+/* Automatic disc-load fast-forward. Activity is recorded by the guest I/O,
+ * controller and audio boundaries, on the scheduler's thread. */
+#define SCHED_AUTO_LOAD_SPEED 16u
+void sched_auto_load_disc_read(void);
+void sched_auto_load_input(int active);
+void sched_auto_load_host_input(uint32_t buttons, uint8_t lx, uint8_t ly);
+void sched_auto_load_audible(void);
+void sched_auto_load_quit(void);
+void sched_auto_load_audio_hooks(int (*silent)(void), void (*transition)(int active));
+int sched_auto_load_enabled(void);
+int sched_auto_load_active(void);
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);

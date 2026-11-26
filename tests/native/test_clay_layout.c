@@ -390,22 +390,30 @@ static int word_cache_reuses_evicted_words(void)
     static char probe[16];
     Clay_Context *context = Clay_GetCurrentContext();
     Clay_TextElementConfig config = { .fontSize = 10, .lineHeight = 10 };
-    /* Exactly the words that take the slot array to its last slot, after the
-       words the earlier layouts left in the cache. */
-    int32_t words = context->measuredWords.capacity - 1 - context->measuredWords.length +
-                    context->measuredWordsFreeList.length;
-    Clay_String full_text = { .isStaticallyAllocated = false, .length = 2 * words - 1, .chars = full };
+    /* Text scanning needs two slots before each character. The last word
+       uses one of those two slots after the loop. */
+    int32_t words = context->measuredWords.capacity - 1;
+    int32_t full_length;
     uint32_t buckets = (uint32_t)context->measureTextHashMap.capacity;
     uint32_t full_bucket;
     int32_t probe_length = 0;
     float width;
 
+    /* Looking up the full text can evict older texts from its bucket. Start
+       with an empty cache so that earlier layouts cannot change the count. */
+    Clay_ResetMeasureTextCache();
+    if (words < 2 || (size_t)words > sizeof(full) / 2) {
+        fprintf(stderr, "FAIL: word cache capacity %d is outside the fixture's range\n",
+                (int)context->measuredWords.capacity);
+        return 0;
+    }
     for (int32_t i = 0; i < words; ++i) {
         full[2 * i] = 'a';
         full[2 * i + 1] = ' ';
     }
+    full_length = 2 * words - 1;
     /* A short text whose cache entry lands in the full text's bucket. */
-    full_bucket = measure_cache_id(full, full_text.length, &config) % buckets;
+    full_bucket = measure_cache_id(full, full_length, &config) % buckets;
     for (int n = 0; n < 100000 && probe_length == 0; ++n) {
         int length = snprintf(probe, sizeof(probe), "w%d", n);
         if (measure_cache_id(probe, length, &config) % buckets == full_bucket) {
@@ -418,11 +426,12 @@ static int word_cache_reuses_evicted_words(void)
     }
 
     clay_error_count = 0;
-    (void)measured_text_width("full", full, full_text.length);
+    (void)measured_text_width("full", full, full_length);
     if (clay_error_count != 0 ||
-        context->measuredWords.length != context->measuredWords.capacity - 1) {
-        fprintf(stderr, "FAIL: %d words did not fill the word cache to its last slot\n",
-                (int)words);
+        context->measuredWords.length != words || context->measuredWordsFreeList.length != 0) {
+        fprintf(stderr, "FAIL: %d words filled %d slots with %d still free and %d errors\n",
+                (int)words, (int)context->measuredWords.length,
+                (int)context->measuredWordsFreeList.length, clay_error_count);
         return 0;
     }
     for (int frame = 0; frame < 3; ++frame) {
@@ -432,8 +441,15 @@ static int word_cache_reuses_evicted_words(void)
     width = measured_text_width("probe", probe, probe_length);
     if (clay_error_count != 0 || width != 10.0f * (float)probe_length) {
         fprintf(stderr, "FAIL: after the full text was evicted, \"%s\" measured %g px "
-                        "with %d errors, not %g px\n", probe, (double)width,
+                        "with %d errors, expected %g px\n", probe, (double)width,
                 clay_error_count, 10.0 * probe_length);
+        return 0;
+    }
+    if (context->measuredWords.length != words || context->measuredWordsFreeList.length != words - 1) {
+        fprintf(stderr, "FAIL: after reusing one word, the cache has %d slots and %d free "
+                        "(expected %d and %d)\n",
+                (int)context->measuredWords.length, (int)context->measuredWordsFreeList.length,
+                (int)words, (int)(words - 1));
         return 0;
     }
     return 1;

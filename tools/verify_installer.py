@@ -14,12 +14,12 @@ The check a built installer has to pass before it is a release asset:
    ``bin/portable.txt``, a file the person added, and the per-user data: before anything is installed the tool
    plants marker files in all five data folders under ``%LOCALAPPDATA%\\Nakagawa`` (``config``, ``data``,
    ``cache``, ``logs`` and ``saves``, plus a nested folder in ``data`` and ``saves``), creating any folder that is
-   missing, checks that every marker is still there, and at the end removes the markers and the folders it made;
+   missing, checks that every marker keeps its original bytes, and at the end removes what it made;
 6. an upgrade in place: it builds an older synthetic release with the pinned Inno Setup compiler (the package plus
    files a newer release dropped), installs it, adds files and changes one installed file, then runs this
    installer over it. The folder must then equal this package's ``SHA256SUMS.txt`` plus exactly the files the
-   person added or changed: the dropped files and their emptied folder are gone. A silent uninstall then keeps
-   the person's files and the markers again.
+   person added or changed: the dropped files and their emptied folder are gone. The upgrade and the
+   following silent uninstall both keep the markers byte-identical. The uninstall keeps the person's files.
 
 WARNING: it plants and removes marker files in the real ``%LOCALAPPDATA%\\Nakagawa`` folders, and writes the real
 per-user uninstall entry and Start-menu shortcut while it runs, because the installer uses those places and not an
@@ -60,6 +60,7 @@ DEFAULT_SHORTCUT_NAME = "Nakagawa Recomp"
 APP_ID = "A37F65B8-FB5B-41BB-AC7B-3700FE43CB02"
 UNINSTALL_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{{{APP_ID}}}_is1"
 SENTINEL_NAME = "installer-verify-sentinel.txt"
+SENTINEL_BYTES = b"planted by tools/verify_installer.py; safe to delete\n"
 #: Inno's own files, beside the program in the install folder.
 INNO_OWN_PREFIX = "unins"
 
@@ -220,8 +221,8 @@ SENTINEL_FOLDER_NAME = "installer-verify-nested"
 
 
 class Sentinels:
-    """Marker files planted in every per-user data folder, to prove an uninstall that was not asked to delete
-    them kept them. Creates what is missing and removes only what it made."""
+    """Check that an upgrade or silent uninstall preserves the per-user markers byte for byte.
+    Creates what is missing and removes only what it made."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -261,18 +262,30 @@ class Sentinels:
             for place in places:
                 marker = place / SENTINEL_NAME
                 try:
-                    marker.write_text("planted by tools/verify_installer.py; safe to delete\n", encoding="utf-8")
+                    marker.write_bytes(SENTINEL_BYTES)
                 except OSError as exc:
                     raise build_installer.InstallerError(
                         f"INSTALLER_VERIFY_FAILED: cannot write {marker}: {exc}"
                     ) from exc
                 self.files.append(marker)
 
-    def missing(self) -> list[str]:
-        """Planted markers that are gone; an empty list with nothing planted is itself a failure."""
+    def problems(self) -> list[str]:
+        """Report markers that are missing, unreadable, or no longer match the planted bytes."""
         if not self.files:
             return ["no sentinel was planted"]
-        return [str(path) for path in self.files if not path.is_file()]
+        problems = []
+        for path in self.files:
+            try:
+                with path.open("rb") as marker:
+                    contents = marker.read(len(SENTINEL_BYTES) + 1)
+            except FileNotFoundError:
+                problems.append(f"missing marker: {path}")
+            except OSError as exc:
+                problems.append(f"unreadable marker: {path}: {exc}")
+            else:
+                if contents != SENTINEL_BYTES:
+                    problems.append(f"changed marker: {path}")
+        return problems
 
     def remove(self) -> None:
         for path in self.files:
@@ -454,9 +467,9 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             expected = sorted(PERSON_FILES)
             if left != expected:
                 fail("INSTALLER_UNINSTALL_LEFTOVER", f"left {left}, expected {expected}")
-            gone = sentinels.missing()
-            if gone:
-                fail("INSTALLER_UNINSTALL_TOUCHED_USER_DATA", f"a silent uninstall removed {gone}")
+            problems = sentinels.problems()
+            if problems:
+                fail("INSTALLER_UNINSTALL_TOUCHED_USER_DATA", "; ".join(problems))
             result["left_after_uninstall"] = left
 
             # 5. An upgrade in place: the older release, the person's files and one installed file they changed,
@@ -473,9 +486,9 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             if problems:
                 fail("INSTALLER_UPGRADE_DIFFERS", "; ".join(problems[:8]))
             check_shortcut_and_entry()
-            gone = sentinels.missing()
-            if gone:
-                fail("INSTALLER_UPGRADE_TOUCHED_USER_DATA", f"the upgrade removed {gone}")
+            problems = sentinels.problems()
+            if problems:
+                fail("INSTALLER_UPGRADE_TOUCHED_USER_DATA", "; ".join(problems))
             left = uninstall(upgraded)
             lost = sorted(set(PERSON_FILES) - set(left))
             if lost:
@@ -483,9 +496,9 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             unexpected = sorted(set(left) - {*PERSON_FILES, UPGRADE_EDITED})
             if unexpected:
                 fail("INSTALLER_UNINSTALL_LEFTOVER", f"the uninstall after the upgrade left {unexpected}")
-            gone = sentinels.missing()
-            if gone:
-                fail("INSTALLER_UNINSTALL_TOUCHED_USER_DATA", f"a silent uninstall removed {gone}")
+            problems = sentinels.problems()
+            if problems:
+                fail("INSTALLER_UNINSTALL_TOUCHED_USER_DATA", "; ".join(problems))
             result["upgrade_removed"] = list(UPGRADE_DROPPED)
             result["upgrade_kept"] = sorted({*PERSON_FILES, UPGRADE_EDITED})
             result["user_data_sentinels_kept"] = len(sentinels.files)

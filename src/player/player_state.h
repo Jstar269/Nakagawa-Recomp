@@ -9,6 +9,7 @@
 #include "nk_iso.h"
 #include "nk_disc_expand.h"
 #include "nk_library.h"
+#include "nk_memstick_layout.h"
 #include "nk_disc_verify.h"
 #include "nk_launch.h"
 #include "nk_steam_shortcuts.h"
@@ -332,9 +333,8 @@ typedef enum {
                                   title whose catalog entry declares a stick dead zone. Appended: the
                                   enum fixes the Settings > Enhanced rows and the saved order; the Ace
                                   line still writes stick before cull */
-    PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
-                                  a title's package declares return at once; guest timing changes. Ace
-                                  only; a title without a load part ignores it */
+    PLAYER_PART_LOAD,          /* loading speed: 0 off, 1 fast (Ace package waits), 2 auto
+                                  (silent disc loads in Enhanced or Ace) */
     PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
                                   Appended; the Ace line writes twin after tess */
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
@@ -1323,6 +1323,10 @@ struct PlayerApp {
     int window_height;
     bool enable_focus_handoff;
     bool child_window_ready;
+    /* The runtime reported its first frame (BOOT_EVENT phase=first_frame) for the
+       running launch. Decides whether a short clean exit ran the game (#306);
+       child_window_ready, set earlier by window_ready, drives the start watch. */
+    bool child_first_frame;
     /* Start watch for the running launch (#1290): the first running check was
        logged, the child wrote its first boot event, and the "still no boot
        event" developer-log note was written. Cleared by each launch. */
@@ -1343,6 +1347,8 @@ struct PlayerApp {
        game's page hides it for that game and the effects it named, for the rest of this
        player session: another game, or an effect it did not name, shows it again. The last
        game hidden is the one remembered. */
+    int fsr1_session_preset;          /* requesting preset for the current launch */
+    NkFsr1Refusal fsr1_session_refusal;
     uint16_t render_effects;
     char render_effects_text[384];
     uint16_t render_effects_hidden;
@@ -1538,6 +1544,13 @@ typedef enum {
     PLAYER_SAVES_FAILED     /* error says what, in plain words */
 } PlayerSavesResult;
 
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+/* Test seam (player-state test build only): called in player_app_monitor_game_session
+   after its live read of the session file and before it checks whether the child
+   still runs, so a test can append what a child wrote between those two points. */
+extern void (*g_player_state_test_after_live_read)(PlayerApp *app);
+#endif
+
 #if defined(NK_SAVES_TEST_SEAMS)
 /* Test seam (player-state test build only): the nth rename the saves code makes from now
    fails, as a rename refused by the system would; 0 turns it off. */
@@ -1555,6 +1568,11 @@ bool player_app_save_backup_folder(const GameRecord *game, char *out, size_t out
 /* Why the title's saves can't be changed now, or NULL: a disc ID that can't name a folder,
  * or a game that starts or runs (it has the folder open). */
 const char *player_app_saves_blocker(const PlayerApp *app, int game_index);
+/* A read-only offer and a confirmed write for the selected title on a READY stick. */
+NkMemstickCollisionResult player_app_bring_in_offer(const PlayerApp *app, int game_index,
+                                                    NkMemstickPlanUnit *offer);
+NkMemstickCollisionResult player_app_bring_in(const PlayerApp *app, int game_index,
+                                              const NkMemstickPlanUnit *offer);
 /* The current local time as a backup stamp, YYYYMMDD-HHMMSS. */
 void player_app_save_stamp_now(char *out, size_t out_size);
 /* Writes a backup of the title's save folder, named with `stamp`, and reads it back whole
@@ -2145,12 +2163,13 @@ const char *player_ssaa_sentence(int value, int render_scale);
  * that adds interpolation above 30 Hz removes this limit. The other parts are untouched, and an
  * Authentic resolution stays off. */
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
-/* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
+/* The resolved Ace line for a session: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
  * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
- * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
+ * ";load=fast" follows only for Ace and ";load=auto" for Enhanced or Ace. A missing load is off.
+ * nk_launch exports Automatic separately as SR_ACE_LOAD_AUTO and the rest of the line as SR_ACE.
  * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier: the resolved
  * factor, so plain 4x at a render scale of 3x or 4x writes ";ssaa=2" (player_ssaa_factor).
  * ";peak=limit" follows ssaa, before texpack, with the Unclipped sound part on, in either tier;
@@ -2228,6 +2247,9 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part);
 void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index);
 /* The title's own value for a part: -1 follows the library. */
 int player_app_title_part(const PlayerApp *app, int game_index, int part);
+/* The package-wait choice is offered when this title is in Ace with a usable package.
+   Only waits declared by the built package can be shortened. */
+bool player_app_title_can_choose_short_waits(const PlayerApp *app, int game_index);
 /* The title's "Last session" line from the report under the user data folder; false, with
  * out empty, when there is none. */
 bool player_app_ace_last_session(const PlayerApp *app, int game_index, char *out, size_t cap);
@@ -2426,8 +2448,11 @@ NkResult player_app_apply_input_profile_to_session(PlayerApp *app, const GameRec
 /* Advance the running-game session state machine one tick at `now_ms`.
  *
  * Returns true when this tick observed the child's exit and finalized the
- * session. A child that exits before 500 ms of wall time is reported through
- * the structured RUNTIME_PREMATURE_EXIT error; a later non-zero exit becomes
+ * session. A child that exits before 500 ms of wall time, with a non-zero
+ * code or before it presented its first frame (BOOT_EVENT phase=first_frame),
+ * is reported through the structured RUNTIME_PREMATURE_EXIT error (a clean
+ * exit 0 after the first frame is a short successful run, #306); a later
+ * non-zero exit becomes
  * RUNTIME_ERROR_EXIT. A child still running PLAYER_GAME_START_TIMEOUT_MS
  * after launch without having written a single boot event never started: the
  * tick stops it, reports RUNTIME_START_TIMEOUT and returns true (#1290).

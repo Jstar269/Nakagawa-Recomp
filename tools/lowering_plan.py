@@ -80,6 +80,7 @@ class Transfer:
     Kinds:
       call            jal, or a linked branch to a callable (``cond`` set): a checked
                       native CALL of ``symbol``, or ``dispatch_call_checked`` when it is None
+      pc-read         jal to its own link: write the link and continue after the slot
       call-computed   jalr rd != 0: dispatch the latched ``target_reg``
       tail-computed   jr rs != 31, jalr $zero: TAIL-record the latched ``target_reg``
       return          jr $ra: capture the latched target, host return
@@ -305,11 +306,12 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         hit = sorted(insns & hst_emission_sites(cg))
         if hit:
             raise Unsupported(f"title-profile special site 0x{hit[0]:08x}")
-    # The same points emit_function asserts, from the same labels (before the planned skip
-    # targets and the entry label join them); the runtime-module and variable-import cases
+    # The same points emit_function asserts, from the same labels and entry (before the
+    # planned skip targets join them); the runtime-module and variable-import cases
     # that carry none in C were refused above.
     sv_checks = {addr: tuple(checks) for addr, checks in cg.sv_points(
-        elf, insns, labels, hst_profile=profile == "hst", options=options).items()}
+        elf, insns, labels, hst_profile=profile == "hst", options=options,
+        entry=start).items()}
 
     def word(addr):
         return space.instruction_word(addr, cg.read32(elf, addr), options=options)
@@ -397,6 +399,8 @@ def _transfer(cg, elf, ranges, addr, w, ds, dsw, known, resume_owners, labels, c
 
     if op == 3:                                                    # jal
         cg.ADDRESS_SPACE.check_jump(addr, w)
+        if cg.is_jal_pc_read(addr, w):
+            return Transfer(addr, w, "pc-read", link_reg=31, slot=_slot(cg, ds, dsw, options), **then)
         target = cg.jump_target(addr, w)
         return Transfer(addr, w, "call", target=target, symbol=callee(target), link_reg=31,
                         slot=_slot(cg, ds, dsw, options), **then)

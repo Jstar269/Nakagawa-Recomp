@@ -16,6 +16,7 @@
 
 
 #include "player_state.h"
+#include "../ui/nk_ui_text.h"
 #include "ace.h"
 #include "texrepl.h"
 #include "nk_font.h"
@@ -242,6 +243,21 @@ void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
     app->runtime_package_cache_generation++;
 }
 
+static size_t player_package_key_length(const char *text, size_t capacity) {
+    const char *end = memchr(text, '\0', capacity);
+    return end ? (size_t)(end - text) : capacity;
+}
+
+static void player_copy_package_key_field(char *dst, size_t dst_capacity,
+                                          const char *src, size_t src_capacity) {
+    /* Cache slots can be wider than the source field, notably selected_executable. */
+    size_t limit = dst_capacity - 1;
+    if (src_capacity < limit) limit = src_capacity;
+    size_t length = player_package_key_length(src, limit);
+    memmove(dst, src, length);
+    dst[length] = '\0';
+}
+
 /* The four fields that name one package of a title (its variant): a GameRecord, a cache entry
    and a worker-failure record all carry them under these names, so one comparison and one copy
    serve each; a fifth field goes here once. */
@@ -250,15 +266,15 @@ void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
      strcmp((a)->title_id, (b)->title_id) == 0 &&                               \
      strcmp((a)->selected_executable, (b)->selected_executable) == 0 &&         \
      strcmp((a)->enhancement_package_id, (b)->enhancement_package_id) == 0)
+#define PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, field)                           \
+    player_copy_package_key_field((dst)->field, sizeof((dst)->field),            \
+                                  (src)->field, sizeof((src)->field))
 #define PLAYER_PACKAGE_KEY_COPY(dst, src)                                        \
     do {                                                                         \
-        snprintf((dst)->disc_id, sizeof((dst)->disc_id), "%s", (src)->disc_id);  \
-        snprintf((dst)->title_id, sizeof((dst)->title_id), "%s", (src)->title_id); \
-        snprintf((dst)->selected_executable, sizeof((dst)->selected_executable), \
-                 "%s", (src)->selected_executable);                              \
-        snprintf((dst)->enhancement_package_id,                                  \
-                 sizeof((dst)->enhancement_package_id), "%s",                    \
-                 (src)->enhancement_package_id);                                 \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, disc_id);                        \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, title_id);                       \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, selected_executable);            \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, enhancement_package_id);         \
     } while (0)
 
 static bool player_runtime_worker_failure_matches(
@@ -1284,7 +1300,12 @@ static const int k_part_tess_values[] = {2, 3, 4, 0};
 static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
-static const char *const k_part_load_words[] = {"fast", "off"};
+static const int k_part_load_values[] = {ACE_LOAD_AUTO, ACE_LOAD_FAST, ACE_LOAD_OFF};
+static const char *const k_part_load_labels[] = {
+    NK_UI_STR(ADAPTER_LOADING_AUTOMATIC), NK_UI_STR(ADAPTER_LOADING_SHORT_WAITS),
+    NK_UI_STR(SETTINGS_OFF)
+};
+static const char *const k_part_load_words[] = {"auto", "fast", "off"};
 /* 4x anyway follows 4x, so a row that steps to 4x and shows the warning steps next to the choice
    that keeps it (player_ssaa_factor). A file with "4" and no "4-anyway" is plain 4x. */
 static const int k_part_ssaa_values[] = {2, 4, PLAYER_SSAA_4_ANYWAY, 0};
@@ -1344,11 +1365,10 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"stick", "Stick dead zone",
      "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, true},
-    /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
-       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
-    {"load", "Short loads",
-     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0, true},
+    /* The legacy fast value still selects the declared waits of an Ace package. Auto
+       has no package dependency. Both values change guest timing and stay out of presets. */
+    {"load", NK_UI_STR(ADAPTER_LOADING_SPEED), NK_UI_STR(ADAPTER_LOADING_DESCRIPTION),
+     3, k_part_load_values, k_part_load_labels, k_part_load_words, ACE_LOAD_OFF, false},
     {"twin", "Full 32-bit colour",
      "Shows 16-bit games in full colour, without dither. Uses more memory.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
@@ -2846,6 +2866,18 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
+    if (row->part[PLAYER_PART_UPSCALE] == 1 &&
+        app->fsr1_session_preset == player_app_graphics_preset(app) &&
+        app->fsr1_session_refusal != NK_FSR1_REFUSAL_NONE) {
+        const int n = snprintf(out, cap,
+            app->fsr1_session_refusal == NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE
+                ? NK_UI_STR(SETTINGS_PRESET_FSR1_QUEUE_REFUSED)
+                : NK_UI_STR(SETTINGS_PRESET_FSR1_STARTUP_REFUSED),
+            row->label);
+        if (n > 0 && (size_t)n < cap) return true;
+        out[0] = '\0';
+        return false;
+    }
     /* The parts it sets, "with A, B and C on" or "with A on and B off", in short words (crisp
        text, FSR 1, full 32-bit colour): the line must stay one line, so the page fits 960 x 540
        and 853 x 480 (test_player_screens.c). */
@@ -3038,7 +3070,14 @@ bool player_app_boot_event_is_window_ready(const char *line) {
                     strstr(line, "BOOT_EVENT phase=first_frame") != NULL);
 }
 
-static void player_monitor_stalled_game_events(PlayerApp *app);
+static void player_read_boot_events(PlayerApp *app, bool live);
+
+/* The runtime writes this at the first guest frame or the first GPU present
+   (src/rt/gui.c), after guest code has run; window_ready comes from gui_init
+   before the guest starts and proves no game ran. */
+static bool player_boot_event_is_first_frame(const char *line) {
+    return line && strstr(line, "BOOT_EVENT phase=first_frame") != NULL;
+}
 
 bool player_app_child_window_ready(PlayerApp *app) {
     if (!app || app->child_window_ready || !app->boot_event_file_path[0]) {
@@ -3047,7 +3086,7 @@ bool player_app_child_window_ready(PlayerApp *app) {
     /* The runtime's own output shares the session file and can come first, so
        the marker is looked for in every line the incremental reader takes, not
        only in the file's first few kilobytes (audit 2026-11-17). */
-    player_monitor_stalled_game_events(app);
+    player_read_boot_events(app, true);
     return app->child_window_ready;
 }
 
@@ -3111,9 +3150,11 @@ static bool player_monitor_game_start(PlayerApp *app, uint64_t now_ms) {
     printf("[PLAYER] Game process %d wrote no boot event in %llu ms; stopping it\n",
            app->launch_session.process.process_id, (unsigned long long)elapsed_ms);
     nk_launch_stop(&app->launch_session);
+    player_read_boot_events(app, false);
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
     char kept_log[NK_MAX_PATH] = "";
     if (app->boot_event_file_path[0]) {
         /* The run's output stays in the logs folder (#1303). */
@@ -3597,22 +3638,33 @@ static void player_app_select_package_variant(PlayerApp *app, int game_index) {
     bool cull = enhancement->cull_available &&
                 player_app_title_cull_on_play(app, game_index, &play, logic_60_on);
     game->enhancement_hook_only = false;
-    if (logic_60 && cull) {
-        /* cull_available holds beside a usable timing package only when the joined name is a
-           valid variant (player_read_title_enhancement), so it fits; were it ever cut, the
-           timing build stays, as for a culling package that cannot be used. */
-        int n = snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id),
-                         "%s+%s", enhancement->package_id, enhancement->cull_package_id);
-        if (n < 0 || (size_t)n >= sizeof(game->enhancement_package_id)) {
-            snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                     enhancement->package_id);
+    if (logic_60) {
+        if (cull) {
+            size_t timing_length = player_package_key_length(
+                enhancement->package_id, sizeof(enhancement->package_id));
+            size_t cull_length = player_package_key_length(
+                enhancement->cull_package_id, sizeof(enhancement->cull_package_id));
+            /* Keep the timing build if the pair cannot be written as a complete variant. */
+            char variant[sizeof(game->enhancement_package_id)];
+            size_t variant_size = timing_length + cull_length + 2;
+            if (timing_length < sizeof(enhancement->package_id) &&
+                cull_length < sizeof(enhancement->cull_package_id) &&
+                variant_size <= sizeof(variant)) {
+                memcpy(variant, enhancement->package_id, timing_length);
+                variant[timing_length] = '+';
+                memcpy(variant + timing_length + 1, enhancement->cull_package_id, cull_length + 1);
+                memcpy(game->enhancement_package_id, variant, variant_size);
+                return;
+            }
         }
-    } else if (logic_60) {
-        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                 enhancement->package_id);
+        player_copy_package_key_field(game->enhancement_package_id,
+                                     sizeof(game->enhancement_package_id),
+                                     enhancement->package_id, sizeof(enhancement->package_id));
     } else if (cull) {
-        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                 enhancement->cull_package_id);
+        player_copy_package_key_field(game->enhancement_package_id,
+                                     sizeof(game->enhancement_package_id),
+                                     enhancement->cull_package_id,
+                                     sizeof(enhancement->cull_package_id));
         game->enhancement_hook_only = true;
     } else {
         game->enhancement_package_id[0] = '\0';
@@ -3834,15 +3886,20 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
             return false;
         }
     }
-    /* A missing stick, load, shadow or cull is off (contract 11.2 item 2): the line carries each key only
+    /* A missing stick, shadow or cull is off (contract 11.2 item 2): the line carries each key only
        when it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
        that count, not the part's word. */
     if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_STICK] == 1 && play->stick_counts >= 1 &&
         play->stick_counts <= ACE_STICK_COUNTS_MAX) {
         if (!launch_line_append(out, cap, &used, ";stick=%d", play->stick_counts)) return false;
     }
-    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_LOAD] == 1) {
-        if (!launch_line_append_on(out, cap, &used, PLAYER_PART_LOAD)) return false;
+    /* The two loading modes share one slot. Fast is still for Ace's package-declared waits. */
+    const int load = play->part[PLAYER_PART_LOAD];
+    if ((load == ACE_LOAD_AUTO && (play->mode == PLAYER_PLAY_ENHANCED || play->mode == PLAYER_PLAY_ACE)) ||
+        (load == ACE_LOAD_FAST && play->mode == PLAYER_PLAY_ACE)) {
+        if (!launch_line_append(out, cap, &used, ";load=%s", enhanced_part_word(PLAYER_PART_LOAD, load))) {
+            return false;
+        }
     }
     /* Supersampling is an Enhanced part (contract 10.21): Enhanced and Ace carry it when it is on. */
     if (play->part[PLAYER_PART_SSAA] == 2 || play->part[PLAYER_PART_SSAA] == 4) {
@@ -4198,6 +4255,12 @@ int player_app_title_part(const PlayerApp *app, int game_index, int part) {
     return title ? title->part[part] : -1;
 }
 
+bool player_app_title_can_choose_short_waits(const PlayerApp *app, int game_index) {
+    return app && game_index >= 0 && game_index < app->game_count &&
+           player_app_title_play_mode(app, game_index) == PLAYER_PLAY_ACE &&
+           app->title_enhancements[game_index].available;
+}
+
 void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
     if (!app || !info || game_index < 0 || game_index >= app->game_count) return;
@@ -4205,7 +4268,12 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     if (!title_play_entry(app, game_index, &entry)) return;
     /* Library default, then each of the part's values in order, then the library's again. */
     int index = entry.part[part] < 0 ? -1 : enhanced_part_value_index(part, entry.part[part]);
-    entry.part[part] = index + 1 < info->value_count ? info->values[index + 1] : -1;
+    int next = index + 1;
+    if (part == PLAYER_PART_LOAD && next < info->value_count &&
+        info->values[next] == ACE_LOAD_FAST && !player_app_title_can_choose_short_waits(app, game_index)) {
+        ++next;
+    }
+    entry.part[part] = next < info->value_count ? info->values[next] : -1;
     if (!player_app_title_play_store(app, &entry)) return;
     player_dev_log_add(app, "settings", "Enhanced %s for %s: %s", info->key, entry.key,
                        entry.part[part] < 0 ? "library default"
@@ -4224,6 +4292,8 @@ void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index
     if (title >= 0) {
         PlayerTitlePlay entry;
         int value = value_index < 0 ? -1 : info->values[value_index];
+        if (part == PLAYER_PART_LOAD && value == ACE_LOAD_FAST &&
+            !player_app_title_can_choose_short_waits(app, title)) return;
         if (!title_play_entry(app, title, &entry) || entry.part[part] == value) return;
         entry.part[part] = value;
         title_play_store(&app->settings, &entry);
@@ -5963,6 +6033,11 @@ bool player_app_retry_from_error(PlayerApp *app) {
     return player_app_start_package_build(app, index);
 }
 
+/* The runtime's last-resort reporter's header (src/rt/driver.c, sr_crash_filter). A
+   problem report says the runtime reported a native crash only for this complete line at
+   a line boundary in the run's own log. */
+static const char k_player_native_crash_header[] = "=== PSP RECOMPILER CRASH REPORT ===";
+
 static void player_report_append(char *out, size_t out_size, size_t *used,
                                  const char *label, const char *value) {
     if (!value || !value[0] || *used + 1u >= out_size) return;
@@ -6069,6 +6144,7 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
     size_t event_count = 0;
     size_t event_next = 0;
     char renderer[32] = "";
+    bool native_crash_reported = false;
     FILE *run_log = error->log_file_path[0]
         ? nk_fopen_utf8(error->log_file_path, "rb") : NULL;
     if (run_log) {
@@ -6079,6 +6155,19 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
         while (fgets(chunk, sizeof(chunk), run_log)) {
             size_t len = strlen(chunk);
             bool line_ends = len > 0 && chunk[len - 1] == '\n';
+            if (at_line_start) {
+                /* The runtime's last-resort reporter (src/rt/driver.c, sr_crash_filter)
+                   writes this exact header before its fault and register lines. Only a
+                   complete line is its record: the same words inside a longer line, a
+                   bare nonzero exit or an exception-looking status are not one. */
+                size_t header_len = len;
+                while (header_len > 0 && (chunk[header_len - 1] == '\n' ||
+                                          chunk[header_len - 1] == '\r'))
+                    header_len--;
+                if (header_len == sizeof(k_player_native_crash_header) - 1u &&
+                    memcmp(chunk, k_player_native_crash_header, header_len) == 0)
+                    native_crash_reported = true;
+            }
             if (at_line_start && strncmp(chunk, event_prefix, sizeof(event_prefix) - 1u) == 0) {
                 while (len > 0 && (chunk[len - 1] == '\n' || chunk[len - 1] == '\r')) {
                     chunk[--len] = '\0';
@@ -6101,6 +6190,8 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
         }
         fclose(run_log);
     }
+    if (native_crash_reported)
+        player_report_append(raw, sizeof(raw), &used, "Runtime: ", "reported a native crash");
     player_report_append(raw, sizeof(raw), &used, "Renderer: ", renderer);
     if (event_count > 0) {
         player_report_append(raw, sizeof(raw), &used, "", "Last boot events:");
@@ -6431,6 +6522,7 @@ const char *player_runtime_stop_feature(const char *boundary) {
     };
     static const char import_prefix[] = "unsupported-import-";
     if (!boundary) return "a system feature";
+    if (strcmp(boundary, "osk-host-unavailable") == 0) return "the on-screen keyboard";
     if (strncmp(boundary, import_prefix, sizeof(import_prefix) - 1u) == 0) {
         const char *name = boundary + sizeof(import_prefix) - 1u;
         for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
@@ -6689,6 +6781,8 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
     player_clear_stalled_game_notice(app, false);
     app->stalled_game_restore_game_front_requested = false;
     app->render_path_known = false;
+    app->fsr1_session_preset = PLAYER_PRESET_CUSTOM;
+    app->fsr1_session_refusal = NK_FSR1_REFUSAL_NONE;
     app->render_path_disc[0] = '\0';
     app->render_effects = 0u;
     app->render_effects_text[0] = '\0';
@@ -6828,6 +6922,7 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     /* The boot-event marker and the input mapping are written here, on the
        thread that owns the app; the work only reads the resulting paths. */
     app->child_window_ready = false;
+    app->child_first_frame = false;
     app->launch_running_check_logged = false;
     app->child_boot_event_seen = false;
     app->child_boot_wait_noted = false;
@@ -7065,6 +7160,10 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
     snprintf(app->running_title, sizeof(app->running_title), "%s", work->game.title_name);
     snprintf(app->running_iso_path, sizeof(app->running_iso_path), "%s", work->game.iso_path);
     app->running_play_mode = work->play_mode;
+    if (work->play_mode != PLAYER_PLAY_AUTHENTIC &&
+        app->launch_session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1) {
+        app->fsr1_session_preset = work->settings.graphics_preset;
+    }
     app->running_start_ms = (int64_t)time(NULL) * 1000;
     /* The library may have changed while the work ran: find the game again. */
     if (game_index < 0 || game_index >= app->game_count ||
@@ -7265,9 +7364,11 @@ void player_app_stop_game(PlayerApp *app) {
     }
     printf("[PLAYER] Stopping active game session...\n");
     nk_launch_stop(&app->launch_session);
+    player_read_boot_events(app, false);
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
     player_clear_stalled_game_notice(app, true);
     if (app->boot_event_file_path[0]) {
         /* The run's output stays in the logs folder (#1303). */
@@ -7317,9 +7418,11 @@ void player_app_stop_stalled_game(PlayerApp *app) {
 
     printf("[PLAYER] Stopping stalled game session...\n");
     nk_launch_stop(&app->launch_session);
+    player_read_boot_events(app, false);
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
 
     char kept_log[NK_MAX_PATH] = "";
     if (app->boot_event_file_path[0]) {
@@ -7651,6 +7754,14 @@ void player_app_consume_render_path_line(PlayerApp *app, const char *line) {
     NkRenderPath path;
     NkRenderFallbackEvent fallback;
     if (!app) return;
+    NkFsr1Refusal refusal = nk_fsr1_refusal_event_parse(line);
+    if (refusal != NK_FSR1_REFUSAL_NONE) {
+        if (app->fsr1_session_preset != PLAYER_PRESET_CUSTOM &&
+            app->fsr1_session_refusal == NK_FSR1_REFUSAL_NONE) {
+            app->fsr1_session_refusal = refusal;
+        }
+        return;
+    }
     if (nk_render_fallback_event_parse(line, &fallback)) {
         const uint16_t bit = (uint16_t)(1u << fallback.reason);
         if (app->render_effects & bit) return;
@@ -7768,8 +7879,13 @@ static void player_consume_stall_event_line(PlayerApp *app, const char *line) {
 
 /* Runtime stderr is appended to this session file. Read only complete lines
  * added since the previous frame, instead of rescanning the growing log. */
-static void player_monitor_stalled_game_events(PlayerApp *app) {
+static void player_read_boot_events(PlayerApp *app, bool live) {
     if (!app || !app->boot_event_file_path[0]) return;
+    /* On stop, drain only the file attached to the child that just ended.
+       Its renderer facts remain useful on the game's Picture card. */
+    if (!live && strcmp(app->boot_event_file_path, app->launch_session.boot_event_file_path) != 0) {
+        return;
+    }
     FILE *events = nk_fopen_utf8(app->boot_event_file_path, "rb");
     if (!events) return;
     /* 64-bit offsets: a long run's session file passes 2 GiB, beyond a Windows
@@ -7803,10 +7919,15 @@ static void player_monitor_stalled_game_events(PlayerApp *app) {
         if (ch == '\n') {
             if (!overflow) {
                 line[used] = '\0';
-                player_consume_stall_event_line(app, line);
+                if (live) player_consume_stall_event_line(app, line);
                 player_app_consume_render_path_line(app, line);
-                if (player_app_boot_event_is_window_ready(line)) {
+                if (live && player_app_boot_event_is_window_ready(line)) {
                     app->child_window_ready = true;
+                }
+                /* Also on the final drain: a child that presented its first
+                   frame and exited between two reads still ran the game. */
+                if (player_boot_event_is_first_frame(line)) {
+                    app->child_first_frame = true;
                 }
             }
             app->boot_event_read_offset = offset;
@@ -7820,24 +7941,38 @@ static void player_monitor_stalled_game_events(PlayerApp *app) {
     fclose(events);
 }
 
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+void (*g_player_state_test_after_live_read)(PlayerApp *app) = NULL;
+#endif
+
 bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
     if (!app || !app->is_game_running) return false;
     if (app->launch_time_ms == 0) {
         app->launch_time_ms = now_ms;
     }
-    player_monitor_stalled_game_events(app);
+    player_read_boot_events(app, true);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+    if (g_player_state_test_after_live_read) g_player_state_test_after_live_read(app);
+#endif
     if (nk_launch_is_running(&app->launch_session)) {
         return player_monitor_game_start(app, now_ms);
     }
     uint64_t elapsed_ms = now_ms >= app->launch_time_ms
         ? (now_ms - app->launch_time_ms) : 0;
     int code = nk_launch_wait(&app->launch_session, 0);
+    /* The child could append its last event after the live read took its snapshot. */
+    player_read_boot_events(app, false);
     char stopped_boundary[96] = "";
     unsigned int stopped_issue = 0;
     bool has_semantic_stop = player_read_semantic_stop(
         app->boot_event_file_path, stopped_boundary, sizeof(stopped_boundary),
         &stopped_issue);
-    bool runtime_failed = elapsed_ms < 500 || code != 0 || has_semantic_stop;
+    /* An exit inside 500 ms closed the game while it was starting when the
+       code is non-zero or the game never presented its first frame. A clean
+       exit 0 after the first frame is a short but successful run (#306).
+       window_ready alone is not that: it is written before guest code runs. */
+    bool premature_exit = elapsed_ms < 500 && (code != 0 || !app->child_first_frame);
+    bool runtime_failed = premature_exit || code != 0 || has_semantic_stop;
     /* Restart game on the card relaunches this one. */
     char stopped_disc_id[sizeof(app->last_error.subject_disc_id)];
     snprintf(stopped_disc_id, sizeof(stopped_disc_id), "%s",
@@ -7852,6 +7987,7 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
        one job handle per finished game in the long-lived player (#511). */
     nk_launch_stop(&app->launch_session);
     app->child_window_ready = false;
+    app->child_first_frame = false;
     player_dev_log_add(app, "runtime", "game exited with code %d after %llu ms", code,
                        (unsigned long long)elapsed_ms);
     if (app->boot_event_file_path[0]) {
@@ -7894,7 +8030,7 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
         player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", stopped_boundary,
                                        stopped_issue, code, elapsed_ms, stopped_disc_id,
                                        run_log);
-    } else if (elapsed_ms < 500) {
+    } else if (premature_exit) {
         player_app_set_game_stop_error(app, "RUNTIME_PREMATURE_EXIT", NULL, 0, code,
                                        elapsed_ms, stopped_disc_id, run_log);
     } else if (code != 0) {
@@ -7932,8 +8068,9 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
             player_app_package_build_preflight_blocker(app, game_index);
         if (blocker) {
             player_app_set_build_error(app, "preflight", blocker->message, "");
-            snprintf(app->last_error.message, sizeof(app->last_error.message), "%s",
-                     player_preflight_plain_message(blocker));
+            nk_shared_text_copy(app->last_error.message, sizeof(app->last_error.message),
+                                player_preflight_plain_message(blocker),
+                                NK_SHARED_TEXT_COPY_TRUNCATE);
         }
         return false;
     }
@@ -8659,6 +8796,31 @@ const char *player_app_saves_blocker(const PlayerApp *app, int game_index) {
         return "Stop the game first: it uses its save folder while it runs.";
     }
     return NULL;
+}
+
+NkMemstickCollisionResult player_app_bring_in_offer(const PlayerApp *app, int game_index,
+                                                    NkMemstickPlanUnit *offer) {
+    if (!offer) return NK_MEMSTICK_COLLISION_INVALID;
+    memset(offer, 0, sizeof(*offer));
+    char root[NK_MAX_PATH];
+    if (!app || game_index < 0 || game_index >= app->game_count ||
+        !player_removal_disc_id_ok(app->games[game_index].disc_id))
+        return NK_MEMSTICK_COLLISION_INVALID;
+    if (!nk_platform_get_path(NK_PATH_SAVES, root, sizeof(root)))
+        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    return nk_memstick_savedata_bring_in_offer(root, app->games[game_index].disc_id, offer);
+}
+
+NkMemstickCollisionResult player_app_bring_in(const PlayerApp *app, int game_index,
+                                              const NkMemstickPlanUnit *offer) {
+    if (!app || game_index < 0 || game_index >= app->game_count ||
+        !player_removal_disc_id_ok(app->games[game_index].disc_id))
+        return NK_MEMSTICK_COLLISION_INVALID;
+    if (app->is_game_running || app->launch_pending) return NK_MEMSTICK_COLLISION_STICK_IN_USE;
+    char root[NK_MAX_PATH];
+    if (!nk_platform_get_path(NK_PATH_SAVES, root, sizeof(root)))
+        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    return nk_memstick_savedata_bring_in(root, app->games[game_index].disc_id, offer);
 }
 
 void player_app_save_stamp_now(char *out, size_t out_size) {
@@ -11648,11 +11810,15 @@ static bool player_assign_module_host_names(NkIsoReader *reader,
             if (player_name_equals_ignore_case(modules[j].name, module->name)) {
                 *duplicate = true;
                 if (boundary_message && boundary_message_size) {
-                    snprintf(boundary_message, boundary_message_size,
-                             "DUPLICATE_DISC_MODULE_BASENAME: module host name "
-                             "%.200s stands for both %.900s and %.900s; their "
-                             "copies would share one file in the per-title folder.",
+                    static const char format[] =
+                        "DUPLICATE_DISC_MODULE_BASENAME: module host name "
+                        "%.200s stands for both %.900s and %.900s; their "
+                        "copies would share one file in the per-title folder.";
+                    char diagnostic[sizeof(format) + 200 + 900 + 900];
+                    snprintf(diagnostic, sizeof(diagnostic), format,
                              module->name, modules[j].rel_path, module->rel_path);
+                    nk_shared_text_copy(boundary_message, boundary_message_size, diagnostic,
+                                        NK_SHARED_TEXT_COPY_TRUNCATE);
                 }
                 return false;
             }
@@ -14360,8 +14526,11 @@ static bool player_steam_join_rel(char *out, size_t cap, const char *root, const
 static void player_steam_note_skip(char *note, size_t cap, const char *label, const char *why) {
     size_t used = strlen(note);
     if (used >= cap) return;
-    (void)snprintf(note + used, cap - used, "%s%s%s%s", used > 0u ? "; " : "", label,
-                   label[0] != '\0' ? " " : "", why);
+    const char *parts[] = {used > 0u ? "; " : "", label, label[0] != '\0' ? " " : "", why};
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]) && used + 1u < cap; ++i) {
+        nk_shared_text_copy(note + used, cap - used, parts[i], NK_SHARED_TEXT_COPY_TRUNCATE);
+        used += strlen(note + used);
+    }
 }
 
 /* Reads up to NK_STEAM_GRID_MAX_BYTES from the first local PNG under `root` that exists. The

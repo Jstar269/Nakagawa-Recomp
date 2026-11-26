@@ -154,6 +154,10 @@ static void expect_refused(const char *exe, const char *code, const char *folder
     assert(strstr(res.message, code) != NULL);
     assert(strstr(res.message, NK_PORTABLE_MARKER) != NULL);
     if (folder) assert(strstr(res.message, folder) != NULL);
+    if (strcmp(code, "PORTABLE_NOT_WRITABLE") == 0) {
+        assert(res.root[0] && strstr(res.message, res.root) != NULL);
+        assert(strstr(res.message, "to use the normal per-user data folder.") != NULL);
+    }
     /* Refused means the default root was not taken instead. */
     assert(nk_platform_resolve_app_data_dir(after, sizeof(after)));
     assert(strcmp(before, after) == 0);

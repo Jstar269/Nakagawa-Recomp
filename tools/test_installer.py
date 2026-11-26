@@ -657,16 +657,30 @@ class VerifierPureTests(unittest.TestCase):
             self.assertTrue((base / name / verify_installer.SENTINEL_NAME).is_file(), name)
         self.assertTrue((base / "saves" / verify_installer.SENTINEL_FOLDER_NAME / verify_installer.SENTINEL_NAME).is_file())
         self.assertEqual(len(sentinels.files), 7)
-        self.assertEqual(sentinels.missing(), [])
+        self.assertEqual(sentinels.problems(), [])
         (base / "logs" / verify_installer.SENTINEL_NAME).unlink()
-        self.assertEqual(sentinels.missing(), [str(base / "logs" / verify_installer.SENTINEL_NAME)])
+        self.assertEqual(sentinels.problems(), [f"missing marker: {base / 'logs' / verify_installer.SENTINEL_NAME}"])
         sentinels.remove()
         self.assertEqual(sorted(path.name for path in base.iterdir()), ["data"])  # made folders gone, mine kept
         self.assertEqual((base / "data" / "library.json").read_text(encoding="utf-8"), "mine")
         self.assertEqual(sorted(path.name for path in (base / "data").iterdir()), ["library.json"])
 
+    def test_a_same_size_overwrite_changes_a_sentinel(self):
+        base = self.root / "Nakagawa"
+        sentinels = verify_installer.Sentinels(base)
+        sentinels.plant()
+        marker = base / "saves" / verify_installer.SENTINEL_NAME
+        original = marker.read_bytes()
+
+        marker.write_bytes(original)
+        self.assertEqual(sentinels.problems(), [])
+
+        marker.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        self.assertEqual(marker.stat().st_size, len(original))
+        self.assertEqual(sentinels.problems(), [f"changed marker: {marker}"])
+
     def test_a_check_with_no_sentinel_planted_fails_instead_of_passing_vacuously(self):
-        self.assertEqual(verify_installer.Sentinels(self.root / "never").missing(), ["no sentinel was planted"])
+        self.assertEqual(verify_installer.Sentinels(self.root / "never").problems(), ["no sentinel was planted"])
 
     def test_a_linked_root_is_not_written_through(self):
         target = self.root / "elsewhere"

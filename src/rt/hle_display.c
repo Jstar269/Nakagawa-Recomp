@@ -186,16 +186,82 @@ static int display_host_span_valid(const DisplayFrameState *fb) {
     return sr_guest_span_readable(fb->addr, bytes);
 }
 
+/* The last accepted CPU-backed image supplies a byte baseline. An accepted
+ * GPU-resident image instead watches commits to its visible VRAM rows. Its
+ * guest backing bytes can be stale, so no comparison or readback is needed. */
+enum { SCANOUT_WIDTH = 480, SCANOUT_HEIGHT = 272 };
+static struct {
+    DisplayFrameState frame;
+    int gpu;
+    uint8_t pixels[SCANOUT_HEIGHT][SCANOUT_WIDTH * 4];
+} s_shown_scanout;
+static int s_present_used_gpu;
+
+void sr_display_note_gpu_present(void) {
+    s_present_used_gpu = 1;
+}
+
+static void display_remember_scanout(void) {
+    const int previous_gpu = s_shown_scanout.gpu;
+    const uint32_t bpp = s_display_active.fmt == 3 ? 4u : 2u;
+    const uint32_t pitch = (uint32_t)s_display_active.stride * bpp;
+    const uint32_t row_bytes = SCANOUT_WIDTH * bpp;
+    s_shown_scanout.frame = s_display_active;
+    s_shown_scanout.gpu = s_present_used_gpu;
+    if (s_present_used_gpu) {
+        /* The descriptor passed display_host_span_valid above. Watch only
+         * the pixels the host displays, including when VRAM writes are aliased. */
+        const uint32_t first = SR_PHYS(s_display_active.addr);
+        const uint32_t end = first + (SCANOUT_HEIGHT - 1u) * pitch + row_bytes;
+        ge_watch_cpu_scanout(first, end, pitch, row_bytes);
+        return;
+    }
+    if (previous_gpu) ge_watch_cpu_scanout(0, 0, 0, 0);
+    const uint8_t *src = SR_HOST_LINEAR(s_display_active.addr);
+    for (unsigned row = 0; row < SCANOUT_HEIGHT; row++)
+        memcpy(s_shown_scanout.pixels[row], src + row * pitch, row_bytes);
+}
+
+static int display_scanout_matches(void) {
+    const DisplayFrameState *fb = &s_display_active;
+    const DisplayFrameState *shown = &s_shown_scanout.frame;
+    return fb->addr == shown->addr && fb->fmt == shown->fmt && fb->stride == shown->stride;
+}
+
+static int display_static_scanout_changed(void) {
+    const DisplayFrameState *fb = &s_display_active;
+    if (!s_display_configured || !fb->addr || !display_scanout_matches() || !gui_on())
+        return 0;
+    if (s_shown_scanout.gpu)
+        return ge_scanout_cpu_written();
+    /* The exact descriptor passed the host-read span check at presentation.
+     * Check guest backing bytes, without syncing or changing GE ownership. */
+    const uint32_t bpp = fb->fmt == 3 ? 4u : 2u;
+    const size_t pitch = (size_t)fb->stride * bpp;
+    const uint8_t *src = SR_HOST_LINEAR(fb->addr);
+    for (unsigned row = 0; row < SCANOUT_HEIGHT; row++)
+        if (memcmp(s_shown_scanout.pixels[row], src + row * pitch, SCANOUT_WIDTH * bpp) != 0)
+            return 1;
+    return 0;
+}
+
 static void display_present_frame(void) {
+    if (!display_scanout_matches()) {
+        if (s_shown_scanout.gpu) ge_watch_cpu_scanout(0, 0, 0, 0);
+        s_shown_scanout.frame.addr = 0;
+        s_shown_scanout.gpu = 0;
+    }
     if (!gui_on() || !s_display_active.addr) return;
     if (!display_host_span_valid(&s_display_active)) {
         fprintf(stderr, "DISPLAY_PRESENT: refusing invalid span addr=0x%08x stride=%d fmt=%d\n",
                 s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         return;
     }
+    s_present_used_gpu = 0;
     int presented = gui_present(s_display_active.addr, s_display_active.fmt,
                                 (uint32_t)s_display_active.stride);
     if (presented) {
+        display_remember_scanout();
         if (sr_perf_enabled) sr_perf_present_frame(s_display_active.addr, s_vcount);
         SR_FLIGHT_RECORD_CLASS(SR_FLIGHT_CLASS_PRESENT, SR_FLIGHT_KIND_PRESENT_FRAME,
                                s_display_active.addr, (uint32_t)s_display_active.fmt,
@@ -249,7 +315,7 @@ static uint64_t s_flip_counted_seq;
  * that showed the frame has already serviced an armed capture, and an arm nobody serviced
  * (a skipped output slot, a presenter that declined the frame) resolves here as "nothing
  * attempted", so a later present can never publish this frame's path with newer pixels. */
-static void display_present_active(void) {
+static void display_present_active(int guest_flip) {
     /* Dark-picture watch (fbcap.h): every SR_PICTURE_PROBE_EVERY VBLANKs, a present no file
      * capture wanted carries a picture probe. A presenter that serves it from host memory
      * does so inside this present, so its result is taken right after; one that reads it
@@ -268,13 +334,13 @@ static void display_present_active(void) {
     /* Ace Mode's 30 Hz detector (ace.h) sees every flip here, before the presenter's own slot
      * rule can drop a second flip in one VBLANK. Off, nothing is read. */
     int new_frame = 0;
-    if (g_ace_on && s_display_active.addr) {
+    if (guest_flip && g_ace_on && s_display_active.addr) {
         uint32_t bytes = (uint32_t)(s_display_active.stride > 0 ? s_display_active.stride : 512) *
                          272u * (s_display_active.fmt == 3 ? 4u : 2u);
         new_frame = ace_flip(s_display_active.addr & 0x1FFFFFu, bytes, s_vcount,
                              sr_host_monotonic_ms() * 1000000ull);
     }
-    if (ace_pad_requested() && s_flip_set) {
+    if (guest_flip && ace_pad_requested() && s_flip_set) {
         /* A new frame set after a read no earlier frame was charged with is measured from that
          * read's poll. Any other present, a repeat of the frame shown or a new frame set with no
          * read since the last measured one, is counted, not measured: the age of an older read
@@ -288,10 +354,12 @@ static void display_present_active(void) {
         }
         s_flip_set = 0;
     }
-    /* A recording counts the guest's own flips beside the picture (videorec.h). */
-    sr_videorec_guest_flip();
-    /* So do the host mip chain's windows, before the presenter's slot rule drops any. */
-    gegpu_note_guest_flip();
+    if (guest_flip) {
+        /* The recording and host mip-chain windows count the guest's flips
+         * before the presenter's slot rule can drop any. */
+        sr_videorec_guest_flip();
+        gegpu_note_guest_flip();
+    }
     display_present_frame();
     sr_capture_cancel();
     uint32_t brightest;
@@ -605,16 +673,18 @@ static void screenshot_after_present(void) {
  * present call. Host-side gate only: no guest work is skipped, no timing is changed,
  * and the frames that do get captured are byte-identical to an ungated run. */
 static const char *fbcap_arm_for_present(uint32_t vcount, const DisplayFrameState *fb,
-                                         uint32_t sync, int framebuf_set) {
+                                         int guest_flip, int framebuf_set) {
     s_fbcap_armed[0] = '\0';
     s_fbcap_legacy[0] = '\0';
-    if (sync != 0u) return NULL;
     /* SR_FBSNAP_WINDOWS alone selects FBSNAP (every present inside the windows), so the
      * windows are parsed before the capture-owner decision (sr_fbcap_owner()), which uses
      * the same effective cadence as the gate below (sr_fbcap_snap_every). */
     fbcap_parse_windows_once();
     int fbsnap_every = sr_fbcap_snap_every(getenv("SR_FBSNAP"), s_fbsnap_win_n > 0);
     int owner = sr_fbcap_owner(sr_fbcap_env_on("SR_FBDUMP"), fbsnap_every > 0);
+    /* FBSNAP observes submitted pictures. FBDUMP and screenshots keep their
+     * explicit guest flip boundaries. The usual per-VBLANK cadence still applies. */
+    if (!guest_flip && owner != SR_FBCAP_FBSNAP) return NULL;
     if (owner == SR_FBCAP_NONE) {
         screenshot_arm_for_present(fb, framebuf_set);
         return NULL;
@@ -844,10 +914,10 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
         hle_watchdog_note_present();
         /* Issue #57: arm any due present capture BEFORE the present so the recorded
          * frame is exactly the one being presented. */
-        fbcap_arm_for_present(s_vcount, &s_display_active, 0u, s_framebuf != 0);
+        fbcap_arm_for_present(s_vcount, &s_display_active, 1, s_framebuf != 0);
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
-        display_present_active();
+        display_present_active(1);
         screenshot_after_present();
     } else {
         s_setfb.latched++;
@@ -1128,12 +1198,23 @@ void sr_vblank_tick(void) {
          * is not the presented one. Arming only in the sync=0 branch left every
          * double-buffering title (which flips at VBLANK, not synchronously) with no
          * present-truthful capture at all. */
-        fbcap_arm_for_present(s_vcount, &s_display_active, 0u, s_framebuf != 0);
+        fbcap_arm_for_present(s_vcount, &s_display_active, 1, s_framebuf != 0);
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
-        display_present_active();
+        display_present_active(1);
         screenshot_after_present();
         display_after_present(s_vcount);
+    } else if (display_static_scanout_changed()) {
+        /* A guest may change the visible pixels without another SetFrameBuf.
+         * A refused host present leaves the old baseline for the next VBLANK. */
+        static int scanout_snapshots = -1;
+        if (scanout_snapshots < 0)
+            scanout_snapshots = getenv("SR_FBSNAP") != NULL || getenv("SR_FBSNAP_WINDOWS") != NULL;
+        if (scanout_snapshots)
+            fbcap_arm_for_present(s_vcount, &s_display_active, 0, s_framebuf != 0);
+        display_present_active(0);
+        if (scanout_snapshots)
+            display_after_present(s_vcount);
     }
     if (g_ace_on) gui_ace_vblank(s_vcount);
     /* SR_VIDEOREC_DIR (videorec.h): this VBLANK's video frame is the newest picture presented

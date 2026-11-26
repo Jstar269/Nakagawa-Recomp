@@ -133,9 +133,35 @@ missing, and stays **Untested** unless someone has seen it start (see [Status wo
 | *Ridge Racer 2* (European release) | Experimental | A user report, on a version it didn't name, says it draws something and then stops. On a private route with the current development build it goes through the loading mini-game, the intro movie and the name entry to a race. Nothing past the start of that race has been checked, and neither has sound. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
 | Any other commercial game (not listed above) | Untested | A valid PSP disc image that isn't listed imports with the **EXPERIMENTAL** badge, which only means no one knows yet how well it runs. The player reads `PSP_GAME/PARAM.SFO` directly to show the title and disc ID for UMD and PS Store images (PR [#426](https://github.com/Jstar269/nakagawa-recomp/pull/426)), never an update SFO or the volume ID. The game card says compatibility is unknown. The player decrypts an encrypted executable or module from your own disc; when it can't, the card names the file (`ENCRYPTED_EXECUTABLE` or `ENCRYPTED_MODULE`) with the reason and the per-game folder where a decrypted copy from your own disc can go ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). It also names PGD-protected content, which isn't supported and is part of the wider ISO-to-Play work ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). **BUILD PACKAGE** builds a package for a retail disc with the public backends, and the build report lists what still isn't supported (PR [#473](https://github.com/Jstar269/nakagawa-recomp/pull/473)). It translates the game's own modules from its disc (`.prx` files under `PSP_GAME`) along with the main program, each placed in memory when the game loads it, so their startup code runs as the game's code; a module the runtime replaces completely is left to the runtime, and a module that can't be prepared stops the build by name. Play stays off until a valid package exists, because an experimental game never starts from a developer runtime (PR [#483](https://github.com/Jstar269/nakagawa-recomp/pull/483)). Games beyond the listed ones are tracked under [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308). Images that aren't PSP discs are refused. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
 
-Hot Shots Tennis runs with 0 title-specific compatibility patches today, as `python tools/compat_overrides.py --debt-census` counts them: the census counts only the entries marked as temporary compatibility patches, it lists none of them as active, and each run's log still names every one that fired in its `COMPAT_PATCH_REPORT` lines. That does not mean its build has no title-specific code. Under the Hot Shots Tennis profile (`--profile=hst`) the code generator still puts 4 hand-written bodies in place of the game's own functions (`tools/codegen_hst_stubs.py`): two native `memcpy` bodies (`0x00011090` and `0x000110dc`) and two native `sceKernelMemset` bodies (`0x000114c0` and `0x000114a8`). The four allocator bridges are gone: the game's own `_malloc_r` (`0x00010738`), `_free_r` (`0x0000f538`), `_memalign_r` (`0x000101c4`) and `_realloc_r` (`0x00013524`) run as written and keep their block headers in the game's memory, where they used to be handed to a heap the runtime owned.
+Hot Shots Tennis runs with 0 title-specific compatibility patches today, as `python tools/compat_overrides.py --debt-census` counts them: the census counts only the entries marked as temporary compatibility patches, it lists none of them as active, and each run's log still names every one that fired in its `COMPAT_PATCH_REPORT` lines. Under the Hot Shots Tennis profile (`--profile=hst`) the code generator no longer puts any hand-written body in place of the game's own functions: the table of such bodies (`HST_CUSTOM_STUBS` in `tools/codegen_hst_stubs.py`) holds 0, down from 8. The four allocator bridges are gone: the game's own `_malloc_r` (`0x00010738`), `_free_r` (`0x0000f538`), `_memalign_r` (`0x000101c4`) and `_realloc_r` (`0x00013524`) run as written and keep their block headers in the game's memory, where they used to be handed to a heap the runtime owned. The four native copy and fill bodies are gone: the game's own routines at `0x00011090`, `0x000110dc`, `0x000114c0` and `0x000114a8` run as written, where the generator used to put the host's `memmove` and `memset`.
 
-The census files the copy and fill bodies as faithful ABI bridges, not as temporary patches, so it does not count them, and they do not appear in `COMPAT_PATCH_REPORT`. Their removal is tracked in [#363](https://github.com/Jstar269/nakagawa-recomp/issues/363). This is the live count; the release notes keep the count each release shipped with.
+That does not mean the profile names no title address. It still lists three entry roles for the analyzer (`HST_ENTRY_ROLES` in `tools/compat_overrides.py`), down from nine: each marks an address inside a function as a point the game can resume at and names the function that owns it, and the code there is translated from the game's own instructions. The other six marked small functions that the game reaches only through a pointer as callable. They are gone because the analyzer finds such a function from the game's code on its own; a private analysis of the title with the nine roles turned off found all six that way and none of the three resume points, so those three stay until there is evidence about whether the game reaches them while it runs. That list and the rest of the retirement work are tracked in [#363](https://github.com/Jstar269/nakagawa-recomp/issues/363). This is the live count; the release notes keep the count each release shipped with.
+
+## Release performance baselines
+
+Starting with v0.1.0, this section holds the frame rates and frame delivery times measured on
+each release candidate. The [first candidate measurements](https://github.com/Jstar269/Nakagawa-Recomp/issues/2750)
+are pending.
+
+| Game | Timed gameplay window |
+| --- | --- |
+| Hot Shots Tennis: Get a Grip (USA) | From the first controllable serve of a fixed exhibition to the settled score after the third point. |
+| LittleBigPlanet (USA, disc version 2.00) | From first control in Walkabout to its level-completion scoreboard. |
+
+Record Authentic and each Ace timing package under test separately. Each result identifies the
+release and commit, disc revision, route, mode and timing package, CPU, GPU, OS and driver,
+display refresh rate, resolution, VSync and other presentation settings. Include host load,
+cache condition and the number of accepted runs.
+
+Report game FPS as measured by [framebuffer flips](DEBUGGING.md#sr_perf-subsystem-attribution).
+The counter counts the first guest framebuffer presented and each later present with a changed
+guest framebuffer address. A repeated address adds no flip, so draws that reuse one buffer can
+go uncounted. For each run, divide the number of flips in the window by the wall-clock seconds
+between its guarded start and end. Include the start and exclude the end. Use only intervals
+between successive flips with both endpoints inside the window. Report the range of per-run FPS
+and each run's median and 95th-percentile interval in milliseconds. For the median, average the
+middle pair when the count is even. For p95, sort the intervals and use rank
+`ceil(0.95 × count)`, starting at one.
 
 ## Whole library
 
@@ -143,6 +169,17 @@ The maintainer builds a whole library of their own discs with `tools/library_bui
 [Building a whole collection](#building-a-whole-collection)), and `tools/compat_table.py` turns that private record
 into the summary below. The summary holds counts only: no titles, disc IDs, file names or hashes. The tool refuses
 to write one that carries any of them.
+
+Prepare the candidate's private release plan from the expected corpus before running the sweep. Then update this
+checkout's table with the manifest and plan.
+
+```text
+python tools/compat_table.py library-build.json --release-plan release-plan.json --write-doc docs/COMPATIBILITY.md
+```
+
+The [exporter](../tools/compat_table.py) documents the plan fields. It checks the candidate commit, every
+attempt's recorded settings, and the expected sources and image hashes before replacing the table. Keep the
+manifest and plan private. For an older or partial report, use standard output or a separate local file.
 
 Each disc is counted in the first tier it fails to pass:
 

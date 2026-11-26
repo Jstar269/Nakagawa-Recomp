@@ -491,7 +491,7 @@ class FunctionLowering:
         quotient, remainder = b.sdiv(x, divisor), b.srem(x, divisor)
         by_zero_lo = b.select(b.icmp("slt", x, self.c32(0)), self.c32(1), self.c32(0xFFFFFFFF))
         lo = b.select(overflow, self.c32(0x80000000), b.select(zero, by_zero_lo, quotient))
-        hi = b.select(overflow, self.c32(0xFFFFFFFF), b.select(zero, x, remainder))
+        hi = b.select(overflow, self.c32(0), b.select(zero, x, remainder))
         self.store_field("lo", lo)
         self.store_field("hi", hi)
 
@@ -592,12 +592,13 @@ class FunctionLowering:
             else:
                 self.checked_dispatch_call(self.c32(t.target), link_value)
 
-        if t.kind == "call" and t.cond is None:                # jal
+        if t.kind == "pc-read" or (t.kind == "call" and t.cond is None):  # jal
             self.begin(t.addr, t.word)
             self.W(t.link_reg, link_value)
             self.end()
             self.instruction(_require_delay_slot(t))
-            call_target()
+            if t.kind == "call":
+                call_target()
             then()
         elif t.kind in ("call-computed", "tail-computed"):     # jalr / jr rs
             latched = self.R(t.target_reg)                     # PR #126: latched at the transfer

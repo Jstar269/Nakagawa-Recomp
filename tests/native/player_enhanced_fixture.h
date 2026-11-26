@@ -10,6 +10,7 @@
 #define NK_TEST_PLAYER_ENHANCED_FIXTURE_H
 
 #include "player_state.h"
+#include "../../src/ui/nk_ui_text.h"
 
 typedef struct {
     const char *name;
@@ -39,8 +40,7 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                                   "screenshots do not change."},
     {"Stick dead zone", "Off", "Ace only, in games that ignore part of the stick. Small pushes count; "
                                "the feel changes."},
-    {"Short loads", "Off", "Ace only, in games with a loading-wait package. Skips those waits; changes "
-                           "the game's timing."},
+    {NK_UI_STR(ADAPTER_LOADING_SPEED), NK_UI_STR(SETTINGS_OFF), NK_UI_STR(ADAPTER_LOADING_DESCRIPTION)},
     {"Full 32-bit colour", "Off", "Shows 16-bit games in full colour, without dither. Uses more memory."},
     {"Supersampling", "Off", "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times."},
     {"Smooth far textures", "Off", "Slightly less shimmer on far textures. Uses CPU; may stutter "

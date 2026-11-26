@@ -142,10 +142,11 @@ typedef struct {
     const char *name;
     uint16_t deps[5];
 } UtilityModuleInfo;
+enum { UTILITY_NET_COMMON = 0x100u, UTILITY_NET_INET = 0x102u };
 static const UtilityModuleInfo s_utility_modules[] = {
-    {0x100, "net_common", {0}},
+    {UTILITY_NET_COMMON, "net_common", {0}},
     {0x101, "net_adhoc", {0}},
-    {0x102, "net_inet", {0}},
+    {UTILITY_NET_INET, "net_inet", {0}},
     {0x103, "net_parse_uri", {0}},
     {0x104, "net_parse_http", {0}},
     {0x105, "net_http", {0x102, 0x103, 0x104, 0}},
@@ -185,6 +186,13 @@ static int utility_module_index(uint32_t module) {
     return -1;
 }
 
+int hle_utility_inet_modules_loaded(void) {
+    const int common = utility_module_index(UTILITY_NET_COMMON);
+    const int inet = utility_module_index(UTILITY_NET_INET);
+    return common >= 0 && inet >= 0 &&
+           s_utility_module_loaded[common] && s_utility_module_loaded[inet];
+}
+
 static uint32_t utility_module_load(const char *api, uint32_t module, int av_api) {
     int index = utility_module_index(module);
     if (index < 0)
@@ -208,6 +216,8 @@ static uint32_t utility_module_unload(const char *api, uint32_t module, int av_a
         return av_api ? SCE_ERROR_AV_MODULE_BAD_ID : SCE_ERROR_MODULE_BAD_ID;
     if (!s_utility_module_loaded[index])
         return av_api ? SCE_ERROR_AV_MODULE_NOT_LOADED : SCE_ERROR_MODULE_NOT_LOADED;
+    if ((module == UTILITY_NET_COMMON || module == UTILITY_NET_INET) && hle_net_inet_initialized())
+        return hle_unmodelled_stop(api, "while sceNetInet is initialized (UNMEASURED teardown order)");
     s_utility_module_loaded[index] = 0u;
     fprintf(stderr, "%s: recognized %s (utility module state unloaded)\n", api,
             s_utility_modules[index].name);
@@ -911,8 +921,9 @@ void osk_abandon_request(void) {
 }
 
 /* Answer the keyboard's fields in order, from the script or from a person. Returns 1 once
- * every field holds its answer, 0 while a person's answer to the current field is pending
- * (that field and the ones after it are left untouched until it arrives). */
+ * every field holds its answer, 0 while a person's answer is pending, or
+ * SR_OSK_TEXT_UNAVAILABLE if no live host can answer. Pending and unavailable fields
+ * are left untouched. */
 static int osk_collect(void) {
     uint32_t p = s_osk_param;
     if (!p) return 1;
@@ -961,6 +972,7 @@ static int osk_collect(void) {
                 return 0;
             }
             s_osk_request_open = 0;
+            if (answer == SR_OSK_TEXT_UNAVAILABLE) return answer;
             ok = answer == 1;
         } else {
             const char *ans = i < s_osk_answer_count ? s_osk_answers[i] : s_osk_repeat;
@@ -1016,6 +1028,26 @@ static uint32_t h_OskInitStart(CpuState *s) {
     dialog_unlock();
     return claim;
 }
+/* No PSP result describes a keyboard the host could not present. Stop
+ * outside the dialog lock without completing the unanswered guest field. */
+static _Noreturn void osk_stop_unavailable(void) {
+    fprintf(stderr, "OSK_HOST_UNAVAILABLE: sceUtilityOskGetStatus could not open a live "
+                    "on-screen keyboard on this host (#306)\n");
+    const char *path = getenv("SR_BOOT_EVENT_FILE");
+    if (path && *path) {
+        FILE *events = fopen(path, "ab");
+        if (events) {
+            fputs("BOOT_EVENT phase=stop reason=semantic-boundary boundary=osk-host-unavailable "
+                  "issue=306\n", events);
+            fclose(events);
+        }
+    }
+    sr_hit_hle = 1;
+    if (sr_sched_on)
+        sr_run_end(7, "osk_host_unavailable", "OSK_HOST_UNAVAILABLE stopped the run");
+    longjmp(g_hle_jmp, 1);
+}
+
 /* GetStatus with no OSK ever started (e.g. polled every boot frame while a savedata dialog
  * is up) is SCE_ERROR_UTILITY_WRONG_TYPE; once one has run NONE(0) is a real status. */
 static uint32_t h_OskGetStatus(CpuState *s) {
@@ -1028,8 +1060,10 @@ static uint32_t h_OskGetStatus(CpuState *s) {
     dialog_lock();
     utility_slot_settle_locked();
     const int ret = s_osk_status;
-    if (ret == OSK_VISIBLE && osk_collect()) s_osk_status = OSK_QUIT;
+    const int collected = ret == OSK_VISIBLE ? osk_collect() : 0;
+    if (collected == 1) s_osk_status = OSK_QUIT;
     dialog_unlock();
+    if (collected == SR_OSK_TEXT_UNAVAILABLE) osk_stop_unavailable();
     return (uint32_t)ret;
 }
 /* PSP-3000 measurements (#363): no keyboard returns WRONG_TYPE (0x80110005);
@@ -1175,7 +1209,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     s_exit_request_deadline_us = 0u;
     memset(s_utility_module_loaded, 0, sizeof(s_utility_module_loaded));
     s_utility_usb_loaded = 0u;
-    hle_net_reset();                     /* the new program starts with sceNet uninitialized */
+    hle_net_reset();                     /* the new program starts with network libraries uninitialized */
     hle_sysreg_loadexec_reset();         /* no sceReg handle of the old program */
     s_volatile_locked = 0;
     g_sdk_version = 0u;

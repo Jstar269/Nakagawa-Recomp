@@ -192,7 +192,7 @@ GUEST_PATCHES: list[dict[str, Any]] = [
 ]
 
 # --- tools/codegen.py: custom per-address stubs -----------------------------
-CODEGEN_CUSTOM_STUBS = [
+CODEGEN_CUSTOM_STUBS: list[dict[str, Any]] = [
     # 0x000011b0 (__register_frame_info bypass), 0x0000260c (exception helper bypass),
     # 0x0000fe3c (_getmodreent), 0x00015ea0 (CSV tokenizer) and 0x000149a8 (strcpy):
     # retired under #363. Each now translates as written: the guest's own frame
@@ -223,21 +223,18 @@ CODEGEN_CUSTOM_STUBS = [
     # is now zero.
     # 0x000468c8 (main_RunGameLoop scheduler wrapper): retired under #363. The worker
     # thread's own loop yields through its syscalls, so the function translates as written.
-    dict(address=0x00011090, category="faithful_abi_bridge", name="memcpy native",
-         reason="native memmove-backed reimplementation (sr_native_memmove), same semantics as "
-                "the translated body, including the scalar accessors' VRAM read-back and write "
-                "notification",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
-    dict(address=0x000110dc, category="faithful_abi_bridge", name="memcpy native (alias)",
-         reason="see 0x11090",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
-    dict(address=0x000114c0, category="faithful_abi_bridge", name="sceKernelMemset native",
-         reason="native memset-backed reimplementation (sr_native_memset), same semantics as "
-                "the translated body, including the scalar accessors' VRAM write notification",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
-    dict(address=0x000114a8, category="faithful_abi_bridge", name="sceKernelMemset native (alias)",
-         reason="see 0x114c0",
-         test="make gpu-coherence-selftest (native-bulk-copy: rendered 5551 rect read and fill kept coherent, #1170)"),
+    # 0x00011090 and 0x000110dc (native memcpy, sr_native_memmove) and 0x000114c0 and
+    # 0x000114a8 (native sceKernelMemset, sr_native_memset): retired under #363 (2026-11-23).
+    # They were recorded as faithful ABI bridges with the translated body's semantics, kept
+    # for speed. The copy had memmove semantics whatever the routine at its address does on
+    # overlap, the fill used only the low byte of its value, and both left every register but
+    # v0 as the caller set it, so equivalence with the translated body was never shown.
+    # Whatever the title has at the four addresses now takes the generator's general path:
+    # guest code translates as written, and a kernel sceKernelMemset or sceKernelMemcpy import
+    # is the generic handler's (src/rt/hle_kernel_utils.c), as before
+    # (tools/test_codegen_hst_stubs.py RetiredCopyAndFillBodiesRunAsWrittenTests).
+    # With these and the allocator bridges gone the table is empty: --profile=hst emits no
+    # hand-written body.
 ]
 
 # --- tools/codegen.py: HST profile entry roles -----------------------------
@@ -246,19 +243,14 @@ CODEGEN_CUSTOM_STUBS = [
 # and stay inventoried here so the remaining manual analyzer seeds can be
 # audited and eventually retired without conflating host entries with source
 # functions.
+#
+# The six callable rows (0x0005a648, 0x00042998, 0x0003db3c, 0x000e1724, 0x000e3b24 and
+# 0x00014430, each an "address-taken-tiny-leaf") are retired under #363 (2026-11-24): the
+# analyzer finds a leaf entered only through a pointer on its own, so --profile=hst seeds
+# no callable entry and the role comes from the image, as under every other profile
+# (tools/test_codegen_profile_isolation.py RetiredCallableSeedTests).  The three resume
+# rows stay until there is evidence about whether the title reaches them at run time.
 HST_ENTRY_ROLES = [
-    dict(address=0x0005A648, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x00042998, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x0003DB3C, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x000E1724, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x000E3B24, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
-    dict(address=0x00014430, role="callable", owner=None,
-         provenance="address-taken-tiny-leaf", test="tools/test_codegen_entry_semantics.py"),
     dict(address=0x000310B0, role="resume", owner=0x00030FDC,
          provenance="private-elf-verified", test="tools/test_codegen_entry_semantics.py"),
     dict(address=0x00021C78, role="resume", owner=0x00021AC0,

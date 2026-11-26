@@ -428,7 +428,9 @@ static int fixed_make(Fsr1Pass *p) {
     return p->easu && p->rcas;
 }
 
-Fsr1Pass *fsr1_create(const Fsr1Init *init, char *error, size_t error_size) {
+Fsr1Pass *fsr1_create(const Fsr1Init *init, char *error, size_t error_size,
+                      bool *queue_lacks_compute) {
+    if (queue_lacks_compute) *queue_lacks_compute = false;
     if (!init || !init->get_instance_proc_addr || !init->device) {
         set_error(error, error_size, "no Vulkan device");
         return NULL;
@@ -455,6 +457,7 @@ Fsr1Pass *fsr1_create(const Fsr1Init *init, char *error, size_t error_size) {
                   (qf[init->queue_family].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
     free(qf);
     if (!compute) {
+        if (queue_lacks_compute) *queue_lacks_compute = true;
         set_error(error, error_size, "this GPU's queue has no compute");
         return NULL;
     }

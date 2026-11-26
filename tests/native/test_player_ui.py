@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager, nullcontext
 import os
 import hashlib
 import itertools
@@ -19,7 +20,7 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Sequence
+from typing import Iterator, Sequence
 from urllib.parse import parse_qs, quote, urlsplit
 import zipfile
 import zlib
@@ -1497,6 +1498,21 @@ def update_report(stdout: str) -> tuple[list[dict[str, str]], list[str]]:
     return steps, requests
 
 
+@contextmanager
+def hold_test_stick_lock(path: Path) -> Iterator[None]:
+    """Hold the same OS lock the player uses, on its synthetic root."""
+    with path.open("r+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
 class NativePlayerUiTests(unittest.TestCase):
     # The executable runs from a sandbox folder under build/, where none of the folders
     # beside it holds tools/nk_cli.py, and the working folder is never searched
@@ -1544,6 +1560,8 @@ class NativePlayerUiTests(unittest.TestCase):
         screenshot_path: Path | None = None,
         cover_cache: dict[str, bytes] | None = None,
         save_backups: dict[str, tuple[str, ...]] | None = None,
+        save_fixture: dict[str, bytes] | None = None,
+        hold_stick_lock: bool = False,
         expect_failure: bool = False,
         runtime_root_arg: str | None = None,
         library_unwritable: bool = False,
@@ -1645,6 +1663,7 @@ class NativePlayerUiTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             ready_source_iso: Path | None = None
+            ready_source_has_clip = post_build_ready and not incompatible_package and art_iso == "clip"
             if build_ready_test:
                 source_executable = b"synthetic input executable\n"
                 ready_source_iso = scratch / "ready-source.iso"
@@ -1684,7 +1703,8 @@ class NativePlayerUiTests(unittest.TestCase):
                     )
                 else:
                     synthetic_art_iso(
-                        ready_source_iso, source_executable=source_executable
+                        ready_source_iso, source_executable=source_executable,
+                        clip=synthetic_snd0_at3() if ready_source_has_clip else None,
                     )
                     synthetic_ready_package(
                         runtime_root, source_executable,
@@ -1741,7 +1761,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 )
                 if build_preflight == "encrypted":
                     synthetic_experimental_profile(runtime_root, "TEST00009", None)
-            if art_iso is not None:
+            if art_iso is not None and not ready_source_has_clip:
                 if art_iso not in ("available", "unavailable", "icon-only", "clip"):
                     raise ValueError(f"unknown synthetic ISO mode: {art_iso}")
                 ui_iso_path = scratch / "source-owned-synthetic.iso"
@@ -1859,19 +1879,28 @@ class NativePlayerUiTests(unittest.TestCase):
             dedicated = scratch / "dedicated-data-root"
             if dedicated_data_root:
                 args.append(f"--user-data-root={dedicated}")
+            saves = dedicated / "saves"
+            if save_fixture is not None:
+                if not dedicated_data_root:
+                    raise ValueError("A save fixture needs an explicit synthetic data root")
+                for name, data in save_fixture.items():
+                    path = saves / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
 
             effective_timeout = compute_effective_timeout(event_script, timeout)
 
             started = time.perf_counter()
-            completed = subprocess.run(
-                args,
-                cwd=ROOT,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-                check=False,
-            )
+            with hold_test_stick_lock(saves / ".nakagawa-stick.lock") if hold_stick_lock else nullcontext():
+                completed = subprocess.run(
+                    args,
+                    cwd=ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                    check=False,
+                )
             wall_seconds = time.perf_counter() - started
             if os.environ.get(PLAYER_UI_ECHO_ENV) == "1":
                 sys.stderr.write(completed.stdout)
@@ -1947,6 +1976,8 @@ class NativePlayerUiTests(unittest.TestCase):
                 "default_profile_files": default_profile_files(),
                 "data_folder_files": files_under(data_folder),
                 "dedicated_files": files_under(dedicated),
+                "save_fixture": ({name: (saves / name).read_bytes() for name in files_under(saves)}
+                                 if save_fixture is not None else None),
                 "downloaded_tool_marker_exists": (
                     tool_marker.is_file() if tool_marker is not None else None
                 ),
@@ -2193,9 +2224,12 @@ class NativePlayerUiTests(unittest.TestCase):
         on_page = [state for route, state in frames if route == "2"]
         self.assertIn("playing", on_page, f"the game's page plays its clip: {on_page}")
         back = len(routes) - 1 - routes[::-1].index("2")
-        after = [state for route, state in frames[back + 1:]]
+        after = [state for route, state in frames[back + 1:] if route == "1"]
         self.assertTrue(after, f"Escape goes back to the library: {routes}")
-        self.assertEqual(after[-1], "idle", f"leaving the page fades the clip out: {after}")
+        self.assertIn("fading_out", after, f"Escape starts a fade in the library: {after}")
+        self.assertEqual(after[-1], "idle", f"the fade releases the clip: {after}")
+        fade = after.index("fading_out")
+        self.assertLess(fade, after.index("idle"), after)
         self.assertNotIn("GAME_MUSIC_", str(played["stdout"]) + str(played["stderr"]))
 
         silent = self.run_player("ready", steps, art_iso="available", env_extra=audio)
@@ -2209,6 +2243,39 @@ class NativePlayerUiTests(unittest.TestCase):
                               settings={"launcher_game_music": False}, env_extra=audio)
         self.assertEqual({state for _, state in self.game_music_by_route(off)}, {"off"},
                          "with the setting off the clip is never read")
+
+    def test_next_ui_play_releases_game_page_clip_before_launch(self) -> None:
+        """Play fades the synthetic disc clip and releases audio before launch."""
+        # Give the dummy device time to pull audio so Play fades from nonzero gain.
+        run = self.run_player(
+            "ready",
+            ("FOCUS_GAINED", "WAIT_MS=1500", "KEY_RETURN", "WAIT_MS=2000",
+             "KEY_RETURN", "WAIT_MS=1500"),
+            post_build_ready=True, art_iso="clip", wait_background=True,
+            env_extra={"SDL_AUDIO_DRIVER": "dummy"},
+        )
+        stdout = str(run["stdout"])
+        self.assert_next_ui_active(stdout)
+        frames = self.game_music_by_route(run)
+        page_states = [state for route, state in frames if route == "2"]
+        self.assertIn("playing", page_states,
+                      f"the ready disc must play SND0.AT3 before Play: {page_states}")
+
+        lines = stdout.splitlines()
+        workers = [line for line in lines if line.startswith(LAUNCH_WORKER_START)]
+        self.assertEqual(workers, [LAUNCH_WORKER_START + "launcher_audio=closed "
+                                   "music=off decoder=idle sounds=closed"], stdout)
+        worker_at = lines.index(workers[0])
+        before_worker = parse_frames("\n".join(lines[:worker_at]))
+        states = [(frame["next_route"], frame["game_music"]) for frame in before_worker]
+        self.assertIn(("2", "playing"), states, states)
+        self.assertIn(("2", "fading_out"), states, states)
+        self.assertLess(states.index(("2", "playing")), states.index(("2", "fading_out")), states)
+        after_worker = parse_frames("\n".join(lines[worker_at + 1:]))
+        self.assertTrue(after_worker, "the launcher draws after the worker starts")
+        self.assertEqual(after_worker[0]["game_music"], "stopped",
+                         "the first frame at worker start must show the SND0 clip released")
+        self.assertEqual(frames[-1][1], "idle", frames[-10:])
 
     def test_next_ui_wait_wakes_each_frame_while_disc_art_is_read(self) -> None:
         """Audit 2026-11-17 (F-8100ccc0): the launcher loop's wait (player_ui_nk_wait_ms)
@@ -3030,6 +3097,77 @@ class NativePlayerUiTests(unittest.TestCase):
                          f"the card stays: {shown}")
         self.assertEqual(shown[asked + 2][0], title,
                          f"the next Back closes the card to the title page: {shown}")
+
+    @staticmethod
+    def ready_stick_bring_in_fixture() -> dict[str, bytes]:
+        unit = "PSP/SAVEDATA/TEST00005_SLOT"
+        return {
+            "nakagawa-saves.json": json.dumps({
+                "schema_version": 1, "layout": "shared-memory-stick", "stick": "Memory Stick",
+                "state": "ready", "written_by": "0.1.0-dev", "sources": [],
+            }).encode("utf-8"),
+            f"TEST00005/{unit}/DATA.BIN": b"older edit",
+            f"TEST00005/{unit}/PARAM.SFO": b"old metadata",
+            f"Memory Stick/{unit}/DATA.BIN": b"shared edit",
+            f"Memory Stick/{unit}/PARAM.SFO": b"shared metadata",
+            f"Kept copies/TEST00005/{unit}/DATA.BIN": b"earlier kept",
+        }
+
+    def test_next_ui_bring_in_cancel_preserves_ready_stick(self) -> None:
+        """The real Saves route offers Bring In and defaults its question to Cancel."""
+        fixture = self.ready_stick_bring_in_fixture()
+        for activate, back in (("KEY_RETURN", "KEY_ESCAPE"), ("PAD_SOUTH", "PAD_EAST")):
+            with self.subTest(activate=activate):
+                run = self.next_ui_run(
+                    "library",
+                    ("WAIT_MS=200", activate, "WAIT_MS=200", activate, "WAIT_MS=200",
+                     activate, "WAIT_MS=200", back, "WAIT_MS=200"),
+                    dedicated_data_root=True, save_fixture=fixture,
+                )
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                states = [(int(frame["next_route"]), int(frame["next_focus"])) for frame in frames
+                          if frame["selected_disc"] == "TEST00005"]
+                saves, bring_in, cancel = 8, 0x4429, 0x4426
+                self.assertIn((saves, bring_in), states, run["stdout"])
+                self.assertIn((saves, cancel), states, run["stdout"])
+                self.assertEqual(states[-1], (saves, bring_in), run["stdout"])
+                self.assertEqual(run["save_fixture"], fixture)
+
+    def test_next_ui_bring_in_confirm_keeps_legacy_whole_and_refuses_busy_stick(self) -> None:
+        """Confirm is the write boundary and the real interprocess lock applies there."""
+        fixture = self.ready_stick_bring_in_fixture()
+        fixture[".nakagawa-stick.lock"] = b""
+        for held, activate, right in ((True, "KEY_RETURN", "KEY_RIGHT"),
+                                       (False, "PAD_SOUTH", "PAD_DPAD_RIGHT")):
+            with self.subTest(held=held):
+                run = self.next_ui_run(
+                    "library",
+                    ("WAIT_MS=200", activate, "WAIT_MS=200", activate, "WAIT_MS=200",
+                     activate, "WAIT_MS=200", right, "WAIT_MS=200", activate, "WAIT_MS=200"),
+                    dedicated_data_root=True, save_fixture=fixture, hold_stick_lock=held,
+                )
+                observed = run["save_fixture"]
+                assert isinstance(observed, dict)
+                if held:
+                    self.assertIn("SAVES_BRING_IN STICK_IN_USE", run["stderr"])
+                    self.assertEqual(observed, fixture)
+                    continue
+                self.assertIn("SAVES_BRING_IN BRING_IN_OK", run["stderr"])
+                self.assertIn("Kept the older version of TEST00005_SLOT in Kept copies.", run["stderr"])
+                for name, data in fixture.items():
+                    self.assertEqual(observed[name], data)
+                journal = ".nakagawa-migration/bring-in/test00005/"
+                intent = f"{journal}intent.json"
+                receipts = [name for name in observed if name.startswith(journal) and name != intent]
+                self.assertEqual(len(receipts), 1)
+                self.assertEqual(observed[intent], observed[receipts[0]])
+                generation = Path(receipts[0]).stem
+                retained = f"Kept copies/TEST00005/Bring In/{generation}/PSP/SAVEDATA/TEST00005_SLOT"
+                self.assertEqual(observed[f"{retained}/DATA.BIN"], b"older edit")
+                self.assertEqual(observed[f"{retained}/PARAM.SFO"], b"old metadata")
+                self.assertEqual(set(observed) - set(fixture),
+                                 {intent, receipts[0], f"{retained}/DATA.BIN", f"{retained}/PARAM.SFO"})
 
     def test_next_ui_settings_tab_opens_by_mouse_keyboard_and_controller(self) -> None:
         """#1281: Settings has a visible SETTINGS tab, and the menu prompt opens it."""
@@ -8420,6 +8558,7 @@ class NativePlayerUiTests(unittest.TestCase):
         """#2055: Enhanced options opens Settings > Enhanced for that game: its rows show the
         game's own values and change only them, and Escape returns to its title page with
         Enhanced options focused."""
+        settings_with_auto_load = {"enhanced": {**self.LIBRARY_ENHANCED["enhanced"], "load": "auto"}}
         run = self.next_ui_run(
             "library",
             (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
@@ -8428,7 +8567,7 @@ class NativePlayerUiTests(unittest.TestCase):
              *(("KEY_DOWN", "WAIT_MS=80") * 3),
              "KEY_RETURN", "WAIT_MS=120", "KEY_RETURN", "WAIT_MS=120",
              "KEY_ESCAPE", "WAIT_MS=200"),
-            wait_background=True, settings=self.LIBRARY_ENHANCED)
+            wait_background=True, settings=settings_with_auto_load)
         trail = self.focus_trail(run)
         self.assertIn(self.TITLE_PLAY_OPTIONS, trail, "Right reaches Enhanced options")
         self.assertIn(self.ENHANCED_PAGE_PART, trail, "Down reaches the first part's row")
@@ -8438,6 +8577,8 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual({page["title"] for page in pages}, {"TEST00005"},
                          "the page is that game's")
         self.assertEqual(pages[0]["af"], "Library (16x)", "a part follows the library first")
+        self.assertEqual(pages[0]["load"], "Library (Automatic)",
+                         "a title in Enhanced follows Automatic loading without an Ace package")
         self.assertIn("Ace needs a package made for this game.", pages[0]["sentence"],
                       "a game with no package of its own says why it has no Ace")
         self.assertEqual(pages[-1]["af"], "8x", "the row shows the game's own value")
@@ -9296,28 +9437,40 @@ class FirstRunRouteTests(unittest.TestCase):
             iso = scratch / "archive.iso"
             create_archive_title_iso(iso, disc_id="ULUS99996", title="Synthetic Archive",
                                      executable=build_plain_mips_elf())
-            user_root = scratch / "user-data"
-            (user_root / "manifests").mkdir(parents=True)
-            (user_root / "manifests" / "archive.json").write_text(
-                json.dumps(archive_title_manifest("ULUS99996", "archive-ulus99996")),
-                encoding="utf-8",
-            )
-            completed = subprocess.run(
-                [str(PLAYER_EXE), f"--user-data-root={user_root}", f"--iso={iso}",
-                 "--launch-now", "--headless-launch"],
-                cwd=ROOT, env=self.scratch_env(scratch), capture_output=True, text=True,
-                timeout=120, check=False,
-            )
-            output = completed.stdout + completed.stderr
-            self.assertIn("STAGING_RESULT status=PASS", completed.stdout, output)
-            self.assertEqual(completed.returncode, 4, output)
-            self.assertIn("--launch-now failed: Runtime package is missing", completed.stderr)
-            self.assertNotIn("data folder", completed.stderr)
-            library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
-            self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99996"])
-            self.assertTrue(library["games"][0]["assets_staged"])
-            self.assertTrue((user_root / "games" / "ULUS99996" / "xbdata" / "menu" /
-                             "assets.xb.d" / "data" / "raw.bin").is_file())
+            for requested_frames in (None, "--headless-accept-presented-frames=1"):
+                with self.subTest(requested_frames=requested_frames):
+                    user_root = scratch / ("acceptance-data" if requested_frames else "user-data")
+                    (user_root / "manifests").mkdir(parents=True)
+                    (user_root / "manifests" / "archive.json").write_text(
+                        json.dumps(archive_title_manifest("ULUS99996", "archive-ulus99996")),
+                        encoding="utf-8",
+                    )
+                    args = [f"--user-data-root={user_root}", f"--iso={iso}",
+                            "--launch-now", "--headless-launch"]
+                    if requested_frames:
+                        args.append(requested_frames)
+                    completed = subprocess.run(
+                        [str(PLAYER_EXE), *args],
+                        cwd=ROOT, env=self.scratch_env(scratch), capture_output=True, text=True,
+                        timeout=120, check=False,
+                    )
+                    output = completed.stdout + completed.stderr
+                    self.assertIn("STAGING_RESULT status=PASS", completed.stdout, output)
+                    self.assertEqual(completed.returncode, 4, output)
+                    self.assertIn("--launch-now failed: Runtime package is missing", completed.stderr)
+                    self.assertNotIn("data folder", completed.stderr)
+                    self.assertNotIn("Spawning runtime:", completed.stdout)
+                    self.assertEqual(
+                        [line for line in output.splitlines() if "HEADLESS_ACCEPTANCE" in line],
+                        ["[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable"]
+                        if requested_frames else [],
+                        output,
+                    )
+                    library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
+                    self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99996"])
+                    self.assertTrue(library["games"][0]["assets_staged"])
+                    self.assertTrue((user_root / "games" / "ULUS99996" / "xbdata" / "menu" /
+                                     "assets.xb.d" / "data" / "raw.bin").is_file())
 
     def test_dropped_uncatalogued_disc_keeps_its_profile_under_the_runtime_root(self) -> None:
         """Audit 2026-11-17 F-1fc4e8af: the runtime root owns experimental profiles.
@@ -9426,6 +9579,38 @@ class FirstRunRouteTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
         self.assertIn("library is empty", completed.stderr)
         self.assertNotIn("has no prepared runtime", completed.stderr)
+
+    def test_headless_acceptance_reports_missing_runtime_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix=".first-run-no-runtime-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            user_root = scratch / "user data"
+            user_root.mkdir()
+            (user_root / "library.json").write_text(json.dumps({
+                "schema_version": 1,
+                "games": [{
+                    "disc_id": "TEST00006", "title_name": "Synthetic Display Smoke",
+                    "iso_path": str(scratch / "display.iso"), "title_id": "display-smoke-v1",
+                }],
+            }), encoding="utf-8")
+            args = ["--empty", f"--user-data-root={user_root}", "--launch-index=0",
+                    "--headless-launch"]
+            for requested_frames in (None, "--headless-accept-presented-frames=1"):
+                with self.subTest(requested_frames=requested_frames):
+                    completed = self.run_route(
+                        scratch, [*args, requested_frames] if requested_frames else args,
+                    )
+                    output = completed.stdout + completed.stderr
+                    self.assertEqual(completed.returncode, 3, output)
+                    self.assertIn("Launch index 0 has no prepared runtime; PLAY NOW is unavailable.",
+                                  completed.stderr)
+                    self.assertNotIn("PLAY NOW available", completed.stdout)
+                    self.assertEqual(
+                        [line for line in output.splitlines() if "HEADLESS_ACCEPTANCE" in line],
+                        ["[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=runtime_unavailable"]
+                        if requested_frames else [],
+                        output,
+                    )
+            self.assertEqual(list((user_root / "cache").glob("player-boot-*.events")), [])
 
     def test_launch_title_names_a_library_game_by_disc_id(self) -> None:
         """#2152: --launch-title (what an Add to Steam shortcut runs) finds the game by its
@@ -10163,7 +10348,7 @@ class PlayerUiPseudoCatalogTests(unittest.TestCase):
 
 
 def check_pseudo_launcher() -> int:
-    """Run the real SDL launcher and observe an adapter's displayed sentence."""
+    """Run the real SDL launcher and observe localized settings values and copy."""
     if not _PLAYER_EXE_BUILD_PATH.is_file():
         print("PSEUDO_LAUNCHER status=FAIL reason=missing-executable", file=sys.stderr)
         return 1
@@ -10175,7 +10360,7 @@ def check_pseudo_launcher() -> int:
             ("WAIT_VIEW=settings,10000", "WAIT_MS=100")
             + ("KEY_DOWN",) * 4
             + ("KEY_RETURN", "WAIT_VIEW=ace_settings,10000", "WAIT_MS=150", "QUIT"),
-            settings={"enhanced": {"default": "enhanced"}},
+            settings={"enhanced": {"default": "enhanced", "load": "auto"}},
             timeout=35.0,
         )
         frames = run["frames"]
@@ -10187,6 +10372,7 @@ def check_pseudo_launcher() -> int:
         # Its existing trace records the same model fields passed to the renderer.
         expected = "Thé dééfault för éévery gààme; ééach gààme's pààge çan ççhoose îts öwn."
         test.assertEqual(pages[-1]["sentence"], expected)
+        test.assertEqual(pages[-1]["load"], "ÀÀutomatic")
     except subprocess.TimeoutExpired as exc:
         print(f"PSEUDO_LAUNCHER status=FAIL reason=timeout limit={exc.timeout}", file=sys.stderr)
         return 1
@@ -10194,7 +10380,8 @@ def check_pseudo_launcher() -> int:
         print(f"PSEUDO_LAUNCHER status=FAIL reason=launcher\n{exc}", file=sys.stderr)
         return 1
 
-    print("PSEUDO_LAUNCHER status=PASS view=ace_settings adapter=ADAPTER_MODE_LIBRARY_DESCRIPTION")
+    print("PSEUDO_LAUNCHER status=PASS view=ace_settings adapter=ADAPTER_MODE_LIBRARY_DESCRIPTION "
+          "load=ADAPTER_LOADING_AUTOMATIC")
     return 0
 
 

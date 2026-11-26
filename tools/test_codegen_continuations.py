@@ -479,6 +479,41 @@ class ContinuationFlowTests(unittest.TestCase):
         self.assertNotIn("s->r[29] = _sp_entry; /* synthetic boundary", text)
         self.assertIn("goto _sr_cont_00001010;", text)
 
+    def test_labelled_call_slot_continues_into_the_foreign_entry(self):
+        # A branch lands on the delay slot of a jal whose link is another entry. On that
+        # path the slot runs as an ordinary word and control goes on into the entry, as it
+        # does after the call: the labelled copy must not fall off the body as a return.
+        elf = FakeElf(
+            {
+                0x1000: beq(4, 0, 0x1000, 0x100C),   # into the jal's delay slot
+                0x1004: 0x00000000,
+                0x1008: jal(0x2000),
+                0x100C: 0x24050001,  # addiu a1, zero, 1 (delay slot and label)
+                0x1010: 0x00041823,  # foreign adjacent entry
+                0x1014: 0x03E00008,
+                0x1018: 0x00000000,
+                0x2000: 0x03E00008,
+                0x2004: 0x00000000,
+            }
+        )
+        known = {0x1000, 0x1010, 0x2000}
+        insns, labels, continuations = codegen.function_flow(
+            elf, 0x1000, [(0x1000, 0x2008)], known)
+        self.assertNotIn(0x1010, insns)
+        self.assertIn(0x100C, labels)
+        self.assertEqual(continuations, {0x1008: 0x1010, 0x100C: 0x1010})
+
+        text = "\n".join(codegen.emit_function(elf, 0x1000, [(0x1000, 0x2008)], known))
+        label = text.index("  L_0000100c: ;")
+        self.assertTrue(
+            text[label:].startswith(
+                "  L_0000100c: ;\n"
+                "    sr_begin(s, 0x0000100cu, 0x24050001u); s->r[5] = (0u + 0x00000001u); "
+                "sr_end(s, 0u, 0);\n"
+                "    goto _sr_cont_00001010;\n"),
+            text[label:],
+        )
+
     def test_stack_census_keeps_synthetic_boundary_annotation(self):
         elf = FakeElf(
             {
@@ -685,6 +720,40 @@ class EntrySplitTests(unittest.TestCase):
         self.assertIn("sr_tail_record(s, 0x00001020u, f_00001020, _sp_entry, 1u); return; }", text)
         self.assertEqual(text.count("0x0000100cu"), 1, text)
         self.assertIn("goto _sr_cont_00001010;", text)
+
+    def test_labelled_branch_slot_continues_into_the_next_entry(self):
+        # 0x1000 lands on the delay slot of the branch at 0x100C, whose not-taken edge is
+        # the entry 0x1014. After the slot that path goes on into 0x1014 too, never into
+        # the code at 0x1040 that the address order puts after the labelled copy.
+        elf = FakeElf({
+            0x1000: beq(4, 0, 0x1000, 0x1010),        # into the slot at 0x1010
+            0x1004: 0x00000000,
+            0x1008: 0x00000000,
+            0x100C: bne(2, 0, 0x100C, 0x1040),
+            0x1010: 0x24420004,                       # addiu v0, v0, 4 (slot and label)
+            0x1014: 0x24420008,                       # entry: addiu v0, v0, 8
+            0x1018: 0x03E00008,
+            0x101C: 0x00000000,
+            0x1040: 0x24030007,                       # addiu v1, zero, 7
+            0x1044: 0x03E00008,
+            0x1048: 0x00000000,
+        })
+        ranges, known = [(0x1000, 0x1050)], {0x1000, 0x1014}
+        with region_split_threshold(0) as options:
+            _, labels, continuations = codegen.function_flow(
+                elf, 0x1000, ranges, known, options=options)
+            text = "\n".join(codegen.emit_function(elf, 0x1000, ranges, known, options=options))
+        self.assertEqual(labels, {0x1010, 0x1040})
+        self.assertEqual(continuations, {0x100C: 0x1014, 0x1010: 0x1014})
+        label = text.index("  L_00001010: ;")
+        self.assertTrue(
+            text[label:].startswith(
+                "  L_00001010: ;\n"
+                "    sr_begin(s, 0x00001010u, 0x24420004u); s->r[2] = (s->r[2] + 0x00000004u); "
+                "sr_end(s, 0u, 0);\n"
+                "    goto _sr_cont_00001014;\n"),
+            text[label:],
+        )
 
     def test_branch_to_its_own_start_stays_a_loop_edge(self):
         insns, labels, continuations = self.flow(self.elf(), 0x1010)

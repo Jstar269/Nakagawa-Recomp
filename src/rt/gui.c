@@ -780,6 +780,9 @@ static void sync_sdl_input_state(void) {
 static void sync_sdl_input(void) {
     s_input_poll_ns = sched_host_now_ns();
     sync_sdl_input_state();
+    /* This poll runs on the scheduler's thread. Stop on live input even
+     * while the guest's next VBLANK or Ctrl latch is masked. */
+    sched_auto_load_host_input(s_buttons, s_lx, s_ly);
 }
 #endif
 
@@ -1403,7 +1406,8 @@ static void gui_wide_release(void) {
 static unsigned long long s_fsr1_presents;  /* presents the upscaler made, said at shutdown */
 
 /* An FSR 1 pass on the presenter's device, or NULL with the reason in error. */
-static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size) {
+static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size, bool *queue_lacks_compute) {
+    if (queue_lacks_compute) *queue_lacks_compute = false;
     Sdl3VkInfo vi;
     memset(&vi, 0, sizeof(vi));
     if (!sdl3vk_get_vk(&vi) || !vi.get_instance_proc_addr) {
@@ -1417,7 +1421,7 @@ static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size) {
     init.physical_device = (VkPhysicalDevice)vi.physical;
     init.device = (VkDevice)vi.device;
     init.queue_family = vi.queue_family;
-    return fsr1_create(&init, error, error_size);
+    return fsr1_create(&init, error, error_size, queue_lacks_compute);
 }
 
 /* An Anime4K pass on the presenter's device, or NULL with the reason in error. */
@@ -1450,7 +1454,7 @@ static int gui_movie_make(MovieUpscale *m, const char *where) {
                     error[0] ? error : "unknown");
     }
     error[0] = '\0';
-    m->fsr1 = gui_fsr1_make(error, sizeof(error));
+    m->fsr1 = gui_fsr1_make(error, sizeof(error), NULL);
     if (!m->fsr1 && !m->anime4k) {
         m->failed = 1;
         fprintf(stderr, "sdl3vk: movie upscaling is unavailable for %s (%s)\n", where,
@@ -1527,7 +1531,7 @@ static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out
     if (!s_fsr1 && !s_fsr1_rec) return NULL;
     if (!s_fsr1_rec && !s_fsr1_rec_failed) {
         char error[160] = "";
-        s_fsr1_rec = gui_fsr1_make(error, sizeof(error));
+        s_fsr1_rec = gui_fsr1_make(error, sizeof(error), NULL);
         if (!s_fsr1_rec) {
             s_fsr1_rec_failed = 1;
             fprintf(stderr, "sdl3vk: FSR 1 is unavailable for the recording (%s); it is scaled as "
@@ -1564,10 +1568,15 @@ static void gui_upscale_init(void) {
     if (mode != 1 && s_movie_mode == MOVIE_UPSCALE_OFF) return;
     char error[160] = "";
     if (mode == 1) {
-        s_fsr1 = gui_fsr1_make(error, sizeof(error));
-        if (!s_fsr1)
+        bool queue_lacks_compute;
+        s_fsr1 = gui_fsr1_make(error, sizeof(error), &queue_lacks_compute);
+        if (!s_fsr1) {
             fprintf(stderr, "sdl3vk: FSR 1 upscaling is unavailable (%s); the window scales as before\n",
                     error[0] ? error : "no Vulkan device");
+            NkFsr1Refusal refusal = queue_lacks_compute ? NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE
+                                                       : NK_FSR1_REFUSAL_STARTUP;
+            sr_gui_boot_event("%s", nk_fsr1_refusal_event(refusal));
+        }
     }
     if (s_movie_mode != MOVIE_UPSCALE_OFF && !gui_movie_make(&s_movie, "the window"))
         s_movie_mode = MOVIE_UPSCALE_OFF;
@@ -2154,6 +2163,8 @@ void gui_pump(void) {
         if (msg.message == WM_QUIT) { gui_quit_request(); continue; }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
+        if (sched_auto_load_enabled())
+            sched_auto_load_host_input(read_keys(), 128u, 128u);
     }
 #endif
 }
@@ -2326,6 +2337,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
                 s_first_gpu_frame = 0;
                 sr_gui_boot_event("BOOT_EVENT phase=first_frame source=gpu presented=1");
             }
+            sr_display_note_gpu_present();
             accepted = 1;
         }
         if (gpu_action != GUI_GPU_TRY_CPU) goto pace;
@@ -3299,6 +3311,8 @@ uint64_t sr_perf_now_ns_impl(void) { selftest_unexpected("sr_perf_now_ns_impl");
 static uint32_t s_stub_held;          /* buttons down now */
 static uint32_t s_stub_pulse;         /* pressed and released since the last consume */
 static uint32_t s_stub_tap;           /* what the next held present's event read records */
+static uint8_t s_stub_lx = 128u, s_stub_ly = 128u;
+static unsigned s_stub_auto_load_vetoes;
 static int      s_stub_held_result = -2; /* -2: sdl3vk_present_held is not expected */
 static unsigned s_stub_held_calls;
 static unsigned s_stub_stop_due_calls;
@@ -3309,7 +3323,13 @@ uint32_t sdl3vk_consume_button_pulses(void) {
     s_stub_pulse = 0;
     return pulses;
 }
-void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
+void sdl3vk_analog(uint8_t *lx, uint8_t *ly) {
+    if (lx) *lx = s_stub_lx;
+    if (ly) *ly = s_stub_ly;
+}
+void sched_auto_load_host_input(uint32_t buttons, uint8_t lx, uint8_t ly) {
+    if (buttons || lx != 128u || ly != 128u) ++s_stub_auto_load_vetoes;
+}
 int sdl3vk_pad_present(void) { return 1; }
 /* Each input read takes the stick dead zone from the session's input profile; NULL (no profile)
  * gives 0, which is what every test but the dead-zone one expects. */
@@ -3343,6 +3363,22 @@ SrPauseVerdict sched_pause_request(SrPauseSource source) {
 }
 int sr_exit_request_stop_due(void) { s_stub_stop_due_calls++; return 0; }
 int sr_capture_is_armed(void) { return 0; }
+
+static void selftest_auto_load_host_poll_veto(void) {
+    const unsigned before = s_stub_auto_load_vetoes;
+    s_stub_lx = 190u;
+    sync_sdl_input();
+    assert(s_stub_auto_load_vetoes == before + 1u);
+    s_stub_lx = 128u;
+    s_stub_pulse = 0x4000u;
+    sync_sdl_input();
+    assert(s_stub_auto_load_vetoes == before + 2u);
+    /* The input veto observes queued taps, leaving them for the guest. */
+    assert(gui_buttons() == 0x4000u && s_stub_pulse == 0x4000u);
+    s_stub_pulse = 0u;
+    sync_sdl_input();
+    assert(s_stub_auto_load_vetoes == before + 2u);
+}
 
 /* The held present reads the window's events, as every present does: the tap lands there. */
 static int (*s_stub_presenter)(VkImage src);   /* when set, it makes the held present */
@@ -4259,6 +4295,9 @@ static void selftest_cpu_source_span_covers_the_read(void) {
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+#ifdef SR_SDL3VK
+    selftest_auto_load_host_poll_veto();
+#endif
     s_present_cap = present_cap_from_value(NULL);
     assert(PSP_SCANOUT_PERIOD_NS == 16683333ull);
     assert(present_period_ns() == PSP_SCANOUT_PERIOD_NS);

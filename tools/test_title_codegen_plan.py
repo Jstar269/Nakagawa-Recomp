@@ -602,6 +602,21 @@ class TitleCodegenPlanTests(unittest.TestCase):
             self.assertEqual(package["executable"]["path"], "libsynthetic.so")
             self.assertTrue((output_dir / "libsynthetic.so").is_file())
             self.assertEqual(cache_metadata.call_args.args[1], cache_options)
+            # Every package reader (package_cache.validate_package_cache, the player's
+            # nk_title_manifest_validate_aot_package) takes the runtime image beside the
+            # executable as <executable stem>_image.bin, so an Android package that kept
+            # Make's synthetic_image.bin would be refused as having no image (#360).
+            executable = Path(package["executable"]["path"])
+            self.assertEqual((output_dir / f"{executable.stem}_image.bin").read_bytes(),
+                             b"synthetic image")
+            self.assertFalse((output_dir / "synthetic_image.bin").exists())
+            # The library loads SDL3 and Vulkan from the device, never a Windows DLL, even
+            # when a Windows PC built it.
+            libraries = [asset.get("name", "") for asset in package["required_local_assets"]
+                         if asset["kind"] == "host-runtime-library"]
+            self.assertTrue(libraries)
+            self.assertFalse([name for name in libraries if name.lower().endswith(".dll")],
+                             libraries)
 
     def test_package_inputs_with_the_same_name_keep_distinct_staged_bytes(self) -> None:
         class StopAfterStaging(Exception):

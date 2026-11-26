@@ -699,6 +699,7 @@ PRODUCTION_SMOKE_MAP       := $(PRODUCTION_SMOKE_DIR)/production_smoke.map
 # field of assets/titles/display-smoke.json.
 DISPLAY_SMOKE_NAME      := display-smoke-v1
 DISPLAY_SMOKE_DIR       := $(BUILD_ROOT)/$(DISPLAY_SMOKE_NAME)
+DISPLAY_SMOKE_RECORD_DIR := $(BUILD_ROOT)/display-smoke-recording
 DISPLAY_SMOKE_FIXTURE   := $(DISPLAY_SMOKE_DIR)/fixture
 DISPLAY_SMOKE_GENERATOR := tests/fixtures/display_smoke/generate.py
 DISPLAY_SMOKE_PRX       := $(DISPLAY_SMOKE_FIXTURE)/guest.prx

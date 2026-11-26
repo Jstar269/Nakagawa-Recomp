@@ -572,7 +572,7 @@ its `PARAM.SFO` inside a `SAVEDATA` folder, and it is copied into the game's `PS
 already there asks "A save named *name* is already here. Replace it?" with CANCEL (first focus) and REPLACE
 (`DANGER`). Back answers a question with Cancel; with no question up, Back closes the card.
 
-Every change backs the saves up first. A restore checks the whole backup before it touches anything, writes it into
+Restore and Add a save back the saves up first. A restore checks the whole backup before it touches anything, writes it into
 a new folder beside the save folder, and only then renames the save folder to `<folder>-backup-<date>` and puts the
 new one in its place; any failure before that swap leaves the saves as they were, and a failed swap puts the old
 folder back. A failure shows the error card ("Your saves were not backed up", "Your saves were not restored" or "The
@@ -582,6 +582,14 @@ runs." The save folder is `<saves>/<DISC_ID>`, the game's Memory Stick; backups 
 `<user data>/titles/<DISC_ID>/save-backups`, named `<DISC_ID>-saves-<date>-<time>.zip` with a `-before-restore`,
 `-before-add` or `-before-remove` ending for the automatic ones. Nothing is uploaded and nothing is deleted
 automatically. Prompt bar: MOVE, SELECT, BACK.
+
+With a ready shared Memory Stick (#2744), the title's Saves card offers BRING IN for a
+new or changed save found in that title's legacy folder. The question names the whole
+save folder and focuses CANCEL first. If the shared stick already holds a different
+save of that name, its progress stays active and the older version goes to Kept copies.
+An interrupted copy can be confirmed again. Bring In leaves the older player's folder
+in place. This action requires a ready stick. First migration and the switch to shared
+storage for ordinary launches are separate.
 
 ### Add to Steam (built)
 
@@ -675,7 +683,9 @@ PICTURE contains TEXTURE FILTERING; WIDESCREEN; SHARPER ENLARGING; TEXTURE PACK;
 SMOOTH FAR TEXTURES; TEXTURE SCALING; SMART 2D FILTER; CRISP SYSTEM TEXT. MOTION contains SMOOTH MOTION and the
 existing global FRAME PACING control. SOUND contains CLEAN PITCHED SOUND and UNCLIPPED SOUND. CONTROLS contains
 STICK DEAD ZONE. ON-SCREEN contains SPEED READOUT and GAME BADGE. ADVANCED contains FINER PATCHES, WIDER CULLING,
-SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
+LOADING SPEED, LATE PAD SAMPLING and SOFT SHADOWS. Loading speed offers Automatic, Short waits (Ace) and Off.
+Automatic works in Enhanced or Ace without an Ace package. Older game packages need rebuilding to use Automatic.
+Short waits requires Ace and a package with declared loading waits. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
 REMOVE TEXTURE PACK are the last rows of Picture.
 Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
 ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
@@ -771,7 +781,7 @@ on (#2280), which changes only the picture the window shows; the other presets l
 second draw of each render op and its GPU memory stay off unless asked for. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, UNCLIPPED
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, LOADING SPEED, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, UNCLIPPED
 SOUND, TEXTURE SCALING, the SMART 2D FILTER, the SPEED READOUT or
 the GAME BADGE: they change timing, framing, input, sound, guest-visible output or the HUD, or have no measured cost on
 low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for

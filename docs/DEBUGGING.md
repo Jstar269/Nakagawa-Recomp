@@ -974,11 +974,11 @@ controller sample while it is open, as the system keyboard polls the pad on a PS
 it takes counts as read by the route. `SR_OSK_TEXT` and `SR_OSK_SCRIPT` are not needed for it.
 `SR_WINDOW_HIDDEN=1` runs the same presenter with a hidden window, so a headless route keeps the
 window's keyboard and its frame capture without a visible window. Under the offscreen presenter
-the overlay is not drawn, and the variables below still answer. Where the presenter cannot draw
-the keyboard, the native input box is the fallback. If SDL refuses the frame's surface or its
-renderer after a request opened, the request is dropped, one stderr line names the SDL error,
-and the field falls back to the native input path (the Windows input box) for the rest of the
-run.
+the overlay is not drawn. Without a configured script, the field stays open while the title continues.
+Windows uses its native input box when the presenter cannot draw the keyboard. On a host without
+that fallback, a live field stops the run at `osk-host-unavailable` without supplying an answer or
+changing the field's output. If SDL refuses the surface or renderer after opening a keyboard, the log
+names the SDL error and the next poll uses the same host rules.
 
 ### Scripted keyboard answers
 
@@ -1412,6 +1412,9 @@ frames are byte-identical to an ungated run.
 | `N` >= 1 | unset | presents at least `N` vblanks apart |
 | `N` >= 1 | set | presents at least `N` vblanks apart, inside the windows |
 | `0`, negative or non-numeric | either | none: an explicit `0` still disables FBSNAP |
+
+A host refresh of a static framebuffer counts as a present for FBSNAP. The cadence permits at
+most one capture attempt per VBLANK, preserving the filename of the first attempt.
 
 `SR_FBSNAP_AFTER` applies in every row, and `SR_FBDUMP` still takes the capture slot when it
 is set. A window whose text does not parse leaves no window active (reported on stderr as
@@ -2376,15 +2379,12 @@ mingw32-make --no-print-directory form-sweep-selftest
 - **Deeper run.** `mingw32-make --no-print-directory form-sweep-deep` runs every instance of every
   form with 2048 states each.
 
-Two choices keep the comparison honest. When two named float registers hold NaNs with different
-payloads the harness makes them equal and counts it on stderr: an arithmetic result then carries
-whichever payload the host compiler's operand order picks inside the shared helper
-(`src/rt/fp_convert.h`), the translated body and the reference are built with different flags,
-and the PSP's own pick is unmeasured. And the reference's results come from `src/ref`, which
-shares the `sr_fpu_*` helpers with generated code for the float arithmetic: for those forms the
-sweep checks the translation around the helper (operand and destination handling, aliasing,
-rounding-mode plumbing), not the helper's arithmetic, which `fp_convert_selftest` and the cosim
-FPU reference cover.
+The reference's results come from `src/ref`, which shares the `sr_fpu_*` helpers with generated
+code for the float arithmetic: for those forms the sweep checks the translation around the helper
+(operand and destination handling, aliasing, rounding-mode plumbing), not the helper's arithmetic,
+which `fp_convert_selftest` and the cosim FPU reference cover. Two NaN operands with different
+payloads are compared as drawn: the helper picks the result NaN from the operand bits, so the
+translated body and the reference agree whatever flags each is built with.
 
 ## Naming generated functions from a symbol map
 

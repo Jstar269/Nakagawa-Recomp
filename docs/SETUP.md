@@ -95,6 +95,11 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   inherited values appear as `Library (value)` and a game's own value is highlighted. Ace-only options carry a tag,
   and options that cannot apply as the page stands stay visible but dimmed, with the reason in the panel. Frame
   pacing is on Motion. A game's Texture pack folder and Remove texture pack rows are the last rows of Picture.
+- **Loading speed.** Under **Settings > Enhanced > Advanced**, choose **Automatic** to fast-forward through
+  detected silent disc loads. You can set it for the library or override it for one game. It works in Enhanced
+  and Ace without an Ace package for the game. Rebuild older game packages to enable Automatic. They keep
+  their other enhancements when launched. Sound, player input or a pause returns the game to normal speed.
+  **Off** is the default. **Short waits (Ace)** uses the loading waits declared by a game's Ace package.
 - **Texture scaling and the Smart 2D filter.** Two parts of Enhanced and Ace, off by default and in no graphics
   preset: Settings > Enhanced offers **Texture scaling** (2x to 6x, or Off) and **Smart 2D filter** (On or Off), for
   the library or for one game. Texture scaling draws each texture from a larger copy made with xBRZ. The Smart 2D
@@ -133,7 +138,7 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   the game can read back and alters the GE timing model's clocks
   ([section 11.3.7](ENHANCEMENT_CONTRACT.md#1137-finer-bezier-and-spline-patches-tess)). Each curved patch is drawn
   with factor x factor times the triangles, on the game's thread, up to 262144 vertices a draw, so a scene with many
-  patches takes longer to draw. With the GE timing model on (`SR_GE_TIMING=1`) the extra triangles also change
+  patches takes longer to draw. With the developer-only GE timing switch (`SR_GE_TIMING=1`), the extra triangles also change
   when the game's display lists complete and when `sceGeDrawSync` returns in game time: on 8888 targets without
   depth test, later for small patches and possibly earlier for large ones; elsewhere by the finer surface's
   coverage, in either direction. A run's log ends with a `PATCH_TESS: exit` line
@@ -883,6 +888,8 @@ settings, create an empty file named `portable.txt` in the same folder as `nakag
 
 A front-end such as Quiver, Pegasus, ES-DE, LaunchBox or Steam ROM Manager starts a game by running a program
 with arguments. Nakagawa Recomp works with any of them that can run an executable with a command line.
+See the [player stability policy](RUNTIME_PACKAGING_ARCHITECTURE.md#7-per-user-data-formats-and-versions)
+for supported contracts and how changes are announced.
 
 - **Program:** `bin\nakagawa_player.exe` inside the unpacked release ZIP
   (`nakagawa-recomp-<version>-windows-x64.zip`).
@@ -1236,7 +1243,8 @@ flight evidence never takes it as authentic; an Authentic session from the launc
 gate and the library sweep run with it `off`. A 480x272 movie frame costs 0.31 ms through two
 Anime4K stages and 0.75 ms with FSR 1 to 3811x2160 on an RTX 3080 (`anime4k-selftest`).
 
-Runtime logs are written under `logs/`. Use `SR_DEBUG=0xFF` for all categories or consult [DEBUGGING.md](DEBUGGING.md) for targeted logging.
+Runtime logs are written under `logs/`. The developer-only `SR_DEBUG=0xFF` enables every category.
+See [targeted runtime logging](DEBUGGING.md) for individual categories.
 On Windows, runtime output redirected to a file or pipe is buffered: a line reaches the log within 50 ms,
 and everything is written when the game exits, aborts or writes a crash report. A process killed from
 outside, such as by the player's Stop or Task Manager, can lose its last 50 ms of output.
@@ -1388,7 +1396,7 @@ quietly. Cheats that write values (health, money, items, timers the game stores 
 
 - a run that records or replays (`SR_RECORD`, `SR_REPLAY`), because a recording has to replay
   without a cheat file;
-- an acceptance checkpoint (`SR_HEADLESS_ACCEPT_PRESENTED_FRAMES`), which is evidence of the game
+- a developer-only acceptance checkpoint (`SR_HEADLESS_ACCEPT_PRESENTED_FRAMES`), which is evidence of the game
   as it is. The player's `--headless-accept-presented-frames` starts its game without cheats, the
   launcher refuses to start one with them, and a runtime started by hand refuses them itself;
 - a run in the GDI window (`SR_VIDEO=gdi`, or when Vulkan does not start), because that window

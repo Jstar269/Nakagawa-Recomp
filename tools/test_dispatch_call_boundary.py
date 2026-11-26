@@ -20,6 +20,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import scratch_dir
@@ -290,13 +291,15 @@ _CHAIN_MARK = 0x5A5A
 def _entry_tail_program() -> tuple[int, ...]:
     """The entry itself ends in a direct TAIL, so whoever invoked it must drain.
 
-    0x1000 `j 0x1010` (the delay slot copies $sp to $v1); 0x1008 is a dead `jal` that only
-    makes 0x1010 a translated body; 0x1010 sets v0 = 7 and returns to the harness.
+    0x1000 `j 0x1018` copies $sp to $v1 in its slot. The dead JAL at 0x1008 names 0x1018
+    as a translated body, with its own distinct return point at 0x1010. The TAIL's
+    destination sets v0 = 7 and returns to the harness.
     """
     return (
-        _j(0x1010), _addu(_V1, _SP, 0),           # 0x1000 entry: tail to 0x1010
-        _jal(0x1010), _NOP,                       # 0x1008 discovery anchor (dead)
-        _addiu(_V0, 0, 7), _jr(_RA), _NOP,        # 0x1010
+        _j(0x1018), _addu(_V1, _SP, 0),           # 0x1000 entry: tail to 0x1018
+        _jal(0x1018), _NOP,                       # 0x1008 discovery anchor (dead)
+        _jr(_RA), _NOP,                           # 0x1010 anchor's return point
+        _addiu(_V0, 0, 7), _jr(_RA), _NOP,        # 0x1018
     )
 
 
@@ -1227,6 +1230,33 @@ def _read_the_pc() -> tuple[int, ...]:
     ])
 
 
+def _jal_read_the_pc(independent_entry: bool = False) -> tuple[int, ...]:
+    """The delay slot sees the new link, then the body continues once."""
+    body_start = 0x1018 if independent_entry else 0x1010
+    link = body_start + 12
+    body = [
+        _addu(_T0, _RA, 0),
+        _jal(link), _addu(_A0, _RA, 0),
+        _addiu(_V0, _V0, 100),
+        _addu(_RA, _T0, 0), _jr(_RA), _addiu(_V0, _V0, 10),
+    ]
+    if not independent_entry:
+        return _probe_program(body)
+    # The unused nonzero-a0 route calls the link address independently.
+    # Save the host return address and pass the real call's link in t0.
+    entry = [
+        _i(0x05, _A0, 0, (0x1034 - 0x1004) >> 2), _NOP,
+        _jal(body_start), _NOP,
+        _jr(_RA), _addu(_V1, _SP, 0),
+    ]
+    another_call = [
+        _addiu(_SP, _SP, -8), _sw(_RA, 0, _SP),
+        _jal(link), _addu(_T0, _RA, 0),
+        _lw(_RA, 0, _SP), _jr(_RA), _addiu(_SP, _SP, 8),
+    ]
+    return tuple(entry + body + another_call)
+
+
 _DEPTH_PROBE_HARNESS = r"""
 #define sr_yield isolation_sr_yield
 #define main embedded_dispatch_isolation_main
@@ -1365,6 +1395,26 @@ int main(int argc, char **argv) {
     const int no_bounds = argc > 2 && strcmp(argv[2], "no-bounds") == 0;
     g_probe_host_entry = argc > 3 && strcmp(argv[2], "host-entry") == 0
         ? (uint32_t)strtoul(argv[3], NULL, 0) : 0u;
+#ifdef PROBE_RUNTIME_MODULE
+    const SrModuleCode *module = sr_module_code_at(0);
+    SrModuleBindDetail detail;
+    if (!g_probe_host_entry || !module ||
+        sr_module_code_bind(module, g_probe_host_entry - PROBE_MODULE_OFFSET, &detail)
+            != SR_MODULE_BIND_OK ||
+        !sr_lookup(g_probe_host_entry)) {
+        fprintf(stderr, "runtime module probe did not bind its generated body\n");
+        return 31;
+    }
+    static const uint32_t module_words[] = { PROBE_MODULE_WORDS };
+    for (size_t i = 0; i < sizeof module_words / sizeof module_words[0]; i++)
+        MEM_W32(g_probe_host_entry + (uint32_t)(4u * i), module_words[i]);
+    if (g_probe_host_entry + 12u != PROBE_MODULE_TARGET) {
+        /* A distinct, interpreter-owned leaf when the runtime link does not match. */
+        if (!sr_exec_span_register(PROBE_MODULE_TARGET, PROBE_MODULE_TARGET + 8u)) return 32;
+        MEM_W32(PROBE_MODULE_TARGET, 0x03e00008u);  /* jr ra */
+        MEM_W32(PROBE_MODULE_TARGET + 4u, 0x24420001u);  /* addiu v0, v0, 1 */
+    }
+#endif
 #ifdef SR_TAIL_DRAIN
     if (argc > 2 && !neighbour && !pair && !no_bounds && !g_probe_host_entry) {   /* a broken protocol (#855) must stop with its named fault */
         CpuState other;
@@ -1449,6 +1499,7 @@ def _mutated_copy(source: Path, work: Path, mutation: tuple[str, str] | None) ->
 def _build_depth_probe(
     words: tuple[int, ...], work: Path, *, codegen_args: tuple[str, ...] = (),
     mutate: dict[str, tuple[str, str]] | None = None, vector: int | None = None,
+    runtime_module: tuple[int, int, tuple[int, ...]] | None = None,
 ) -> tuple[Path | None, str]:
     """Translate a source-owned fixture and link it into the depth-probe harness.
 
@@ -1500,12 +1551,16 @@ def _build_depth_probe(
     if config.returncode != 0:
         return None, config.stderr + config.stdout
     harness = work / "depth_probe_harness.c"
-    harness.write_text(
-        _DEPTH_PROBE_HARNESS.replace("PROBE_SP", f"0x{_PROBE_SP:08x}u")
-        .replace("PROBE_BASE", f"0x{_PROBE_BASE:08x}u")
-        .replace("PROBE_WORDS", ", ".join(f"0x{w & 0xFFFFFFFF:08x}u" for w in words)),
-        encoding="utf-8", newline="\n",
-    )
+    fixture = (_DEPTH_PROBE_HARNESS.replace("PROBE_SP", f"0x{_PROBE_SP:08x}u")
+               .replace("PROBE_BASE", f"0x{_PROBE_BASE:08x}u")
+               .replace("PROBE_WORDS", ", ".join(f"0x{w & 0xFFFFFFFF:08x}u" for w in words)))
+    if runtime_module is not None:
+        offset, target, module_words = runtime_module
+        fixture = (f"#define PROBE_RUNTIME_MODULE\n#define PROBE_MODULE_OFFSET {offset}u\n"
+                   f"#define PROBE_MODULE_TARGET {target}u\n"
+                   f"#define PROBE_MODULE_WORDS {', '.join(f'0x{w:08x}u' for w in module_words)}\n"
+                   + fixture)
+    harness.write_text(fixture, encoding="utf-8", newline="\n")
     if "recomp.c" in mutate or "recomp.h" in mutate:
         # The harness reaches recomp.c and recomp.h through dispatch_isolation_selftest.c's
         # quoted includes, which search the including file's directory first; copy them.
@@ -1531,6 +1586,7 @@ def _build_depth_probe(
             *((f"-DPROBE_VECTOR=0x{vector:08x}u",) if vector is not None else ()),
             "-I", str(work), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
             str(harness), str(generated), str(work / "probe_0.c"),
+            *(str(path) for path in sorted(work.glob("nk_lib_*.c"))),
             str(guest_interp), str(PERF),
             str(sr_coro),
             str(ROOT / "src" / "rt" / "cpu_lle.c"),
@@ -2940,7 +2996,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
             "T5-call-body-does-not-drain", _entry_tail_program(), (0,),
             {"recomp.h": ("    fn(s);\n    if (sr_tail_transfer.pending) sr_tail_drain(s);\n",
                           "    fn(s);\n")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 7,
+            lambda r: r[0][0] == 0 and r[0][2].get("v0") == 0 and r[0][2].get("v1") == _PROBE_SP,
         )
         # A computed step applies its restore while the next computed transfer is pending:
         # F runs in H's frame instead of the live one.
@@ -3398,6 +3454,75 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self.assertEqual(fields.get("v0"), 110, output)
         self.assertEqual(fields.get("a0"), 0x101C, output)
         self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        self.assertEqual(fields.get("unwinds"), 0, output)
+
+    def test_jal_pc_read_keeps_the_caller(self):
+        for omitted in ((), ("--omit-aot=0x1010",)):
+            with self.subTest(omitted=omitted):
+                generated, results = self._probe(_jal_read_the_pc(), (0,), codegen_args=omitted)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 110, output)
+                self.assertEqual(fields.get("a0"), 0x101C, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+                self.assertEqual(fields.get("unwinds"), 0, output)
+                self.assertNotIn("void f_0000101c(CpuState *s) {", generated)
+                if omitted:
+                    self.assertGreater(fields.get("interp", 0), 0, output)
+                else:
+                    self.assertEqual(fields.get("interp"), 0, output)
+
+    def test_jal_runtime_placement_compares_the_actual_target_and_link(self):
+        from tools.test_codegen_runtime_modules import ladder
+
+        base = 0x09000000
+        offset = ladder.OVERLAY_MIX_OFF
+        target = base + offset + 12
+        # The mix body has no relocation sites. Its file-space jump target is
+        # external, so the loaded address determines whether it equals its link.
+        words = (
+            _addu(_T0, _RA, 0), _jal(target), _addu(_A0, _RA, 0),
+            _addiu(_V0, _V0, 100), _addu(_RA, _T0, 0),
+            _jr(_RA), _addiu(_V0, _V0, 10),
+        )
+        image = bytearray(ladder.build_overlay_prx(ladder.OVERLAYS[0]))
+        struct.pack_into("<7I", image, ladder.OVERLAY_TEXT_FILE_OFFSET + offset, *words)
+        with scratch_dir.TemporaryDirectory(prefix="jal_runtime_placement_") as tmp:
+            work = Path(tmp)
+            module = work / "placement.prx"
+            module.write_bytes(image)
+            exe, build_output = _build_depth_probe(
+                (_jr(_RA), _NOP), work,
+                codegen_args=(f"--extra-elf={module}@runtime",),
+                runtime_module=(offset, target, words),
+            )
+            self.assertIsNotNone(exe, build_output)
+            for placement, result, interpreted in ((base, 110, 0), (base + 0x10000, 111, 2)):
+                with self.subTest(placement=hex(placement)):
+                    entry = placement + offset
+                    rc, output, fields = _run_depth_probe(exe, 0, "host-entry", hex(entry))
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(fields.get("v0"), result, output)
+                    self.assertEqual(fields.get("a0"), entry + 12, output)
+                    self.assertEqual(fields.get("sp"), _PROBE_SP, output)
+                    self.assertEqual(fields.get("interp"), interpreted, output)
+                    self.assertEqual(fields.get("unwinds"), 0, output)
+
+    def test_jal_pc_read_hands_off_to_an_independently_registered_entry(self):
+        with mock.patch.dict(os.environ, {"SR_DISPLOG": "1"}):
+            generated, results = self._probe(
+                _jal_read_the_pc(independent_entry=True), (0,),
+                codegen_args=("--omit-aot=0x1018",),
+            )
+        rc, output, fields = results[0]
+        self.assertIn("void f_00001024(CpuState *s) {", generated)
+        self.assertEqual(rc, 0, output)
+        self.assertGreater(fields.get("interp", 0), 0, output)
+        self.assertEqual(fields.get("v0"), 110, output)
+        self.assertEqual(fields.get("a0"), 0x1024, output)
+        self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        self.assertIn("GUEST_INTERP_AOT_HANDOFF pc=0x00001024", output)
+        self.assertNotIn("GUEST_INTERP_AOT_CALL target=0x00001024", output)
         self.assertEqual(fields.get("unwinds"), 0, output)
 
     def test_linked_branch_mutants_fail_for_their_semantic(self):

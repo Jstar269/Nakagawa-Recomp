@@ -87,7 +87,9 @@ static int SDLCALL player_ui_snd0_load(void *data) {
     PlayerUiSnd0ReadResult read;
     snd0->load_failure = PLAYER_UI_SND0_IDLE;
     snd0->load_detail[0] = '\0';
-    read = snd0->reader(snd0->load_path, &bytes, &size, snd0->reader_user);
+    read = snd0->reader(snd0->load_path, &bytes, &size, snd0->reader_user,
+                        player_ui_snd0_cancelled, snd0);
+    if (player_ui_snd0_cancelled(snd0)) goto done;
     if (read == PLAYER_UI_SND0_READ_MISSING) {
         snd0->load_failure = PLAYER_UI_SND0_NO_CLIP;
     } else if (read != PLAYER_UI_SND0_READ_OK || bytes == NULL) {
@@ -106,6 +108,7 @@ static int SDLCALL player_ui_snd0_load(void *data) {
                            reason, player_ui_at3_result_name(result));
         }
     }
+done:
     free(bytes);
     SDL_SetAtomicInt(&snd0->loader_done, 1);
     return 0;

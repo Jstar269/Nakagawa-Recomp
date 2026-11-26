@@ -597,10 +597,51 @@ class ShowcasePrebuiltPrxTests(unittest.TestCase):
                 showcase.main(["build-prx"])
             with self.assertRaises(SystemExit):
                 showcase.main(["smoke", "--prebuilt-prx-dir", "prx"])
+        with mock.patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                showcase.main(["smoke", "--target", "android"])
         with mock.patch.object(showcase, "build_all") as build:
             self.assertEqual(showcase.main(["build"]), 0)
             self.assertEqual(showcase.main(["build", "--prebuilt-prx-dir", "prx"]), 0)
-        self.assertEqual(build.call_args_list, [mock.call(None), mock.call(Path("prx"))])
+            self.assertEqual(showcase.main(["build", "--target", "android"]), 0)
+        self.assertEqual(build.call_args_list, [mock.call(None, "host"),
+                                                mock.call(Path("prx"), "host"),
+                                                mock.call(None, "android")])
+
+    def test_android_packages_are_built_for_android_in_their_own_stage(self) -> None:
+        """`build --target android` builds the packages the Android app bundles (#360): the
+        planner builds lib<game>.so, in a stage of its own, and the demos folder has the
+        layout the desktop showcase discovery reads (packages/<disc>, images/<disc>.iso)."""
+        packaged: list[list[str]] = []
+
+        def fake_package(command: list[str], **_: object) -> subprocess.CompletedProcess:
+            packaged.append(command)
+            out = Path(command[command.index("--output-dir") + 1])
+            (out / "package.json").write_text(
+                '{"format": "nakagawa-aot-package", "executable": {"path": "libdemo.so"}}',
+                encoding="utf-8")
+            (out / "libdemo.so").write_bytes(b"\x7fELF")
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            prebuilt = self._prebuilt(root)
+            demos = root / "android-demos"
+            with mock.patch.object(showcase, "BUILD_ROOT", root / "showcase"), \
+                    mock.patch.object(showcase, "DEMO_ROOT", demos), \
+                    mock.patch.object(showcase, "_check_prx_entry"), \
+                    mock.patch.object(showcase, "_package_fingerprint", return_value="0" * 16), \
+                    mock.patch.object(showcase.subprocess, "run", side_effect=fake_package):
+                self.assertEqual(showcase.main(["build", "--prebuilt-prx-dir", str(prebuilt),
+                                                "--target", "android"]), 0)
+            self.assertEqual(len(packaged), len(showcase.DEMOS))
+            for demo, command in zip(showcase.DEMOS, packaged, strict=True):
+                self.assertEqual(command[command.index("--target") + 1], "android")
+                stage = Path(command[command.index("--output-dir") + 1])
+                self.assertEqual(stage.name, "package-android-" + "0" * 16)
+                disc = str(demo["disc_id"])
+                self.assertTrue((demos / "packages" / disc / "libdemo.so").is_file())
+                self.assertEqual(inspect_iso(demos / "images" / f"{disc}.iso").disc_id, disc)
 
 
 if __name__ == "__main__":

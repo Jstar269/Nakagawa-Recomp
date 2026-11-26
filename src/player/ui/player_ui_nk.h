@@ -223,6 +223,7 @@ typedef enum {
     PLAYER_UI_SAVES_CANCEL,          /* the question's Cancel */
     PLAYER_UI_SAVES_OLDER,           /* the list's next, older backups */
     PLAYER_UI_SAVES_NEWER,           /* the list's newer backups */
+    PLAYER_UI_SAVES_BRING_IN,        /* bring in the offered legacy save */
     PLAYER_UI_SAVES_RESTORE_BASE = 0x100 /* + the backup's row: Restore asks first */
 } PlayerUiSavesOp;
 
@@ -771,6 +772,7 @@ typedef struct {
        page, the library's ("Library (16x)") before them. */
     const char *const *labels;
     int label_count;
+    int unavailable_label;      /* 1-based part label index, or 0 when all are available */
     const char *library_value;  /* NULL on the library's page */
 } PlayerUiEnhancedRow;
 
@@ -1294,6 +1296,7 @@ enum {
     PLAYER_UI_ID_SAVES_CANCEL = 0x4426u,
     PLAYER_UI_ID_SAVES_OLDER = 0x4427u,
     PLAYER_UI_ID_SAVES_NEWER = 0x4428u,
+    PLAYER_UI_ID_SAVES_BRING_IN = 0x4429u,
     PLAYER_UI_ID_SAVES_RESTORE_BASE = 0x4430u,      /* + the backup's row */
     PLAYER_UI_ID_STEAM_ADD = 0x4441u,
     PLAYER_UI_ID_STEAM_BACK = 0x4442u,
@@ -1584,9 +1587,9 @@ typedef struct {
 
 PlayerUiAction player_ui_screen_stop(NkUi *ui, const PlayerUiStopModel *model);
 
-/* Saves (#1883): back up the title's saves, restore one of its backups (newest
-   first, a page at a time; Restore asks first), add a save from a folder, and
-   open the save folder. Every change backs the saves up first. */
+/* Saves (#1883, #2744): back up, restore and add saves, open the save folder,
+   or confirm bringing in an older player's save on a READY shared stick.
+   Restore and Add back up first. Bring in publishes without overwriting. */
 #define PLAYER_UI_SAVES_ROW_CAP 4u
 typedef struct {
     const char *when;           /* "2026-11-04 14:05" */
@@ -1596,7 +1599,8 @@ typedef struct {
 typedef enum {
     PLAYER_UI_SAVES_ASK_NONE = 0,
     PLAYER_UI_SAVES_ASK_RESTORE,    /* Restore the backup in row ask_row? */
-    PLAYER_UI_SAVES_ASK_REPLACE     /* Replace the save named ask_name? */
+    PLAYER_UI_SAVES_ASK_REPLACE,    /* Replace the save named ask_name? */
+    PLAYER_UI_SAVES_ASK_BRING_IN    /* Bring in the older player's save? */
 } PlayerUiSavesAsk;
 
 typedef struct {
@@ -1613,6 +1617,9 @@ typedef struct {
     PlayerUiSavesAsk ask;
     size_t ask_row;             /* the row Restore asks about, on this page */
     const char *ask_name;       /* the save Add a save would replace */
+    const char *bring_in_name;  /* the next legacy save offered, or NULL */
+    const char *bring_in_note;  /* where the offered save will go */
+    const char *bring_in_problem; /* why an older save could not be inspected */
     const char *status;         /* what the last action did, or NULL */
     PlayerUiNoteKind status_kind;
     const char *blocked;        /* why the saves can't change now, or NULL */

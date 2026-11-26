@@ -303,6 +303,7 @@ extern void sr_hle_test_audio_reset(void);
 extern void sr_hle_test_audio_wait_reset(void);
 extern void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us));
 extern uint64_t sr_hle_test_audio_wait_total_us(void);
+extern void sr_hle_test_audio_refusal_note_reset(void);
 extern void sr_hle_test_audio_lead_reset(void);
 extern uint32_t sr_hle_test_audio_late_wake_us(void);
 extern void sr_hle_test_audio_lead_feed(uint32_t vbl, int ch, int queued);
@@ -660,6 +661,24 @@ int sr_audio_host_pull_frames(void) {
     return s_audio_sim_reported_pull >= 0 ? s_audio_sim_reported_pull : s_audio_sim_pull;
 }
 
+static int s_audio_load_queue_silent = 1;
+static int s_audio_load_handoff[9];
+static int s_audio_load_pending_sound;
+
+int sr_audio_load_silent(void) { return s_audio_load_queue_silent; }
+
+int sr_audio_load_pending_sound(int ch) { return ch == 0 && s_audio_load_pending_sound; }
+
+void sr_audio_replace_silent_queue(int ch, int frames, int hold) {
+    (void)hold;
+    if (sr_audio_load_pending_sound(ch)) return;
+    if (ch >= 0 && ch < 9) {
+        s_audio_load_handoff[ch] = frames;
+        s_audio_sim_q[ch] = frames;
+        s_audio_sim_dry[ch] = frames == 0;
+    }
+}
+
 int sr_audio_queued(int ch) {
     if (s_audio_sim_pull > 0 && ch >= 0 && ch < 9) {
         s_audio_queue_calls++;
@@ -676,6 +695,9 @@ int sr_audio_queued(int ch) {
 }
 
 static void audio_fixture_reset(void) {
+    s_audio_load_queue_silent = 1;
+    s_audio_load_pending_sound = 0;
+    memset(s_audio_load_handoff, 0, sizeof(s_audio_load_handoff));
     s_oor_calls = 0;
     s_audio_push_calls = 0;
     s_audio_push_wide_calls = 0;
@@ -707,7 +729,12 @@ static void audio_fixture_reset(void) {
 static int s_test_gui_on;
 static unsigned long s_test_gui_present_calls;
 static uint32_t s_test_gui_last_addr, s_test_gui_last_stride;
+static unsigned long s_test_gpu_guest_flips;
 static int s_test_gui_last_fmt;
+static int s_test_gui_sample_pixel;
+static int s_test_gui_refuse_once;
+static int s_test_gui_gpu_source;
+static uint32_t s_test_gui_first_pixel;
 int gui_on(void) { return s_test_gui_on; }
 /* A real host window with a person at it (not the offscreen sink or an acceptance launch). */
 static int s_test_gui_interactive;
@@ -759,6 +786,14 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     s_test_gui_last_addr = fbaddr;
     s_test_gui_last_fmt = fmt;
     s_test_gui_last_stride = stride;
+    if (s_test_gui_refuse_once) {
+        s_test_gui_refuse_once = 0;
+        return 0;
+    }
+    if (s_test_gui_gpu_source)
+        sr_display_note_gpu_present();
+    if (s_test_gui_sample_pixel)
+        memcpy(&s_test_gui_first_pixel, SR_HOST_LINEAR(fbaddr), sizeof s_test_gui_first_pixel);
     return 1;
 }
 /* The host-neutral HLE selftest omits the Vulkan backend. With no live GPU target,
@@ -776,7 +811,7 @@ int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc) {
     if (desc) g_sync_last = *desc;
     return 2; /* GEGPU_SYNC_NO_TARGET */
 }
-void gegpu_note_guest_flip(void) {}
+void gegpu_note_guest_flip(void) { s_test_gpu_guest_flips++; }
 void sr_profile_dump(void) {}
 void sr_profile_dump_final(void) {}
 uint64_t SDL_GetTicksNS(void) { return 0; }
@@ -1670,7 +1705,7 @@ static uint32_t libfont_start_call(CpuState *cpu, uint32_t uid) {
 /* A source-owned PRX with a real module-info/export layout. Its export pointers
  * use the loaded guest-address form consumed by prx_loader; the HLE export
  * registrar must resolve those same fields back through the ELF segments. */
-static int write_synthetic_libfont_prx(const char *path, uint32_t base) {
+static int write_synthetic_libfont_prx(const char *path, uint32_t base, int with_stop) {
     enum { SIZE = 0x380, PHOFF = 0x34, MODOFF = 0x100, SHSTR_OFF = 0x2c0,
            SEG_SIZE = 0x200, EXPORT_VA = 0x100, TABLE_VA = 0x140,
            START_OFF = 0x70 };
@@ -1710,16 +1745,21 @@ static int write_synthetic_libfont_prx(const char *path, uint32_t base) {
     fixture_wr32(image + MODOFF + 40, base + EXPORT_VA + 16u);
     uint8_t *entry = image + 0x80 + EXPORT_VA;
     entry[8] = 4;
-    /* Three functions: the table is the NIDs (module_start, the export, module_stop),
-     * then their addresses in the same order. */
-    fixture_wr16(entry + 10, 3);
+    /* The NIDs precede the corresponding addresses. Omit the stop function entirely
+     * in the no-stop image, while keeping both the start and the regular export. */
+    uint16_t function_count = with_stop ? 3u : 2u;
+    uint8_t *table = image + 0x80 + TABLE_VA;
+    uint8_t *addresses = table + 4u * function_count;
+    fixture_wr16(entry + 10, function_count);
     fixture_wr32(entry + 12, base + TABLE_VA);
-    fixture_wr32(image + 0x80 + TABLE_VA, 0xd632acdbu);
-    fixture_wr32(image + 0x84 + TABLE_VA, SYNTH_LIBFONT_EXPORT_NID);
-    fixture_wr32(image + 0x88 + TABLE_VA, 0xcee05613u);
-    fixture_wr32(image + 0x8c + TABLE_VA, START_OFF);
-    fixture_wr32(image + 0x90 + TABLE_VA, SYNTH_LIBFONT_EXPORT_OFF);
-    fixture_wr32(image + 0x94 + TABLE_VA, SYNTH_LIBFONT_STOP_OFF);
+    fixture_wr32(table, 0xd632acdbu);
+    fixture_wr32(table + 4, SYNTH_LIBFONT_EXPORT_NID);
+    fixture_wr32(addresses, START_OFF);
+    fixture_wr32(addresses + 4, SYNTH_LIBFONT_EXPORT_OFF);
+    if (with_stop) {
+        fixture_wr32(table + 8, 0xcee8593cu);
+        fixture_wr32(addresses + 8, SYNTH_LIBFONT_STOP_OFF);
+    }
     fixture_wr32(image + 0x80 + START_OFF, 0x03e00008u); /* jr ra */
     fixture_wr32(image + 0x80 + SYNTH_LIBFONT_EXPORT_OFF, 0x03e00008u);
     fixture_wr32(image + 0x80 + SYNTH_LIBFONT_STOP_OFF, 0x03e00008u);
@@ -1763,7 +1803,7 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
     expect(runtime_module_path(path, sizeof(path), name),
            "libfont startup fixture path is under SR_MODULE_DIR and fits the bounded test buffer");
     if (!path[0]) return;
-    expect(write_synthetic_libfont_prx(path, base),
+    expect(write_synthetic_libfont_prx(path, base, 1),
            "source-owned libfont PRX fixture is written");
 
     hle_test_setenv("SR_REAL_MODULE_START", NULL);
@@ -1877,7 +1917,50 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
         } else {
             expect(0, "imports route to the reloaded libfont export");
         }
+
+        /* Retire the reloaded image through the real guest-visible calls, so its
+         * user-partition block at the manifest base is free for the no-stop image below.
+         * sr_hle_test_module_reset() only clears records; it never frees guest memory. */
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = reloaded;
+        cpu.r[7] = status_addr;
+        expect(sr_hle_test_stop_module(&cpu) == 0u &&
+                   s_synth_libfont_stop_calls == 2u,
+               "the reloaded libfont stops through its translated module_stop");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = reloaded;
+        expect(sr_hle_test_unload_module(&cpu) == 0u &&
+                   sr_hle_test_image_count() == 0u && sr_hle_test_module_count() == 0u,
+               "the reloaded libfont unloads and releases its image before the no-stop load");
     }
+
+    /* A translated stop body alone is not an export. Load the same image with a real
+     * start but no stop entry in the table, and exercise the existing host no-entry
+     * behavior through the actual loader. */
+    sr_hle_test_module_reset();
+    expect(write_synthetic_libfont_prx(path, base, 0),
+           "libfont no-stop PRX omits the module_stop export");
+    title_hle_write_cstr(0x08906000u, guest_path);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x08906000u;
+    uint32_t without_stop = sr_hle_test_load_module(&cpu);
+    uint32_t starts_without_stop = s_synth_libfont_start_calls;
+    uint32_t stops_without_stop = s_synth_libfont_stop_calls;
+    expect(without_stop != 0u && libfont_start_call(&cpu, without_stop) == 0u &&
+               s_synth_libfont_start_calls == starts_without_stop + 1u,
+           "libfont no-stop PRX still runs its declared module_start");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = without_stop;
+    cpu.r[7] = 0x089060c0u;
+    MEM_W32(0x089060c0u, 0xFFFFFFFFu);
+    expect(sr_hle_test_stop_module(&cpu) == 0u &&
+               s_synth_libfont_stop_calls == stops_without_stop &&
+               MEM_R32(0x089060c0u) == 0xFFFFFFFFu,
+           "libfont no-stop PRX stops without a guest call or status write");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = without_stop;
+    expect(sr_hle_test_unload_module(&cpu) == 0u,
+           "libfont no-stop PRX can be unloaded after StopModule");
 
     /* Phase 3: SR_REAL_MODULE_START=1 keeps translated startup for every module. */
     hle_test_setenv("SR_REAL_MODULE_START", "1");
@@ -2169,7 +2252,7 @@ static int write_fixed_module_prx(const char *path, uint32_t link) {
     fixture_wr16(seg + RT_LIBENT + 26, 1);
     fixture_wr32(seg + RT_LIBENT + 28, link + RT_LIB_TABLE);
     fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xD632ACDBu);
-    fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE05613u);
+    fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE8593Cu);
     fixture_wr32(seg + RT_SYSLIB_TABLE + 8, link + RT_START);
     fixture_wr32(seg + RT_SYSLIB_TABLE + 12, link + RT_STOP);
     fixture_wr32(seg + RT_LIB_TABLE + 0, RT_EXPORT_NID + 1u);
@@ -2290,7 +2373,7 @@ static int write_runtime_module_prx_lib(const char *path, uint8_t flavour, int w
     fixture_wr32(seg + RT_LIBENT + 28, RT_LIB_TABLE);
     if (with_start) {
         fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xD632ACDBu);
-        fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE05613u);
+        fixture_wr32(seg + RT_SYSLIB_TABLE + 4, 0xCEE8593Cu);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 8, RT_START);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 12, RT_STOP);
     } else {
@@ -2298,7 +2381,7 @@ static int write_runtime_module_prx_lib(const char *path, uint8_t flavour, int w
          * word is the (relocated) stop address; the fourth word stays relocated but
          * unused. */
         fixture_wr16(seg + RT_LIBENT + 10, 1);
-        fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xCEE05613u);
+        fixture_wr32(seg + RT_SYSLIB_TABLE + 0, 0xCEE8593Cu);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 4, RT_STOP);
         fixture_wr32(seg + RT_SYSLIB_TABLE + 12, RT_STOP);
     }
@@ -4980,6 +5063,87 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     nk_remove_utf8(host);   /* only a runtime that wrongly created it leaves one */
 }
 
+/* sceIoIoctl (0x63632449) on a disc0: file: the io-seek-umd-* cells of PSP-HLE-IO-SEEK-001
+ * (#2807). The record (docs/HARDWARE_ORACLE.md, case hle-io-seek: a PSP-3000, system software
+ * 6.6.0 as reported by pspver, boot 156, XMB context, one acceptance-eligible launch of the probe
+ * built from 59520eb0, 2026-11-08) opens disc0:/UMD_DATA.BIN read-only and takes its size from
+ * sceIoLseek(fd, 0, SEEK_END). For the targets -1, the size and the size + 1, each from a position
+ * of 8 (sceIoLseek SEEK_SET 8), it makes the ioctl seek 0x01010005 with a 16-byte record (the
+ * offset, a reserved word of 0, SEEK_SET) and no output, then the position query 0x01020004 with
+ * no input and an 8-byte output preset to a sentinel. The seek returned 0x80010005, 0 and
+ * 0x80010005 (range-checked at the size, inclusive), and every position query returned 0 and
+ * wrote only the low out word.
+ *
+ * Here the production path makes the same calls in the same order on the selftest's synthetic
+ * disc, whose UMD_DATA.BIN is 2048 bytes, each through sr_syscall. The probe also records the
+ * low out word and the SEEK_CUR position, but the public summary publishes neither value, so the
+ * positions below (8 after a refused seek, the size after the accepted one) are runtime checks,
+ * not measured cells. The Memory Stick commands of the same record are the io-seek-ms-ioctl-*
+ * part of test_io_memory_stick_cells_through_syscall. */
+#define NID_IO_IOCTL_DISC0       0x63632449u
+#define IOCTL_DISC0_SEEK         0x01010005u
+#define IOCTL_DISC0_GETPOS       0x01020004u
+#define IOCTL_DISC0_PRE          8u
+#define IOCTL_DISC0_SENTINEL     0xa5a5a5a5u
+#define IOCTL_DISC0_OUT_OF_RANGE 0x80010005u
+
+static void test_io_ioctl_disc0_seek_range_and_position(void) {
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    s_umd_io_synthetic_enabled = 1;
+    const uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, "disc0:/UMD_DATA.BIN", 0x0001u);  /* RDONLY */
+    uint32_t high = 0xdeadbeefu;
+    const uint32_t size = fd >= 3u && fd < 64u ? ms_cell_seek64(fd, 0, 2u, &high) : 0u;
+    expect(fd >= 3u && fd < 64u && size == 2048u && high == 0u,
+           "disc0 ioctl: disc0:/UMD_DATA.BIN opens read-only and SEEK_END gives its size");
+    if (fd < 3u || fd >= 64u) {
+        s_umd_io_synthetic_enabled = 0;
+        return;
+    }
+    static const struct {
+        int64_t target;
+        uint32_t seek_result;
+        const char *what;
+    } rows[] = {
+        {-1, IOCTL_DISC0_OUT_OF_RANGE,
+         "io-seek-umd-ioctl-neg1: the ioctl seek to -1 returns 0x80010005"},
+        {2048, 0u, "io-seek-umd-ioctl-size: the ioctl seek to the size returns 0"},
+        {2049, IOCTL_DISC0_OUT_OF_RANGE,
+         "io-seek-umd-ioctl-size1: the ioctl seek to the size + 1 returns 0x80010005"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        CpuState cpu;
+        expect(ms_cell_seek64(fd, IOCTL_DISC0_PRE, 0u, &high) == IOCTL_DISC0_PRE && high == 0u,
+               "disc0 ioctl: each row starts from a position of 8");
+        MEM_W32(MS_CELL_IOCTL_IN, (uint32_t)((uint64_t)rows[i].target & 0xffffffffu));
+        MEM_W32(MS_CELL_IOCTL_IN + 4u, (uint32_t)((uint64_t)rows[i].target >> 32));
+        MEM_W32(MS_CELL_IOCTL_IN + 8u, 0u);    /* reserved */
+        MEM_W32(MS_CELL_IOCTL_IN + 12u, 0u);   /* SEEK_SET */
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = fd; cpu.r[5] = IOCTL_DISC0_SEEK; cpu.r[6] = MS_CELL_IOCTL_IN; cpu.r[7] = 16u;
+        cpu.r[8] = 0u; cpu.r[9] = 0u;
+        const uint32_t seek = sr_syscall(&cpu, NID_IO_IOCTL_DISC0);
+        expect(seek == rows[i].seek_result, rows[i].what);
+
+        MEM_W32(MS_CELL_IOCTL_OUT, IOCTL_DISC0_SENTINEL);
+        MEM_W32(MS_CELL_IOCTL_OUT + 4u, IOCTL_DISC0_SENTINEL);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = fd; cpu.r[5] = IOCTL_DISC0_GETPOS; cpu.r[6] = 0u; cpu.r[7] = 0u;
+        cpu.r[8] = MS_CELL_IOCTL_OUT; cpu.r[9] = 8u;
+        const uint32_t getpos = sr_syscall(&cpu, NID_IO_IOCTL_DISC0);
+        expect(getpos == 0u && MEM_R32(MS_CELL_IOCTL_OUT + 4u) == IOCTL_DISC0_SENTINEL,
+               "disc0 ioctl: the position query returns 0 and writes only the low out word "
+               "(PSP-HLE-IO-SEEK-001 io-seek-umd-*)");
+        const uint32_t position = rows[i].seek_result == 0u ? 2048u : IOCTL_DISC0_PRE;
+        expect(MEM_R32(MS_CELL_IOCTL_OUT) == position &&
+                   ms_cell_seek64(fd, 0, 1u, &high) == position && high == 0u,
+               "disc0 ioctl: the low out word and SEEK_CUR read the position: 8 after a refused "
+               "seek, the size after the accepted one (runtime check, not a published value)");
+    }
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u, "disc0 ioctl: the disc0: file closes");
+    s_umd_io_synthetic_enabled = 0;
+}
+
 /* sceIoAssign / sceIoUnassign through the production syscall path. WipEout Pure's Memory
  * Stick insert handler assigns "fatms0:" to "msstor0p1:" through "fatms0:" read/write, and
  * its eject handler unassigns it; before these handlers both NIDs were unregistered and the
@@ -6041,6 +6205,7 @@ static void test_fd_namespace(void) {
     test_io_async_and_path_imports();
     test_io_assign_through_syscall();
     test_io_memory_stick_cells_through_syscall();
+    test_io_ioctl_disc0_seek_range_and_position();
     test_io_open_async_notifies_later_callback();
     test_io_enhancement_data_file();
     test_data_guest_key_keeps_sjis_pairs();
@@ -8441,6 +8606,39 @@ static void test_console_profile_identity(void) {
     sysreg_restart();
 }
 
+/* sceWlanGetSwitchState (0xd7763699) and sceWlanDevIsPowerOn (0x93440b11), the one handler
+ * h_WlanOn: the wlan-state cell of PSP-KERNEL-SEM-001 (#2807). The record (docs/HARDWARE_ORACLE.md,
+ * case kernel-semantics: a PSP-3000 on system software 6.61 with ARK-5.1.0, PSPLink 3.2.1, boot 84,
+ * game context, one acceptance-eligible launch of the probe built from 0c3cf0da, 2026-10-31) calls
+ * sceWlanGetSwitchState and then sceWlanDevIsPowerOn, neither with an argument, and records both
+ * results: each answered 1 with the console's WLAN switch on.
+ *
+ * Here the production path makes the same two calls in the same order through sr_syscall, with no
+ * registry overlay present, so the console profile is the default one, whose switch is on. The
+ * answer with the switch off is not in the record: the runtime takes it from the profile's
+ * "wlan_switch" setting for both calls (test_console_profile_identity), unmeasured. */
+#define NID_WLAN_GET_SWITCH_STATE 0xd7763699u
+#define NID_WLAN_DEV_IS_POWER_ON  0x93440b11u
+
+static void test_wlan_state_with_the_switch_on(void) {
+    reset_fixture();
+    sr_hle_init();
+    sysreg_scratch_clean();
+    sysreg_env(SYSREG_SCRATCH_FILE);
+    sysreg_restart();
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    const uint32_t switch_state = sr_syscall(&cpu, NID_WLAN_GET_SWITCH_STATE);
+    memset(&cpu, 0, sizeof(cpu));
+    const uint32_t power_on = sr_syscall(&cpu, NID_WLAN_DEV_IS_POWER_ON);
+    expect(switch_state == 1u,
+           "wlan-state: sceWlanGetSwitchState() returns 1 with the switch on (PSP-KERNEL-SEM-001)");
+    expect(power_on == 1u,
+           "wlan-state: sceWlanDevIsPowerOn() then returns 1 with the switch on (PSP-KERNEL-SEM-001)");
+    sysreg_scratch_clean();   /* the process-wide scratch overlay main() set stays selected */
+    sysreg_restart();
+}
+
 /* Read model against the tree measured on PSP-3000 6.6.1 (2026-10-09, read-only enumeration):
  * handle lifecycle, typed key info, the measured names, types, sizes and listing order, value
  * copies, the measured not-found and bad-handle codes, create-on-open, bad spans and short
@@ -9504,6 +9702,222 @@ static uint32_t net_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, ui
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3; cpu.r[8] = t0;
     return sr_syscall(&cpu, nid);
+}
+
+/* #2968: only the public offline lifecycle is modelled. All cells go
+ * through the dispatcher, including the two spellings of utility IO. */
+static void test_net_inet_lifecycle_without_network(int stop_at_socket) {
+    enum {
+        NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
+        NID_INET_INIT = 0x17943399u, NID_INET_TERM = 0xa9ed66b9u,
+        NID_INET_SOCKET = 0x8b7b220fu,
+        NID_LOAD_NET = 0x1579a159u, NID_UNLOAD_NET = 0x64d50c56u,
+        NID_LOAD_MODULE = 0x2a2b3de0u, NID_UNLOAD_MODULE = 0xe49bfe92u,
+        NET_COMMON = 1u, NET_INET = 3u, MODULE_INET = 0x102u,
+    };
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_net_inited(void);
+    extern uint32_t sr_hle_test_net_pool_uid(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    sr_hle_init();
+    const int init_registered = sr_hle_test_is_registered(NID_INET_INIT);
+    const int term_registered = sr_hle_test_is_registered(NID_INET_TERM);
+    expect(init_registered, "Inet lifecycle registers the fresh Init NID");
+    expect(term_registered, "Inet lifecycle registers the active Term NID");
+    expect(!sr_hle_test_is_registered(NID_INET_SOCKET), "Inet lifecycle leaves sceNetInetSocket unsupported");
+    if (!init_registered || !term_registered) return;
+
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_loadexec_reset_guest_state();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u,
+           "Inet lifecycle: early Term stops by name");
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 2u,
+           "Inet lifecycle: Init without setup stops by name");
+    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+               net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "Inet lifecycle: starting core Net supplies its pool");
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Inet lifecycle: loading INET is still needed after core Net starts");
+    expect(net_call(NID_LOAD_MODULE, MODULE_INET, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: generic utility loading shares the legacy INET state");
+    const uint32_t pool = sr_hle_test_net_pool_uid();
+    const int inet_started = net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u;
+    expect(inet_started && sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: fresh Init returns zero and preserves the core allocator");
+    if (stop_at_socket) {
+        /* The child must use the normal named-stop path. Never invoke a socket
+         * handler if a future change registers one for this NID. */
+        if (inet_started && !sr_hle_test_is_registered(NID_INET_SOCKET)) {
+            sr_sched_on = 1;
+            (void)net_call(NID_INET_SOCKET, 2u, 2u, 0, 0, 0);
+        }
+        return;
+    }
+    expect(net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 4u,
+           "Inet lifecycle: duplicate Inet Init stops by name");
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 5u &&
+               sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: early core Term leaves the pool and active Inet alone");
+    expect(net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) ==
+               SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 6u &&
+               sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: core re-Init while Inet is live preserves the pool");
+    expect(net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               net_call(NID_UNLOAD_MODULE, MODULE_INET, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 8u,
+           "Inet lifecycle: utility unloads cannot remove the active modules");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Inet lifecycle: active Inet Term returns zero and leaves core Net alive");
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: core Net Term and both unloads work after Inet Term");
+
+    expect(net_call(NID_LOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u &&
+               net_call(NID_LOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 9u,
+           "Inet lifecycle: loaded modules do not substitute for core Net initialization");
+    expect(net_call(NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               net_call(NID_INET_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Inet lifecycle: a new ordinary setup after teardown succeeds");
+    sr_hle_loadexec_reset_guest_state();
+    expect(!sr_hle_test_net_inited() &&
+               net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 10u,
+           "Inet lifecycle: the LoadExec reset clears active Inet as well as core Net");
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+static int resolver_test_start_inet_stack(void) {
+    return net_call(0x1579a159u /* LoadNetModule */, 1u /* COMMON */, 0, 0, 0, 0) == 0u &&
+           net_call(0x1579a159u /* LoadNetModule */, 3u /* INET */, 0, 0, 0, 0) == 0u &&
+           net_call(0x39af39a6u /* NetInit */, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           net_call(0x17943399u /* InetInit */, 0, 0, 0, 0, 0) == 0u;
+}
+
+/* #2999: exercise local lifecycle, including the reference-derived initial cell without the
+ * prior object operations in the PSP test. Parent and LoadExec reset cases verify runtime scope. */
+static void test_net_resolver_lifecycle_without_network(int stop_at_lookup) {
+    enum {
+        NID_NET_TERM = 0x281928a9u, NID_INET_TERM = 0xa9ed66b9u,
+        NID_RESOLVER_INIT = 0xf3370e61u, NID_RESOLVER_TERM = 0x6138194au,
+        NID_RESOLVER_CREATE = 0x244172afu, NID_RESOLVER_LOOKUP = 0x224c5f44u,
+        NID_UNLOAD_NET = 0x64d50c56u,
+        NET_COMMON = 1u, NET_INET = 3u,
+    };
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_net_inited(void);
+    extern uint32_t sr_hle_test_net_pool_uid(void);
+    const int initial_failures = s_failures;
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    sr_hle_init();
+    const int init_registered = sr_hle_test_is_registered(NID_RESOLVER_INIT);
+    const int term_registered = sr_hle_test_is_registered(NID_RESOLVER_TERM);
+    const int lookup_registered = sr_hle_test_is_registered(NID_RESOLVER_LOOKUP);
+    expect(init_registered, "Resolver lifecycle registers the Init NID");
+    expect(term_registered, "Resolver lifecycle registers the Term NID");
+    expect(!sr_hle_test_is_registered(NID_RESOLVER_CREATE) && !lookup_registered,
+           "Resolver lifecycle leaves object creation and lookup unregistered");
+    if (!init_registered || !term_registered) return;
+
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_loadexec_reset_guest_state();
+    sysreg_scratch_clean();
+    sysreg_restart();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u,
+           "Resolver lifecycle: Init before Inet was started stops by name");
+    const int inet_ready = resolver_test_start_inet_stack();
+    expect(inet_ready, "Resolver lifecycle: normal offline utility, Net and Inet startup");
+    const uint32_t pool = sr_hle_test_net_pool_uid();
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 2u,
+           "Resolver lifecycle: Term before successful Init stops by name");
+
+    static const char wlan_off[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, "
+        "\"categories\": [], \"keys\": [], \"console\": {\"wlan_mac_hex\": \"00a1b2c3d4e5\", "
+        "\"open_psid_hex\": \"00112233445566778899aabbccddeeff\", \"wlan_switch\": 0}}";
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, wlan_off, sizeof(wlan_off) - 1u),
+           "Resolver lifecycle: create the synthetic WLAN-off profile");
+    sysreg_restart();
+    expect(profile_call(0xd7763699u, 0u) == 0u &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Resolver lifecycle: the unmeasured WLAN-off cell stops by name");
+    sysreg_scratch_clean();
+    sysreg_restart();
+
+    const int resolver_ready = net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u;
+    expect(resolver_ready && sr_hle_test_net_inited() && sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: initial Init without prior object operations preserves the Net pool");
+    if (stop_at_lookup) {
+        /* Never exercise a lookup if a future change registers this import. */
+        if (inet_ready && resolver_ready && !lookup_registered && s_failures == initial_failures) {
+            sr_sched_on = 1;
+            (void)net_call(NID_RESOLVER_LOOKUP, 0, 0, 0, 0, 0);
+        }
+        return;
+    }
+    FILE *duplicate_capture;
+    int duplicate_fd;
+    char duplicate_log[512] = {0};
+    const int duplicate_capturing = hle_data_stderr_capture_begin(&duplicate_capture, &duplicate_fd);
+    const uint32_t duplicate_result = net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0);
+    if (duplicate_capturing)
+        hle_data_stderr_capture_end(duplicate_capture, duplicate_fd, duplicate_log, sizeof(duplicate_log));
+    expect(duplicate_result == 0x80000020u && sr_hle_test_unmodelled_stops() == stops + 3u,
+           "Resolver lifecycle: duplicate Init returns the observed error without a stop");
+    expect(duplicate_capturing &&
+               strstr(duplicate_log, "HLE: sceNetResolverInit (NID 0xf3370e61): "
+                                     "duplicate Init returns 0x80000020 (already initialized)") != NULL,
+           "Resolver lifecycle: duplicate Init visibly reports its modeled error");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 4u && sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: Inet cannot tear down while Resolver is active");
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == 0u &&
+               sr_hle_test_net_pool_uid() == pool,
+           "Resolver lifecycle: first and repeated Term return zero and leave core Net alive");
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 5u,
+           "Resolver lifecycle: the unmeasured re-init order stops by name");
+    expect(net_call(NID_INET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_INET, 0, 0, 0, 0) == 0u &&
+               net_call(NID_UNLOAD_NET, NET_COMMON, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: normal Inet and core teardown follows Resolver Term");
+    expect(resolver_test_start_inet_stack(), "Resolver lifecycle: the parent Inet stack can start again");
+    expect(net_call(NID_RESOLVER_TERM, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 6u,
+           "Resolver lifecycle: repeat Term does not carry into the rebuilt Inet stack");
+    expect(net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 7u,
+           "Resolver lifecycle: re-init in a later Inet lifetime stops by name");
+    sr_hle_loadexec_reset_guest_state();
+    expect(resolver_test_start_inet_stack() &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: the new program can Init after a terminated predecessor");
+    sr_hle_loadexec_reset_guest_state();
+    expect(resolver_test_start_inet_stack() &&
+               net_call(NID_RESOLVER_INIT, 0, 0, 0, 0, 0) == 0u,
+           "Resolver lifecycle: the new program can Init after an active predecessor");
+    sr_hle_loadexec_reset_guest_state();
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
 }
 
 static void test_net_core_without_network(void) {
@@ -11726,21 +12140,73 @@ static int adh_p2_recv_exact(adh_p2_sock_t s, void *buf, size_t n) {
     return 0;
 }
 
+/* A synthetic peer that answers after the guest has given up and closed its sockets gets an
+ * error back, not a SIGPIPE that ends the whole selftest run. */
+#ifdef MSG_NOSIGNAL
+#define ADH_P2_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define ADH_P2_SEND_FLAGS 0
+#endif
+
 static int adh_p2_send_all(adh_p2_sock_t s, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t sent = 0u;
     while (sent < n) {
-        int r = send(s, (const char *)(p + sent), (int)(n - sent), 0);
+        int r = send(s, (const char *)(p + sent), (int)(n - sent), ADH_P2_SEND_FLAGS);
         if (r <= 0) return -1;
         sent += (size_t)r;
     }
     return 0;
 }
 
+extern uint64_t sr_host_monotonic_ms(void);
+
+/* How far a synthetic real-TCP peer thread has got. Each stage is set after the bytes it names
+ * have been read or sent, so a guest that sees it can count on them being on the socket. */
+enum {
+    ADH_P2_PEER_WAITING,
+    ADH_P2_PEER_READ_CREATE,   /* read LOGIN and the Create (lobby CONNECT) frame */
+    ADH_P2_PEER_LOBBY_REPLIED, /* sent its lobby answer to that Create */
+    ADH_P2_PEER_DATA_REPLIED   /* answered the guest's PDP datagram */
+};
+
+enum {
+    ADH_P2_PEER_WAIT_MS = 5000,
+    ADH_P2_PEER_GUEST_STEP_US = 1000,
+    ADH_P2_PEER_GUEST_BUDGET_US = 500000 /* a tenth of the 5 s online request timeout */
+};
+
+/* Waits for a synthetic peer thread to reach `want` (#2996, #3042); `stage` only grows, so it may
+ * be a stage or a count of answers. The peer runs in host time, while
+ * guest time moves only when the guest delays, so a guest polling loop alone can use up a guest
+ * deadline (the 5 s online request timeout) before the peer's thread has run at all. Here the
+ * guest delays between host sleeps only until ADH_P2_PEER_GUEST_BUDGET_US of guest time has
+ * passed, which lets its pumps connect and send what the peer is waiting for; after that guest
+ * time holds still while the peer catches up. The wait ends after ADH_P2_PEER_WAIT_MS of host
+ * time, and the caller reports that as a fixture failure. */
+static bool adh_p2_wait_peer(CpuState *cpu, atomic_int *stage, int want) {
+    const uint64_t deadline = sr_host_monotonic_ms() + (uint64_t)ADH_P2_PEER_WAIT_MS;
+    const uint64_t guest_until = sched_vtime_us() + (uint64_t)ADH_P2_PEER_GUEST_BUDGET_US;
+    while (atomic_load(stage) < want) {
+        if (sr_host_monotonic_ms() >= deadline) return false;
+        if (sched_vtime_us() < guest_until) {
+            cpu->r[4] = ADH_P2_PEER_GUEST_STEP_US;
+            (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        }
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000ul);
+#endif
+    }
+    return true;
+}
+
 typedef struct {
     adh_p2_sock_t lsn;
     volatile int stop;
     int got_pdp_ping;
+    atomic_int stage; /* ADH_P2_PEER_* */
 } AdhP2TcpServer;
 
 #ifdef _WIN32
@@ -11763,6 +12229,7 @@ static void *adh_p2_tcp_server_thread(void *arg) {
                 if (op == 2u) {
                     uint8_t grp[8];
                     if (adh_p2_recv_exact(lobby, grp, 8u) != 0) break;
+                    atomic_store(&srv->stage, ADH_P2_PEER_READ_CREATE);
                     uint8_t bssid_pkt[7] = {6u, peer_mac[0], peer_mac[1], peer_mac[2],
                                             peer_mac[3], peer_mac[4], peer_mac[5]};
                     uint8_t conn_pkt[139];
@@ -11771,8 +12238,9 @@ static void *adh_p2_tcp_server_thread(void *arg) {
                     memcpy(conn_pkt + 1, "LoopPeer", 8u);
                     memcpy(conn_pkt + 129, peer_mac, 6u);
                     conn_pkt[135] = 7u;
-                    (void)adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt));
-                    (void)adh_p2_send_all(lobby, conn_pkt, sizeof(conn_pkt));
+                    if (adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt)) == 0 &&
+                        adh_p2_send_all(lobby, conn_pkt, sizeof(conn_pkt)) == 0)
+                        atomic_store(&srv->stage, ADH_P2_PEER_LOBBY_REPLIED);
                     data = accept(srv->lsn, NULL, NULL);
                     if (data != ADH_P2_BAD_SOCK) {
                         uint8_t init[24], hdr[14], pay[64];
@@ -11791,7 +12259,8 @@ static void *adh_p2_tcp_server_thread(void *arg) {
                                 rep[9] = hdr[9];
                                 rep[10] = 6u;
                                 memcpy(rep + 14, "TCP_OK", 6u);
-                                (void)adh_p2_send_all(data, rep, sizeof(rep));
+                                if (adh_p2_send_all(data, rep, sizeof(rep)) == 0)
+                                    atomic_store(&srv->stage, ADH_P2_PEER_DATA_REPLIED);
                             }
                         }
                         /* Keep data socket alive briefly until lobby closes. */
@@ -11813,12 +12282,16 @@ static void *adh_p2_tcp_server_thread(void *arg) {
 }
 
 static int s_adh_p2_tcp_done;
+static AdhP2TcpServer *s_adh_p2_tcp_srv;
 
 static void adh_p2_tcp_main_fn(CpuState *cpu) {
+    char msg[192];
     const uint8_t peer_mac[6] = {0x02u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
     const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    atomic_int *peer_stage = &s_adh_p2_tcp_srv->stage;
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
     expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
            adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
            adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
@@ -11826,8 +12299,27 @@ static void adh_p2_tcp_main_fn(CpuState *cpu) {
            "adhoc tcp loopback: Net/Adhocctl init succeed");
     expect(adh(ADH_NID_CREATE, adh_name(0, "LOOPGRP"), 0u, 0u) == 0u,
            "adhoc tcp loopback: Create starts");
+    /* The answer is waited for mostly in host time, so the Create's 5 s guest deadline cannot pass
+     * while the peer's thread is late. */
+    const bool lobby_answered = adh_p2_wait_peer(cpu, peer_stage, ADH_P2_PEER_LOBBY_REPLIED);
+    snprintf(msg, sizeof(msg),
+             "adhoc tcp loopback: fixture peer answered LOGIN and Create within %d ms (stage=%d)",
+             ADH_P2_PEER_WAIT_MS, atomic_load(peer_stage));
+    expect(lobby_answered, msg);
+    if (!lobby_answered) {
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
+    }
     adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u, "adhoc tcp loopback: reaches CONNECTED state");
+    snprintf(msg, sizeof(msg),
+             "adhoc tcp loopback: reaches CONNECTED state with one CONNECT callback "
+             "(state=%u events=%u ev=%d err=0x%08x)",
+             adh_state(), s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u);
+    expect(adh_state() == 1u && s_adh_events == 1u && ADH_AT(0).event == 1 &&
+               ADH_AT(0).error == 0u,
+           msg);
     MEM_W32(ADH_P2_LEN, 256u);
     for (int w = 0; w < 40; w++) {
         MEM_W32(ADH_P2_LEN, 256u);
@@ -11847,8 +12339,13 @@ static void adh_p2_tcp_main_fn(CpuState *cpu) {
     expect(adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp, ADH_P2_PEER_MAC,
                          0x3100u, ADH_P2_BUF, 6u, 0u, 0u, 0u) == 0u,
            "adhoc tcp loopback: PdpSend sends TCP_GO");
+    const bool data_answered = adh_p2_wait_peer(cpu, peer_stage, ADH_P2_PEER_DATA_REPLIED);
+    snprintf(msg, sizeof(msg),
+             "adhoc tcp loopback: fixture peer answered TCP_GO within %d ms (stage=%d)",
+             ADH_P2_PEER_WAIT_MS, atomic_load(peer_stage));
+    expect(data_answered, msg);
     uint32_t rrc = 1u;
-    for (int w = 0; w < 40; w++) {
+    for (int w = 0; data_answered && w < 40; w++) {
         MEM_W32(ADH_P2_LEN, 64u);
         rrc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp,
                             ADH_P2_BUF + 64u, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u, 0u);
@@ -11890,7 +12387,8 @@ static void test_adhoc_online_real_tcp_loopback_e2e(void) {
     char srv_spec[64];
     snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u", port, port);
 
-    AdhP2TcpServer srv = {lsn, 0, 0};
+    AdhP2TcpServer srv = {lsn, 0, 0, ADH_P2_PEER_WAITING};
+    s_adh_p2_tcp_srv = &srv;
 #ifdef _WIN32
     uintptr_t th = _beginthreadex(NULL, 0, adh_p2_tcp_server_thread, &srv, 0, NULL);
     expect(th != 0u, "adhoc tcp loopback: server thread started");
@@ -11922,6 +12420,7 @@ static void test_adhoc_online_real_tcp_loopback_e2e(void) {
 #else
     if (pt_ok) pthread_join(th, NULL);
 #endif
+    s_adh_p2_tcp_srv = NULL;
 }
 
 /* ---- D2 & D12.{2,3,4,5} regressions -------------------------------------------------------- */
@@ -11942,11 +12441,16 @@ static void d12_match_cb_fn(CpuState *cpu) {
     cpu->r[2] = 0u;
 }
 
+/* The guest asks for the unsolicited packet with one byte on the trigger socket. The peer answers
+ * with one byte, and only after the whole packet has gone onto the lobby socket. */
+enum { D122_TRIG_REQUEST = 'T', D122_TRIG_ACK = 'A' };
+
 typedef struct {
     adh_p2_sock_t lsn;
     adh_p2_sock_t trig_lsn;
     volatile int stop;
-    volatile int sent_unsolicited;
+    atomic_int sent_unsolicited; /* 1 once the whole SCAN_COMPLETE is on the lobby socket */
+    atomic_int stage; /* ADH_P2_PEER_* */
 } D122TcpServer;
 
 #ifdef _WIN32
@@ -11968,16 +12472,23 @@ static void *d122_tcp_server_thread(void *arg) {
                 if (op == 2u) {
                     uint8_t grp[8];
                     if (adh_p2_recv_exact(lobby, grp, 8u) != 0) break;
+                    atomic_store(&srv->stage, ADH_P2_PEER_READ_CREATE);
                     uint8_t bssid_pkt[7] = {6u, bssid[0], bssid[1], bssid[2],
                                             bssid[3], bssid[4], bssid[5]};
-                    (void)adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt));
+                    if (adh_p2_send_all(lobby, bssid_pkt, sizeof(bssid_pkt)) == 0)
+                        atomic_store(&srv->stage, ADH_P2_PEER_LOBBY_REPLIED);
                     adh_p2_sock_t trig = accept(srv->trig_lsn, NULL, NULL);
                     if (trig != ADH_P2_BAD_SOCK) {
                         const uint8_t scan_done = 5u; /* NK_LOBBY_SCAN_COMPLETE */
-                        const uint8_t ack = 'A';
-                        (void)adh_p2_send_all(lobby, &scan_done, 1u);
-                        srv->sent_unsolicited = 1;
-                        (void)adh_p2_send_all(trig, &ack, 1u);
+                        const uint8_t ack = D122_TRIG_ACK;
+                        uint8_t req = 0u;
+                        /* Without the request, or with a packet that did not go out whole, nothing
+                         * is counted or acknowledged: the guest reads the end of the socket. */
+                        if (adh_p2_recv_exact(trig, &req, 1u) == 0 && req == D122_TRIG_REQUEST &&
+                            adh_p2_send_all(lobby, &scan_done, 1u) == 0) {
+                            atomic_store(&srv->sent_unsolicited, 1);
+                            (void)adh_p2_send_all(trig, &ack, 1u);
+                        }
                         adh_p2_close_sock(trig);
                     }
                     uint8_t drain[16];
@@ -12007,9 +12518,29 @@ static void d122_main_fn(CpuState *cpu) {
            adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
            "d12.2: init");
     expect(adh(ADH_NID_CREATE, adh_name(0, "GRP122"), 0u, 0u) == 0u, "d12.2: Create starts");
-    adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u && s_adh_events == 1u, "d12.2: connected in GRP122");
-    /* Poke trigger socket so server immediately sends unsolicited SCAN_COMPLETE while in state 1. */
+    /* As in the loopback cell (#2996): the BSSID answer is waited for mostly in host time, so the
+     * Create's 5 s guest deadline cannot pass while the peer's thread is late. */
+    atomic_int *peer_stage = &s_d122_srv->stage;
+    const bool lobby_answered = adh_p2_wait_peer(cpu, peer_stage, ADH_P2_PEER_LOBBY_REPLIED);
+    char d122_msg[160];
+    snprintf(d122_msg, sizeof(d122_msg),
+             "d12.2: fixture peer answered LOGIN and Create within %d ms (stage=%d)",
+             ADH_P2_PEER_WAIT_MS, atomic_load(peer_stage));
+    expect(lobby_answered, d122_msg);
+    if (lobby_answered) adh_p2_wait_state(cpu, 1u, 1u);
+    const bool connected = adh_state() == 1u && s_adh_events == 1u && ADH_AT(0).event == 1;
+    expect(connected, "d12.2: connected in GRP122");
+    if (!connected) {
+        /* The unsolicited scan answer is only meaningful in the group: leave it unsent. The peer's
+         * thread leaves its wait for the trigger when the listener closes. */
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
+    }
+    /* Ask on the trigger socket for the unsolicited SCAN_COMPLETE while in state 1. The server
+     * acknowledges only after the whole packet is on the lobby socket. */
+    int trig_connect = -1, trig_send = -1, trig_recv = -1;
+    uint8_t trig_ack = 0u;
     adh_p2_sock_t poke = socket(AF_INET, SOCK_STREAM, 0);
     if (poke != ADH_P2_BAD_SOCK) {
         struct sockaddr_in ta;
@@ -12017,22 +12548,37 @@ static void d122_main_fn(CpuState *cpu) {
         ta.sin_family = AF_INET;
         ta.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         ta.sin_port = htons(s_d122_trig_port);
-        if (connect(poke, (struct sockaddr *)&ta, sizeof(ta)) == 0) {
-            uint8_t ack = 0u;
-            (void)adh_p2_recv_exact(poke, &ack, 1u);
+        trig_connect = connect(poke, (struct sockaddr *)&ta, sizeof(ta));
+        if (trig_connect == 0) {
+            const uint8_t req = D122_TRIG_REQUEST;
+            trig_send = adh_p2_send_all(poke, &req, 1u);
+            if (trig_send == 0) trig_recv = adh_p2_recv_exact(poke, &trig_ack, 1u);
         }
         adh_p2_close_sock(poke);
+    }
+    const int sent_unsolicited = atomic_load(&s_d122_srv->sent_unsolicited);
+    const bool triggered = trig_connect == 0 && trig_send == 0 && trig_recv == 0 &&
+                           trig_ack == D122_TRIG_ACK && sent_unsolicited == 1;
+    snprintf(d122_msg, sizeof(d122_msg),
+             "d12.2: fixture peer took the trigger and sent the whole SCAN_COMPLETE "
+             "(connect=%d send=%d recv=%d ack=0x%02x sent=%d)",
+             trig_connect, trig_send, trig_recv, trig_ack, sent_unsolicited);
+    expect(triggered, d122_msg);
+    if (!triggered) {
+        /* An unchanged guest says nothing about a packet that was not sent: leave it unjudged. */
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
     }
     for (int w = 0; w < 20; w++) {
         cpu->r[4] = 20000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
         if (adh_state() != 1u || s_adh_events != 1u) break;
     }
-    char d122_msg[160];
     snprintf(d122_msg, sizeof(d122_msg),
              "d12.2: unsolicited SCAN_COMPLETE while in group keeps state 1 and fires no event "
              "(state=%u events=%u)", adh_state(), s_adh_events);
-    expect(s_d122_srv->sent_unsolicited == 1 && adh_state() == 1u && s_adh_events == 1u, d122_msg);
+    expect(adh_state() == 1u && s_adh_events == 1u, d122_msg);
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
            "d12.2: teardown");
@@ -12208,7 +12754,7 @@ static void test_adhoc_d2_d12_regressions(void) {
         expect(bind_ok, "d12.2: bound 127.0.0.1:0");
         if (bind_ok) {
             s_d122_trig_port = ntohs(tsa.sin_port);
-            D122TcpServer srv = {lsn, trig, 0, 0};
+            D122TcpServer srv = {lsn, trig, 0, 0, ADH_P2_PEER_WAITING};
             s_d122_srv = &srv;
 #ifdef _WIN32
             uintptr_t th = _beginthreadex(NULL, 0, d122_tcp_server_thread, &srv, 0, NULL);
@@ -12732,8 +13278,11 @@ typedef struct {
     int group_exists;
     uint8_t active_group[8], group_bssid[6];
     volatile int stop, running;
-    volatile int drop_lobby_on_connect;
-    volatile int drop_lobby_mid_session;
+    atomic_int drop_lobby_on_connect;
+    atomic_int drop_lobby_mid_session;
+    /* Progress the guest waits for in host time (#3042), counted once the frames are sent. */
+    atomic_int joins_answered;    /* group joins answered with their BSSID */
+    atomic_int mid_session_drops; /* pump passes that closed every in-group lobby connection */
     volatile int silent_lobby;
     volatile int hold_connect_reply; /* joins the group but keeps the members and the BSSID back */
     volatile int inject_late_reply;  /* sends a member and a BSSID to a logged-in client once */
@@ -12772,13 +13321,17 @@ static void mr_nonblock(adh_p2_sock_t s) {
     int nd = 1;
     (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof(nd));
 }
-static void mr_send(adh_p2_sock_t fd, const void *buf, size_t n) {
+/* Returns whether all of `buf` was sent. ADH_P2_SEND_FLAGS (MSG_NOSIGNAL where it exists) turns
+ * an answer to a client that has already closed its socket into a failed send, not a SIGPIPE
+ * that ends the whole run. */
+static bool mr_send(adh_p2_sock_t fd, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t sent = 0u;
     for (int tries = 0; sent < n && tries < 2000; tries++) {
-        int r = send(fd, (const char *)(p + sent), (int)(n - sent), 0);
+        int r = send(fd, (const char *)(p + sent), (int)(n - sent), ADH_P2_SEND_FLAGS);
         if (r > 0) sent += (size_t)r;
     }
+    return sent == n;
 }
 /* The answer to a join the client no longer waits for: a member called Ghost, then a BSSID
  * (02:00:00:00:00:66) that is not the test group's (02:00:00:00:00:77). */
@@ -12821,11 +13374,15 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
         }
         if (!placed) adh_p2_close_sock(c);
     }
+    /* Read once, so that a pass closes all in-group connections or none of them. */
+    const int drop_mid_session = atomic_load(&r->drop_lobby_mid_session);
+    int dropped_mid_session = 0;
     for (int i = 0; i < 6; i++) {
         MiniRelayPeer *p = &r->peers[i];
         if (!p->active) continue;
-        if (r->drop_lobby_mid_session && p->in_group) {
+        if (drop_mid_session && p->in_group) {
             adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
+            dropped_mid_session = 1;
             continue;
         }
         int closed = 0;
@@ -12885,7 +13442,7 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
                 p->in_group = 1;
                 uint8_t bp[7] = {6u, r->group_bssid[0], r->group_bssid[1], r->group_bssid[2],
                                  r->group_bssid[3], r->group_bssid[4], r->group_bssid[5]};
-                mr_send(p->fd, bp, sizeof(bp));
+                if (mr_send(p->fd, bp, sizeof(bp))) atomic_fetch_add(&r->joins_answered, 1);
             } else if (op == 3u) {
                 if (p->in_group) {
                     p->in_group = 0;
@@ -12917,6 +13474,7 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
             adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
         }
     }
+    if (dropped_mid_session) atomic_fetch_add(&r->mid_session_drops, 1);
     for (int i = 0; i < 24; i++) {
         MiniRelayConn *dc = &r->conns[i];
         if (!dc->active) continue;
@@ -13026,6 +13584,10 @@ static void *mr_thread_fn(void *arg) {
 }
 static int mr_start(AdhP2MiniRelay *r) {
     memset(r, 0, sizeof(*r));
+    atomic_init(&r->drop_lobby_on_connect, 0);
+    atomic_init(&r->drop_lobby_mid_session, 0);
+    atomic_init(&r->joins_answered, 0);
+    atomic_init(&r->mid_session_drops, 0);
     r->lobby_lsn = socket(AF_INET, SOCK_STREAM, 0);
     r->data_lsn = socket(AF_INET, SOCK_STREAM, 0);
     if (r->lobby_lsn == ADH_P2_BAD_SOCK || r->data_lsn == ADH_P2_BAD_SOCK) return 0;
@@ -13062,6 +13624,36 @@ static void mr_stop(AdhP2MiniRelay *r) {
     adh_p2_close_sock(r->lobby_lsn); adh_p2_close_sock(r->data_lsn);
     for (int i = 0; i < 6; i++) if (r->peers[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->peers[i].fd);
     for (int i = 0; i < 24; i++) if (r->conns[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->conns[i].fd);
+}
+
+/* Waits until the relay has answered one more group join than `before` (#3042). Polling GetState
+ * alone moves guest time on without letting the relay's thread run: on one CPU, the 4 s of guest
+ * time adh_p2_wait_state allows passed in about a millisecond of host time, before the relay had
+ * read the join. The answer is waited for mostly in host time instead, and a missing one is
+ * reported as a fixture failure for `cell`. */
+static bool mr_wait_join_answered(CpuState *cpu, AdhP2MiniRelay *r, int before, const char *cell) {
+    char msg[160];
+    const bool answered = adh_p2_wait_peer(cpu, &r->joins_answered, before + 1);
+    snprintf(msg, sizeof(msg), "%s: fixture relay answered the group join within %d ms (answers=%d)",
+             cell, ADH_P2_PEER_WAIT_MS, atomic_load(&r->joins_answered) - before);
+    expect(answered, msg);
+    return answered;
+}
+
+/* Has the relay close every in-group lobby connection and waits, mostly in host time, until a pump
+ * pass has done so (#3042). The flag is cleared only after that: cleared on a guest-side deadline,
+ * it could be gone before a late relay thread read it. A drop that does not happen is reported as
+ * a fixture failure for `cell`. */
+static bool mr_drop_lobby_mid_session(CpuState *cpu, AdhP2MiniRelay *r, const char *cell) {
+    char msg[160];
+    const int before = atomic_load(&r->mid_session_drops);
+    atomic_store(&r->drop_lobby_mid_session, 1);
+    const bool dropped = adh_p2_wait_peer(cpu, &r->mid_session_drops, before + 1);
+    atomic_store(&r->drop_lobby_mid_session, 0);
+    snprintf(msg, sizeof(msg), "%s: fixture relay closed the lobby connections within %d ms (passes=%d)",
+             cell, ADH_P2_PEER_WAIT_MS, atomic_load(&r->mid_session_drops) - before);
+    expect(dropped, msg);
+    return dropped;
 }
 
 /* ---- D4 regression: PtpOpen before Peer listens retries cleanly in PtpConnect; self-connect ---- */
@@ -13281,29 +13873,28 @@ static void d3_main_fn(CpuState *cpu) {
     s_adh_events = 0u;
     s_d3_srv->drop_lobby_on_connect = 0;
     s_d3_srv->drop_lobby_mid_session = 0;
+    const int d32_joins = atomic_load(&s_d3_srv->joins_answered);
     expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
            adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
            adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
            adh(ADH_NID_CREATE, adh_name(0, "D3MID01"), 0u, 0u) == 0u, "d3.2: Create");
-    adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u && s_adh_events == 1u, "d3.2: in group D3MID01");
-    s_d3_srv->drop_lobby_mid_session = 1;
-    for (int w = 0; w < 100 && s_adh_events < 2u; w++) {
-#ifdef _WIN32
-        Sleep(1u);
-#else
-        adh_p2_usleep(1000);
-#endif
-        cpu->r[4] = 5000u;
-        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    const bool d32_answered = mr_wait_join_answered(cpu, s_d3_srv, d32_joins, "d3.2");
+    if (d32_answered) adh_p2_wait_state(cpu, 1u, 1u);
+    const bool d32_in_group = d32_answered && adh_state() == 1u && s_adh_events == 1u &&
+                              ADH_AT(0).event == 1 && ADH_AT(0).error == 0u;
+    snprintf(msg, sizeof(msg), "d3.2: in group D3MID01 (state=%u events=%u ev=%d err=0x%08x)",
+             adh_state(), s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u);
+    expect(d32_in_group, msg);
+    if (d32_in_group && mr_drop_lobby_mid_session(cpu, s_d3_srv, "d3.2")) {
+        for (int w = 0; w < 100 && s_adh_events < 2u; w++) d3_step(cpu);
+        snprintf(msg, sizeof(msg),
+                 "d3.2: mid-session lobby drop resets state=0 and fires DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
+                 s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+                 s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state());
+        expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
+               ADH_AT(1).error == 0x80410b09u && adh_state() == 0u, msg);
     }
-    s_d3_srv->drop_lobby_mid_session = 0;
-    snprintf(msg, sizeof(msg),
-             "d3.2: mid-session lobby drop resets state=0 and fires DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
-             s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
-             s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state());
-    expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
-           ADH_AT(1).error == 0x80410b09u && adh_state() == 0u, msg);
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.2: cleanup");
 
@@ -13466,13 +14057,29 @@ static void off_main_fn(CpuState *cpu) {
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
     s_adh_events = 0u;
+    const int joins = atomic_load(&s_off_srv->joins_answered);
     expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
            adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
            adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
            adh(ADH_NID_CREATE, adh_name(0, "OFFGRP1"), 0u, 0u) == 0u, "off: Create");
-    adh_p2_wait_state(cpu, 1u, 1u);
-    expect(adh_state() == 1u && s_adh_events == 1u && off_active_peers() == 1,
-           "off: in group OFFGRP1 with the lobby connected");
+    const bool answered = mr_wait_join_answered(cpu, s_off_srv, joins, "off");
+    if (answered) adh_p2_wait_state(cpu, 1u, 1u);
+    const bool connected = answered && adh_state() == 1u && s_adh_events == 1u &&
+                           ADH_AT(0).event == 1 && ADH_AT(0).error == 0u;
+    const int peers = connected ? off_active_peers() : -1;
+    const bool in_group = connected && peers == 1;
+    snprintf(msg, sizeof(msg),
+             "off: in group OFFGRP1 with the lobby connected "
+             "(answered=%d state=%u events=%u ev=%d err=0x%08x peers=%d)",
+             (int)answered, adh_state(), s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, peers);
+    expect(in_group, msg);
+    if (!in_group) {
+        /* Turning Online play off is checked from a connected group only. */
+        (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+        (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+        return;
+    }
     /* The launcher turns Online play off: it creates the file SR_ADHOC_OFF_FILE names. */
     FILE *marker = fopen(s_off_path, "wb");
     expect(marker != NULL, "off: the marker file is written");
@@ -13564,9 +14171,8 @@ static int offd_guest_conns(const uint8_t peer_mac[6]) {
 }
 
 static void offd_kill_lobby(CpuState *cpu) {
-    s_off_srv->drop_lobby_mid_session = 1;
+    if (!mr_drop_lobby_mid_session(cpu, s_off_srv, "offd")) return;
     for (int w = 0; w < 400 && s_adh_events < 2u; w++) d3_step(cpu);
-    s_off_srv->drop_lobby_mid_session = 0;
 }
 
 static void offd_turn_off(void) {
@@ -13582,25 +14188,44 @@ static void offd_main_fn(CpuState *cpu) {
     NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
     NkAdhocTransport *tp = peer_rc ? nk_relay_client_transport(peer_rc) : NULL;
     const uint8_t grp[8] = {'O', 'F', 'F', 'D', 'A', 'T', '1', 0};
-    expect(tp && tp->ops->login(tp, peer_mac, "OffPeer", "TEST00012") == NK_NET_OK &&
-               tp->ops->connect(tp, grp) == NK_NET_OK,
-           "offd: peer logged into OFFDAT1");
-    if (!tp) {
-        s_offd_done = 1;
-        return;
+    const bool peer_started = tp && tp->ops->login(tp, peer_mac, "OffPeer", "TEST00012") == NK_NET_OK &&
+                              tp->ops->connect(tp, grp) == NK_NET_OK;
+    expect(peer_started, "offd: peer logged into OFFDAT1");
+    if (!peer_started) goto cleanup;
+
+    /* Settle the host peer's one reply before sending the guest Create.
+       Otherwise the drop ACK can refer to the host peer alone. */
+    const uint64_t peer_deadline = sr_host_monotonic_ms() + ADH_P2_PEER_WAIT_MS;
+    while (atomic_load(&s_off_srv->joins_answered) == 0 && sr_host_monotonic_ms() < peer_deadline) {
+        tp->ops->pump(tp);
+        d3_step(cpu);
     }
+    const int peer_joins = atomic_load(&s_off_srv->joins_answered);
+    expect(peer_joins == 1, "offd: fixture relay answered the host peer's group join");
+    if (peer_joins != 1) goto cleanup;
+
     const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '1', '2'};
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
     for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
     s_adh_events = 0u;
-    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
-               adh(ADH_NID_WLAN_ETHER, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
-               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
-               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
-               adh(ADH_NID_CREATE, adh_name(0, "OFFDAT1"), 0u, 0u) == 0u,
-           "offd: guest Create");
+    const bool guest_started =
+        net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+        adh(ADH_NID_WLAN_ETHER, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+        adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+        adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+        adh(ADH_NID_CREATE, adh_name(0, "OFFDAT1"), 0u, 0u) == 0u;
+    expect(guest_started, "offd: guest Create");
+    if (!guest_started || !mr_wait_join_answered(cpu, s_off_srv, peer_joins, "offd")) goto cleanup;
     adh_p2_wait_state(cpu, 1u, 1u);
+    const uint32_t guest_state = adh_state();
+    const bool guest_joined = guest_state == 1u && s_adh_events == 1u &&
+                              ADH_AT(0).event == 1 && ADH_AT(0).error == 0u;
+    snprintf(msg, sizeof(msg), "offd: guest in group OFFDAT1 (state=%u events=%u ev=%d err=0x%08x)",
+             guest_state, s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u);
+    expect(guest_joined, msg);
+    if (!guest_joined) goto cleanup;
     expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "offd: AdhocInit");
 
     if (s_offd_case == 0) {
@@ -13709,7 +14334,12 @@ static void offd_main_fn(CpuState *cpu) {
         /* (c) Lobby lost, then turned off, with no socket open: nothing opens after it. */
         const int peer_lsn = tp->ops->ptp_listen(tp, 0x5301u, 4);
         offd_kill_lobby(cpu);
-        expect(s_adh_events == 2u && adh_state() == 0u, "offd.c: the lobby is lost");
+        const uint32_t state = adh_state();
+        snprintf(msg, sizeof(msg), "offd.c: the lobby is lost (events=%u ev=%d err=0x%08x state=%u)",
+                 s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+                 s_adh_events > 1u ? ADH_AT(1).error : 0u, state);
+        expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
+               ADH_AT(1).error == 0x80410b09u && state == 0u, msg);
         offd_turn_off();
         for (int w = 0; w < 300; w++) d3_step(cpu); /* past the 250 ms between looks */
         const uint32_t pdp = adh_call_full(0x6f92741bu /* PdpCreate */, cpu->r[29], ADH_P2_SELF_MAC,
@@ -13735,7 +14365,8 @@ static void offd_main_fn(CpuState *cpu) {
         if (lsn < 0x80000000u) (void)adh(0x157e6225u /* PtpClose */, lsn, 0u, 0u);
         if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
     }
-    tp->ops->logout(tp);
+cleanup:
+    if (tp) tp->ops->logout(tp);
     nk_relay_client_destroy(peer_rc);
     (void)adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u);
     (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
@@ -13819,30 +14450,69 @@ static void test_adhoc_d3_dead_and_silent_lobby(void) {
 #endif
 }
 
-extern uint64_t sr_host_monotonic_ms(void);
-
 static bool d9_fast_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
     (void)host; (void)ctx;
     out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
     return true;
 }
 
-static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
-    (void)host;
-    int *calls = (int *)ctx;
-    if (calls) (*calls)++;
+enum { D9_SLOW_HELD, D9_SLOW_RELEASED, D9_SLOW_ACKNOWLEDGED, D9_SLOW_TIMED_OUT };
+
+/* A resolver detached during cleanup can outlive the guest fixture frame. */
+static atomic_uint s_d9_slow_calls;
+static atomic_int s_d9_slow_gate;
+
+/* Holds the first lookup until the guest releases the gate. Returns whether it was released;
+ * a lookup still held after 3 s marks the gate timed out instead, so that a guest that never
+ * gets to release it (Init joining the unfinished worker) reports the failure. */
+static bool d9_hold_resolve(void) {
+    if (atomic_fetch_add(&s_d9_slow_calls, 1u) != 0u) return false;
+    const uint64_t deadline = sr_host_monotonic_ms() + 3000u;
+    while (atomic_load(&s_d9_slow_gate) == D9_SLOW_HELD) {
+        if (sr_host_monotonic_ms() >= deadline) {
+            int held = D9_SLOW_HELD;
+            if (atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_TIMED_OUT))
+                return false;
+            break;
+        }
 #ifdef _WIN32
-    Sleep(150u);
+        Sleep(1u);
 #else
-    adh_p2_usleep(150000);
+        adh_p2_usleep(1000u);
 #endif
+    }
+    return atomic_load(&s_d9_slow_gate) == D9_SLOW_RELEASED;
+}
+
+static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host; (void)ctx;
+    if (!d9_hold_resolve()) return false;
     out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
+    atomic_store(&s_d9_slow_gate, D9_SLOW_ACKNOWLEDGED);
     return true;
 }
 
+/* The failing lookup is held the same way (#2995): released at once, it can fail and be pumped
+ * before Create, which then answers 0x80410b09 itself instead of queuing the request whose
+ * DISCONNECT callback D8.3 checks. */
 static bool d9_fail_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
     (void)host; (void)out_ipv4; (void)ctx;
+    if (d9_hold_resolve()) atomic_store(&s_d9_slow_gate, D9_SLOW_ACKNOWLEDGED);
     return false;
+}
+
+/* Waits in host time, without moving guest time, for a released lookup to finish. */
+static bool d9_wait_resolve_acknowledged(void) {
+    const uint64_t deadline = sr_host_monotonic_ms() + 3000u;
+    while (atomic_load(&s_d9_slow_gate) != D9_SLOW_ACKNOWLEDGED) {
+        if (sr_host_monotonic_ms() >= deadline) return false;
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        adh_p2_usleep(1000u);
+#endif
+    }
+    return true;
 }
 
 static AdhP2MiniRelay *s_d89_srv;
@@ -13916,19 +14586,24 @@ static void d89_main_fn(CpuState *cpu) {
            "d9: wrote D9PLAYER overlay");
     sysreg_restart();
 
-    /* D9: 150ms slow DNS must not block sceNetAdhocctlInit on the guest thread. */
-    int resolve_calls = 0;
-    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, &resolve_calls);
+    /* D9: the successful resolver stays unfinished until Init and Create have returned. */
+    atomic_store(&s_d9_slow_calls, 0u);
+    atomic_store(&s_d9_slow_gate, D9_SLOW_HELD);
+    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, NULL);
     const uint64_t t0 = sr_host_monotonic_ms();
     const uint32_t d9_init_rc = adh_init(0x2000u, 0x30u, ADH_ID);
     const uint64_t elapsed = sr_host_monotonic_ms() - t0;
+    const bool create_queued = d9_init_rc == 0u &&
+                               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+                               adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u;
+    /* Release on a failed setup too, without overwriting the watchdog state. */
+    int held = D9_SLOW_HELD;
+    const bool released = atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_RELEASED);
     snprintf(msg, sizeof(msg),
-             "d9: sceNetAdhocctlInit does not block on slow DNS (rc=0x%08x elapsed=%llu ms calls=%d)",
-             d9_init_rc, (unsigned long long)elapsed, resolve_calls);
-    expect(d9_init_rc == 0u && elapsed < 50u, msg);
-    expect(adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
-           adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u,
-           "d9: Create queues while DNS resolves");
+             "d9: Init and Create return before the resolver watchdog (rc=0x%08x elapsed=%llu ms calls=%u gate=%d)",
+             d9_init_rc, (unsigned long long)elapsed, atomic_load(&s_d9_slow_calls), held);
+    expect(d9_init_rc == 0u && released, msg);
+    expect(create_queued, "d9: Create queues while DNS resolves");
     for (int w = 0; w < 120 && (adh_state() != 1u || s_adh_events == 0u); w++) {
 #ifdef _WIN32
         Sleep(5u);
@@ -13938,18 +14613,37 @@ static void d89_main_fn(CpuState *cpu) {
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
     }
-    expect(adh_state() == 1u && s_adh_events == 1u && resolve_calls == 1,
-           "d9: async DNS resolved once and Create connected cleanly");
+    expect(atomic_load(&s_d9_slow_gate) == D9_SLOW_ACKNOWLEDGED,
+           "d9: successful DNS fixture acknowledges release after Create");
+    expect(adh_state() == 1u && s_adh_events == 1u && ADH_AT(0).event == 1 && ADH_AT(0).error == 0u &&
+               atomic_load(&s_d9_slow_calls) == 1u,
+           "d9: async DNS resolved once and Create delivered the CONNECT callback");
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d9: Term");
 
-    /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error(). */
+    /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error().
+     * The failure is held until Create has returned, so that it arrives for a queued request. */
     s_adh_events = 0u;
+    atomic_store(&s_d9_slow_calls, 0u);
+    atomic_store(&s_d9_slow_gate, D9_SLOW_HELD);
     nk_relay_client_set_resolve_hook_for_test(d9_fail_resolve_hook, NULL);
-    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
-           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
-           adh(ADH_NID_CREATE, adh_name(0, "D9FAIL1"), 0u, 0u) == 0u,
-           "d8.3/d9: Init+Create starts before async DNS failure");
-    for (int w = 0; w < 80 && s_adh_events == 0u; w++) {
+    const uint32_t fail_init_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    const uint32_t fail_handler_rc = adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u);
+    const uint32_t fail_create_rc = adh(ADH_NID_CREATE, adh_name(0, "D9FAIL1"), 0u, 0u);
+    held = D9_SLOW_HELD;
+    const bool fail_released =
+        atomic_compare_exchange_strong(&s_d9_slow_gate, &held, D9_SLOW_RELEASED);
+    const bool fail_finished = fail_released && d9_wait_resolve_acknowledged();
+    snprintf(msg, sizeof(msg),
+             "d8.3/d9: fixture holds the DNS failure until Create returns "
+             "(calls=%u gate=%d finished=%d)",
+             atomic_load(&s_d9_slow_calls), held, fail_finished);
+    expect(fail_finished && atomic_load(&s_d9_slow_calls) == 1u, msg);
+    snprintf(msg, sizeof(msg),
+             "d8.3/d9: Init+Create starts before async DNS failure "
+             "(init=0x%08x handler=0x%08x create=0x%08x)",
+             fail_init_rc, fail_handler_rc, fail_create_rc);
+    expect(fail_init_rc == 0u && fail_handler_rc == 0u && fail_create_rc == 0u, msg);
+    for (int w = 0; fail_finished && w < 80 && s_adh_events == 0u; w++) {
 #ifdef _WIN32
         Sleep(2u);
 #else
@@ -17882,6 +18576,187 @@ static void test_utility_dialog_wrong_states_unmeasured_types(void) {
     }
 }
 
+/* Savedata, the message dialog, netconf, gamedata install and game sharing with no utility dialog
+ * started: the measured sequence of PSP-HLE-UTILITY-NONE-001, one kind per cell (#2807). The record
+ * (docs/HARDWARE_ORACLE.md, cells utility-none-savedata, utility-none-msgdialog,
+ * utility-none-netconf, utility-none-gamedata and utility-none-sharing: a PSP-3000 on system
+ * software 6.61, one launch from the XMB context, boot 115, 2026-11-04) calls GetStatus, Update(1),
+ * GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus of each kind, in that order, in a
+ * process that calls no InitStart, and every one of the seven calls answers 0x80110005
+ * (WRONG_TYPE). Each cell makes the same seven calls in the same order, back to back as the probe
+ * does, each one entering its NID directly through sr_syscall.
+ *
+ * What stands for that state here: sr_hle_init() registers the production handlers, and
+ * sr_hle_test_osk_slot_reset() frees the utility slot and forgets every dialog. That is the state
+ * the runtime starts a program in (the slot's initial value, and the one the LoadExec guest reset
+ * restores through the same utility_dialogs_reset_locked). No InitStart is called.
+ *
+ * What these cells do not show. The reset is synthetic: the measured process was freshly launched,
+ * not one whose earlier dialogs were forgotten, so nothing here says a PSP answers WRONG_TYPE again
+ * after a dialog was used. Every call after an InitStart (the INIT, RUNNING, FINISHED and SHUTDOWN
+ * states, NONE after use, and their timing) is outside the record, and so is a process in the game
+ * context, which is how the runtime starts its programs, and every call while another kind holds
+ * the slot. Those cells are test_utility_dialog_single_slot's and
+ * test_utility_dialog_wrong_states_unmeasured_types', and are not reviewed by these. */
+static void test_savedata_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-savedata, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_UPDATE) == 0x80110005u,
+           "savedata call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "savedata call 4, ShutdownStart with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "savedata call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u,
+           "savedata call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_msg_dialog_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-msgdialog, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_UPDATE) == 0x80110005u,
+           "message dialog call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_SHUTDOWN) == 0x80110005u,
+           "message dialog call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_SHUTDOWN) == 0x80110005u,
+           "message dialog call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MSG_DIALOG_STATUS) == 0x80110005u,
+           "message dialog call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_netconf_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-netconf, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_UPDATE) == 0x80110005u,
+           "netconf call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_SHUTDOWN) == 0x80110005u,
+           "netconf call 4, ShutdownStart with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_SHUTDOWN) == 0x80110005u,
+           "netconf call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_NETCONF_DIALOG_STATUS) == 0x80110005u,
+           "netconf call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_gamedata_install_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-gamedata, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_UPDATE) == 0x80110005u,
+           "gamedata install call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "gamedata install call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 5, GetStatus after ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_SHUTDOWN) == 0x80110005u,
+           "gamedata install call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_GAMEDATA_DIALOG_STATUS) == 0x80110005u,
+           "gamedata install call 7, GetStatus after the second ShutdownStart, returns "
+           "0x80110005 (WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_game_sharing_calls_with_no_dialog_started(void) {
+    CpuState cpu;
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 1, GetStatus with no InitStart, returns 0x80110005 (WRONG_TYPE): "
+           "PSP-HLE-UTILITY-NONE-001 utility-none-sharing, one launch from the XMB context");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_UPDATE) == 0x80110005u,
+           "game sharing call 2, Update(1) with no InitStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 3, GetStatus after Update(1), returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_SHUTDOWN) == 0x80110005u,
+           "game sharing call 4, ShutdownStart with no InitStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 5, GetStatus after ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_SHUTDOWN) == 0x80110005u,
+           "game sharing call 6, a second ShutdownStart, returns 0x80110005 (WRONG_TYPE)");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_SHARING_DIALOG_STATUS) == 0x80110005u,
+           "game sharing call 7, GetStatus after the second ShutdownStart, returns 0x80110005 "
+           "(WRONG_TYPE)");
+    sr_hle_test_osk_slot_reset();
+}
+
 static void test_utility_dialog_measured_states(void) {
     CpuState cpu;
     sr_hle_init();
@@ -18047,6 +18922,7 @@ static void reset_fixture(void) {
     s_test_gui_pulse = 0u;
     s_test_gui_poll_ns = 0u;
     s_test_gui_present_calls = 0;
+    s_test_gpu_guest_flips = 0;
     s_test_gui_last_addr = 0;
     s_test_gui_last_fmt = 0;
     s_test_gui_last_stride = 0;
@@ -18393,6 +19269,178 @@ static void test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue(voi
     sr_hle_test_audio_reset();
     audio_fixture_reset();
     reset_fixture();
+}
+
+static uint64_t s_load_host_ns;
+static uint64_t load_host_clock_fixture(void) { return s_load_host_ns; }
+
+static void load_audio_wait_fixture(uint32_t guest_us) {
+    const unsigned speed = sched_fast_forward_speed();
+    const uint64_t host_ns = ((uint64_t)guest_us * 1000u + speed - 1u) / speed;
+    s_load_host_ns += host_ns;
+    vtime_take_host_sample();
+    audio_sim_advance((uint32_t)((host_ns + 999u) / 1000u));
+}
+
+static void test_auto_load_disc_and_silent_audio(void) {
+    static const char spec[] =
+        "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+        "sas=off;tess=off;twin=off;load=auto";
+    extern int hle_audio_queued(int ch);
+    extern void sr_hle_test_ctrl_sampling_reset(void);
+    extern void sr_hle_test_ctrl_stick(uint8_t lx, uint8_t ly);
+    extern int s_ctrl_test_stick;
+    extern uint8_t s_ctrl_test_lx, s_ctrl_test_ly;
+    enum {
+        PATH_ADDR = 0x08019000u, DISC_ADDR = 0x08019100u, PAD_ADDR = 0x08019400u,
+        PCM = 0x08a00000u, DISC_LBA = 0x1002u
+    };
+    CpuState cpu;
+    const uint32_t saved_disc_sectors = s_umd_synthetic_sectors;
+    const int saved_stick = s_ctrl_test_stick, saved_interactive = s_test_gui_interactive;
+    const uint8_t saved_lx = s_ctrl_test_lx, saved_ly = s_ctrl_test_ly;
+    uint64_t (*const saved_host_clock)(void) = s_host_ns_fn;
+    const int saved_pace = s_pace_on, saved_det_clock = s_det_clock;
+    const uint64_t saved_epoch_ns = s_clock_epoch_ns, saved_latch_ns = s_vbl_latch_ns;
+    const uint64_t saved_ff_host_ns = s_ff_host_anchor_ns, saved_ff_pace_ns = s_ff_pace_anchor_ns;
+    const uint32_t saved_ff_speed = s_ff_speed, saved_ff_epoch = s_ff_epoch;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    audio_fixture_reset();
+    s_test_gui_on = s_test_gui_interactive = 1;
+    s_umd_io_synthetic_enabled = 1;
+    s_umd_synthetic_sectors = DISC_LBA + 1u;
+    s_pace_on = 1;
+    s_det_clock = 0;
+    s_load_host_ns = 1000000u;
+    s_host_ns_fn = load_host_clock_fixture;
+    s_clock_epoch_ns = 0u;
+    s_ff_speed = 1u;
+    s_ff_host_anchor_ns = s_ff_pace_anchor_ns = 0u;
+    sched_auto_load_reset();
+    s_audio_sim_pull = 64;
+    s_audio_sim_reported_pull = 0;
+    s_audio_load_queue_silent = 0;
+    sr_hle_test_audio_wait_hook(load_audio_wait_fixture);
+    memset(&g_mem[PCM - 0x08000000u], 0, 64u * 4u);
+    expect(ace_init_spec(spec, NULL) == 1 && !nk_ace_load_fast("fixture", 0u),
+           "automatic disc load does not skip a title-declared wait");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "automatic load fixture reserves stereo PCM");
+    fd_set_path(&cpu, PATH_ADDR, "disc0:/UMD_DATA.BIN");
+    cpu.r[5] = 1u;
+    const uint32_t fd = sr_syscall(&cpu, 0x109f50bcu); /* sceIoOpen */
+    expect(fd >= 3u && fd < 64u, "automatic load fixture opens a synthetic disc file");
+
+    if (fd >= 3u && fd < 64u) {
+        expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 0u) == 0u,
+               "automatic load: a zero-byte read still returns zero");
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active(), "automatic load: zero bytes do not start it");
+        expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u &&
+                   MEM_R8(DISC_ADDR) == umd_synthetic_byte((uint64_t)DISC_LBA * 2048u),
+               "automatic load fixture processes 16 disc bytes through sceIoRead");
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active(), "automatic load: mixed queued audio blocks entry");
+        s_audio_load_queue_silent = 1;
+        sched_auto_load_vblank();
+        expect(sched_auto_load_active(), "automatic load: silence permits the recent read");
+        sr_hle_test_ctrl_stick(190u, 128u);
+        sr_ctrl_sample();
+        expect(!sched_auto_load_active() && sched_fast_forward_speed() == 1u,
+               "automatic load: a physical stick stops it with PSP digital sampling");
+        expect(audio_dispatch(&cpu, 0x3a622550u, PAD_ADDR, 1u, 0u) == 1u &&
+                   MEM_R8(PAD_ADDR + 8u) == 128u && MEM_R8(PAD_ADDR + 9u) == 128u,
+               "automatic load: the PSP's digital sample still reads centred");
+        sr_hle_test_ctrl_stick(128u, 128u);
+        sr_ctrl_sample();
+        expect(!s_auto_load_input, "automatic load: the next centred host latch clears input");
+        for (unsigned i = 0; i < 3u; ++i) {
+            expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u,
+                   "automatic load: the next disc bytes are delivered");
+            sched_auto_load_vblank();
+            expect(sched_auto_load_active() && sched_fast_forward_speed() == SCHED_AUTO_LOAD_SPEED,
+                   "automatic load: silent PCM and ongoing reads coexist at 16x");
+            expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u &&
+                       hle_audio_queued(0) == 64 && s_audio_push_calls == 0u,
+                   "automatic load: accepted zero PCM is kept in the guest-time queue");
+            if (i != 2u) {
+                s_load_host_ns += 1100000u;
+                scheduler_progress_time();
+            }
+        }
+        ace_ff_hold(1);
+        sched_auto_load_vblank();
+        expect(!sched_auto_load_active() && sched_fast_forward_speed() == SCHED_FAST_FORWARD_SPEED &&
+                   hle_audio_queued(0) == 64 && s_audio_load_handoff[0] == 64,
+               "automatic load: manual handoff seeds the same pending guest silence");
+        ace_ff_hold(0);
+        sched_auto_load_disc_read();
+        sched_auto_load_vblank();
+        expect(sched_auto_load_active() && hle_audio_queued(0) == 64,
+               "automatic load: a later silent load starts with the preserved queue");
+        MEM_W16(PCM, 12345u);
+        MEM_W16(PCM + 2u, (uint16_t)(int16_t)-23456);
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u,
+               "automatic load: the first audible PCM submission succeeds");
+        expect(sched_fast_forward_speed() == 1u && !sched_auto_load_active() &&
+                   s_audio_push_calls == 1u && s_audio_push_first_l == 12345 &&
+                   s_audio_push_first_r == -23456,
+               "automatic load: the first audible stereo frame reaches the mixer at 1x");
+        expect(s_audio_load_handoff[0] == 64 && hle_audio_queued(0) == 128,
+               "automatic load: the pending silence remains queued before the incoming PCM");
+
+        /* After the last tone the device played dry. A retained tail is
+         * unavailable for playback until the guest supplies another block. */
+        s_audio_sim_q[0] = 0;
+        s_audio_sim_dry[0] = 1;
+        s_audio_load_pending_sound = 1;
+        s_audio_load_handoff[0] = -1;
+        for (unsigned i = 0u; i <= AUTO_LOAD_RECENT_VBLANKS; ++i) {
+            s_load_host_ns += 16683333u;
+            scheduler_progress_time();
+            expect(audio_dispatch(&cpu, 0x6a638d83u, fd, DISC_ADDR, 16u) == 16u,
+                   "automatic load: disc reads continue after the channel drains");
+            sched_auto_load_vblank();
+        }
+        expect(sched_auto_load_active() && s_audio_load_handoff[0] == -1,
+               "automatic load: a dry channel can accelerate without clearing retained samples");
+        memset(&g_mem[PCM - 0x08000000u], 0, 64u * 4u);
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, PCM) == 64u &&
+                   sched_fast_forward_speed() == 1u && s_audio_push_calls == 2u &&
+                   s_audio_load_handoff[0] == -1,
+               "automatic load: the first resumed block reaches the backend with the retained tail");
+        (void)audio_dispatch(&cpu, 0x810c4bc3u, fd, 0u, 0u); /* sceIoClose */
+    }
+    sched_auto_load_reset();
+    (void)ace_init_spec("off", NULL);
+    s_host_ns_fn = NULL;
+    s_umd_io_synthetic_enabled = 0;
+    s_umd_synthetic_sectors = saved_disc_sectors;
+    sr_hle_test_audio_wait_hook(NULL);
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    s_ctrl_test_stick = saved_stick;
+    s_ctrl_test_lx = saved_lx;
+    s_ctrl_test_ly = saved_ly;
+    s_test_gui_interactive = saved_interactive;
+    audio_fixture_reset();
+    reset_fixture();
+
+    /* Returning to 1x preserves the elapsed guest-time offset. A later
+     * fixture that installs its own host clock must not inherit that offset. */
+    s_host_ns_fn = saved_host_clock;
+    s_pace_on = saved_pace;
+    s_det_clock = saved_det_clock;
+    s_clock_epoch_ns = saved_epoch_ns;
+    s_vbl_latch_ns = saved_latch_ns;
+    s_ff_host_anchor_ns = saved_ff_host_ns;
+    s_ff_pace_anchor_ns = saved_ff_pace_ns;
+    s_ff_speed = saved_ff_speed;
+    s_ff_epoch = saved_ff_epoch;
 }
 
 /* Media telemetry truthfulness on the production audio hand-off.
@@ -18865,6 +19913,116 @@ static void test_audio_regular_output_refuses_bad_volumes(void) {
            "AudioOutputPanned takes a negative volume, as the reference does");
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
            "volume fixture releases its channel");
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* sceAudioOutputPannedBlocking (0x13f592bc) on a channel number 0 to 7 that is not reserved (#341),
+ * entered through the production registration. HOST_TESTED; no PSP record measures this API.
+ * Each cell's evidence class:
+ *  - an unreserved channel with valid volumes returns NOT_INITIALIZED (0x80260001), plays nothing
+ *    and does not park the caller: PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ *    caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/__sceAudio.cpp, __AudioEnqueue).
+ *    PSPAutotests tests/audio/sceaudio/output.expected at ea71108f00933712c4662276261b39cd42249b1e
+ *    records 0x80260001 for sceAudioOutputBlocking on channel 5 only, never for this NID.
+ *  - a volume of 0x10000 on that channel is INVALID_VOL, the volume checked first: the order is
+ *    PPSSPP-derived (Core/HLE/sceAudio.cpp, sceAudioOutputPannedBlocking); output.expected records
+ *    0x8026000b for this NID only on a reserved channel, so the order is not recorded there.
+ *  - a reserved channel still returns its length and hands the host both volumes: output.expected
+ *    records the length for this NID on a reserved channel (corroboration only).
+ *  - the first refusal of a run is reported once, by name.
+ * Channel 8 (INVALID_CH) and a negative volume through this NID are asserted by
+ * test_audio_regular_output_refuses_bad_channels and test_audio_regular_output_refuses_bad_volumes.
+ *
+ * MUTANT: skip the reservation check in h_AudioOutputPannedBlocking -- the unreserved channel
+ *   returns its zero length instead of NOT_INITIALIZED and waits 1 ms open-loop.
+ * MUTANT: check the channel before the volumes -- 0x10000 on the unreserved channel returns
+ *   NOT_INITIALIZED. */
+static void test_audio_output_panned_blocking_unreserved_channel(void) {
+    enum {
+        STEREO_BUF = 0x08a00000u,
+        NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING = 0x13f592bcu,
+        UNRESERVED_CH = 2u,
+        RESERVED_CH = 0u,
+        OUT_OF_RANGE_CH = 8u,
+        FRAMES = 64u,
+        FORMAT_STEREO = 0u,
+        VOL_LEFT = 0x8000u,
+        VOL_RIGHT = 0x4000u,
+        VOL_OVER = 0x10000u,
+    };
+    static const char REPORT[] =
+        "HLE: PPSSPP-derived, not PSP-measured: sceAudioOutputPannedBlocking refuses channel "
+        "0x00000002 with 0x80260001";
+    CpuState cpu;
+    FILE *capture = NULL;
+    int saved_fd = -1, reserved = -1;
+    char log[2048];
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    sr_hle_test_audio_refusal_note_reset();
+    const unsigned long silence_before = s_audio_silence_calls;
+    expect(sr_hle_test_audio_state(UNRESERVED_CH, &reserved, NULL, NULL) && reserved == 0,
+           "PannedBlocking fixture: channel 2 starts unreserved");
+
+    log[0] = '\0';
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = UNRESERVED_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    const uint32_t unreserved = sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = OUT_OF_RANGE_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    const uint32_t out_of_range = sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    expect(unreserved == SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "PPSSPP-derived, not PSP-measured: AudioOutputPannedBlocking refuses a valid, unreserved "
+           "channel with NOT_INITIALIZED");
+    expect(s_audio_push_calls == 0u && s_audio_silence_calls == silence_before,
+           "PPSSPP-derived, not PSP-measured: the unreserved PannedBlocking output plays nothing");
+    expect(sr_hle_test_audio_wait_total_us() == 0u,
+           "PPSSPP-derived, not PSP-measured: the unreserved PannedBlocking output does not park "
+           "the caller");
+    expect(out_of_range == SCE_AUDIO_ERROR_INVALID_CH,
+           "PPSSPP-derived, not PSP-measured: the second refusal (channel 8) is INVALID_CH");
+    size_t reports = 0u;
+    for (const char *at = log; (at = strstr(at, "refuses channel")) != NULL; at++) reports++;
+    expect(capturing && strstr(log, REPORT) != NULL,
+           "the first refusal of a run is reported by name (sceAudioOutputPannedBlocking, channel "
+           "and code)");
+    expect(capturing && reports == 1u, "a second refusal in the same run is not reported again");
+
+    /* Control: the volume is checked before the channel. */
+    const uint32_t over[][2] = {{VOL_LEFT, VOL_OVER}, {VOL_OVER, VOL_RIGHT}};
+    for (size_t i = 0; i < sizeof(over) / sizeof(over[0]); i++) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = UNRESERVED_CH; cpu.r[5] = over[i][0]; cpu.r[6] = over[i][1];
+        cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_VOL,
+               "PPSSPP-derived order, not PSP-measured: a volume of 0x10000 on the unreserved "
+               "channel is INVALID_VOL before the channel check");
+    }
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "PPSSPP-derived, not PSP-measured: a refused PannedBlocking volume plays nothing and "
+           "never waits");
+
+    /* Control: a reserved channel with valid volumes still plays. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, RESERVED_CH, FRAMES, FORMAT_STEREO) ==
+               RESERVED_CH,
+           "PannedBlocking fixture reserves a 64-frame stereo channel 0");
+    s_audio_queue_result = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = RESERVED_CH; cpu.r[5] = VOL_LEFT; cpu.r[6] = VOL_RIGHT; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == FRAMES &&
+               s_audio_push_calls == 1u && s_audio_push_frames == (int)FRAMES &&
+               s_audio_push_vol_l == (int)VOL_LEFT && s_audio_push_vol_r == (int)VOL_RIGHT,
+           "PSPAutotests-corroborated, not PSP-measured here: AudioOutputPannedBlocking on a reserved "
+           "channel returns its length and hands the host the left and right volumes");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, RESERVED_CH, 0u, 0u) == 0u,
+           "PannedBlocking fixture releases its channel");
     sr_hle_test_audio_reset();
     audio_fixture_reset();
     reset_fixture();
@@ -20082,9 +21240,21 @@ static void test_kernel_import_sweep_sysclock_conversion(void) {
     cpu.r[4] = clock;
     cpu.r[5] = low_out;
     cpu.r[6] = high_out;
+    /* This pointer-input arithmetic cell follows the pinned PPSSPP model. */
+    const uint64_t wide_value = ((uint64_t)0x12345678u << 32) | 0x89abcdefu;
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
-               MEM_R32(low_out) == 0x89abcdefu && MEM_R32(high_out) == 0x12345678u,
-           "sceKernelSysClock2USec splits the modeled 64-bit microsecond value");
+               MEM_R32(low_out) == (uint32_t)(wide_value / 1000000u) &&
+               MEM_R32(high_out) == (uint32_t)(wide_value % 1000000u),
+           "sceKernelSysClock2USec splits the 64-bit microsecond clock into seconds and microseconds");
+    MEM_W32(clock, 1234567890u);
+    MEM_W32(clock + 4u, 0u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = clock;
+    cpu.r[5] = low_out;
+    cpu.r[6] = high_out;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
+               MEM_R32(low_out) == 1234u && MEM_R32(high_out) == 567890u,
+           "sceKernelSysClock2USec turns 1234567890 us into 1234 s and 567890 us");
 
     const uint32_t sentinel = 0xa57c3de1u;
     MEM_W32(low_out, sentinel);
@@ -20096,6 +21266,38 @@ static void test_kernel_import_sweep_sysclock_conversion(void) {
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0x800200d3u &&
                MEM_R32(low_out) == sentinel && MEM_R32(high_out) == sentinel,
            "sceKernelSysClock2USec rejects an incomplete input span before writing outputs");
+
+    /* Existing local all-or-nothing pointer policy. Neither reference
+     * emulator establishes the PSP's null pointer result. */
+    for (int missing = 4; missing <= 6; ++missing) {
+        cpu.r[4] = clock;
+        cpu.r[5] = low_out;
+        cpu.r[6] = high_out;
+        cpu.r[missing] = 0u;
+        expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0x800200d3u &&
+                   MEM_R32(low_out) == sentinel && MEM_R32(high_out) == sentinel,
+               "SysClock2USec null input or output preserves both output words");
+    }
+
+    MEM_W32(clock, 42u);
+    MEM_W32(clock + 4u, 1u);
+    cpu.r[4] = clock;
+    cpu.r[5] = clock + 4u;
+    cpu.r[6] = clock;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
+               MEM_R32(clock + 4u) == 4294u && MEM_R32(clock) == 967338u,
+           "SysClock2USec snapshots both input words before aliased output writes");
+
+    /* PPSSPP unsigned interpretation of the bit pattern. PSP signed-input
+     * semantics are not implied by this fixture. */
+    MEM_W32(clock, 0xffffffffu);
+    MEM_W32(clock + 4u, 0xffffffffu);
+    cpu.r[4] = clock;
+    cpu.r[5] = low_out;
+    cpu.r[6] = high_out;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
+               MEM_R32(low_out) == 4154504685u && MEM_R32(high_out) == 551615u,
+           "SysClock2USec splits a high-bit clock using the pinned unsigned reference");
 }
 
 /* sceKernelSysClock2USecWide takes the 64-bit clock by value ($a0 low word, $a1 high word)
@@ -20120,9 +21322,19 @@ static void test_unregistered_batch_sysclock_wide(void) {
     cpu.r[5] = 0x12345678u;
     cpu.r[6] = WIDE_LOW_OUT;
     cpu.r[7] = WIDE_HIGH_OUT;
+    const uint64_t wide_value = ((uint64_t)0x12345678u << 32) | 0x89abcdefu;
     expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
-               MEM_R32(WIDE_LOW_OUT) == 0x89abcdefu && MEM_R32(WIDE_HIGH_OUT) == 0x12345678u,
-           "sceKernelSysClock2USecWide splits the by-value 64-bit clock into low/high outputs");
+               MEM_R32(WIDE_LOW_OUT) == (uint32_t)(wide_value / 1000000u) &&
+               MEM_R32(WIDE_HIGH_OUT) == (uint32_t)(wide_value % 1000000u),
+           "sceKernelSysClock2USecWide splits the by-value clock into seconds and microseconds");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1234567890u;   /* the probe's PSP-KERNEL-MISC-001 sysclock-wide input */
+    cpu.r[5] = 0u;
+    cpu.r[6] = WIDE_LOW_OUT;
+    cpu.r[7] = WIDE_HIGH_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
+               MEM_R32(WIDE_LOW_OUT) == 1234u && MEM_R32(WIDE_HIGH_OUT) == 567890u,
+           "sceKernelSysClock2USecWide turns 1234567890 us into 1234 s and 567890 us");
 
     MEM_W32(WIDE_LOW_OUT, sentinel);
     memset(&cpu, 0, sizeof(cpu));
@@ -20133,6 +21345,31 @@ static void test_unregistered_batch_sysclock_wide(void) {
     expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0x800200d3u &&
                MEM_R32(WIDE_LOW_OUT) == sentinel,
            "sceKernelSysClock2USecWide refuses a missing output pointer before writing the low word");
+
+    MEM_W32(WIDE_HIGH_OUT, sentinel);
+    cpu.r[4] = 1234567890u;
+    cpu.r[5] = 0u;
+    cpu.r[6] = 0u;
+    cpu.r[7] = WIDE_HIGH_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0x800200d3u &&
+               MEM_R32(WIDE_HIGH_OUT) == sentinel,
+           "SysClock2USecWide null seconds follows the local whole-call refusal policy");
+
+    cpu.r[4] = 1000007u;
+    cpu.r[5] = 0u;
+    cpu.r[6] = WIDE_LOW_OUT;
+    cpu.r[7] = WIDE_LOW_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
+               MEM_R32(WIDE_LOW_OUT) == 7u && MEM_R32(WIDE_HIGH_OUT) == sentinel,
+           "SysClock2USecWide ordered alias writes leave the remainder last");
+
+    cpu.r[4] = 0xffffffffu;
+    cpu.r[5] = 0xffffffffu;
+    cpu.r[6] = WIDE_LOW_OUT;
+    cpu.r[7] = WIDE_HIGH_OUT;
+    expect(sr_syscall(&cpu, NID_SYS_CLOCK_TO_USEC_WIDE) == 0u &&
+               MEM_R32(WIDE_LOW_OUT) == 4154504685u && MEM_R32(WIDE_HIGH_OUT) == 551615u,
+           "SysClock2USecWide splits a high-bit clock using the pinned unsigned reference");
 }
 
 static void test_kernel_usec_sysclock_conversions(void) {
@@ -20168,8 +21405,8 @@ static void test_kernel_usec_sysclock_conversions(void) {
         cpu.r[5] = LOW_OUT;
         cpu.r[6] = HIGH_OUT;
         expect(sr_syscall(&cpu, NID_SCE_KERNEL_SYS_CLOCK_TO_USEC) == 0u &&
-                   MEM_R32(LOW_OUT) == usec && MEM_R32(HIGH_OUT) == 0u,
-               "sceKernelUSec2SysClock round-trips through sceKernelSysClock2USec");
+                   MEM_R32(LOW_OUT) == usec / 1000000u && MEM_R32(HIGH_OUT) == usec % 1000000u,
+               "sceKernelUSec2SysClock round-trips through sceKernelSysClock2USec as seconds and microseconds");
 
         memset(&cpu, 0, sizeof(cpu));
         cpu.r[4] = usec;
@@ -30290,6 +31527,7 @@ static void test_wait_thread_end_cb_execution(void) {
 #define NID_SCE_KERNEL_MEMCPY 0x1839852au
 #define NID_SYSLIB_MEMSET 0x10f3bb61u
 #define NID_SYSLIB_STRLEN 0x52df196cu
+#define NID_SYSLIB_SNPRINTF 0xc2145e80u
 /* PSP DMAC error classes, measured on hardware (see test_dmac_semantics). */
 #define SCE_DMAC_ILLEGAL_ADDR 0x80000103u
 #define SCE_DMAC_ILLEGAL_SIZE 0x80000104u
@@ -30343,8 +31581,114 @@ static void test_sysclib_memory_imports(void) {
            "SysclibForKernel memset writes the complete validated guest span");
 }
 
+static uint32_t sysclib_snprintf(uint32_t dst, uint32_t size, uint32_t fmt) {
+    s_cpu->r[4] = dst;
+    s_cpu->r[5] = size;
+    s_cpu->r[6] = fmt;
+    return sr_syscall(s_cpu, NID_SYSLIB_SNPRINTF);
+}
+
+static void test_sysclib_snprintf(void) {
+    const uint32_t fmt = 0x08301000u, dst = 0x08302000u, str = 0x08303000u;
+    const uint32_t stack = 0x08304000u, last = 0x0bffffffu;
+    const uint32_t stopped = 0x80020002u;  /* selftest return for a named stop */
+    reset_fixture();
+    sr_hle_init();
+
+    uint8_t sentinel[64];
+    memset(sentinel, 0xa5, sizeof(sentinel));
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "mutex%d");
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 32u, fmt) == 6u,
+           "Sysclib snprintf dispatch reads its first variadic word from a3");
+    expect(memcmp(SR_HOST(dst), "mutex1", sizeof("mutex1")) == 0 &&
+               memcmp(SR_HOST(dst + 7u), sentinel + 7u, sizeof(sentinel) - 7u) == 0,
+           "Sysclib snprintf terminates the output and leaves later bytes alone");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 4u, fmt) == 6u &&
+               memcmp(SR_HOST(dst), "mut", sizeof("mut")) == 0 &&
+               memcmp(SR_HOST(dst + 4u), sentinel + 4u, sizeof(sentinel) - 4u) == 0,
+           "Sysclib snprintf truncation stores capacity-1 bytes and returns the full count");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = 1u;
+    expect(sysclib_snprintf(dst, 1u, fmt) == 6u && MEM_R8(dst) == 0u &&
+               memcmp(SR_HOST(dst + 1u), sentinel + 1u, sizeof(sentinel) - 1u) == 0,
+           "Sysclib snprintf capacity one stores only the terminator");
+
+    title_hle_write_cstr(fmt, "%-6.3s|%+4d|%X|%c|%u|%i|%%");
+    title_hle_write_cstr(str, "tennis");
+    const char expected[] = "ten   |  +7|2A|P|9|-4|%";
+    s_cpu->r[7] = str;
+    s_cpu->r[8] = 7u;
+    s_cpu->r[9] = 42u;
+    s_cpu->r[10] = 'P';
+    s_cpu->r[11] = 9u;
+    uint32_t original_sp = s_cpu->r[29];
+    s_cpu->r[29] = stack;
+    MEM_W32(stack, (uint32_t)-4);
+    expect(sysclib_snprintf(dst, (uint32_t)sizeof(expected), fmt) == sizeof(expected) - 1u &&
+               memcmp(SR_HOST(dst), expected, sizeof(expected)) == 0 &&
+               MEM_R8(dst + (uint32_t)sizeof(expected)) == 0xa5u,
+           "Sysclib snprintf formats bounded scalar fields and reads the sixth word at entry sp");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    s_cpu->r[7] = str;
+    s_cpu->r[29] = last - 1u;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unreadable variadic spill before storing");
+    s_cpu->r[29] = original_sp;
+
+    title_hle_write_cstr(fmt, "");
+    expect(sysclib_snprintf(dst, 64u, fmt) == 0u && MEM_R8(dst) == 0u &&
+               MEM_R8(dst + 1u) == 0xa5u,
+           "Sysclib snprintf empty output stores one NUL and returns zero");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    title_hle_write_cstr(fmt, "literal");
+    expect(sysclib_snprintf(dst, 0u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses unmodeled zero capacity before storing");
+    MEM_W8(last, 0x5au);
+    expect(sysclib_snprintf(last, 2u, fmt) == stopped && MEM_R8(last) == 0x5au,
+           "Sysclib snprintf refuses a destination span that leaves guest memory");
+    expect(sysclib_snprintf(dst, 64u, last) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated format at the arena boundary");
+
+    title_hle_write_cstr(fmt, "prefix %s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+               memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0,
+           "Sysclib snprintf refuses an unterminated string without copying the prefix");
+    title_hle_write_cstr(fmt, "%.1s");
+    s_cpu->r[7] = last;
+    expect(sysclib_snprintf(dst, 2u, fmt) == 1u &&
+               MEM_R8(dst) == 0x5au && MEM_R8(dst + 1u) == 0u,
+           "Sysclib snprintf string precision bounds the read at the last arena byte");
+
+    memcpy(SR_HOST(dst), sentinel, sizeof(sentinel));
+    const char *unsupported[] = {"prefix %p", "prefix %n", "%08d", "%*d", "%lld",
+                                 "%4097d", "%4096d+", "trailing %"};
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+        title_hle_write_cstr(fmt, unsupported[i]);
+        s_cpu->r[7] = str;
+        expect(sysclib_snprintf(dst, 64u, fmt) == stopped &&
+                   memcmp(SR_HOST(dst), sentinel, sizeof(sentinel)) == 0 &&
+                   memcmp(SR_HOST(str), "tennis", sizeof("tennis")) == 0,
+               "Sysclib snprintf refuses unsupported formats and bounds without guest writes");
+    }
+}
+
 static void test_refer_thread_status(void) {
+    extern uint32_t sr_hle_test_compiled_sdk_version(void);
     enum {
+        LEGACY_SDK = 0x02060010u,
+        EXTENDED_SDK = 0x02060011u,
         THREAD_NAME = 0x08301000u,
         THREAD_INFO = 0x08302000u,
         THREAD_ENTRY = 0x08001234u,
@@ -30354,9 +31698,15 @@ static void test_refer_thread_status(void) {
         NID_REFER_THREAD_STATUS = 0x17c1684eu,
         TEST_ILLEGAL_ADDR = 0x80000103u,
         TEST_UNKNOWN_THID = 0x80020198u,
+        TEST_ILLEGAL_SIZE = 0x800201bcu,
     };
     reset_fixture();
     sr_hle_init();
+    const uint32_t saved_sdk = sr_hle_test_compiled_sdk_version();
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+               sr_hle_test_compiled_sdk_version() == LEGACY_SDK,
+           "ReferThreadStatus fixture selects the legacy compiled SDK through dispatch");
     title_hle_write_cstr(THREAD_NAME, "showcase-worker");
     s_cpu->r[4] = THREAD_NAME;
     s_cpu->r[5] = THREAD_ENTRY;
@@ -30393,47 +31743,96 @@ static void test_refer_thread_status(void) {
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR,
            "ReferThreadStatus validates the complete output structure span");
 
-    /* The caller's size word selects the write (the PSP-KERNEL-STATUS-001 rule of the sema,
-     * event-flag and mailbox status calls): 0 writes nothing, a smaller size writes only that
-     * many bytes of the 0x68-byte record, and an unmeasured larger one stops by name.
-     * MUTANT: write sizeof(SrThreadInfo) bytes whatever the size word says -- the size-0 and
-     *   size-8 cells see bytes past the caller's struct overwritten. */
-    enum { INFO_GUARD = 0x70u };
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 0u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == 0u && MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 0 succeeds and writes nothing");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, 8u);
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO) == (uint32_t)sizeof(SrThreadInfo) &&
-               memcmp((const void *)SR_HOST(THREAD_INFO + 4u), "show", 4u) == 0 &&
-               MEM_R32(THREAD_INFO + 8u) == 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word of 8 writes only the first 8 bytes of the record");
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
-    s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
-               MEM_R32(THREAD_INFO + 0x64u) != 0xa5a5a5a5u &&
-               MEM_R32(THREAD_INFO + 0x68u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with the full size writes the record and nothing past it");
+    /* The prefix is the live 104-byte status for the same dormant thread. The
+     * SDK split, write sizes, and trailing word are independently recorded in
+     * PSPAutotests threads/threads/refer.expected (see h_ReferThreadStatus).
+     * A full sentinel comparison proves both the returned bytes and the absence
+     * of writes after the smaller of the declared and supported lengths. */
+    uint8_t legacy[sizeof(SrThreadInfo)];
+    uint8_t extended[0x6c] = {0};
+    memcpy(legacy, (const void *)SR_HOST(THREAD_INFO), sizeof(legacy));
+    memcpy(extended, legacy, sizeof(legacy));
+    fixture_wr32(extended, (uint32_t)sizeof(extended));
+    static const struct {
+        uint32_t sdk, input_size, written, result;
+        const char *label;
+    } cases[] = {
+        { LEGACY_SDK, 0, 0, 0, "legacy size zero leaves output untouched" },
+        { LEGACY_SDK, 8, 8, 0, "legacy partial size returns an exact prefix" },
+        { LEGACY_SDK, 0x68, 0x68, 0, "legacy full size writes 104 bytes" },
+        { LEGACY_SDK, 0x6c, 0x68, 0, "legacy size 108 preserves the trailing word" },
+        { LEGACY_SDK, 0x80, 0x68, 0, "legacy size 128 caps the write at 104 bytes" },
+        { LEGACY_SDK, 0x400, 0x68, 0, "legacy size 1024 caps the write at 104 bytes" },
+        { LEGACY_SDK, UINT32_MAX, 0x68, 0, "legacy maximum size caps the write at 104 bytes" },
+        { EXTENDED_SDK, 0, 0, 0, "newer size zero leaves output untouched" },
+        { EXTENDED_SDK, 8, 8, 0, "newer partial size reports 108 and returns an exact prefix" },
+        { EXTENDED_SDK, 0x68, 0x68, 0, "newer size 104 reports 108 without writing the trailing word" },
+        { EXTENDED_SDK, 0x80, 0, TEST_ILLEGAL_SIZE, "newer size 128 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x400, 0, TEST_ILLEGAL_SIZE, "newer size 1024 returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, UINT32_MAX, 0, TEST_ILLEGAL_SIZE, "newer maximum size returns ILLEGAL_SIZE without writing" },
+        { EXTENDED_SDK, 0x6c, 0x6c, 0, "newer size 108 still succeeds after a rejected size" },
+    };
+    uint8_t expected[0x404];
     const uint32_t stops_before = sr_hle_test_unmodelled_stops();
-    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
-    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo) + 4u);
+    sr_flight_test_disable();
+    expect(!sr_flight_class_enabled(SR_FLIGHT_CLASS_ALL),
+           "ReferThreadStatus diagnostic is tested with flight recording disabled");
+    FILE *capture = NULL;
+    int saved_stderr = -1;
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_stderr);
+    expect(capturing, "ReferThreadStatus fixture captures normal stderr");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (i == 0 || cases[i].sdk != cases[i - 1].sdk) {
+            s_cpu->r[4] = cases[i].sdk;
+            expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u &&
+                       sr_hle_test_compiled_sdk_version() == cases[i].sdk,
+                   "ReferThreadStatus fixture selects the compiled SDK through dispatch");
+        }
+        memset(expected, 0xa5, sizeof(expected));
+        fixture_wr32(expected, cases[i].input_size);
+        memcpy((void *)SR_HOST(THREAD_INFO), expected, sizeof(expected));
+        const uint8_t *record = cases[i].sdk == LEGACY_SDK ? legacy : extended;
+        memcpy(expected, record, cases[i].written);
+        s_cpu->r[4] = uid;
+        s_cpu->r[5] = THREAD_INFO;
+        expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == cases[i].result &&
+                   memcmp((const void *)SR_HOST(THREAD_INFO), expected, sizeof(expected)) == 0,
+               cases[i].label);
+    }
+    char log[1024] = {0};
+    if (capturing) hle_data_stderr_capture_end(capture, saved_stderr, log, sizeof(log));
+    expect(count_occurrences(log, "HLE: sceKernelReferThreadStatus ILLEGAL_SIZE (0x800201bc)") == 3 &&
+               strstr(log, "requested=0x00000080 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0x00000400 max=0x6c sdk=0x02060011") &&
+               strstr(log, "requested=0xffffffff max=0x6c sdk=0x02060011"),
+           "ReferThreadStatus logs only the three newer SDK oversized requests");
+    expect(strstr(log, "UNSUPPORTED_IMPORT:") == NULL,
+           "ReferThreadStatus diagnostic never claims an unsupported import");
+    expect(sr_hle_test_unmodelled_stops() == stops_before,
+           "ReferThreadStatus handles both observed SDK layouts without a semantic stop");
+
+    /* Exactly 104 bytes fit. The newer 108-byte write must check the whole span
+     * before modifying the prefix. The legacy write fits despite the request. */
+    const uint32_t end_buffer = 0x0c000000u - (uint32_t)sizeof(legacy);
+    memset(expected, 0xa5, sizeof(legacy));
+    fixture_wr32(expected, (uint32_t)sizeof(extended));
+    memcpy((void *)SR_HOST(end_buffer), expected, sizeof(legacy));
     s_cpu->r[4] = uid;
-    s_cpu->r[5] = THREAD_INFO;
-    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
-               sr_hle_test_unmodelled_stops() == stops_before + 1u &&
-               MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u,
-           "ReferThreadStatus with a size word above 0x68 stops by name and writes nothing");
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR &&
+               memcmp((const void *)SR_HOST(end_buffer), expected, sizeof(legacy)) == 0,
+           "newer ReferThreadStatus rejects a truncated 108-byte span before writing");
+    s_cpu->r[4] = LEGACY_SDK;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture switches back to the legacy SDK");
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = end_buffer;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               memcmp((const void *)SR_HOST(end_buffer), legacy, sizeof(legacy)) == 0,
+           "legacy ReferThreadStatus validates the 104-byte write span for a 108-byte request");
+    s_cpu->r[4] = saved_sdk;
+    expect(sr_syscall(s_cpu, NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370) == 0u,
+           "ReferThreadStatus fixture restores the prior compiled SDK");
 }
 
 /* sceKernelReferThreadRunStatus and sceKernelReferCallbackStatus check the whole record span
@@ -36381,6 +37780,427 @@ static void test_ge_raster_cells_match_psp(void) {
     }
 }
 
+/* ==== GE weight cells (PSP-GE-WEIGHT-001, #343) ====
+ * The lists of probe_ge_sample.c's CASE=ge-weight, through production dispatch and the software
+ * GE, checked against the raw windows a PSP-3000 recorded (docs/HARDWARE_ORACLE.md;
+ * tests/fixtures/psp_oracle/ge_corpus.json). Sample s is a quad covering pixel (16 + s, 8): slot 0
+ * holds 1.0 through bone 0 (the identity plus t0 pixels), the target slot's bone moves the quad
+ * down 16 w pixels, and every other bone is off the window with a zero weight. So a sample lands
+ * on row 8 + s (f32-neg: 24 - s, f32-c1: 8) in its own column: any other row, a second pixel or
+ * none measures a different weight scale, sign, slot order or vertex layout. */
+
+#define GW_LIST 0x08900000u        /* display list in main RAM */
+#define GW_VERTS 0x08904000u       /* the 16 samples' vertices */
+#define GW_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GW_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GW_STRIDE 64u
+#define GW_ROWS 32u
+#define GW_WX 16u                  /* window x 16..31, y 8..24 */
+#define GW_WY 8u
+#define GW_WW 16u
+#define GW_WH 17u
+#define GW_N (GW_WW * GW_WH)
+#define GW_SAMPLES 16u
+#define GW_VTX_PER_SAMPLE 6u
+#define GW_VTX_COUNT (GW_SAMPLES * GW_VTX_PER_SAMPLE)
+#define GW_MAX_VTX_BYTES 48u       /* eight float weights, colour, float position */
+#define GW_BONES 8u
+#define GW_LIST_WORDS 224u
+
+enum { GW_U8 = 1, GW_U16 = 2, GW_F32 = 3 };
+
+/* fmt: VTYPE bits 9-10; count: weights per vertex; target: the slot whose bone moves the quad
+   (0: none); base, step: the target weight of sample s is base + step s, raw for u8 and u16 and
+   in sixteenths for float; t0: bone 0's y translation in pixels. */
+struct gw_cell {
+    const char *name;
+    uint8_t fmt, count, target;
+    int32_t base, step, t0;
+};
+
+#define GW_CELL_COUNT 16u
+static const struct gw_cell gw_cells[GW_CELL_COUNT] = {
+    {"f32-w1", GW_F32, 2u, 1u, 0, 1, 0},
+    {"u8-w1", GW_U8, 2u, 1u, 0, 8, 0},
+    {"u16-w1", GW_U16, 2u, 1u, 0, 0x800, 0},
+    {"u8-hi", GW_U8, 2u, 1u, 0x80, 8, -16},
+    {"u16-hi", GW_U16, 2u, 1u, 0x8000, 0x800, -16},
+    {"f32-neg", GW_F32, 2u, 1u, 0, -1, 16},
+    {"f32-c1", GW_F32, 1u, 0u, 0, 0, 0},
+    {"f32-c3", GW_F32, 3u, 2u, 0, 1, 0},
+    {"f32-c4", GW_F32, 4u, 3u, 0, 1, 0},
+    {"f32-c5", GW_F32, 5u, 4u, 0, 1, 0},
+    {"f32-c6", GW_F32, 6u, 5u, 0, 1, 0},
+    {"f32-c7", GW_F32, 7u, 6u, 0, 1, 0},
+    {"f32-c8", GW_F32, 8u, 7u, 0, 1, 0},
+    {"u8-c3", GW_U8, 3u, 2u, 0, 8, 0},
+    {"u8-c5", GW_U8, 5u, 4u, 0, 8, 0},
+    {"u16-c3", GW_U16, 3u, 2u, 0, 0x800, 0},
+};
+
+/* The window digest each cell left on a PSP-3000 (firmware 6.6.0, probe case ge-weight,
+ * docs/HARDWARE_ORACLE.md; tests/fixtures/psp_oracle/ge_corpus.json). Index k is gw_cells[k]. */
+static const struct {
+    const char *name;
+    uint64_t psp;
+} s_gw_psp[GW_CELL_COUNT] = {
+    {"f32-w1", 0x7272338f6f65a625ull},
+    {"u8-w1", 0x7272338f6f65a625ull},
+    {"u16-w1", 0x7272338f6f65a625ull},
+    {"u8-hi", 0x7272338f6f65a625ull},
+    {"u16-hi", 0x7272338f6f65a625ull},
+    {"f32-neg", 0x3c99dede733b6e25ull},
+    {"f32-c1", 0xbff6b75764ccfe25ull},
+    {"f32-c3", 0x7272338f6f65a625ull},
+    {"f32-c4", 0x7272338f6f65a625ull},
+    {"f32-c5", 0x7272338f6f65a625ull},
+    {"f32-c6", 0x7272338f6f65a625ull},
+    {"f32-c7", 0x7272338f6f65a625ull},
+    {"f32-c8", 0x7272338f6f65a625ull},
+    {"u8-c3", 0x7272338f6f65a625ull},
+    {"u8-c5", 0x7272338f6f65a625ull},
+    {"u16-c3", 0x7272338f6f65a625ull},
+};
+
+/* The input-sensitivity pass recodes each u8 weight byte b to round(128*b/255)
+ * so the stock w/128 decoder approximates the w/255 scale. A separate scratch
+ * build decodes the original vertex bytes with 1.0f / 255.0f in read_weights.
+ * Exactly the four u8 cells fail its PSP comparison and the other twelve match. */
+static int32_t gw_u8_wrong_scale(int32_t raw)
+{
+    const int32_t rebased = (raw * 128 + 127) / 255;
+    return rebased < 0 ? 0 : rebased > 255 ? 255 : rebased;
+}
+
+static uint32_t gw_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t gw_weight_bytes(const struct gw_cell *c)
+{
+    return c->count * (c->fmt == GW_F32 ? 4u : c->fmt == GW_U16 ? 2u : 1u);
+}
+
+static uint32_t gw_colour_offset(const struct gw_cell *c)
+{
+    return (gw_weight_bytes(c) + 3u) & ~3u;
+}
+
+static uint32_t gw_vertex_size(const struct gw_cell *c)
+{
+    return gw_colour_offset(c) + 4u + 12u;
+}
+
+static void gw_put_weight(uint8_t *v, const struct gw_cell *c, uint32_t slot, int32_t raw,
+                          int wrong_u8_scale)
+{
+    if (c->fmt == GW_U8 && wrong_u8_scale) raw = gw_u8_wrong_scale(raw);
+    if (c->fmt == GW_F32) {
+        const uint32_t bits = gw_fbits((float)raw / 16.0f);
+        memcpy(v + 4u * slot, &bits, 4u);
+    } else if (c->fmt == GW_U16) {
+        const uint16_t half = (uint16_t)raw;
+        memcpy(v + 2u * slot, &half, 2u);
+    } else {
+        v[slot] = (uint8_t)raw;
+    }
+}
+
+/* Every sample's six vertices for cell c into `dst`; returns the vertex size. With
+ * wrong_u8_scale, every 8-bit weight becomes the byte a w / 255 decoder would consume. */
+static uint32_t gw_vertices(const struct gw_cell *c, uint8_t *dst, int wrong_u8_scale)
+{
+    static const float corner[GW_VTX_PER_SAMPLE][2] = {
+        {-0.375f, -0.375f}, {0.625f, -0.375f}, {-0.375f, 0.625f},
+        {-0.375f, 0.625f}, {0.625f, -0.375f}, {0.625f, 0.625f},
+    };
+    const uint32_t size = gw_vertex_size(c);
+    const uint32_t coff = gw_colour_offset(c);
+    const int32_t one = c->fmt == GW_F32 ? 16 : c->fmt == GW_U16 ? 0x8000 : 0x80;
+    memset(dst, 0, GW_VTX_COUNT * GW_MAX_VTX_BYTES);
+    for (uint32_t s = 0; s < GW_SAMPLES; s++) {
+        const uint32_t colour = 0xff000000u | (0x30u << 16) | (0xc0u << 8) | (0x10u * s + 0x0fu);
+        const float px = (float)(GW_WX + s);
+        const float py = (float)GW_WY;
+        for (uint32_t k = 0; k < GW_VTX_PER_SAMPLE; k++) {
+            uint8_t *v = dst + (s * GW_VTX_PER_SAMPLE + k) * size;
+            gw_put_weight(v, c, 0u, one, wrong_u8_scale);
+            if (c->target != 0u) {
+                gw_put_weight(v, c, c->target, c->base + c->step * (int32_t)s, wrong_u8_scale);
+            }
+            memcpy(v + coff, &colour, 4u);
+            const float pos[3] = {(px + corner[k][0] - 32.0f) / 32.0f,
+                                  (py + corner[k][1] - 16.0f) / 16.0f, 0.0f};
+            memcpy(v + coff + 4u, pos, sizeof(pos));
+        }
+    }
+    return size;
+}
+
+/* The draw's display list for vertex words at `vtx` (physical address); returns the word count.
+   Every state the draw reads is set. */
+static uint32_t gw_list(const struct gw_cell *c, uint32_t vtx, uint32_t vtype, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    static const float ident43[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    static const float proj[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const uint32_t full = (GW_STRIDE - 1u) | ((GW_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GW_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GW_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GW_W(0x9c, GW_FB_OFFSET);
+    GW_W(0x9d, GW_STRIDE);
+    GW_W(0xd2, 3u);             /* 8888 */
+    GW_W(0x9e, GW_ZB_OFFSET);
+    GW_W(0x9f, GW_STRIDE);
+    GW_W(0x15, 0);
+    GW_W(0x16, full);
+    GW_W(0xd4, 0);
+    GW_W(0xd5, full);
+    GW_W(0xd6, 0);
+    GW_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(off_units[i], 0);  /* lighting, culling, texturing, fog, dither, blending, tests */
+    }
+    GW_W(0x1e, 0);              /* texture off */
+    GW_W(0xc9, 0);
+    GW_W(0x50, 0);              /* flat shading */
+    GW_W(0xd3, 0);              /* clear mode off */
+    GW_W(0xe7, 1);              /* depth writes off */
+    GW_W(0xe8, 0);
+    GW_W(0xe9, 0);
+    GW_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GW_W(0xd8, 1);              /* colour test ALWAYS */
+    GW_W(0xd9, 0);
+    GW_W(0xda, 0);
+    GW_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GW_W(0xdd, 0);              /* KEEP, KEEP, KEEP */
+    GW_W(0xde, 1);              /* depth test ALWAYS */
+    GW_W(0xdf, 0x32u);
+    GW_W(0xe0, 0);
+    GW_W(0xe1, 0);
+    GW_W(0xe6, 3);              /* logic op COPY */
+    GW_W(0xcf, 0);
+    GW_W(0xcd, 0);
+    GW_W(0xce, 0);
+    GW_W(0x53, 0);              /* MATERIALUPDATE: vertex colour is the only colour source */
+    GW_W(0x2c, gw_fbits(1.0f) >> 8);   /* morph weight 0; one morph target */
+    /* Bones: 0 is the identity plus t0 pixels in y; the target slot's bone is the zero matrix
+       plus 16 pixels (one clip unit); every other bone the zero matrix plus 64 pixels. */
+    GW_W(0x2a, 0);
+    for (uint32_t b = 0; b < GW_BONES; b++) {
+        float m[12] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 0.0f};
+        if (b == 0u) {
+            memcpy(m, ident43, sizeof(m));
+            m[10] = (float)c->t0 / 16.0f;
+        } else if (c->target != 0u && b == c->target) {
+            m[10] = 1.0f;
+        }
+        for (uint32_t i = 0; i < 12u; i++) {
+            GW_W(0x2b, gw_fbits(m[i]) >> 8);
+        }
+    }
+    GW_W(0x3a, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(0x3b, gw_fbits(ident43[i]) >> 8);
+    }
+    GW_W(0x3c, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(0x3d, gw_fbits(ident43[i]) >> 8);
+    }
+    GW_W(0x3e, 0);
+    for (uint32_t i = 0; i < 16u; i++) {
+        GW_W(0x3f, gw_fbits(proj[i]) >> 8);
+    }
+    GW_W(0x42, gw_fbits(32.0f) >> 8);   /* viewport: x = 32 + 32 X, y = 16 + 16 Y */
+    GW_W(0x43, gw_fbits(16.0f) >> 8);
+    GW_W(0x44, 0);
+    GW_W(0x45, gw_fbits(2048.0f) >> 8);
+    GW_W(0x46, gw_fbits(2048.0f) >> 8);
+    GW_W(0x47, gw_fbits(32768.0f) >> 8);
+    GW_W(0x4c, (2048u - 32u) << 4);
+    GW_W(0x4d, (2048u - 16u) << 4);
+    GW_W(0x12, vtype);
+    GW_W(0x01, vtx);
+    GW_W(0x04, (3u << 16) | GW_VTX_COUNT);   /* triangles */
+    GW_W(0x0f, 0);
+    GW_W(0x0c, 0);
+#undef GW_W
+    return n;
+}
+
+/* FNV-1a 64 over the window's 272 words, each little-endian: ge_window_fnv1a64. */
+static uint64_t gw_digest(const uint32_t *px)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < GW_N; i++) {
+        for (uint32_t b = 0; b < 4u; b++) {
+            h ^= (px[i] >> (8u * b)) & 0xffu;
+            h *= 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+
+/* The window row (0-based, row 0 is y 8) sample s lands on, per the probe's model. */
+static int gw_sample_row(const struct gw_cell *c, uint32_t s)
+{
+    if (strcmp(c->name, "f32-neg") == 0) return 24 - (int)s;
+    if (strcmp(c->name, "f32-c1") == 0) return 8;
+    return 8 + (int)s;
+}
+
+/* Every sample lights exactly one pixel, in column s and its model row, with its 24 colour
+ * bits. Returns the number of samples that do not. */
+static unsigned gw_pixels_wrong(const struct gw_cell *c, const uint32_t *px)
+{
+    unsigned wrong = 0;
+    for (uint32_t s = 0; s < GW_SAMPLES; s++) {
+        const int row = gw_sample_row(c, s) - (int)GW_WY;
+        const uint32_t rgb = 0x0030c000u | (0x10u * s + 0x0fu);
+        for (uint32_t y = 0; y < GW_WH; y++) {
+            const uint32_t got = px[y * GW_WW + s];
+            if ((int)y == row) {
+                if ((got & 0x00ffffffu) != rgb) wrong++;
+            } else if (got != 0u) {
+                wrong++;
+            }
+        }
+    }
+    return wrong;
+}
+
+/* One cell through production dispatch and the software GE; fills the window and returns 1 when
+ * the list is accepted and completes. */
+static int gw_run_cell(const struct gw_cell *c, uint32_t px[GW_N], int wrong_u8_scale)
+{
+    CpuState cpu;
+    const uint32_t fb = 0x04000000u + GW_FB_OFFSET;
+    (void)gw_vertices(c, (uint8_t *)SR_HOST(GW_VERTS), wrong_u8_scale);
+    /* Transform mode: 8888 colour (bits 2-4 = 7), float position (bits 7-8 = 3), the weight
+       format in bits 9-10 and the weight count less one in bits 14-16. */
+    const uint32_t vtype = (7u << 2) | (3u << 7) | ((uint32_t)c->fmt << 9) |
+                           ((uint32_t)(c->count - 1u) << 14);
+    memset(SR_HOST(fb), 0, GW_STRIDE * GW_ROWS * 4u);
+    const uint32_t words = gw_list(c, GW_VERTS, vtype, (uint32_t *)SR_HOST(GW_LIST));
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = GW_LIST;
+    const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = qid;
+    const int ok = words > 0u && (qid & 0xFF000000u) == 0x35000000u &&
+                   sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) == 0u;
+    for (uint32_t i = 0; i < GW_N; i++) {
+        const uint32_t at = (GW_WY + i / GW_WW) * GW_STRIDE + GW_WX + i % GW_WW;
+        px[i] = MEM_R32(fb + at * 4u);
+    }
+    return ok;
+}
+
+/* Run every PSP-GE-WEIGHT-001 cell through the software GE with its original
+ * vertices or the recoded u8 input. Mark each differing PSP digest and return
+ * the count. For original input, print divergent windows in the corpus format. */
+static unsigned gw_run_cells(int wrong_u8_scale, unsigned char diverged[GW_CELL_COUNT],
+                             unsigned *names_ok, unsigned *synced)
+{
+    uint32_t px[GW_N];
+    unsigned count = 0;
+    reset_fixture();
+    sr_hle_init();
+    *names_ok = 1;
+    *synced = 1;
+    for (uint32_t k = 0; k < GW_CELL_COUNT; k++) {
+        const struct gw_cell *c = &gw_cells[k];
+        if (!gw_run_cell(c, px, wrong_u8_scale)) *synced = 0;
+        if (strcmp(s_gw_psp[k].name, c->name) != 0) *names_ok = 0;
+        const uint64_t digest = gw_digest(px);
+        diverged[k] = digest != s_gw_psp[k].psp;
+        if (!diverged[k]) continue;
+        count++;
+        if (wrong_u8_scale) continue;
+        fprintf(stderr, "GE-WEIGHT %s software=0x%016llx psp=0x%016llx", c->name,
+                (unsigned long long)digest, (unsigned long long)s_gw_psp[k].psp);
+        for (uint32_t i = 0; i < GW_N; i++)
+            fprintf(stderr, "%s%08x", i % GW_WW ? " " : "\n  ", (unsigned)px[i]);
+        fprintf(stderr, "\n");
+    }
+    return count;
+}
+
+/* The recoded u8 input and exactly the PSP-GE-WEIGHT-001 cells whose windows it must change. */
+#define GW_SENSITIVITY_CELLS 8
+static const struct {
+    int wrong_u8_scale;
+    const char *rule;
+    const char *cells[GW_SENSITIVITY_CELLS];
+} s_gw_wrong_inputs[] = {
+    {1, "u8 weights recoded by round(128 w / 255)", {"u8-w1", "u8-hi", "u8-c3", "u8-c5", NULL}},
+};
+
+/* Every PSP-GE-WEIGHT-001 cell matches the PSP's window digest under the measured rules, and
+ * the recoded u8 input above changes exactly its named cells, so the PSP data, not agreement
+ * with the software GE's own past output, pins the weight scale and slot order (#343). */
+static void test_ge_weight_cells_match_psp(void) {
+    unsigned char diverged[GW_CELL_COUNT];
+    unsigned names_ok = 0, synced = 0;
+    const unsigned count = gw_run_cells(0, diverged, &names_ok, &synced);
+    expect(names_ok, "PSP-GE-WEIGHT-001 digest table rows name the cells in table order");
+    expect(synced, "every PSP-GE-WEIGHT-001 list is accepted and completes");
+    expect(count == 0, "every PSP-GE-WEIGHT-001 cell matches the PSP window digest");
+
+    /* The model's pixels, so a rule that keeps the digest but moves a pixel cannot pass. */
+    {
+        uint32_t px[GW_N];
+        int drawn = 1;
+        unsigned bad = 0;
+        char what[256];
+        reset_fixture();
+        sr_hle_init();
+        for (uint32_t k = 0; k < GW_CELL_COUNT; k++) {
+            if (!gw_run_cell(&gw_cells[k], px, 0)) drawn = 0;
+            const unsigned w = gw_pixels_wrong(&gw_cells[k], px);
+            if (w != 0u) {
+                snprintf(what, sizeof what, "%s: %u pixel(s) off the model row", gw_cells[k].name, w);
+                expect(0, what);
+                bad++;
+            }
+        }
+        snprintf(what, sizeof what, "each sample lights one pixel in column s and its model row, in its "
+                 "colour (every list drawn: %s)", drawn ? "yes" : "no");
+        expect(drawn && bad == 0, what);
+    }
+
+    for (size_t m = 0; m < sizeof(s_gw_wrong_inputs) / sizeof(s_gw_wrong_inputs[0]); m++) {
+        unsigned mnames = 0, msynced = 0;
+        const unsigned wrong = gw_run_cells(s_gw_wrong_inputs[m].wrong_u8_scale, diverged, &mnames,
+                                            &msynced);
+        fprintf(stderr, "GE-WEIGHT input sensitivity (%s): %u of %u cells differ from the PSP:",
+                s_gw_wrong_inputs[m].rule, wrong, (unsigned)GW_CELL_COUNT);
+        for (uint32_t k = 0; k < GW_CELL_COUNT; k++)
+            if (diverged[k]) fprintf(stderr, " %s", gw_cells[k].name);
+        fprintf(stderr, "\n");
+        unsigned named = 0, caught = 0;
+        for (size_t n = 0; n < GW_SENSITIVITY_CELLS && s_gw_wrong_inputs[m].cells[n] != NULL; n++) {
+            named++;
+            unsigned hit = 0;
+            for (uint32_t k = 0; k < GW_CELL_COUNT; k++)
+                if (strcmp(gw_cells[k].name, s_gw_wrong_inputs[m].cells[n]) == 0 && diverged[k]) hit = 1;
+            if (!hit)
+                fprintf(stderr, "GE-WEIGHT input sensitivity: named cell %s matches the PSP\n",
+                        s_gw_wrong_inputs[m].cells[n]);
+            caught += hit;
+        }
+        expect(msynced && named > 0 && caught == named && wrong == named,
+               "the u8 input-sensitivity recoding changes exactly its named PSP cells");
+    }
+}
+
 /* A clear that writes alpha (stencil) but not colour keeps the colour it clears over
  * (compose_px_rgba), and dither must not move that kept colour: dither offsets the colour
  * the pixel writes, and this clear writes none. Before, the kept colour was dithered and
@@ -40481,6 +42301,42 @@ static void test_dcache_maintenance_notifies_renderer(void) {
     ge_set_gpu_hooks(NULL);
 }
 
+/* sceKernelDcacheWritebackAll (0x79d1c3fa): the cache-wball cell of PSP-CACHE-001 (#2807). The
+ * record (docs/HARDWARE_ORACLE.md, case cache-alias: a PSP-3000 on system software 6.61 with
+ * ARK-5.1.0, PSPLink 3.2.1; the 2026-10-10 campaign launch of f6ccfb33 and the acceptance-eligible
+ * 2026-10-15 requalification launch of f2d6c91a, all five records identical) stores 0xDEADBEEF
+ * through the cached address of the second word of a 64-byte-aligned buffer, calls
+ * sceKernelDcacheWritebackAll(), discarding its result, and reads the same word through the
+ * uncached alias (the address with 0x40000000 set): the record passes only when that read is
+ * 0xDEADBEEF, and it passed in both launches. The probe went on to its next record, so the call
+ * returned to it.
+ *
+ * Here the production path makes the same store, call and read, the call through sr_syscall.
+ * Guest RAM is one coherent array in this runtime, so the alias reads the stored word whatever
+ * the handler does; what this cell can catch in the handler is a call that does not come back
+ * (a named stop). The 0 the handler returns is not asserted: the probe discards it. */
+#define NID_DCACHE_WRITEBACK_ALL   0x79d1c3fau
+#define DCACHE_WBALL_BUFFER        0x08abd000u   /* 64-byte aligned, as the probe's buffer */
+#define DCACHE_WBALL_UNCACHED_BIT  0x40000000u
+#define DCACHE_WBALL_WORD          0xdeadbeefu
+
+static void test_dcache_writeback_all_cached_store_reaches_the_uncached_alias(void) {
+    reset_fixture();
+    sr_hle_init();
+    MEM_W32(DCACHE_WBALL_BUFFER, 0u);
+    MEM_W32(DCACHE_WBALL_BUFFER + 4u, 0u);
+    MEM_W32(DCACHE_WBALL_BUFFER + 4u, DCACHE_WBALL_WORD);   /* c_ptr[1] = 0xDEADBEEF */
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)sr_syscall(&cpu, NID_DCACHE_WRITEBACK_ALL);
+    expect(sr_hle_test_unmodelled_stops() == stops,
+           "cache-wball: sceKernelDcacheWritebackAll() returns to its caller with no named stop");
+    expect(MEM_R32((DCACHE_WBALL_BUFFER + 4u) | DCACHE_WBALL_UNCACHED_BIT) == DCACHE_WBALL_WORD,
+           "cache-wball: after the write-back the uncached alias reads the word stored through the "
+           "cached address, 0xDEADBEEF (PSP-CACHE-001)");
+}
+
 /* Instruction-cache maintenance (#1979). The three Icache NIDs are registered in production
  * and in this harness (hle_register_icache_handlers); each is entered here through
  * sr_syscall with a literal NID. The cells pin what the handlers do today: a normal range,
@@ -41803,6 +43659,144 @@ static void test_display_narrow_stride_span(void) {
            "a stride-64 framebuffer whose last 480-pixel row runs past RAM is not presented");
     expect(display_set(0x041ef000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
            "a stride-64 framebuffer whose last 480-pixel row runs past eDRAM is not presented");
+    s_test_gui_on = 0;
+}
+
+static void test_display_static_scanout(void) {
+    const uint32_t vram = 0x04000000u;
+    const uint32_t vram_alias = 0x44000000u;
+    const uint32_t other_vram = 0x04100000u;
+    const uint32_t ram = 0x09000000u;
+    unsigned long calls, immediate, latched, rejected;
+    unsigned long initial_calls, initial_immediate, initial_latched, initial_rejected;
+    uint32_t last_error;
+
+    reset_fixture();
+    sr_hle_init();
+    s_test_gui_on = 1;
+    s_test_gui_sample_pixel = 1;
+    sr_display_test_flip_counts(&initial_calls, &initial_immediate, &initial_latched,
+                                &initial_rejected, &last_error);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 0u, "the boot placeholder is not presented");
+    expect(display_set(vram_alias, 512, 3, 0) == 0u &&
+               s_test_gui_present_calls == 1u && s_test_gui_first_pixel == 0u,
+           "the guest presents its initial blank scanout once");
+
+    MEM_W32(other_vram, 0xff223344u);
+    MEM_W32(vram + 480u * 4u, 0xff223344u); /* stride padding */
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 1u, "outside writes do not refresh the visible scanout");
+
+    unsigned long presents = s_test_gui_present_calls;
+    MEM_W16(vram, 0x5678u);
+    MEM_W16(vram + 2u, 0xff34u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_last_addr == vram_alias &&
+               s_test_gui_first_pixel == 0xff345678u,
+           "a VBLANK presents CPU changes in the active VRAM alias without a guest flip");
+    presents = s_test_gui_present_calls;
+    MEM_W32(vram, 0xff345678u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents, "a repeated store of the same pixels does not present again");
+    sr_display_test_flip_counts(&calls, &immediate, &latched, &rejected, &last_error);
+    expect(calls == initial_calls + 1u && immediate == initial_immediate + 1u &&
+               latched == initial_latched && rejected == initial_rejected &&
+               s_test_gpu_guest_flips == 1u,
+           "refreshing a static image does not count as a guest flip");
+
+    MEM_W32(vram, 0xff112233u);
+    expect(display_set(ram, 512, 3, 1) == 0u, "the guest queues a different framebuffer");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_last_addr == ram,
+           "a pending flip takes precedence over refresh of the old active image");
+
+    presents = s_test_gui_present_calls;
+    MEM_W32(ram, 0xffa1b2c3u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_last_addr == ram &&
+               s_test_gui_first_pixel == 0xffa1b2c3u,
+           "a VBLANK also presents CPU changes in a main-RAM scanout");
+    sr_display_advance_vcount(1u);
+    presents = s_test_gui_present_calls;
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents, "unchanged main-RAM scanout does not present again");
+
+    s_test_gui_refuse_once = 1;
+    MEM_W32(ram, 0xff112233u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 1u && s_test_gui_first_pixel == 0xffa1b2c3u,
+           "a declined host refresh leaves the previous picture on screen");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents + 2u && s_test_gui_first_pixel == 0xff112233u,
+           "the changed scanout is tried again after a host decline");
+
+    presents = s_test_gui_present_calls;
+    expect(display_set(0, 0, 0, 1) == 0u, "the guest queues display-off");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    MEM_W32(ram, 0xffabcdefu);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents, "writing a retired display buffer does not refresh it");
+    s_test_gui_sample_pixel = 0;
+    s_test_gui_on = 0;
+}
+
+static void test_display_gpu_scanout_cpu_writes(void) {
+    const uint32_t active = 0x04000000u;
+    const uint32_t alias = 0x44000000u;
+    const uint32_t rendered = 0xff13579bu;
+    const uint32_t cpu_pixel = 0xff2468acu;
+    reset_fixture();
+    sr_hle_init();
+    s_test_gui_on = 1;
+    s_test_gui_sample_pixel = 1;
+    s_test_gui_gpu_source = 1;
+    expect(display_set(alias, 512, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "the guest's explicit flip shows a GPU-resident image");
+
+    /* A renderer may deliver its pixels back to guest memory without a CPU
+     * store commitment. Changing those bytes alone must not wake scanout. */
+    memcpy(SR_HOST_LINEAR(active), &rendered, sizeof rendered);
+    sr_gpu_vram_dirty(active, sizeof rendered);
+    MEM_W32(active + 480u * 4u, 0xff123456u);
+    MEM_W32(0x04100000u, 0xff123456u);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 1u,
+           "GPU readback, row padding and a different VRAM buffer leave scanout alone");
+
+    s_test_gui_refuse_once = 1;
+    MEM_W32(active, cpu_pixel);
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 2u && s_test_gui_first_pixel != cpu_pixel,
+           "a CPU write to the displayed GPU target requests one host refresh");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == 3u && s_test_gui_last_addr == alias &&
+               s_test_gui_first_pixel == cpu_pixel,
+           "a declined refresh retries and reaches the presenter with the written pixel");
+    const unsigned long presents = s_test_gui_present_calls;
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(s_test_gui_present_calls == presents && s_test_gpu_guest_flips == 1u,
+           "accepted refresh consumes the CPU update and preserves the guest flip count");
+
+    s_test_gui_refuse_once = 0;
+    s_test_gui_gpu_source = 0;
+    expect(display_set(0, 0, 0, 1) == 0u, "the guest queues display-off after GPU scanout");
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    s_test_gui_sample_pixel = 0;
     s_test_gui_on = 0;
 }
 
@@ -45438,8 +47432,11 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
     expect(sas_env_cell_grain(&cpu, core, out) == 0x3FB79F36u,
            "exponential decay of rate 0x12345 for 255 samples below the top");
 
-    /* A linear decay that lands exactly on the sustain level stays in the decay for that step
-     * (the switch is height < level) and leaves on the next one: 0x1FF00000 is then held. */
+    /* A linear decay that lands exactly on the sustain level ends there: for the linear decay the
+     * switch is height <= level, so 0x20000000 is held. PPSSPP's model switched only below the level
+     * and held 0x1FF00000; PSP-SAS-002 measures the PSP stopping a linear decay on the level (its
+     * bound runs, at 0x30000000; test_sas_adsr_psp_sas_002_curve_runs). The exponential and DIRECT
+     * decays keep PPSSPP's below-the-level switch (test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule). */
     sas_env_cell_begin(&cpu, core, pcm, 256u);
     expect(sas_env_cell_call(&cpu, rates, core, 7, 0x40000000u, 0x00100000u, 0, 0) == 0,
            "ADSR: attack, decay 0x100000, sustain held");
@@ -45449,8 +47446,8 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
     sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
     expect(sas_env_cell_grain(&cpu, core, out) == 0x30100000u, "linear decay after 255 steps");
     expect(sas_env_cell_grain(&cpu, core, out) == 0x20100000u, "linear decay after 511 steps");
-    expect(sas_env_cell_grain(&cpu, core, out) == 0x1FF00000u,
-           "the decay passes the sustain level by one step, then the sustain holds it");
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x20000000u,
+           "the decay stops on the sustain level, then the sustain holds it");
 
     /* SimpleADSR with an exponential sustain (env2 bits 14-15 = 3) takes its rate from the
      * exponent table: code 0x20 is 0x70000, not the linear table's 0x1C0000. */
@@ -45520,6 +47517,508 @@ static void test_sas_envelope_curve_paths_and_refusals(void) {
     expect(MEM_R32(heights) == 0u, "GetAllEnvelopeHeights reads 0 for the ended voice");
     cpu.r[4] = core;
     expect((sr_syscall(&cpu, NID_SAS_GET_END) & 1u) != 0, "the ended one-shot voice sets its end flag");
+}
+
+/* ---- PSP-SAS-002 (sas-adsr): the probe's envelope sequences through production dispatch (#2807) ----
+ *
+ * The record is one acceptance-eligible launch of the probe built from 06a6c942c on a PSP-3000 (system
+ * software 6.61), boot 208, in the game context, on 2026-11-13 (UTC): 696 records and the done record, all
+ * PASS. Every record's result and out words equal the 2026-11-05 and 2026-11-10 runs
+ * (tools/psp_oracle/manifest.json PSP-SAS-002; docs/HARDWARE_ORACLE.md; the values are in
+ * tests/fixtures/psp_oracle/README.md, sas-adsr). These cells replay run_sas_adsr in
+ * tests/fixtures/psp_oracle/probe.c call for call, with its arguments and in its order. That is one core
+ * (32 voices, output mode 0, 44100 Hz), initialised again before every run, and one looping synthetic VAG
+ * voice (64 blocks of filter 0, shift 0 and nibbles 0x71, loop flags 0x06 and 0x03) at volume
+ * 0x1000/0x1000/0/0. The height is read after every __sceSasCore. Each call that the probe records
+ * enters its NID through sr_syscall with a named constant.
+ *
+ * The README publishes these values, and the cells assert them as measured:
+ * - init, SetVoice, SetVolume, SetSimpleADSR, SetADSR and SetSL return 0 in every run;
+ * - the height is 0 before KeyOn, and 0 after KeyOn until the first __sceSasCore;
+ * - __sceSasSetADSRmode takes attack curves 0, 2 and 4, decay and release curves 1, 3 and 5, and sustain
+ *   curves 0 to 5. It returns 0x80420013 for attack 1, 3 or 5, decay or release 0, 2 or 4, sustain 6, and
+ *   all four at 5. A refused row's heights equal the baseline's, so nothing is applied in part. A curve in
+ *   a phase the mask leaves out is not checked: mask 1 with decay 0, sustain 6 and release 0 returns 0,
+ *   with the baseline's heights. The top bit is ignored: such a row returns 0 with the heights of the
+ *   same row without it. A release-only mask leaves the heights before KeyOff alone;
+ * - the end flag after the last grain is 0xfffffffe for pairs p3 and p4 and for the grain-64 p1 and p2
+ *   runs, and 0xffffffff for every other run;
+ * - with a sustain level of 0x30000000 or 0x30080000, a linear decay of 0x00100000 per step from the top
+ *   stops at 0x30000000 in both runs: the decay steps while the height is above the level and does not
+ *   clamp to it;
+ * - the exponent attack at grain 64 reads at grain 3 the height that grain 256 reads at grain 0;
+ * - pair p8's height reaches 0 at grain 585.
+ *
+ * PPSSPP's model holds 0x2ff00000 in the bound run, because its decay leaves for the sustain only below
+ * the level; sas_envelope.h ends a linear decay at the level, as the record shows. bound pins that
+ * equality, and bound-half, whose step overshoots the level, is the control that passes either way.
+ * Both runs use the linear decay, so the record says nothing about the exponential or DIRECT decay at
+ * the level; those keep PPSSPP's rule (test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule).
+ *
+ * Published values this runtime does not reproduce. The cells print each as a named KNOWN DEVIATION line
+ * and do not assert it:
+ * - The exponent attack's height at grain 0 of the grain-256 run is 0x00a76d9d on the PSP and 0x00bf40cd
+ *   here. This runtime's exponent curve at rate 0x00020000 gives 0x00a76d9d after 224 steps and
+ *   0x00bf40cd after 256. The runtime steps 256 times in that grain, because it has no key-on delay
+ *   (sas_envelope.h leaves out PPSSPP's 32 silent samples after a key-on, #1296). So the curve agrees and
+ *   the start does not. Every absolute height after KeyOn moves with that delay, and the cells assert
+ *   none of them.
+ * - Pair p1 (0x30fb/0x102c) reads end flag 0xffffffff after grain 1023 on the PSP and 0xfffffffe here.
+ *   PPSSPP's exponential release, code 0x0c, needs about 395 grains from the top, and the PSP's ends
+ *   within 384. The record publishes no p1 height, so it does not pin the right curve.
+ * - KeyOff returns 0x80420016 on the PSP once the envelope has reached 0 (pairs p0, p5 and p8, and mode
+ *   row 13). This runtime's __sceSasSetKeyOff returns 0 there. KeyOff is not reviewed here.
+ * The probe makes one call it does not record, __sceSasCore; its result is checked only as a runtime
+ * precondition. */
+#define NID_SAS_ADSR_SET_MODE   0x9ec3676au
+#define NID_SAS_ADSR_SET_RATES  0x019b25ebu
+#define NID_SAS_ADSR_SET_SL     0x5f9529f6u
+#define NID_SAS_ADSR_SET_SIMPLE 0xcbcd4f79u
+#define NID_SAS_ADSR_GET_HEIGHT 0x74ae582au
+#define SAS_ADSR_CORE           0x08030000u
+#define SAS_ADSR_OUT            0x08010000u
+#define SAS_ADSR_VAG            0x08020000u
+#define SAS_ADSR_VAG_BLOCKS     64u
+#define SAS_ADSR_PAIR_ON        640u
+#define SAS_ADSR_PAIR_OFF       384u
+#define SAS_ADSR_MODE_ON        8u
+#define SAS_ADSR_MODE_OFF       8u
+#define SAS_ADSR_EVERYTHING     0xfu
+#define SAS_ADSR_TOP            0x80000000u
+#define SAS_ADSR_ENDED          0xffffffffu
+#define SAS_ADSR_VOICE0_PLAYING 0xfffffffeu
+#define SAS_ADSR_P8_ZERO_GRAIN  585u
+#define SAS_ADSR_BOUND_HEIGHT   0x30000000u
+#define SAS_ADSR_EXPATK_GRAIN0  0x00a76d9du
+
+typedef struct {
+    uint32_t calls[16];
+    uint32_t heights[SAS_ADSR_PAIR_ON + SAS_ADSR_PAIR_OFF];
+    int core_failed;   /* a __sceSasCore that did not return 0 (runtime precondition, not a record word) */
+} SasAdsrReplay;
+
+static SasAdsrReplay s_sas_adsr_replay;
+static SasAdsrReplay s_sas_adsr_baseline;
+
+/* The probe's VAG (run_sas_adsr), written once per cell; every run re-inits the core over it. */
+static void sas_adsr_cell_begin(CpuState *cpu) {
+    reset_fixture(); sr_hle_init(); sr_hle_test_sas_reset();
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    for (uint32_t b = 0; b < SAS_ADSR_VAG_BLOCKS; b++) {
+        const uint32_t blk = SAS_ADSR_VAG + b * 16u;
+        MEM_W8(blk, 0x00u);
+        MEM_W8(blk + 1u, b == 0u ? 0x06u : (b + 1u == SAS_ADSR_VAG_BLOCKS ? 0x03u : 0x00u));
+        for (uint32_t i = 2; i < 16u; i++) MEM_W8(blk + i, 0x71u);
+    }
+}
+
+/* __sceSasInit(core, grain, 32, 0, 44100), __sceSasSetVoice(core, 0, vag, 1024, 1) and
+ * __sceSasSetVolume(core, 0, 0x1000, 0x1000, 0, 0), their results in words[0..2]. */
+static void sas_adsr_voice(CpuState *cpu, uint32_t grain, uint32_t *words) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = grain; cpu->r[6] = 32u; cpu->r[7] = 0u; cpu->r[8] = 44100u;
+    words[0] = sr_syscall(cpu, NID_SAS_INIT);
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = SAS_ADSR_VAG;
+    cpu->r[7] = SAS_ADSR_VAG_BLOCKS * 16u; cpu->r[8] = 1u;
+    words[1] = sr_syscall(cpu, NID_SAS_SET_VOICE);
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = 0x1000u; cpu->r[7] = 0x1000u;
+    cpu->r[8] = 0u; cpu->r[9] = 0u;
+    words[2] = sr_syscall(cpu, NID_SAS_SET_VOLUME);
+}
+
+static uint32_t sas_adsr_set_mode(CpuState *cpu, uint32_t mask, uint32_t a, uint32_t d, uint32_t s, uint32_t r) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = mask; cpu->r[7] = a;
+    cpu->r[8] = d; cpu->r[9] = s; cpu->r[10] = r;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_MODE);
+}
+
+static uint32_t sas_adsr_set_rates(CpuState *cpu, uint32_t mask, uint32_t a, uint32_t d, uint32_t s, uint32_t r) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = mask; cpu->r[7] = a;
+    cpu->r[8] = d; cpu->r[9] = s; cpu->r[10] = r;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_RATES);
+}
+
+static uint32_t sas_adsr_set_level(CpuState *cpu, uint32_t level) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = level;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_SL);
+}
+
+static uint32_t sas_adsr_set_simple(CpuState *cpu, uint32_t env1, uint32_t env2) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u; cpu->r[6] = env1; cpu->r[7] = env2;
+    return sr_syscall(cpu, NID_SAS_ADSR_SET_SIMPLE);
+}
+
+static uint32_t sas_adsr_height(CpuState *cpu) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u;
+    return sr_syscall(cpu, NID_SAS_ADSR_GET_HEIGHT);
+}
+
+static uint32_t sas_adsr_key_on(CpuState *cpu) {
+    cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u;
+    return sr_syscall(cpu, NID_SAS_SET_KEY_ON);
+}
+
+/* `on` grains, KeyOff (its result in *key_off), then `off` grains: __sceSasCore and the height after each. */
+static void sas_adsr_grains(CpuState *cpu, uint32_t on, uint32_t off, SasAdsrReplay *out, uint32_t *key_off) {
+    for (uint32_t g = 0; g < on + off; g++) {
+        if (g == on) {
+            cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = 0u;
+            *key_off = sr_syscall(cpu, NID_SAS_SET_KEY_OFF);
+        }
+        cpu->r[4] = SAS_ADSR_CORE; cpu->r[5] = SAS_ADSR_OUT;
+        if (sr_syscall(cpu, NID_SAS_CORE) != 0u) out->core_failed = 1;
+        out->heights[g] = sas_adsr_height(cpu);
+    }
+}
+
+static uint32_t sas_adsr_end_flag(CpuState *cpu) {
+    cpu->r[4] = SAS_ADSR_CORE;
+    return sr_syscall(cpu, NID_SAS_GET_END);
+}
+
+/* The probe's nine __sceSasSetSimpleADSR pairs {env1, env2} (k_sas_adsr_pairs) and, from the README,
+ * the end flag each run reads after its last grain. `deviates` marks the one this runtime does not
+ * reproduce (p1, see above). */
+static const struct { uint32_t env1, env2, end_flag; int deviates; } k_sas_adsr_simple_pairs[] = {
+    {0x10c7u, 0x500au, SAS_ADSR_ENDED, 0},           /* p0 */
+    {0x30fbu, 0x102cu, SAS_ADSR_ENDED, 1},           /* p1 */
+    {0xb083u, 0x900eu, SAS_ADSR_ENDED, 0},           /* p2 */
+    {0x40cfu, 0xc830u, SAS_ADSR_VOICE0_PLAYING, 0},  /* p3 */
+    {0xb800u, 0x5fdfu, SAS_ADSR_VOICE0_PLAYING, 0},  /* p4 */
+    {0x0049u, 0x481eu, SAS_ADSR_ENDED, 0},           /* p5 */
+    {0x7f0fu, 0x002cu, SAS_ADSR_ENDED, 0},           /* p6 */
+    {0x20a5u, 0x8c24u, SAS_ADSR_ENDED, 0},           /* p7 */
+    {0x100fu, 0x510au, SAS_ADSR_ENDED, 0},           /* p8 */
+};
+#define SAS_ADSR_SIMPLE_PAIRS (sizeof(k_sas_adsr_simple_pairs) / sizeof(k_sas_adsr_simple_pairs[0]))
+
+/* sas_adsr_pair: calls[0..10] are env1, env2, init, SetVoice, SetVolume, SetSimpleADSR, KeyOn, the
+ * height after KeyOn, KeyOff, the end flag after the last grain, the height before KeyOn. */
+static void sas_adsr_replay_pair(CpuState *cpu, uint32_t pair, SasAdsrReplay *out) {
+    memset(out, 0, sizeof(*out));
+    out->calls[0] = k_sas_adsr_simple_pairs[pair].env1;
+    out->calls[1] = k_sas_adsr_simple_pairs[pair].env2;
+    sas_adsr_voice(cpu, 256u, &out->calls[2]);
+    out->calls[5] = sas_adsr_set_simple(cpu, out->calls[0], out->calls[1]);
+    out->calls[10] = sas_adsr_height(cpu);
+    out->calls[6] = sas_adsr_key_on(cpu);
+    out->calls[7] = sas_adsr_height(cpu);
+    sas_adsr_grains(cpu, SAS_ADSR_PAIR_ON, SAS_ADSR_PAIR_OFF, out, &out->calls[8]);
+    out->calls[9] = sas_adsr_end_flag(cpu);
+}
+
+static void test_sas_simple_adsr_psp_sas_002_pairs(void) {
+    CpuState cpu;
+    sas_adsr_cell_begin(&cpu);
+    int setters = 1, before_key_on = 1, after_key_on = 1, key_on = 1, core = 1;
+    for (uint32_t pair = 0; pair < SAS_ADSR_SIMPLE_PAIRS; pair++) {
+        SasAdsrReplay *r = &s_sas_adsr_replay;
+        sas_adsr_replay_pair(&cpu, pair, r);
+        if (r->calls[2] != 0u || r->calls[3] != 0u || r->calls[4] != 0u || r->calls[5] != 0u) setters = 0;
+        if (r->calls[10] != 0u) before_key_on = 0;
+        if (r->calls[7] != 0u) after_key_on = 0;
+        if (r->calls[6] != 0u) key_on = 0;
+        if (r->core_failed) core = 0;
+        if (k_sas_adsr_simple_pairs[pair].deviates) {
+            printf("sas-adsr: KNOWN DEVIATION SimpleADSR p%u (0x%04x/0x%04x) end flag after grain 1023 "
+                   "got=0x%08x want=0x%08x (PSP-SAS-002 sas-adsr-p%u-calls out9; exponential release)\n",
+                   (unsigned)pair, (unsigned)r->calls[0], (unsigned)r->calls[1], (unsigned)r->calls[9],
+                   (unsigned)k_sas_adsr_simple_pairs[pair].end_flag, (unsigned)pair);
+        } else {
+            char what[160];
+            snprintf(what, sizeof(what),
+                     "SimpleADSR p%u (0x%04x/0x%04x): the end flag after grain 1023 is 0x%08x "
+                     "(PSP-SAS-002 sas-adsr-p%u-calls out9)",
+                     (unsigned)pair, (unsigned)r->calls[0], (unsigned)r->calls[1],
+                     (unsigned)k_sas_adsr_simple_pairs[pair].end_flag, (unsigned)pair);
+            expect(r->calls[9] == k_sas_adsr_simple_pairs[pair].end_flag, what);
+        }
+        if (pair == 8u) {
+            expect(r->heights[SAS_ADSR_P8_ZERO_GRAIN - 1u] != 0u && r->heights[SAS_ADSR_P8_ZERO_GRAIN] == 0u,
+                   "SimpleADSR p8 (0x100f/0x510a): the sustain reaches height 0 at grain 585, not before "
+                   "(PSP-SAS-002 sas-adsr-p8-h24 out8 and out9)");
+        }
+    }
+    expect(setters,
+           "SimpleADSR pairs: __sceSasInit, SetVoice, SetVolume and __sceSasSetSimpleADSR return 0 for all "
+           "nine pairs (PSP-SAS-002 sas-adsr-p0..p8-calls out2..out5)");
+    expect(before_key_on,
+           "SimpleADSR pairs: __sceSasGetEnvelopeHeight reads 0 before KeyOn (sas-adsr-pN-calls out10)");
+    expect(after_key_on,
+           "SimpleADSR pairs: __sceSasGetEnvelopeHeight reads 0 after KeyOn, before the first __sceSasCore "
+           "(sas-adsr-pN-calls out7)");
+    expect(key_on && core, "SimpleADSR pairs: KeyOn and every __sceSasCore return 0 (runtime precondition)");
+}
+
+/* The probe's __sceSasSetADSRmode table (k_sas_adsr_mode_rows) and, from the README, each row's result:
+ * 0, or 0x80420013 when a phase in the mask names a curve that phase does not take. `same_as` names the
+ * row whose heights a top-bit row must repeat, -1 for none. */
+static const struct { uint32_t mask, attack, decay, sustain, release, result; int same_as; } k_sas_adsr_mode_table[] = {
+    {0xfu, 0u, 1u, 0u, 1u, 0u, -1}, {0xfu, 2u, 1u, 0u, 1u, 0u, -1}, {0xfu, 4u, 1u, 0u, 1u, 0u, -1},
+    {0xfu, 0u, 3u, 0u, 1u, 0u, -1}, {0xfu, 0u, 5u, 0u, 1u, 0u, -1}, {0xfu, 0u, 1u, 0u, 3u, 0u, -1},
+    {0xfu, 0u, 1u, 0u, 5u, 0u, -1},
+    {0xfu, 0u, 1u, 1u, 1u, 0u, -1}, {0xfu, 0u, 1u, 2u, 1u, 0u, -1}, {0xfu, 0u, 1u, 3u, 1u, 0u, -1},
+    {0xfu, 0u, 1u, 4u, 1u, 0u, -1}, {0xfu, 0u, 1u, 5u, 1u, 0u, -1},
+    {0x1u, 4u, 5u, 3u, 5u, 0u, -1}, {0x2u, 4u, 5u, 3u, 5u, 0u, -1}, {0x4u, 4u, 5u, 3u, 5u, 0u, -1},
+    {0x8u, 4u, 5u, 3u, 5u, 0u, -1},
+    {0xfu, 1u, 1u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 3u, 1u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 5u, 1u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 0u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 0u, 2u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 4u, 0u, 1u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 1u, 0u, 0u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 0u, 1u, 0u, 2u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 1u, 0u, 4u, SAS_ERROR_ADSR_MODE, -1},
+    {0xfu, 0u, 1u, 6u, 1u, SAS_ERROR_ADSR_MODE, -1}, {0xfu, 5u, 5u, 5u, 5u, SAS_ERROR_ADSR_MODE, -1},
+    {0x1u, 0u, 0u, 6u, 0u, 0u, -1},
+    {0xfu, SAS_ADSR_TOP | 2u, 1u, 0u, 1u, 0u, 1}, {0xfu, 0u, SAS_ADSR_TOP | 3u, 0u, 1u, 0u, 3},
+    {0xfu, 0u, 1u, SAS_ADSR_TOP | 1u, 1u, 0u, 7}, {0xfu, 0u, 1u, 0u, SAS_ADSR_TOP | 3u, 0u, 5},
+};
+#define SAS_ADSR_MODE_TABLE_ROWS (sizeof(k_sas_adsr_mode_table) / sizeof(k_sas_adsr_mode_table[0]))
+#define SAS_ADSR_MODE_MASKED_OUT_ROW 27u
+#define SAS_ADSR_MODE_RELEASE_ONLY_ROW 15u
+
+/* sas_adsr_mode_row: calls[0..15] are the mask and four curves as passed, init, SetVoice, SetVolume, the
+ * baseline SetADSRmode, SetADSR and SetSL, the row's SetADSRmode, KeyOn, the height after KeyOn, KeyOff
+ * and the height before KeyOn. row < 0 is the baseline alone: the same calls without the row's own
+ * SetADSRmode, which is what a call that changes nothing leaves. */
+static void sas_adsr_replay_mode_row(CpuState *cpu, int row, SasAdsrReplay *out) {
+    memset(out, 0, sizeof(*out));
+    if (row >= 0) {
+        out->calls[0] = k_sas_adsr_mode_table[row].mask;
+        out->calls[1] = k_sas_adsr_mode_table[row].attack;
+        out->calls[2] = k_sas_adsr_mode_table[row].decay;
+        out->calls[3] = k_sas_adsr_mode_table[row].sustain;
+        out->calls[4] = k_sas_adsr_mode_table[row].release;
+    }
+    sas_adsr_voice(cpu, 256u, &out->calls[5]);
+    /* The baseline: linear attack, decays and release; attack 0x00400000, decay 0x00100000, sustain
+     * 0x00004000 and release 0x00040000 per step; sustain level 0x20000000. */
+    out->calls[8] = sas_adsr_set_mode(cpu, SAS_ADSR_EVERYTHING, 0u, 1u, 1u, 1u);
+    out->calls[9] = sas_adsr_set_rates(cpu, SAS_ADSR_EVERYTHING, 0x00400000u, 0x00100000u, 0x00004000u,
+                                       0x00040000u);
+    out->calls[10] = sas_adsr_set_level(cpu, 0x20000000u);
+    if (row >= 0) {
+        out->calls[11] = sas_adsr_set_mode(cpu, out->calls[0], out->calls[1], out->calls[2], out->calls[3],
+                                           out->calls[4]);
+    }
+    out->calls[15] = sas_adsr_height(cpu);
+    out->calls[12] = sas_adsr_key_on(cpu);
+    out->calls[13] = sas_adsr_height(cpu);
+    sas_adsr_grains(cpu, SAS_ADSR_MODE_ON, SAS_ADSR_MODE_OFF, out, &out->calls[14]);
+}
+
+static int sas_adsr_same_heights(const SasAdsrReplay *a, const SasAdsrReplay *b, uint32_t grains) {
+    return memcmp(a->heights, b->heights, grains * sizeof(a->heights[0])) == 0;
+}
+
+static void test_sas_adsr_mode_psp_sas_002_table(void) {
+    CpuState cpu;
+    static SasAdsrReplay rows[SAS_ADSR_MODE_TABLE_ROWS];
+    sas_adsr_cell_begin(&cpu);
+    sas_adsr_replay_mode_row(&cpu, -1, &s_sas_adsr_baseline);
+    const uint32_t grains = SAS_ADSR_MODE_ON + SAS_ADSR_MODE_OFF;
+    int setters = 1, before_key_on = 1, after_key_on = 1, key_on = 1, core = 1;
+    int results = 1, refused_as_baseline = 1, top_bit = 1;
+    for (uint32_t i = 0; i < SAS_ADSR_MODE_TABLE_ROWS; i++) {
+        sas_adsr_replay_mode_row(&cpu, (int)i, &rows[i]);
+        const SasAdsrReplay *r = &rows[i];
+        if (r->calls[5] != 0u || r->calls[6] != 0u || r->calls[7] != 0u || r->calls[8] != 0u ||
+            r->calls[9] != 0u || r->calls[10] != 0u)
+            setters = 0;
+        if (r->calls[15] != 0u) before_key_on = 0;
+        if (r->calls[13] != 0u) after_key_on = 0;
+        if (r->calls[12] != 0u) key_on = 0;
+        if (r->core_failed) core = 0;
+        if (r->calls[11] != k_sas_adsr_mode_table[i].result) results = 0;
+        if (k_sas_adsr_mode_table[i].result != 0u && !sas_adsr_same_heights(r, &s_sas_adsr_baseline, grains))
+            refused_as_baseline = 0;
+        if (k_sas_adsr_mode_table[i].same_as >= 0 &&
+            !sas_adsr_same_heights(r, &rows[k_sas_adsr_mode_table[i].same_as], grains))
+            top_bit = 0;
+    }
+    expect(setters,
+           "ADSRmode table: __sceSasInit, SetVoice, SetVolume, the baseline SetADSRmode, __sceSasSetADSR and "
+           "__sceSasSetSL return 0 in all 32 rows (PSP-SAS-002 sas-adsr-m00..m31-calls out5..out10)");
+    expect(results,
+           "ADSRmode table: each row's __sceSasSetADSRmode returns the PSP's word: 0 for attack 0/2/4, decay "
+           "and release 1/3/5 and sustain 0..5, 0x80420013 for any other curve in the mask "
+           "(sas-adsr-mNN-calls out11)");
+    expect(refused_as_baseline,
+           "ADSRmode table: the eleven refused rows leave the baseline's 16 heights, so nothing is applied in "
+           "part (sas-adsr-m16..m26-h)");
+    expect(rows[SAS_ADSR_MODE_MASKED_OUT_ROW].calls[11] == 0u &&
+               sas_adsr_same_heights(&rows[SAS_ADSR_MODE_MASKED_OUT_ROW], &s_sas_adsr_baseline, grains),
+           "ADSRmode table: mask 1 with decay 0, sustain 6 and release 0 returns 0 with the baseline's heights: "
+           "a curve outside the mask is not checked (sas-adsr-m27-calls, sas-adsr-m27-h)");
+    expect(top_bit,
+           "ADSRmode table: a curve with the top bit set returns 0 and gives the heights of the same curve "
+           "without it (sas-adsr-m28..m31 against m01, m03, m07 and m05)");
+    expect(sas_adsr_same_heights(&rows[SAS_ADSR_MODE_RELEASE_ONLY_ROW], &s_sas_adsr_baseline, SAS_ADSR_MODE_ON),
+           "ADSRmode table: a release-only mask leaves the 8 heights before KeyOff as the baseline's "
+           "(sas-adsr-m15-h out0..out7)");
+    expect(before_key_on,
+           "ADSRmode table: __sceSasGetEnvelopeHeight reads 0 before KeyOn (sas-adsr-mNN-calls out15)");
+    expect(after_key_on,
+           "ADSRmode table: __sceSasGetEnvelopeHeight reads 0 after KeyOn, before the first __sceSasCore "
+           "(sas-adsr-mNN-calls out13)");
+    expect(key_on && core, "ADSRmode table: KeyOn and every __sceSasCore return 0 (runtime precondition)");
+}
+
+/* The probe's explicit-curve runs (k_sas_adsr_runs). simple != 0 sets the envelope with SetSimpleADSR;
+ * otherwise SetADSRmode sets the curves and SetADSR and SetSL the rates and level. end_flag is the
+ * README's word after the last grain. */
+static const struct {
+    const char *name;
+    uint32_t grain, simple, env1, env2, attack, decay, sustain, release;
+    uint32_t rate_a, rate_d, rate_s, rate_r, level, on, off, end_flag;
+} k_sas_adsr_curve_runs[] = {
+    {"expatk", 256u, 0u, 0u, 0u, 4u, 1u, 1u, 1u, 0x00020000u, 0x00100000u, 0u, 0x00040000u, 0x20000000u,
+     64u, 16u, SAS_ADSR_ENDED},
+    {"expatk-g64", 64u, 0u, 0u, 0u, 4u, 1u, 1u, 1u, 0x00020000u, 0x00100000u, 0u, 0x00040000u, 0x20000000u,
+     128u, 32u, SAS_ADSR_ENDED},
+    {"bound", 256u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 0x00400000u, 0x00100000u, 0u, 0x00100000u, 0x30000000u,
+     16u, 16u, SAS_ADSR_ENDED},
+    {"bound-half", 256u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 0x00400000u, 0x00100000u, 0u, 0x00100000u, 0x30080000u,
+     16u, 16u, SAS_ADSR_ENDED},
+    {"g64-p1", 64u, 1u, 0x30fbu, 0x102cu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 128u, 32u,
+     SAS_ADSR_VOICE0_PLAYING},
+    {"g64-p2", 64u, 1u, 0xb083u, 0x900eu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 128u, 32u,
+     SAS_ADSR_VOICE0_PLAYING},
+};
+#define SAS_ADSR_CURVE_RUNS (sizeof(k_sas_adsr_curve_runs) / sizeof(k_sas_adsr_curve_runs[0]))
+
+/* sas_adsr_curve_run: calls[0..13] are the grain, init, SetVoice, SetVolume, SetSimpleADSR or
+ * SetADSRmode, SetADSR, SetSL, KeyOn, the height after KeyOn, KeyOff, the end flag, the height before
+ * KeyOn, and the grains on and off. */
+static void sas_adsr_replay_curve_run(CpuState *cpu, uint32_t idx, SasAdsrReplay *out) {
+    memset(out, 0, sizeof(*out));
+    const uint32_t grain = k_sas_adsr_curve_runs[idx].grain;
+    out->calls[0] = grain;
+    out->calls[12] = k_sas_adsr_curve_runs[idx].on;
+    out->calls[13] = k_sas_adsr_curve_runs[idx].off;
+    sas_adsr_voice(cpu, grain, &out->calls[1]);
+    if (k_sas_adsr_curve_runs[idx].simple) {
+        out->calls[4] = sas_adsr_set_simple(cpu, k_sas_adsr_curve_runs[idx].env1, k_sas_adsr_curve_runs[idx].env2);
+    } else {
+        out->calls[4] = sas_adsr_set_mode(cpu, SAS_ADSR_EVERYTHING, k_sas_adsr_curve_runs[idx].attack,
+                                          k_sas_adsr_curve_runs[idx].decay, k_sas_adsr_curve_runs[idx].sustain,
+                                          k_sas_adsr_curve_runs[idx].release);
+        out->calls[5] = sas_adsr_set_rates(cpu, SAS_ADSR_EVERYTHING, k_sas_adsr_curve_runs[idx].rate_a,
+                                           k_sas_adsr_curve_runs[idx].rate_d, k_sas_adsr_curve_runs[idx].rate_s,
+                                           k_sas_adsr_curve_runs[idx].rate_r);
+        out->calls[6] = sas_adsr_set_level(cpu, k_sas_adsr_curve_runs[idx].level);
+    }
+    out->calls[11] = sas_adsr_height(cpu);
+    out->calls[7] = sas_adsr_key_on(cpu);
+    out->calls[8] = sas_adsr_height(cpu);
+    sas_adsr_grains(cpu, k_sas_adsr_curve_runs[idx].on, k_sas_adsr_curve_runs[idx].off, out, &out->calls[9]);
+    out->calls[10] = sas_adsr_end_flag(cpu);
+}
+
+static void test_sas_adsr_psp_sas_002_curve_runs(void) {
+    CpuState cpu;
+    static SasAdsrReplay runs[SAS_ADSR_CURVE_RUNS];
+    sas_adsr_cell_begin(&cpu);
+    int setters = 1, before_key_on = 1, after_key_on = 1, key_on = 1, core = 1, end_flags = 1;
+    for (uint32_t i = 0; i < SAS_ADSR_CURVE_RUNS; i++) {
+        sas_adsr_replay_curve_run(&cpu, i, &runs[i]);
+        const SasAdsrReplay *r = &runs[i];
+        if (r->calls[1] != 0u || r->calls[2] != 0u || r->calls[3] != 0u || r->calls[4] != 0u ||
+            r->calls[5] != 0u || r->calls[6] != 0u)
+            setters = 0;
+        if (r->calls[11] != 0u) before_key_on = 0;
+        if (r->calls[8] != 0u) after_key_on = 0;
+        if (r->calls[7] != 0u) key_on = 0;
+        if (r->core_failed) core = 0;
+        if (r->calls[10] != k_sas_adsr_curve_runs[i].end_flag) end_flags = 0;
+    }
+    expect(setters,
+           "curve runs: __sceSasInit, SetVoice, SetVolume, __sceSasSetADSRmode (curves 4/1/1/1 and 0/1/1/1), "
+           "__sceSasSetADSR, __sceSasSetSL and __sceSasSetSimpleADSR return 0 in all six runs "
+           "(PSP-SAS-002 sas-adsr-<run>-calls out1..out6)");
+    expect(before_key_on && after_key_on,
+           "curve runs: __sceSasGetEnvelopeHeight reads 0 before KeyOn and after KeyOn, before the first "
+           "__sceSasCore (sas-adsr-<run>-calls out11 and out8)");
+    expect(end_flags,
+           "curve runs: the end flag after the last grain is 0xffffffff for expatk, expatk-g64, bound and "
+           "bound-half and 0xfffffffe for g64-p1 and g64-p2 (sas-adsr-<run>-calls out10)");
+    /* bound and bound-half: the attack reaches the top in one grain and the decay steps 0x00100000 to
+     * 0x30000000 in one more; whatever the key-on delay, grains 2..15 follow both. */
+    for (uint32_t i = 2; i < 4; i++) {
+        int held = 1;
+        for (uint32_t g = 2; g < k_sas_adsr_curve_runs[i].on; g++)
+            if (runs[i].heights[g] != SAS_ADSR_BOUND_HEIGHT) held = 0;
+        char what[200];
+        snprintf(what, sizeof(what),
+                 "curve run %s: SetSL 0x%08x, a linear decay of 0x00100000 per step from the top stops at "
+                 "0x30000000 and holds it through grain 15 (sas-adsr-%s-h00 out2..out15)",
+                 k_sas_adsr_curve_runs[i].name, (unsigned)k_sas_adsr_curve_runs[i].level,
+                 k_sas_adsr_curve_runs[i].name);
+        expect(held, what);
+    }
+    expect(runs[1].heights[3] == runs[0].heights[0] && runs[0].heights[0] != 0u,
+           "curve runs: the exponent attack at grain 64 reads at grain 3 the height grain 256 reads at grain 0 "
+           "(sas-adsr-expatk-g64-h00 out3 and sas-adsr-expatk-h00 out0)");
+    expect(key_on && core, "curve runs: KeyOn and every __sceSasCore return 0 (runtime precondition)");
+    if (runs[0].heights[0] != SAS_ADSR_EXPATK_GRAIN0)
+        printf("sas-adsr: KNOWN DEVIATION expatk height at grain 0 got=0x%08x want=0x%08x "
+               "(PSP-SAS-002 sas-adsr-expatk-h00 out0; no key-on delay, #1296)\n",
+               (unsigned)runs[0].heights[0], (unsigned)SAS_ADSR_EXPATK_GRAIN0);
+}
+
+/* Controls for the decay curves PSP-SAS-002 does not measure at the sustain level (#2807). The record's
+ * bound runs pin the linear decay ending at the level; these two pin that the exponential and DIRECT
+ * decays keep PPSSPP's rule of ending only below it. This is PPSSPP-derived behaviour kept, not
+ * PSP-measured. Each uses the probe's core and voice, a one-step linear attack (0x40000000) and
+ * sustain level 0x30000000, and reads the height after the first two grains of 256.
+ * - Exponential decay, rate 0x40000000, zero-rate linear sustain. The first decay step gives
+ *   0x40000000 - (0x40000000 + 3) / 4 = 0x30000000, exactly the level, so the decay steps again:
+ *   0x30000000 + ((0x10000000 * 0x40000000) >> 32) - 0x10000000 = 0x24000000, below the level, which
+ *   the sustain then holds. Ending at the level would hold 0x30000000.
+ * - DIRECT decay with rate 0x30000000, the level, and a linear sustain of 0x00100000 per step. DIRECT
+ *   sets the height to 0x30000000 on every step and never goes below the level, so the envelope stays
+ *   in the decay at 0x30000000. Ending at the level would start the sustain and read
+ *   0x30000000 - 254 * 0x00100000 = 0x20200000 after the first grain. */
+#define SAS_ADSR_CURVE_LINEAR_INC  0u   /* __sceSasSetADSRmode curve numbers (PspSasADSRCurveModes) */
+#define SAS_ADSR_CURVE_LINEAR_DEC  1u
+#define SAS_ADSR_CURVE_EXP_DEC     3u
+#define SAS_ADSR_CURVE_DIRECT      5u
+#define SAS_ADSR_CONTROL_LEVEL     0x30000000u
+#define SAS_ADSR_CONTROL_EXP_HELD  0x24000000u
+static void test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule(void) {
+    CpuState cpu;
+    static const struct {
+        uint32_t decay_curve, decay_rate, sustain_rate, held;
+        const char *what;
+    } controls[] = {
+        {SAS_ADSR_CURVE_EXP_DEC, 0x40000000u, 0u, SAS_ADSR_CONTROL_EXP_HELD,
+         "exponential decay 0x40000000 that lands on sustain level 0x30000000 steps once more and holds "
+         "0x24000000 (PPSSPP-derived, not PSP-measured)"},
+        {SAS_ADSR_CURVE_DIRECT, SAS_ADSR_CONTROL_LEVEL, 0x00100000u, SAS_ADSR_CONTROL_LEVEL,
+         "DIRECT decay at the sustain level stays in the decay at 0x30000000; the falling sustain never "
+         "starts (PPSSPP-derived, not PSP-measured)"},
+    };
+    sas_adsr_cell_begin(&cpu);
+    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
+        uint32_t words[3];
+        sas_adsr_voice(&cpu, 256u, words);
+        const uint32_t mode = sas_adsr_set_mode(&cpu, SAS_ADSR_EVERYTHING, SAS_ADSR_CURVE_LINEAR_INC,
+                                                controls[i].decay_curve, SAS_ADSR_CURVE_LINEAR_DEC,
+                                                SAS_ADSR_CURVE_LINEAR_DEC);
+        const uint32_t rates = sas_adsr_set_rates(&cpu, SAS_ADSR_EVERYTHING, 0x40000000u, controls[i].decay_rate,
+                                                  controls[i].sustain_rate, 0x00040000u);
+        const uint32_t level = sas_adsr_set_level(&cpu, SAS_ADSR_CONTROL_LEVEL);
+        const uint32_t key_on = sas_adsr_key_on(&cpu);
+        expect(words[0] == 0u && words[1] == 0u && words[2] == 0u && mode == 0u && rates == 0u &&
+                   level == 0u && key_on == 0u,
+               "decay control: the core, voice and envelope set up");
+        uint32_t heights[2];
+        for (int g = 0; g < 2; g++) {
+            cpu.r[4] = SAS_ADSR_CORE; cpu.r[5] = SAS_ADSR_OUT;
+            (void)sr_syscall(&cpu, NID_SAS_CORE);
+            heights[g] = sas_adsr_height(&cpu);
+        }
+        expect(heights[0] == controls[i].held && heights[1] == controls[i].held, controls[i].what);
+    }
 }
 
 static void test_sas_reinit_is_a_fresh_init(void) {
@@ -50531,8 +53030,13 @@ static uint32_t selftest_tlspl_refer(uint32_t uid, uint32_t info) {
     return sr_syscall(&cpu, NID_TLSPL_REFER);
 }
 
+/* sceKernelGetTlsAddr through sr_syscall with its named NID, the form the manifest's dispatch
+ * detector credits (#2807). */
 static uint32_t selftest_tlspl_get_addr(uint32_t uid) {
-    return selftest_tlspl_simple(uid, NID_TLSPL_GET_ADDR);
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid;
+    return sr_syscall(&cpu, NID_TLSPL_GET_ADDR);
 }
 
 /* w-hle-b: pspautotests tests/threads/tls/{create,delete,free,refer}.expected and
@@ -51214,10 +53718,25 @@ static void test_fpl_blocking_waits(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
-/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, 2026-11-06, PSP-3000): a one-byte
- * sceIoWrite to Stdout and to Stderr returns 1; sceIoClose of the Stdout handle returns
- * 0x800200D1 and closes nothing, so a later write returns 1 and sceKernelStdout returns the same
- * handle. The cells hold whatever value the runtime hands out for the handles. */
+/* One sceIo* call on a descriptor argument through the production dispatch. a1 and a2 are the
+ * call's second and third argument words. */
+static uint32_t std_handle_call(uint32_t nid, uint32_t fd, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = fd; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, PSP-3000), measured in two launch
+ * contexts: from the XMB (boots 135 and 222) and in the game context (boot 200).
+ * Both contexts agree, and the cells marked "both contexts" hold for each: sceKernelStdin,
+ * sceKernelStdout and sceKernelStderr return the same three distinct kernel UIDs, none of them 1;
+ * a one-byte sceIoWrite to Stdout and to Stderr returns 1 and each import returns the same handle
+ * afterwards; sceIoClose of the Stdout handle is refused and closes nothing, so a later write
+ * returns 1 and sceKernelStdout returns the same handle.
+ * The contexts differ in one result, the error of that close: 0x80020325 in the game context and
+ * 0x800200D1 from the XMB. The runtime starts its programs as games, so the one cell marked
+ * "game context" asserts the game context's value. */
 static void test_std_handles_measured(void) {
     reset_fixture();
     sr_hle_init();
@@ -51225,22 +53744,157 @@ static void test_std_handles_measured(void) {
     MEM_W8(buf, (uint8_t)'x');
     CpuState cpu;
     memset(&cpu, 0, sizeof cpu);
+    const uint32_t in = sr_syscall(&cpu, 0x172d316eu);    /* sceKernelStdin */
+    memset(&cpu, 0, sizeof cpu);
     const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
     memset(&cpu, 0, sizeof cpu);
     const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
-    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001)");
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err; cpu.r[5] = buf; cpu.r[6] = 1u;
-    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001)");
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out;
-    expect(sr_syscall(&cpu, 0x810c4bc3u) == 0x800200d1u,
-           "std handles: sceIoClose of Stdout returns 0x800200D1 (PSP-HLE-STDIO-001)");
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
-    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u,
-           "std handles: Stdout still takes a write after the refused close (PSP-HLE-STDIO-001)");
+    expect(in != out && out != err && in != err,
+           "std handles: Stdin, Stdout and Stderr are three distinct handles (PSP-HLE-STDIO-001 stdio-handles, both contexts)");
+    expect(in != 1u && out != 1u && err != 1u,
+           "std handles: none of the three handles is 1 (PSP-HLE-STDIO-001 stdio-handles, both contexts)");
+    expect(in == 0x0093a513u && out == 0x00938a15u && err == 0x00936f17u,
+           "std handles: the three handles are the UIDs both contexts recorded (PSP-HLE-STDIO-001 stdio-handles, boots 135, 200, 222)");
+    expect(in >= 64u && out >= 64u && err >= 64u,
+           "std handles: no handle is a number of the descriptor table");
+    expect(std_handle_call(0x42ec03acu, out, buf, 1u) == 1u,
+           "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001, both contexts)");
     memset(&cpu, 0, sizeof cpu);
     expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
-           "std handles: sceKernelStdout returns the same handle after the close (PSP-HLE-STDIO-001)");
+           "std handles: sceKernelStdout returns the same handle after the write (PSP-HLE-STDIO-001 stdio-write-stdout, both contexts)");
+    expect(std_handle_call(0x42ec03acu, err, buf, 1u) == 1u,
+           "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001, both contexts)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xf78ba90au) == err,
+           "std handles: sceKernelStderr returns the same handle after the write (PSP-HLE-STDIO-001 stdio-write-stderr, both contexts)");
+    const uint32_t close_rc = std_handle_call(0x810c4bc3u, out, 0u, 0u);
+    expect((close_rc & 0x80000000u) != 0u,
+           "std handles: sceIoClose of Stdout is refused with an error (PSP-HLE-STDIO-001 stdio-close-stdout, both contexts)");
+    expect(close_rc == 0x80020325u,
+           "std handles: sceIoClose of Stdout returns 0x80020325 (PSP-HLE-STDIO-001, game context, boot 200; the XMB launches returned 0x800200D1)");
+    expect(std_handle_call(0x42ec03acu, out, buf, 1u) == 1u,
+           "std handles: Stdout still takes a write after the refused close (PSP-HLE-STDIO-001, both contexts)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
+           "std handles: sceKernelStdout returns the same handle after the close (PSP-HLE-STDIO-001, both contexts)");
+}
+
+/* What PSP-HLE-STDIO-001 measures in neither launch context. No cell here is a PSP result: each
+ * holds what the runtime does in place of one. A call on a standard handle that had a result
+ * keeps it and nothing more: the Stdin and Stderr closes answer the Stdout refusal, as they did
+ * while the three imports named one handle, and say once that this is modelled. A call with no
+ * result to keep stops at a named boundary and changes nothing: sceIoCloseAsync of a handle and
+ * a write through the Stdin handle. A read is unclaimed, a read from Stdin above all: the cells
+ * hold only that it is still the runtime's earlier error and not a success. The descriptor
+ * numbers 0, 1 and 2 and every other value answer as before. */
+static void test_std_handles_unmeasured_are_named(void) {
+    enum { BAD_FD = 0x80020323u, NO_ASYNC = 0x8002032au, STD_ERRNO = 0x80010009u,
+           BOUNDARY = 0x80010086u, REFUSED = 0x80020325u };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t buf = 0x00240c00u, result = 0x00240c10u;
+    MEM_W8(buf, (uint8_t)'x');
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t in = sr_syscall(&cpu, 0x172d316eu);    /* sceKernelStdin */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
+
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    static char captured[8192];
+    const int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    expect(capturing, "std handles: stderr capture for the unmeasured calls");
+
+    /* sceIoClose of the Stdin and the Stderr handle: the modelled refusal, nothing closed. */
+    expect(std_handle_call(0x810c4bc3u, err, 0u, 0u) == REFUSED &&
+               std_handle_call(0x810c4bc3u, err, 0u, 0u) == REFUSED,
+           "std handles: sceIoClose of the Stderr handle answers the Stdout refusal 0x80020325 (modelled, unmeasured)");
+    expect(std_handle_call(0x42ec03acu, err, buf, 1u) == 1u,
+           "std handles: Stderr still takes a write after its refused close");
+    expect(std_handle_call(0x810c4bc3u, in, 0u, 0u) == REFUSED,
+           "std handles: sceIoClose of the Stdin handle answers the Stdout refusal 0x80020325 (modelled, unmeasured)");
+
+    /* sceIoCloseAsync of a handle: a named boundary, nothing queued and nothing closed. */
+    expect(std_handle_call(0xff5940b6u, out, 0u, 0u) == BOUNDARY &&
+               std_handle_call(0xff5940b6u, err, 0u, 0u) == BOUNDARY &&
+               std_handle_call(0xff5940b6u, in, 0u, 0u) == BOUNDARY,
+           "std handles: sceIoCloseAsync of a standard handle stops at a named boundary (0x80010086)");
+    expect(std_handle_call(0x3251ea56u, out, 0u, 0u) == NO_ASYNC,
+           "std handles: the refused sceIoCloseAsync queued no request on Stdout");
+    expect(std_handle_call(0x42ec03acu, out, buf, 1u) == 1u,
+           "std handles: Stdout still takes a write after the refused sceIoCloseAsync");
+
+    /* A write through the Stdin handle: a named boundary, synchronous and asynchronous. */
+    expect(std_handle_call(0x42ec03acu, in, buf, 1u) == BOUNDARY,
+           "std handles: sceIoWrite through the Stdin handle stops at a named boundary (0x80010086)");
+    expect(std_handle_call(0x0facab19u, in, buf, 1u) == BOUNDARY &&
+               std_handle_call(0x3251ea56u, in, 0u, 0u) == NO_ASYNC,
+           "std handles: sceIoWriteAsync through the Stdin handle stops at a named boundary and queues nothing");
+
+    if (capturing) {
+        captured[0] = '\0';
+        hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+        fprintf(stderr, "%s", captured);
+        expect(count_occurrences(captured, "HLE: modelled, not PSP-measured: sceIoClose of the Stderr handle answers 0x80020325") == 1 &&
+                   count_occurrences(captured, "HLE: modelled, not PSP-measured: sceIoClose of the Stdin handle answers 0x80020325") == 1,
+               "std handles: each modelled close refusal is said once per run");
+        expect(count_occurrences(captured, "SEMANTIC_BOUNDARY: IO_STD_HANDLE_OPERATION: sceIoCloseAsync on the Stdout handle is not measured on a PSP (PSP-HLE-STDIO-001)") == 1 &&
+                   count_occurrences(captured, "IO_STD_HANDLE_OPERATION: sceIoCloseAsync") == 1,
+               "std handles: the sceIoCloseAsync boundary is named once per run");
+        expect(count_occurrences(captured, "SEMANTIC_BOUNDARY: IO_STD_HANDLE_OPERATION: sceIoWrite on the Stdin handle") == 1 &&
+                   count_occurrences(captured, "SEMANTIC_BOUNDARY: IO_STD_HANDLE_OPERATION: sceIoWriteAsync on the Stdin handle") == 1,
+               "std handles: the Stdin write boundaries are named");
+    }
+
+    /* A read from Stdin is UNMEASURED and unclaimed (the probe runs none). Not a PSP result: only
+     * that the handle opens no new success path and the runtime's earlier error is unchanged. */
+    MEM_W8(buf, (uint8_t)'x');
+    expect(std_handle_call(0x6a638d83u, in, buf, 1u) == STD_ERRNO &&
+               std_handle_call(0xa0b5a7c2u, in, buf, 1u) == STD_ERRNO &&
+               std_handle_call(0x3251ea56u, in, 0u, 0u) == NO_ASYNC && MEM_R8(buf) == (uint8_t)'x',
+           "std handles: a read through the Stdin handle is unclaimed: no success, nothing read or queued, the runtime's earlier 0x80010009 (not a PSP result)");
+    /* The errors the standard streams already had are reached through the other handles too. */
+    expect(std_handle_call(0x6a638d83u, out, buf, 1u) == STD_ERRNO,
+           "std handles: sceIoRead through the Stdout handle keeps the runtime's standard-stream errno 0x80010009 (unmeasured)");
+    expect(std_handle_call(0x68963324u, out, 0u, 0u) == STD_ERRNO,
+           "std handles: sceIoLseek32 through the Stdout handle keeps the runtime's standard-stream errno 0x80010009 (unmeasured)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err;
+    expect(sr_syscall(&cpu, 0x27eb27b8u) == STD_ERRNO && cpu.r[3] == 0u,
+           "std handles: sceIoLseek through the Stderr handle keeps the runtime's standard-stream errno 0x80010009 (unmeasured)");
+    expect(std_handle_call(0x63632449u, out, 0u, 0u) == STD_ERRNO,
+           "std handles: sceIoIoctl through the Stdout handle keeps the runtime's standard-stream errno 0x80010009 (unmeasured)");
+    expect(std_handle_call(0x1b385d8fu, out, 0u, 0u) == BAD_FD,
+           "std handles: sceIoLseek32Async through the Stdout handle is refused as for descriptor 1");
+    MEM_W32(result, 0xfeedfaceu); MEM_W32(result + 4u, 0xdeadbeefu);
+    expect(std_handle_call(0x0facab19u, err, buf, 1u) == 0u &&
+               std_handle_call(0x3251ea56u, err, result, 0u) == 1u &&
+               std_handle_call(0xe23eec33u, err, result, 0u) == 0u &&
+               MEM_R32(result) == 1u && MEM_R32(result + 4u) == 0u,
+           "std handles: a queued write through the Stderr handle completes with its count (unmeasured)");
+
+    /* A value that is not one of the three handles answers as before. */
+    expect(std_handle_call(0x42ec03acu, out + 1u, buf, 1u) == BAD_FD &&
+               std_handle_call(0x810c4bc3u, in - 1u, 0u, 0u) == BAD_FD &&
+               std_handle_call(0xff5940b6u, err + 2u, 0u, 0u) == BAD_FD,
+           "std handles: a value beside a handle is a bad descriptor");
+    expect(std_handle_call(0x42ec03acu, 1u, buf, 1u) == 1u &&
+               std_handle_call(0x42ec03acu, 2u, buf, 1u) == 1u &&
+               std_handle_call(0x42ec03acu, 0u, buf, 1u) == 1u,
+           "std handles: descriptors 0, 1 and 2 named by number still take a write");
+    expect(std_handle_call(0x810c4bc3u, 1u, 0u, 0u) == REFUSED,
+           "std handles: sceIoClose of descriptor 1 answers as the Stdout handle does");
+    expect(std_handle_call(0x810c4bc3u, 2u, 0u, 0u) == 0u &&
+               std_handle_call(0x42ec03acu, 2u, buf, 1u) == BAD_FD,
+           "std handles: sceIoClose of descriptor 2 by number closes it, as before");
+    expect(std_handle_call(0x42ec03acu, err, buf, 1u) == BAD_FD,
+           "std handles: the Stderr handle names the stream that descriptor 2 closed");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xf78ba90au) == err,
+           "std handles: sceKernelStderr still returns its handle");
+    sr_hle_init();
 }
 
 static void test_vpl_blocking_waits(void) {
@@ -53443,6 +56097,178 @@ static void test_psp_mutex(void) {
     mtx_delete(m_held2);
     mtx_delete(m_other);
 
+    s_cur = -1;
+}
+
+/* sceKernelLockMutexCB (0x5bf4dd27) from a VBLANK sub-interrupt handler: the one cell of
+ * PSP-MUTEX-001 that measures this handler (#2807). The record (docs/HARDWARE_ORACLE.md, case
+ * mutex-interrupt-context: a PSP-3000 on system software 6.61, PSPLink 3.2.1, one launch of the
+ * probe built from ec5dd563, acceptance-eligible, 2026-10-15) runs six mutex calls in each of 20
+ * firings of a VBLANK sub-interrupt handler (sub-interrupt 0) that the main thread registered. In
+ * the probe's order they are LockMutex with an unknown UID, LockMutex with count 0, LockMutex
+ * (count 1, no timeout) on an unlocked mutex, LockMutexCB (count 1, no timeout) on the same mutex,
+ * TryLockMutex on it, and UnlockMutex of a mutex the main thread created held. In 20 of 20 firings
+ * each call returned 0x80020064 (ILLEGAL_CONTEXT), and the handler reached the end of its body
+ * every time, so none of the calls blocked it.
+ *
+ * Here the production path runs the same sequence: the main thread creates both mutexes through
+ * sceKernelCreateMutex, registers and enables the handler through sceKernelRegisterSubIntrHandler
+ * and sceKernelEnableSubIntr, and each of 20 VBLANKs is latched under sceKernelCpuSuspendIntr and
+ * delivered by sceKernelCpuResumeIntr through the scheduler's own deliver_vblank. The handler body
+ * is a host function bound at its guest entry, standing in for the generated translation of the
+ * probe's handler; every call it makes enters the NID through sr_syscall.
+ *
+ * This cell covers the interrupt-context refusal. In the separate mutex-timeout-quanta case,
+ * the probe calls LockMutexCB with a 250 us timeout on a mutex the main thread holds. It
+ * discards the return code and emits the timeout word and elapsed time in slots 13 and 14.
+ * The public summary does not qualify timeout behavior. Thread-context acquisition, wake
+ * outcomes and callback delivery remain outside this cell. The post-call mutex-state
+ * assertion checks runtime consistency. The interrupt probe reads no mutex status. */
+#define NID_MUTEX_INTR_LOCK_MUTEX     0xb011b11fu
+#define NID_MUTEX_INTR_LOCK_MUTEX_CB  0x5bf4dd27u
+#define NID_MUTEX_INTR_TRY_LOCK_MUTEX 0x0ddcd2c9u
+#define NID_MUTEX_INTR_UNLOCK_MUTEX   0x6b30100fu
+#define MUTEX_INTR_TRIALS             20
+#define MUTEX_INTR_HANDLER_ENTRY      0x08a3c040u
+#define MUTEX_INTR_UNKNOWN_UID        0x7fffffffu
+#define MUTEX_INTR_ILLEGAL_CONTEXT    0x80020064u
+
+typedef struct {
+    int      intr_context;
+    uint32_t r_bad_uid;
+    uint32_t r_bad_cnt;
+    uint32_t r_lock;
+    uint32_t r_lock_cb;
+    uint32_t r_try;
+    uint32_t r_unlock;
+    int      done;
+} MutexIntrTrial;
+
+static MutexIntrTrial s_mutex_intr_trials[MUTEX_INTR_TRIALS];
+static int s_mutex_intr_count;
+static uint32_t s_mutex_intr_unlocked;
+static uint32_t s_mutex_intr_main_owned;
+
+static void mutex_intr_subintr_fn(CpuState *cpu) {
+    const int idx = s_mutex_intr_count;
+    cpu->r[2] = 0u;
+    if (idx >= MUTEX_INTR_TRIALS) return;
+    MutexIntrTrial t;
+    memset(&t, 0, sizeof t);
+    t.intr_context = sched_is_intr_context();
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = MUTEX_INTR_UNKNOWN_UID; sc.r[5] = 1u;
+    t.r_bad_uid = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 0u;
+    t.r_bad_cnt = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u; sc.r[6] = 0u;
+    t.r_lock = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u; sc.r[6] = 0u;
+    t.r_lock_cb = sr_syscall(&sc, NID_MUTEX_INTR_LOCK_MUTEX_CB);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_unlocked; sc.r[5] = 1u;
+    t.r_try = sr_syscall(&sc, NID_MUTEX_INTR_TRY_LOCK_MUTEX);
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = s_mutex_intr_main_owned; sc.r[5] = 1u;
+    t.r_unlock = sr_syscall(&sc, NID_MUTEX_INTR_UNLOCK_MUTEX);
+    t.done = 1;
+    s_mutex_intr_trials[idx] = t;
+    s_mutex_intr_count = idx + 1;
+}
+
+/* Open wait invocations, which a blocking call adds while it waits and removes when it finishes. */
+static int mutex_intr_wait_invocations(void) {
+    int n = 0;
+    for (const WaitInvocation *w = s_wait_invocations; w; w = w->next) n++;
+    return n;
+}
+
+static void test_lock_mutex_cb_refused_in_vblank_subintr(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(MUTEX_INTR_HANDLER_ENTRY, mutex_intr_subintr_fn);
+    s_vbl_next_us = UINT64_MAX;   /* only the VBLANKs this cell latches are delivered */
+    TCB *main_t = fixture_thread(0x5f8u, TH_RUNNING, 32);
+    main_t->started = 1;
+    s_cur = (int)(main_t - s_tcb);
+    s_mutex_intr_count = 0;
+    memset(s_mutex_intr_trials, 0, sizeof s_mutex_intr_trials);
+
+    SceKernelMutexInfoTest info;
+    s_mutex_intr_unlocked = mtx_create("oracle-intr-unl", 0, 0);
+    s_mutex_intr_main_owned = mtx_create("oracle-intr-own", 0, 1);
+    expect((int32_t)s_mutex_intr_unlocked > 0 && (int32_t)s_mutex_intr_main_owned > 0 &&
+               mtx_get_info(s_mutex_intr_unlocked, &info) && info.currentCount == 0 &&
+               mtx_get_info(s_mutex_intr_main_owned, &info) && info.currentCount == 1 &&
+               info.lockThread == (int32_t)main_t->uid,
+           "intr LockMutexCB: the main thread creates one unlocked mutex and one it holds");
+
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u; cpu.r[6] = MUTEX_INTR_HANDLER_ENTRY; cpu.r[7] = 0u;
+    const uint32_t reg = sr_syscall(&cpu, NID_SCE_KERNEL_REGISTER_SUBINTR);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t ena = sr_syscall(&cpu, NID_SCE_KERNEL_ENABLE_SUBINTR);
+    expect(reg == 0u && ena == 0u,
+           "intr LockMutexCB: the VBLANK sub-interrupt 0 handler registers and enables");
+
+    const int waits_before = mutex_intr_wait_invocations();
+    for (int i = 0; i < MUTEX_INTR_TRIALS; i++) {
+        memset(&cpu, 0, sizeof cpu);
+        const uint32_t token = sr_syscall(&cpu, NID_SCE_KERNEL_CPU_SUSPEND_INTR);
+        sched_raise_interrupt(SCHED_INTR_VBLANK);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = token;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_CPU_RESUME_INTR);
+    }
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t dis = sr_syscall(&cpu, NID_SCE_KERNEL_DISABLE_SUBINTR);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 30u; cpu.r[5] = 0u;
+    const uint32_t rel = sr_syscall(&cpu, NID_SCE_KERNEL_RELEASE_SUBINTR);
+    expect(dis == 0u && rel == 0u,
+           "intr LockMutexCB: the handler disables and releases again, as the probe's teardown does");
+
+    expect(s_mutex_intr_count == MUTEX_INTR_TRIALS,
+           "intr LockMutexCB: the handler completes all 20 trials, as on the PSP (20 of 20)");
+    int in_intr = 1, lock_cb = 1, others = 1, done = 1;
+    for (int i = 0; i < s_mutex_intr_count; i++) {
+        const MutexIntrTrial *t = &s_mutex_intr_trials[i];
+        if (!t->intr_context) in_intr = 0;
+        if (!t->done) done = 0;
+        if (t->r_lock_cb != MUTEX_INTR_ILLEGAL_CONTEXT) lock_cb = 0;
+        if (t->r_bad_uid != MUTEX_INTR_ILLEGAL_CONTEXT || t->r_bad_cnt != MUTEX_INTR_ILLEGAL_CONTEXT ||
+            t->r_lock != MUTEX_INTR_ILLEGAL_CONTEXT || t->r_try != MUTEX_INTR_ILLEGAL_CONTEXT ||
+            t->r_unlock != MUTEX_INTR_ILLEGAL_CONTEXT)
+            others = 0;
+    }
+    expect(in_intr, "intr LockMutexCB: every trial runs in interrupt context");
+    expect(lock_cb,
+           "intr LockMutexCB: LockMutexCB(unlocked mutex, 1, NULL) in a VBLANK sub-interrupt handler "
+           "returns 0x80020064 (ILLEGAL_CONTEXT): PSP-MUTEX-001 mutex-interrupt-context, 20 of 20 trials");
+    expect(done, "intr LockMutexCB: the refused call returns to the handler, which never parks");
+    expect(others,
+           "intr LockMutexCB: the record's other five calls in the same trial also return 0x80020064");
+    expect(s_cur == (int)(main_t - s_tcb) && main_t->state == TH_RUNNING &&
+               mutex_intr_wait_invocations() == waits_before,
+           "intr LockMutexCB: the interrupted main thread is current again and no wait was opened");
+    expect(mtx_get_info(s_mutex_intr_unlocked, &info) && info.currentCount == 0 &&
+               info.lockThread == 0 && info.numWaitThreads == 0,
+           "intr LockMutexCB: the refused locks leave the mutex unlocked with no waiter (runtime check)");
+    expect(mtx_get_info(s_mutex_intr_main_owned, &info) && info.currentCount == 1 &&
+               info.lockThread == (int32_t)main_t->uid && info.numWaitThreads == 0,
+           "intr LockMutexCB: the refused unlock leaves the main thread's mutex held (runtime check)");
+
+    (void)mtx_delete(s_mutex_intr_unlocked);
+    (void)mtx_delete(s_mutex_intr_main_owned);
+    sr_test_guest_fn_reset();
     s_cur = -1;
 }
 
@@ -57254,6 +60080,7 @@ static void lifecycle_stop_fn(CpuState *s) {
 #define SELFSTOP_ARG_ADDR 0x08a02000u
 static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
+static uint32_t s_selfstop_guest_result;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
 static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
@@ -57265,7 +60092,7 @@ static void selfstop_guest_entry(CpuState *s) {
     s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
     s->r[5] = s_selfstop_guest_args[1];
     s->r[6] = s_selfstop_guest_args[2];
-    (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
+    s_selfstop_guest_result = sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
 
@@ -57802,56 +60629,110 @@ static void test_late_prx_unload_reload_lifecycle(void) {
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
 
-    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
-     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
-     * with argument size 0 and argp 0, and the module is unloaded. */
-    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
-                                          LIFECYCLE_PATCH_OFF_A_1);
-    expect(self_uid != 0u &&
-               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
-                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
-           "self-stop (1, 0, NULL): module image loads");
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
-    memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = self_uid;
-    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
-    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
-     * so the call returns and the module stays loaded. */
-    s_lifecycle_stop_calls = 0u;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
-               sr_hle_test_module_count() == 1u,
-           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
-    s_lifecycle_stop_calls = 0u;
-    s_lifecycle_stop_arglen = 0xffffffffu;
-    s_lifecycle_stop_argp_word = 0xffffffffu;
-    s_selfstop_guest_returned = 0u;
-    s_selfstop_guest_args[0] = 1u;
-    s_selfstop_guest_args[1] = 0u;
-    s_selfstop_guest_args[2] = 0u;
-    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
-    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
-    s_selfstop_guest_args[0] = 0u;
-    s_selfstop_guest_args[1] = 4u;
-    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
-    expect(s_selfstop_guest_returned == 0u,
-           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
-    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
-               s_lifecycle_stop_argp_word == 0u,
-           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
-    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
-           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
-
     remove(path_a);
     remove(path_b);
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
+}
+
+static uint32_t s_selfstop_stop_argp;
+static void selfstop_zero_result_stop_fn(CpuState *s) {
+    s_lifecycle_stop_calls++;
+    s_lifecycle_stop_arglen = s->r[4];
+    s_selfstop_stop_argp = s->r[5]; /* Record the pointer itself, without reading it. */
+    s->r[2] = 0u;
+}
+
+static void test_self_stop_unload_measured_forms(void) {
+    extern void sr_hle_test_partition_reset(void);
+    const char *path = HLE_BUILD_ROOT "/hle_lifecycle_self_stop.prx";
+    const uint32_t entry = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
+    const uint32_t address_nid = 0xd8b73127u, export_pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_PATCH_OFF_A_1;
+    const struct {
+        uint32_t first, arglen, argp, refusal;
+    } cases[] = {
+        {0u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg0 */
+        {1u, 0u, 0u, 0u}, /* PSP-HLE-SELFSTOP-001: self-stop-arg1 */
+        /* PSP-HLE-SELFSTOP-001's past-RAM cell unloaded with a substituted pointer.
+         * The host deliberately refuses an unreadable span instead. */
+        {0u, 4u, 0x0c000000u, 0x80000103u},
+        {1u, 4u, SELFSTOP_ARG_ADDR, 0x80020002u}, /* Unmeasured first argument of 1 with a block. */
+    };
+
+    if (!write_lifecycle_prx(path, 0x51570a0bu)) {
+        expect(0, "self-stop: synthetic image written");
+        return;
+    }
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_fixture();
+        sr_hle_init();
+        sr_test_guest_fn_reset();
+        sr_hle_test_module_reset();
+        /* A refusal deliberately leaves its fixed-address partition block allocated. */
+        sr_hle_test_partition_reset();
+
+        uint32_t uid = sr_hle_test_load_prx_image(path, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                                  LIFECYCLE_PATCH_OFF_A_1);
+        s_selfstop_guest_gp = 0x0aabbccdu;
+        const int loaded = uid != 0u &&
+            sr_hle_test_set_module_image(uid, LIFECYCLE_MOD_B_BASE,
+                                         LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, s_selfstop_guest_gp);
+        expect(loaded, "self-stop: fresh synthetic module image loaded");
+        if (!loaded) break;
+        sr_test_register_guest_fn(entry, lifecycle_start_fn);
+        sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_STOP_OFF, selfstop_zero_result_stop_fn);
+        sr_test_register_guest_fn(export_pc, lifecycle_export_b_fn);
+        CpuState cpu = {0};
+        cpu.r[4] = uid;
+        expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop: fresh module starts");
+        cpu.r[4] = entry;
+        expect(sr_syscall(&cpu, address_nid) == uid && sr_hle_test_module_count() == 1u &&
+                   sr_hle_test_image_count() == 1u && sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+               "self-stop: started module, image and export present before call");
+
+        s_selfstop_guest_args[0] = cases[i].first;
+        s_selfstop_guest_args[1] = cases[i].arglen;
+        s_selfstop_guest_args[2] = cases[i].argp;
+        s_selfstop_guest_result = UINT32_MAX;
+        s_selfstop_guest_returned = 0u;
+        s_selfstop_guest_in_scheduler = 0;
+        s_lifecycle_stop_calls = 0u;
+        s_lifecycle_stop_arglen = UINT32_MAX;
+        s_selfstop_stop_argp = UINT32_MAX;
+        sr_test_register_guest_fn(entry, selfstop_guest_entry);
+        sched_run(entry, 0u, 0u);
+
+        expect(s_selfstop_guest_in_scheduler && s_selfstop_guest_pc == entry,
+               "self-stop: caller runs as a scheduled thread in the started module");
+        cpu.r[4] = entry;
+        const uint32_t after = sr_syscall(&cpu, address_nid);
+        if (cases[i].refusal != 0u) {
+            expect(s_selfstop_guest_returned && s_selfstop_guest_result == cases[i].refusal &&
+                       s_lifecycle_stop_calls == 0u,
+                   "self-stop: unsupported argument form returns the refusal and runs no stop");
+            expect(after == uid && sr_hle_test_module_count() == 1u && sr_hle_test_image_count() == 1u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == export_pc,
+                   "self-stop: refusal preserves the module, image and export");
+        } else {
+            expect(!s_selfstop_guest_returned && s_selfstop_guest_result == UINT32_MAX,
+                   cases[i].first ? "self-stop (1, 0, NULL) does not return" : "self-stop (0, 0, NULL) does not return");
+            expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u && s_selfstop_stop_argp == 0u,
+                   "self-stop: module_stop runs once with length zero and a raw null pointer");
+            expect(after == 0x8002012eu && sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
+                       sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
+                   "self-stop: module, image and export retired and address lookup no longer finds the module");
+        }
+    }
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    remove(path);
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
 }
 
 static void test_host_skipped_start_stop_unload_reload(void) {
@@ -63203,10 +66084,31 @@ static void test_font_glyph_image_and_handles(uint32_t served_index) {
            "the served font has a glyph whose bitmap fits a 16 x 16 buffer");
     uint32_t stops = sr_hle_test_unmodelled_stops();
     for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 4u, 0xa5u);
     flt_write_glyph_image(FLT_GI, 2u, 0, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
            "sceFontGetCharGlyphImage draws into a complete glyph image and bitmap");
+    /* The first glyph of each synthetic strike in test_flash0_font.py has coverage
+     * 0..15 in row order. Check what the guest actually sees at its 16-byte pitch. */
+    int coverage_ok = 1;
+    for (uint32_t y = 0; y < 4u; ++y) {
+        for (uint32_t x = 0; x < 4u; ++x) {
+            if (MEM_R8(FLT_BITMAP + 16u * y + x) != 17u * (4u * y + x)) coverage_ok = 0;
+        }
+    }
+    expect(coverage_ok && MEM_R8(FLT_BITMAP + 4u) == 0xa5u,
+           "format-2 glyph syscall writes all 16 coverage levels and preserves the next byte");
+
+    for (uint32_t i = 0; i < 0x100u; i += 4u) MEM_W32(FLT_BITMAP + i, 0u);
+    MEM_W8(FLT_BITMAP + 5u, 0xa5u);
+    flt_write_glyph_image(FLT_GI, 2u, 32, 16u, 16u, 16u, FLT_BITMAP);
+    expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
+               sr_hle_test_unmodelled_stops() == stops &&
+               MEM_R8(FLT_BITMAP) == 0u && MEM_R8(FLT_BITMAP + 1u) == 9u &&
+               MEM_R8(FLT_BITMAP + 2u) == 25u && MEM_R8(FLT_BITMAP + 3u) == 43u &&
+               MEM_R8(FLT_BITMAP + 4u) == 25u && MEM_R8(FLT_BITMAP + 5u) == 0xa5u,
+           "half-pixel format-2 glyph write preserves the byte beyond its fifth column");
     flt_write_glyph_image(FLT_GI, 2u, 100 * 64, 16u, 16u, 16u, FLT_BITMAP);
     expect(flt_call(FLT_NID_GLYPH, font, ch, FLT_GI, 0u) == 0u &&
                sr_hle_test_unmodelled_stops() == stops,
@@ -67376,6 +70278,154 @@ static void test_atrac3plus_decode_after_end(void) {
     (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
 }
 
+/* Drain two complete frames. For the ring the first encoded frame is the state-loading
+ * frame. For halfway playback the third frame is only partially supplied. */
+static void test_atrac3plus_refill_after_empty(int streamed) {
+    enum {
+        SAMPLES = 2048u, FRAMES = 4u, HEADER = 56u,
+        WRITE_PTR = 0x08004118u, WRITABLE = 0x0800411cu, READ_OFFSET = 0x08004120u,
+        POSITION = 0x08004124u, PCM_BYTES = SAMPLES * 2u * 2u
+    };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(FRAMES, 3u * SAMPLES, 0u);
+    const uint32_t prefix = HEADER + (streamed ? 3u * AU03_ALIGN
+                                               : 2u * AU03_ALIGN + AU03_ALIGN / 2u);
+    uint8_t tail[FRAMES * AU03_ALIGN];
+    const uint32_t tail_bytes = size - prefix;
+    uint8_t *track = &g_mem[AU03_TRACK - 0x08000000u];
+    memcpy(tail, track + prefix, tail_bytes);
+    memset(track + prefix, 0, tail_bytes);
+    uint32_t id = streamed
+        ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, prefix, 0u, 0u)
+        : td24b_dispatch4(NID_SCE_ATRAC_SET_HALFWAY_BUFFER_AND_GET_ID, AU03_TRACK, prefix, size, 0u);
+    expect(id < 8u, "ATRAC3+ refill: the filled prefix configures the decoder");
+    if (id >= 8u) return;
+
+    for (unsigned frame = 0u; frame < 2u; ++frame) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+               "ATRAC3+ refill: ordinary buffered frames decode before starvation");
+    }
+    uint8_t unchanged_pcm[PCM_BYTES];
+    memset(unchanged_pcm, 0xa5, sizeof(unchanged_pcm));
+    uint8_t *pcm = &g_mem[AU03_PCM - 0x08000000u];
+    memcpy(pcm, unchanged_pcm, sizeof(unchanged_pcm));
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret == ATRAC_ERROR_BUFFER_IS_EMPTY &&
+               MEM_R32(AU03_OUT_N) == 0u && MEM_R32(AU03_OUT_END) == 0u,
+           streamed ? "ATRAC3+ drained stream returns 0x80630023, 0 samples, finish 0"
+                    : "ATRAC3+ short halfway prefix returns 0x80630023, 0 samples, finish 0");
+    expect(MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu,
+           streamed ? "ATRAC3+ drained stream leaves remain untouched"
+                    : "ATRAC3+ short halfway prefix leaves remain untouched");
+    expect(memcmp(pcm, unchanged_pcm, sizeof(unchanged_pcm)) == 0 &&
+               sr_hle_test_atrac_last_block_us() == 0u,
+           "ATRAC3+ buffer-empty performs no PCM write or decode wait");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_NEXT_DECODE_POSITION, id, POSITION, 0u, 0u) == 0u &&
+               MEM_R32(POSITION) == 2u * SAMPLES,
+           "ATRAC3+ buffer-empty leaves the decode position at the missing frame");
+
+    ret = td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id, WRITE_PTR, WRITABLE, READ_OFFSET);
+    const uint32_t write = MEM_R32(WRITE_PTR);
+    const uint32_t expected_write = streamed ? AU03_TRACK : AU03_TRACK + prefix;
+    int can_refill = ret == 0u && MEM_R32(READ_OFFSET) == prefix &&
+                     MEM_R32(WRITABLE) >= tail_bytes && write == expected_write;
+    expect(can_refill, "ATRAC3+ refill requests the unfed file bytes at the correct guest address");
+    if (can_refill) {
+        memcpy(&g_mem[write - 0x08000000u], tail, tail_bytes);
+        expect(td24b_dispatch4(0x7db31251u /* sceAtracAddStreamData */, id, tail_bytes, 0u, 0u) == 0u,
+               "ATRAC3+ refill accepts the bytes supplied by the guest");
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 1u,
+               "ATRAC3+ refill decodes the missing frame and reaches the track end");
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == ATRAC_ERROR_DECODE_DATA_AFTER_END && MEM_R32(AU03_OUT_N) == 0u,
+               "ATRAC3+ refill preserves the separate DecodeData after-end error");
+    }
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+static int au03_refill_loop_frame(uint32_t id, uint32_t read_offset, uint32_t write_address,
+                                  const uint8_t frame[AU03_ALIGN]) {
+    enum { WRITE_PTR = 0x08004118u, WRITABLE = 0x0800411cu, READ_OFFSET = 0x08004120u };
+    uint32_t ret = td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id,
+                                   WRITE_PTR, WRITABLE, READ_OFFSET);
+    if (ret != 0u || MEM_R32(READ_OFFSET) != read_offset || MEM_R32(WRITABLE) < AU03_ALIGN ||
+        MEM_R32(WRITE_PTR) != write_address)
+        return 0;
+    memcpy(&g_mem[write_address - 0x08000000u], frame, AU03_ALIGN);
+    return td24b_dispatch4(0x7db31251u /* sceAtracAddStreamData */, id, AU03_ALIGN, 0u, 0u) == 0u;
+}
+
+static void test_atrac3plus_refill_after_loop_rewind(void) {
+    enum { SAMPLES = 2048u, DATA_OFFSET = 124u, POSITION = 0x08004124u };
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(4u, 3u * SAMPLES, 2u * SAMPLES - 1u);
+    const uint32_t ring = size - AU03_ALIGN;
+    uint8_t frame[AU03_ALIGN];
+    memcpy(frame, &g_mem[AU03_TRACK - 0x08000000u + DATA_OFFSET], sizeof(frame));
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, ring, 0u, 0u);
+    expect(id < 8u, "ATRAC3+ loop refill: setup takes the streamed track");
+    if (id >= 8u) return;
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, id, 0xffffffffu, 0u, 0u) == 0u,
+           "ATRAC3+ loop refill: the track is set to loop");
+    for (unsigned i = 0; i < 2u; ++i) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+               "ATRAC3+ loop refill: the initial frames decode and playback loops");
+    }
+
+    int fed_tail = au03_refill_loop_frame(id, ring, AU03_TRACK, frame);
+    expect(fed_tail, "ATRAC3+ loop refill: the remaining frame is supplied before EOF");
+    if (fed_tail) {
+        uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES,
+               "ATRAC3+ loop refill: the last fed frame decodes after rewind");
+        /* All bytes through EOF have been fed, but the stream's next refill
+         * advertises an earlier file offset because playback is looping. */
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        expect(ret == ATRAC_ERROR_BUFFER_IS_EMPTY && MEM_R32(AU03_OUT_N) == 0u &&
+                   MEM_R32(AU03_OUT_END) == 0u && MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "ATRAC3+ loop refill: a dry ring at fed EOF still needs a refill");
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_NEXT_DECODE_POSITION,
+                              id, POSITION, 0u, 0u) == 0u && MEM_R32(POSITION) == SAMPLES,
+               "ATRAC3+ loop refill: buffer-empty preserves the rewound decode position");
+        int fed_loop = au03_refill_loop_frame(id, DATA_OFFSET, AU03_TRACK + AU03_ALIGN, frame);
+        expect(fed_loop, "ATRAC3+ loop refill: the advertised earlier bytes are accepted");
+        if (fed_loop) {
+            ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+            expect(ret == 0u && MEM_R32(AU03_OUT_N) == SAMPLES && MEM_R32(AU03_OUT_END) == 0u,
+                   "ATRAC3+ loop refill: decode resumes after feeding the earlier bytes");
+        }
+    }
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+static void test_atrac3plus_missing_frame_without_refill(void) {
+    reset_fixture();
+    sr_hle_init();
+    /* The loaded file contains only one frame although its sample count needs two. */
+    const uint32_t size = au03_build_at3p(1u, 2u * 2048u, 0u);
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, size, 0u, 0u);
+    expect(id < 8u, "ATRAC3+ no refill: setup takes the track");
+    if (id >= 8u) return;
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret == 0u && MEM_R32(AU03_OUT_N) == 2048u && MEM_R32(AU03_OUT_END) == 0u,
+           "ATRAC3+ no refill: the complete frame decodes before the missing one");
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "ATRAC3+ missing frame beyond the loaded file stops by name");
+    expect(MEM_R32(AU03_OUT_N) == 0xdeadbeefu && MEM_R32(AU03_OUT_END) == 0xdeadbeefu &&
+               MEM_R32(AU03_OUT_REMAIN) == 0xdeadbeefu,
+           "ATRAC3+ missing frame without refill leaves guest outputs untouched");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
 /* The loop end rewinds only while loops remain, in every buffer state: a streamed play-once
  * track with a loop chunk finishes, and an all-data track with a trailer rewinds at its loop end
  * rather than at the end of the file. PPSSPP-derived, not PSP-measured. */
@@ -67920,6 +70970,22 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--display-static-scanout") == 0) {
+        test_display_static_scanout();
+        test_display_gpu_scanout_cpu_writes();
+        fprintf(stderr, "display-static-scanout: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--auto-load") == 0) {
+        test_auto_load_disc_and_silent_audio();
+        test_pad_vblank_deadline(); /* the next fixture must see its own clock */
+        fprintf(stderr, "auto-load: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--utility-usb") == 0) {
         test_utility_usb_module_state();
         fprintf(stderr, "utility-usb: %d checks, %d failures\n", s_checks, s_failures);
@@ -67936,6 +71002,28 @@ static int hle_selftest_main(int argc, char **argv) {
 
     if (argc > 1 && strcmp(argv[1], "--adhocctl-handler-fault-child") == 0)
         return run_adhocctl_handler_fault_child();
+    if (argc > 1 && strcmp(argv[1], "--inet-socket-stop-child") == 0) {
+        test_net_inet_lifecycle_without_network(1);
+        free(g_mem_base);
+        return 98;
+    }
+    if (argc > 1 && strcmp(argv[1], "--resolver-lookup-stop-child") == 0) {
+        test_net_resolver_lifecycle_without_network(1);
+        free(g_mem_base);
+        return 1;
+    }
+    if (argc > 1 && strcmp(argv[1], "--resolver-offline") == 0) {
+        test_net_resolver_lifecycle_without_network(0);
+        fprintf(stderr, "resolver-offline: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--inet-offline") == 0) {
+        test_net_inet_lifecycle_without_network(0);
+        fprintf(stderr, "inet-offline: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--adhocctl") == 0) {
         test_adhocctl_lone_console();
         test_adhocctl_teardown();
@@ -67965,6 +71053,18 @@ static int hle_selftest_main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--msgpipe-rendezvous") == 0) {
         test_msgpipe_rendezvous();
         fprintf(stderr, "msgpipe-rendezvous: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--sysclib-snprintf") == 0) {
+        test_sysclib_snprintf();
+        fprintf(stderr, "sysclib-snprintf: %d checks, %d failures\n", s_checks, s_failures);
+        return s_failures != 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--self-stop-unload") == 0) {
+        test_self_stop_unload_measured_forms();
+        fprintf(stderr, "self-stop-unload: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
     }
@@ -68052,6 +71152,15 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--sysclock-conversion") == 0) {
+        test_kernel_import_sweep_sysclock_conversion();
+        test_unregistered_batch_sysclock_wide();
+        test_kernel_usec_sysclock_conversions();
+        fprintf(stderr, "sysclock-conversion: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--vtimer") == 0) {
         test_vtimer_lifecycle();
         test_vtimer_measured_limits_and_base();
@@ -68089,6 +71198,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sysreg_virtual_registry();
     test_sysreg_overlay_follows_user_data_root();
     test_console_profile_identity();
+    test_wlan_state_with_the_switch_on();
     test_console_profile_identity_is_deterministic_under_the_deterministic_clock();
     test_sysreg_write_model();
     test_sysparam_nickname_string();
@@ -68096,6 +71206,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_edram_addr_translation();
     test_named_refusals();
     test_net_core_without_network();
+    test_net_inet_lifecycle_without_network(0);
+    test_net_resolver_lifecycle_without_network(0);
     test_refer_system_status();
     test_ctrl_read_latch();
     test_ctrl_peek_latch_keeps_the_latch();
@@ -68175,6 +71287,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_utility_dialog_measured_states();
     test_osk_nested_ranges();
     test_utility_dialog_wrong_states_unmeasured_types();
+    test_savedata_calls_with_no_dialog_started();
+    test_msg_dialog_calls_with_no_dialog_started();
+    test_netconf_calls_with_no_dialog_started();
+    test_gamedata_install_calls_with_no_dialog_started();
+    test_game_sharing_calls_with_no_dialog_started();
     test_exit_thread_does_not_wake_launcher(0);
     test_exit_thread_does_not_wake_launcher(2);
     test_explicit_exit_status_exact((int32_t)0x800201acu, 0x800200d2u);
@@ -68198,6 +71315,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_regular_contract_safety();
     test_audio_regular_output_refuses_bad_channels();
     test_audio_regular_output_refuses_bad_volumes();
+    test_audio_output_panned_blocking_unreserved_channel();
     test_audio_output2_release_refuses_while_queued();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
@@ -68224,6 +71342,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_calls_read_the_guest_queue_under_the_deterministic_clock();
     test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock();
     test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue();
+    test_auto_load_disc_and_silent_audio();
     test_ctrl_live_input_latch_suppresses_phantom_start();
     test_ctrl_pulse_never_synthesises_start_in_a_real_window();
     test_ctrl_read_buffer_contract();
@@ -68243,6 +71362,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_stall_alias_linear_from_uncached_list();
     test_ge_linear_filter_stays_inside_region();
     test_ge_raster_cells_match_psp();
+    test_ge_weight_cells_match_psp();
     test_ge_alpha_only_clear_keeps_colour_under_dither();
     test_ge_depth_bounds_and_through_z_match_psp();
     test_ge_mip_cells_software_contract();
@@ -68254,11 +71374,13 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_reads_vram_under_the_status_word();
     test_ge_texture_decode_notes_the_capture();
     test_dcache_maintenance_notifies_renderer();
+    test_dcache_writeback_all_cached_store_reaches_the_uncached_alias();
     test_icache_maintenance_returns_zero_for_every_range();
     test_exit_game_ignores_argument_registers(argc > 0 ? argv[0] : NULL);
     test_bulk_guest_span_atomicity();
     test_inline_stores_match_full_bodies();
     test_sysclib_memory_imports();
+    test_sysclib_snprintf();
     test_thread_stack_free_size_contract();
     test_check_thread_stack_contract();
     test_refer_thread_status();
@@ -68286,6 +71408,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_queued_callers_are_served_in_arrival_order();
     test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
+    test_display_static_scanout();
+    test_display_gpu_scanout_cpu_writes();
     test_display_narrow_stride_span();
     test_display_get_mode_span();
     test_time_domains_are_coherent();
@@ -68426,6 +71550,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
     test_atrac_decode_without_frame_grid();
     test_atrac3plus_decode_after_end();
+    test_atrac3plus_refill_after_empty(1);
+    test_atrac3plus_refill_after_empty(0);
+    test_atrac3plus_refill_after_loop_rewind();
+    test_atrac3plus_missing_frame_without_refill();
     test_atrac_loop_end_follows_loop_num();
     test_atrac_set_loop_num_bad_id();
     test_mp3_loadexec_reset();
@@ -68449,6 +71577,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_reinit_is_a_fresh_init();
     test_sas_envelope_follows_its_rates_and_curves();
     test_sas_envelope_curve_paths_and_refusals();
+    test_sas_simple_adsr_psp_sas_002_pairs();
+    test_sas_adsr_mode_psp_sas_002_table();
+    test_sas_adsr_psp_sas_002_curve_runs();
+    test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule();
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();
@@ -68505,6 +71637,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_pool_priority_attribute_orders_waiters();
     test_fpl_calls_are_quiet_without_trace();
     test_std_handles_measured();
+    test_std_handles_unmeasured_are_named();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_mbx_has_no_host_table_limits();
@@ -68515,12 +71648,14 @@ static int hle_selftest_main(int argc, char **argv) {
     test_intr_conformance_create_failure_is_setup_failure();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
+    test_lock_mutex_cb_refused_in_vblank_subintr();
     test_kernel_nested_join();
     test_kernel_nested_mutex();
     test_real_module_start_lifecycle();
     test_prx_stop_entry_boundaries();
     test_module_stop_join_failure_keeps_stop_single();
     test_late_prx_unload_reload_lifecycle();
+    test_self_stop_unload_measured_forms();
     test_module_without_entry_runs_no_code();
     test_host_skipped_start_stop_unload_reload();
     test_late_prx_duplicate_base_last_reference();

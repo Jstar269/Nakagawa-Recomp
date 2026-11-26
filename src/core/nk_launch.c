@@ -554,10 +554,9 @@ static bool find_candidate_executable(
                 if (rel[k] == '/') rel[k] = sep;
             }
             int w = snprintf(cand, sizeof(cand), "%s%c%s", root, sep, rel);
-            if (w > 0 && (size_t)w < sizeof(cand) &&
-                nk_platform_file_exists(cand)) {
-                if ((size_t)w >= max_len) return false;
-                snprintf(out_path, max_len, "%s", cand);
+            if (w <= 0 || (size_t)w >= sizeof(cand) || (size_t)w >= max_len) continue;
+            if (nk_platform_file_exists(cand)) {
+                memcpy(out_path, cand, (size_t)w + 1u);
                 return true;
             }
         }
@@ -1535,6 +1534,20 @@ NkResult nk_launch_prepare_session(
     return NK_OK;
 }
 
+/* The package owns its runtime. Separate a single complete Automatic token
+   from the v1 line so runtimes that only know load=off/fast keep the other parts. */
+static const char k_ace_auto_field[] = ";load=auto";
+
+static const char *launch_ace_auto_field(const char *spec) {
+    if (strncmp(spec, "v1;", 3) != 0) return NULL;
+    const char *field = strstr(spec, ";load=");
+    if (!field || strncmp(field, k_ace_auto_field, sizeof(k_ace_auto_field) - 1u) != 0)
+        return NULL;
+    const char *tail = field + sizeof(k_ace_auto_field) - 1u;
+    if ((*tail && *tail != ';') || strstr(tail, ";load=")) return NULL;
+    return field;
+}
+
 NkResult nk_launch_start(NkLaunchSession *session) {
     if (!session || session->executable_path[0] == '\0') {
         return NK_ERROR_GENERIC;
@@ -1653,6 +1666,12 @@ NkResult nk_launch_start(NkLaunchSession *session) {
                 sizeof session->config.guest_memory_channel)) {
         snprintf(session->last_error, sizeof(session->last_error),
                  "The local guest-memory channel name is not terminated.");
+        return NK_ERROR_GENERIC;
+    }
+
+    if (!memchr(session->config.ace_spec, '\0', sizeof(session->config.ace_spec))) {
+        snprintf(session->last_error, sizeof(session->last_error),
+                 "The Ace specification is not terminated.");
         return NK_ERROR_GENERIC;
     }
 
@@ -1821,8 +1840,15 @@ NkResult nk_launch_start(NkLaunchSession *session) {
                      "Enhanced or Ace is on; the acceptance checkpoint needs an Authentic run.");
             return NK_ERROR_GENERIC;
         }
-        snprintf(env_ace, sizeof(env_ace), "SR_ACE=%s", ace);
+        const char *load_auto = ace_on ? launch_ace_auto_field(ace) : NULL;
+        if (load_auto) {
+            snprintf(env_ace, sizeof(env_ace), "SR_ACE=%.*s%s", (int)(load_auto - ace), ace,
+                     load_auto + sizeof(k_ace_auto_field) - 1u);
+        } else {
+            snprintf(env_ace, sizeof(env_ace), "SR_ACE=%s", ace);
+        }
         envp[env_count++] = env_ace;
+        envp[env_count++] = load_auto ? "SR_ACE_LOAD_AUTO=1" : "SR_ACE_LOAD_AUTO=0";
         /* Always set too: empty unless this Ace run has a report path, so an inherited path
            can never receive (and replace a file with) the runtime's report. */
         snprintf(env_ace_report, sizeof(env_ace_report), "SR_ACE_REPORT=%s",

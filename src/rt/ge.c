@@ -1379,6 +1379,43 @@ void sr_ge_vram_write_prepare(uint32_t physical_addr, uint32_t width) {
                                   "the Vulkan depth surface could not be preserved before a CPU store yet.");
 }
 
+/* Once the host shows a GPU-resident scanout, a later CPU store can change
+ * that image without another SetFrameBuf. Keep this signal independent of
+ * the renderer's pending ranges, which it can consume before VBLANK. */
+static struct {
+    uint32_t first, end, pitch, visible_row;
+    int written;
+} s_scanout_cpu_watch;
+
+void ge_watch_cpu_scanout(uint32_t first, uint32_t end, uint32_t pitch, uint32_t visible_row) {
+    s_scanout_cpu_watch.first = first;
+    s_scanout_cpu_watch.end = end;
+    s_scanout_cpu_watch.pitch = pitch;
+    s_scanout_cpu_watch.visible_row = visible_row;
+    s_scanout_cpu_watch.written = 0;
+}
+
+int ge_scanout_cpu_written(void) {
+    return s_scanout_cpu_watch.written;
+}
+
+static void ge_note_scanout_cpu_write(uint32_t addr, uint32_t bytes) {
+    if (!bytes || addr >= s_scanout_cpu_watch.end ||
+        (uint64_t)addr + bytes <= s_scanout_cpu_watch.first)
+        return;
+    /* Narrow strides overlap rows. With a wider stride, only a write that
+     * starts in a visible row or crosses the padding into one can wake it. */
+    if (addr < s_scanout_cpu_watch.first ||
+        s_scanout_cpu_watch.pitch <= s_scanout_cpu_watch.visible_row) {
+        s_scanout_cpu_watch.written = 1;
+        return;
+    }
+    const uint32_t row_offset = (addr - s_scanout_cpu_watch.first) % s_scanout_cpu_watch.pitch;
+    if (row_offset < s_scanout_cpu_watch.visible_row ||
+        bytes > s_scanout_cpu_watch.pitch - row_offset)
+        s_scanout_cpu_watch.written = 1;
+}
+
 void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width) {
     uint32_t canonical = sr_vram_cpu_aperture(physical_addr)
                        ? sr_vram_cpu_address(physical_addr) : SR_PHYS(physical_addr);
@@ -1388,6 +1425,8 @@ void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width) {
     }
     if (g_ge_capture_active && !s_ge_capture_own_store)
         ge_capture_note_cpu_vram_store(physical_addr, width);
+    if (s_scanout_cpu_watch.first && !s_scanout_cpu_watch.written && !s_ge_capture_own_store)
+        ge_note_scanout_cpu_write(canonical, width);
     sr_gpu_vram_dirty(physical_addr, width);
     g_sr_vram_read_pending = s_zbuf_guest_dirty ||
         (s_gpu && s_gpu->vram_pending && s_gpu->vram_pending());
@@ -2639,6 +2678,95 @@ static TexLevel tex_level(uint32_t level) {
     t.level = level > 7u ? 0u : level;
     return t;
 }
+
+#ifndef SR_GE_VRAM_DECODER_CLI
+static const uint32_t capture_tex_bits[] = {16, 16, 16, 32, 4, 8, 16, 32};
+
+static int capture_texture_layout(const TexLevel *t, uint32_t level) {
+    return level <= 7u && ge.tex_fmt <= 10u && t->w > 0 && t->h > 0 &&
+           t->w <= 512 && t->h <= 512 && t->bufw <= 0xFFFFu;
+}
+
+static uint32_t capture_dxt_offset(uint32_t stride, uint32_t x, uint32_t y) {
+    uint32_t bpr = stride / 4u;
+    return ((y / 4u) * (bpr ? bpr : 1u) + x / 4u) * (ge.tex_fmt == 8u ? 8u : 16u);
+}
+
+static uint32_t capture_dxt_bytes(uint32_t rows) {
+    if (ge.tex_fmt == 8u) return 8u;
+    return ge.tex_fmt == 9u ? 8u + rows * 2u : 16u;
+}
+
+GeCaptureTextureStorage ge_capture_texture_storage(uint32_t level) {
+    const TexLevel t = tex_level(level);
+    if (!capture_texture_layout(&t, level)) return GE_CAPTURE_TEXTURE_INVALID;
+    const uint32_t stride = t.bufw ? t.bufw : (uint32_t)t.w;
+    uint32_t extent = 0;
+    if (ge.tex_fmt >= 8u) {
+        const uint32_t last_row = (uint32_t)t.h - 1u;
+        extent = capture_dxt_offset(stride, (uint32_t)t.w - 1u, last_row) +
+                 capture_dxt_bytes((last_row % 4u) + 1u);
+    } else {
+        const uint32_t bits = capture_tex_bits[ge.tex_fmt];
+        /* A narrow swizzled pitch can put an earlier row beyond the final row. */
+        for (uint32_t y = 0; y < (uint32_t)t.h; ++y) {
+            const uint32_t end = texel_offset(stride, (uint32_t)t.w - 1u, y, bits) +
+                                 (bits < 8u ? 1u : bits / 8u);
+            if (end > extent) extent = end;
+        }
+    }
+    if (!sr_inrange_n(t.addr, extent)) return GE_CAPTURE_TEXTURE_INVALID;
+    const uint32_t physical = SR_PHYS(t.addr);
+    const uint32_t end = physical + extent;
+    if (physical >= SR_VRAM_CPU_BASE && end <= SR_VRAM_CPU_END)
+        return GE_CAPTURE_TEXTURE_VRAM;
+    if (physical < SR_VRAM_CPU_END && end > SR_VRAM_CPU_BASE)
+        return GE_CAPTURE_TEXTURE_INVALID;
+    return GE_CAPTURE_TEXTURE_SPARSE;
+}
+
+static int capture_texture_run(const TexLevel *t, const uint8_t *resident, uint32_t available,
+                               uint32_t offset, uint32_t bytes) {
+    return offset <= available && bytes <= available - offset &&
+           (uint64_t)t->addr + offset + bytes <= UINT64_C(0x100000000) &&
+           ge_capture_note_observed_sparse(t->addr + offset, resident + offset, bytes);
+}
+
+int ge_capture_note_texture_level(uint32_t level, const uint8_t *resident, uint32_t available) {
+    const TexLevel t = tex_level(level);
+    if (!g_ge_capture_active || !resident || !capture_texture_layout(&t, level)) return 0;
+    const uint32_t width = (uint32_t)t.w, height = (uint32_t)t.h;
+    const uint32_t stride = t.bufw ? t.bufw : width;
+    if (ge.tex_fmt >= 8u) {
+        for (uint32_t y = 0; y < height; y += 4u) {
+            const uint32_t rows = height - y < 4u ? height - y : 4u;
+            for (uint32_t x = 0; x < width; x += 4u) {
+                const uint32_t offset = capture_dxt_offset(stride, x, y);
+                /* The first four bytes hold one index row each. Endpoints and
+                 * alpha bytes follow them, including in a partial block. */
+                if (!capture_texture_run(&t, resident, available, offset, rows) ||
+                    !capture_texture_run(&t, resident, available, offset + 4u,
+                                         capture_dxt_bytes(rows) - 4u))
+                    return 0;
+            }
+        }
+        return 1;
+    }
+    const uint32_t bits = capture_tex_bits[ge.tex_fmt];
+    /* Linear textures use one run per row. Swizzled tiles hold 16 row bytes.
+     * Visit each active run so stride padding and partial tiles stay unfixed. */
+    const uint32_t group = ge.tex_swizzle ? 128u / bits : width;
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x += group) {
+            const uint32_t count = width - x < group ? width - x : group;
+            if (!capture_texture_run(&t, resident, available, texel_offset(stride, x, y, bits),
+                                     (count * bits + 7u) / 8u))
+                return 0;
+        }
+    }
+    return 1;
+}
+#endif
 
 /* Host bytes of the level a GPU decode is reading (tex_decode_host_begin), else NULL. */
 static const uint8_t *s_tex_host;

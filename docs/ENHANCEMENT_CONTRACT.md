@@ -106,17 +106,19 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   depends on it under `SR_DETERMINISTIC_CLOCK=1`; that has not been measured. Under the wall clock it
   takes host time as any host work does. It chooses only which upscaler enlarges the shown picture.
 
-  *When a frame is a movie frame.* Its movie box (the box around its movie pixels) covers at least
-  half of the shown 480 x 272, in either way a movie reaches the GE:
+  *When a frame is a movie frame.* The movie covers at least half of the shown 480 x 272 under
+  the rule for its route into the GE:
   - *drawn as a texture* (Hot Shots Tennis's opening movie, and LittleBigPlanet's intro as #2111
     describes it): draws since the target was last presented sampled a texture whose upload matched
     a noted picture (same stride and format, and either the texture's first texel is a pixel of the
     picture, or the texture starts with the picture's rows byte for byte, a copy such as Hot Shots
     Tennis makes with its own code before drawing it; the note's rows unchanged), bound as level 0,
-    the anisotropic or scaled image, or the host mip chain (Enhanced `mips=on`); UI drawn over part
-    of the movie (subtitles, a prompt) keeps the frame a movie frame, and a later draw, line, point
-    or GE block transfer over the whole movie box does not (a primitive the software GE draws
-    instead keeps it);
+    the anisotropic or scaled image, or the host mip chain (Enhanced `mips=on`). Count the union of
+    those draw rectangles after clipping to the scissor and display. Overlaps count once and gaps
+    between rectangles count zero. Triangles contribute their clipped bounding rectangles, so this
+    is a coverage estimate. UI drawn over part of the movie (subtitles, a prompt) keeps its
+    coverage. A later draw, line, point or GE block transfer over the whole movie box clears it.
+    A primitive the software GE draws instead keeps it;
   - *decoded into a GE target*: the presented target holds a whole noted picture of its stride and
     format, written after the GE's last write to that target and unchanged since; any GE draw or GE
     block transfer after it, even one pixel of UI, leaves the frame to the GE (a CPU copy into VRAM
@@ -128,16 +130,20 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   never matching a texture served from a target), when a later picture is written over it, when its
   decoder is deleted or released, when eight newer pictures were noted (counted as dropped), and
   when the upscaler is off. A picture behind a swizzled VRAM view, a copy that is converted, scaled,
-  partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, a picture sampled from a render
-  target, and a picture written in more than eight strips (whose first strip is dropped) are not
-  matched: those frames stay GE frames. Known limit: a picture of one solid colour (a fade to black)
+  partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, and a picture sampled from a render
+  target do not match. The renderer holds eight notes. When a picture is written in more than
+  eight strips, a texture starting in an evicted strip loses that address match, but surviving
+  strips can still match when drawn separately. Two distant strips whose rectangles together cover
+  less than half the frame stay GE. Known limit: a picture of one solid colour (a fade to black)
   is matched by any texture of its stride and format that starts with the same bytes, so while that
   note is held, a frame that draws such a texture (a plain black background) over half the screen
   goes to the movie upscaler, UI drawn over it included. Only the presented picture changes.
 
   Evidence: `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way
   through the production path, check every way a note stops matching, and compare one frame's guest
-  VRAM with tracking on and off; `gpu-mips-selftest`'s `movie` cell draws a transformed, linearly
+  VRAM with tracking on and off; `movie-strip-coverage` checks sparse, overlapping and contiguous
+  strips, the half-screen threshold, overlays and framebuffer equality with tracking on and off;
+  `gpu-mips-selftest`'s `movie` cell draws a transformed, linearly
   filtered movie quad with the mip chain bound and without it; `gpu-coherence-selftest-movie-mutant`
   builds the renderer without the match (both cases must fail) and with the copy judged by a
   word-wise hash (the alpha-bit cell must fail); `psmf-media-selftest` checks the notes each HLE
@@ -399,6 +405,16 @@ Some frame-counted values are data, not instructions: tables in the executable's
 - **`data_files`** name a disc `path` (plain names separated by `/`, compared without case), the file's `sha256`, a `format` (`csv`), the zero-based `header_row` that names the columns, the `first_data_row`, and `cells`: a `column` by its header name, or a zero-based `column_index` where the header line has no ASCII name for it, optional zero-based data `rows` (all data rows when left out) and a `transform`. Several `cells` entries may name one column when their `rows` do not overlap, so no value is rescaled twice. A cell is a plain decimal number. Its optional `type` (a `data_sites` type) says how the title parses it; without one, a cell with a decimal point is a float and any other an integer. An integer cell stays an integer and must rescale exactly; when the cell gives a `type`, both the stock value and the rescaled value must fit that type, and a cell without a `type` has no range check; a float cell must stay within the float32 range, before and after the rescale; a float cell is read as a float, rescaled, and written as the shortest decimal that reads back to the same float. Build-package passes the title's extracted files (`--enhancement-data-root`); codegen finds the file by path and digest, rewrites it, and embeds the result. At run time `sr_enhancement_file_register()` holds it, and opening that path for reading reads the stock bytes first: matching bytes are served rewritten, with the rewritten size; any other bytes at a registered path stop the run with `ENHANCEMENT_DATA_MISMATCH`. Files on disc are never modified. Only an open by path is served: a title that reads its data through raw UMD sectors or its own archive reader never opens these paths, and their rewrites do not apply. With the other end-of-process reports, however the run ends (their order relative to `COMPAT_PATCH_REPORT` is not fixed), `ENHANCEMENT_DATA_REPORT: served=K/N` counts the registered files that were opened and served, and `ENHANCEMENT_DATA_NOT_SERVED` names each one that never was.
 
 Both are covered by the package digest, so a change to either is a different enhanced build.
+
+A timing declaration can use `sites: []` when it has at least one `data_sites` entry and declares
+`rng_policy.mode: unmodified`. The mode means the package authors no RNG transform. It is available
+only without instruction rewrite sites, including the optional Short loads part, and forbids
+`probability_per_update_x0.5` in data sites and data files. The data span must
+have one full file-backed load mapping that agrees with the data section, and no overlapping
+allocated section may classify it as code or zero-fill. Real-time RNG behavior and physics still
+need measurement at the new rate. Such a package uses the same build and runtime opt-in. The `f32_x3` transform
+multiplies a finite `f32` element by three and rounds it to float32. A result outside the finite
+float32 range refuses the package. This transform is available only for initialised executable data sites.
 
 #### Load-time store sites
 
@@ -697,14 +713,14 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `mips` (`on` or `off`,
-section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section
-11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
+section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`auto`, `fast` or `off`,
+sections 10.15.1 and 11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
 section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (`on` or `off`, section 11.3.4),
 `shadow` (`soft` or `off`, sections 10.23 and 11.3.13), `texscale` (`2` to `6` or `off`) and `smart2d` (`on` or
 `off`, both sections 10.10 and 11.3.3) and `cull` (`on` or `off`, section 11.3.6) are the other keys a
 line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs`, `texpack`, `shadow`,
 `texscale`, `smart2d` or
-`cull` is off, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
+`cull` is off by default, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
 `ssaa=2|4`, `peak=limit`, `glyphs=on`, `texpack=on`, `texscale=2..6` and `smart2d=on` do not), the launcher writes
 `;mips=on` for an Enhanced or Ace
 launch with that part on, `;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
@@ -806,7 +822,8 @@ the device is created with no feature outside Ace.
   guest-visible item. Its entry is section 11.3.7.
 - **Input:** `stick=<counts>` (Ace only) changes the left-stick values of the live host samples the guest latches,
   never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
-- **Loads:** `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
+- **Loads:** `load=auto` accelerates the paced clock during detected silent disc loads (section 10.15.1).
+  `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
   it changes guest timing. It is a guest-visible item, not yet admitted. Its entry is section 11.3.10.
 - **Depth:** `depth=32` gives the Vulkan renderer a 32-bit float depth buffer, which changes which surface wins
   where two lie within one 16-bit depth step, in the frames a present commits to guest VRAM. The depth the guest
@@ -1077,12 +1094,25 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 `settings.json` keeps the library's choice in `"enhanced"` and a sparse `"title_play"` map, every value by name:
 
 ```json
-"enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
-            "load": "off", "twin": "off", "mips": "off"},
-"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
-"texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+{
+  "enhanced": {
+    "default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on",
+    "wide": "off", "smooth": "off", "sas": "off", "tess": "off", "cull": "off",
+    "upscale": "off", "stick": "off", "load": "off", "twin": "off", "ssaa": "off",
+    "mips": "off", "texpack": "off", "pad": "off", "shadow": "off", "peak": "off",
+    "texscale": "off", "smart2d": "off"
+  },
+  "title_play": {
+    "ULUS10000": {"mode": "ace", "af": "8", "texpack": "on"},
+    "ULES00000": {"mode": "library", "logic_60": "off"}
+  },
+  "texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+}
 ```
+
+Here the library defaults to Enhanced with texture replacement off. `ULUS10000` enables its chosen pack with
+`"texpack": "on"`, while `ULES00000` inherits the library's texture pack setting. Authentic keeps texture
+replacement off even when a folder is saved.
 
 `"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
 256 of them; choosing one more is refused with a message. A member that is not a disc ID and a folder string is
@@ -1980,6 +2010,34 @@ window's keys turn it on, and it never runs in an Authentic run.
   its VBLANK returns where the turbo clock's does). `hle-thread-selftest` pins the audio: no host push from either
   output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
   queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
+
+#### 10.15.1. Automatic fast-forward during disc loads
+
+In Enhanced and Ace modes, Automatic lets the scheduler advance the paced clock faster while a game reads
+from disc during a quiet stretch. It works across games without a title-specific Ace package and defaults to
+off. The launcher always exports `SR_ACE_LOAD_AUTO`: `1` for Automatic, `0` for every other selection, including
+Authentic and the acceptance checkpoint. It sends the rest of the v1 `SR_ACE` line independently. An older game
+package ignores the additional variable and keeps the other requested enhancements. Rebuild that game package
+with a runtime that supports Automatic to use the setting.
+
+When starting the runtime directly, an explicit `load=auto`, `load=fast` or `load=off` in `SR_ACE` takes
+precedence. The additional variable can opt in only with a valid enabled Enhanced or Ace line and no explicit
+`load` key. An unset value or any value other than `1` leaves the parsed selection in force.
+
+Each successful, nonempty read through a guest disc file or raw UMD descriptor makes the next eight
+serviced VBLANKs eligible. A further read
+renews that window. On an eligible VBLANK, if the controller is idle and the output queues are silent,
+the paced clock can switch to 16x. The guest still executes its loading code, and its timers and waits
+follow the same guest clock throughout. Actual wall time depends on the storage, host and game.
+
+Input, audible output and pause end automatic acceleration. Zero-valued samples can continue during a load.
+The first audible block goes through the normal audio path, and its output starts an eight-VBLANK cooldown.
+The detector stays inactive in Authentic mode, under the deterministic and turbo clocks, and whenever the
+player has enabled online ad hoc play. Manual fast-forward still uses the controls in section 10.15. The separate `load=fast`
+choice applies the package-declared waits in section 11.3.10.
+
+The runtime logs `AUTO_LOAD: on` and `AUTO_LOAD: off` at clock transitions. If no eligible load occurs,
+the exit report records that reason. The `load_waits_skipped` counter belongs to package-declared waits.
 
 ### 10.16. Smooth Far Textures (Host Mip Chains)
 
@@ -3470,10 +3528,10 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   which is what the stock function returns after its wait. With the key
   off, or where waits are not permitted (the stock call then returns `SCE_KERNEL_ERROR_CAN_NOT_WAIT` without
   blocking), the skip steps aside and the stock call runs. Nothing else in the title's code changes.
-- **Key.** `load=fast` or `load=off` on the launch line (section 10.1), an optional key: a line without it reads as
-  off, any other value is refused, and `load=fast` is refused unless the line carries `tier=ace`. The player has a
-  library setting and a per-title setting, "Short loads", each able to turn it off alone (section 11.2,
-  item 2); the line carries `;load=fast` only for an Ace launch with the part on, so every other line is as it was.
+- **Key.** `load=fast` selects the package-declared waits and requires `tier=ace`. `load=off` selects stock
+  loading. Automatic uses the separate launcher variable described in section 10.15.1. A runtime started
+  directly also accepts `load=auto`. The library setting and per-title override select the same behavior
+  (sections 10.1 and 11.2).
   The run names it (`ACE_MODE: load fast (...)` at start, `ACE_MODE: load waits skipped <n> (longest run <m> logic
   updates; ...)` at exit, the report's `load`, `load_waits_skipped`, `load_skip_max_run` and `load_paced`), and
   confirms it the first time a declared wait is skipped. A run that asked for
