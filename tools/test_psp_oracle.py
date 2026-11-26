@@ -485,6 +485,61 @@ class PspOracleProtocolTests(unittest.TestCase):
                     parse_output(text)
 
 
+def _solid_guard(verdict: int, *, size: int = 0x00200000, base: int = 0x04000000, ge_state: int = 0,
+                 mode: tuple[int, int, int, int] = (0, 0, 480, 272),
+                 slot0: tuple[int, int, int, int] = (0, 0, 0, 0),
+                 slot1: tuple[int, int, int, int] | None = None) -> tuple[int, ...]:
+    """The sixteen `-guard` words of solid-triangle-8888-v1: fifteen values and a verdict.
+
+    The values are sceGeEdramGetSize, sceGeEdramGetAddr and sceGeDrawSync(1); sceDisplayGetMode's
+    result, mode, width and height; and sceDisplayGetFrameBuf's result, address, stride and
+    format for the immediate slot and the next-frame slot (the same as slot0 unless given)."""
+    return (size, base, ge_state, *mode, *slot0, *(slot0 if slot1 is None else slot1), verdict)
+
+
+_SOLID_FAILED = (0x80000107, 0, 0, 0xFFFFFFFF)  # a failed read leaves the probe's initial values
+_SOLID_XMB = (0, 0x04000000, 512, 3)            # a displayed buffer at the start of EDRAM
+_SOLID_CLEAR = (0, 0x04088000, 512, 3)          # a displayed buffer after the target
+
+#: The decision table of the solid-triangle guard. A verdict's bits 0-3 are the four conditions
+#: (EDRAM size, EDRAM base, GE idle, scanout clear of EDRAM [0,1024)), bit 4 the display mode,
+#: bits 8-11 and 12-15 the slots' classes (0 unknown, 1 no framebuffer, 2 clear, 3 over the
+#: target). Every verdict here is written out, not computed: the probe's own text (on the host)
+#: and the parser are each held to it.
+SOLID_GUARD_NO_FRAMEBUFFER = _solid_guard(0x111F)
+SOLID_GUARD_DISJOINT = _solid_guard(0x221F, slot0=_SOLID_CLEAR)
+SOLID_GUARD_ACCEPTED = {
+    "no framebuffer in either slot (standalone PSPLink)": SOLID_GUARD_NO_FRAMEBUFFER,
+    "no framebuffer, a stride and format still reported": _solid_guard(0x111F, slot0=(0, 0, 512, 3)),
+    "one buffer after the target in both slots": SOLID_GUARD_DISJOINT,
+    "two buffers after the target": _solid_guard(0x221F, slot0=_SOLID_CLEAR, slot1=(0, 0x04110000, 512, 3)),
+    "the uncached view, 16 bits, starting at offset 1024": _solid_guard(0x221F, slot0=(0, 0x44000400, 512, 1)),
+}
+SOLID_GUARD_REFUSED = {
+    "a buffer at EDRAM offset 0 (the XMB)": _solid_guard(0x3317, slot0=_SOLID_XMB),
+    "a buffer whose start is the target's last word": _solid_guard(0x3317, slot0=(0, 0x040003FC, 512, 3)),
+    "immediate slot empty, a buffer pending": _solid_guard(0x2117, slot0=(0, 0, 0, 0), slot1=_SOLID_CLEAR),
+    "a buffer shown, an empty one pending": _solid_guard(0x1217, slot0=_SOLID_CLEAR, slot1=(0, 0, 0, 0)),
+    "both reads failed (null addresses)": _solid_guard(0x0017, slot0=_SOLID_FAILED),
+    "the next-frame read failed": _solid_guard(0x0117, slot0=(0, 0, 0, 0), slot1=_SOLID_FAILED),
+    "an EDRAM mirror address": _solid_guard(0x0017, slot0=(0, 0x04288000, 512, 3)),
+    "a main-memory address": _solid_guard(0x0017, slot0=(0, 0x08800000, 512, 3)),
+    "a kernel-segment address": _solid_guard(0x0017, slot0=(0, 0x84088000, 512, 3)),
+    "a stride that is no power of two": _solid_guard(0x0017, slot0=(0, 0x04088000, 600, 3)),
+    "a stride below the screen width": _solid_guard(0x0017, slot0=(0, 0x04088000, 256, 3)),
+    "a stride above 2048": _solid_guard(0x0017, slot0=(0, 0x04088000, 4096, 0)),
+    "an unknown pixel format": _solid_guard(0x0017, slot0=(0, 0x04088000, 512, 4)),
+    "a buffer that runs past the end of EDRAM": _solid_guard(0x0017, slot0=(0, 0x04180000, 512, 3)),
+    "the display mode read failed": _solid_guard(0x1107, mode=(0x80000103, 0xFFFFFFFF, 0, 0)),
+    "a display mode other than the LCD's": _solid_guard(0x1107, mode=(0, 1, 480, 272)),
+    "a display size other than 480 by 272": _solid_guard(0x2207, mode=(0, 0, 720, 480), slot0=_SOLID_CLEAR),
+    "a busy GE": _solid_guard(0x111B, ge_state=1),
+    "a GE state read that failed": _solid_guard(0x111B, ge_state=0x80000021),
+    "an EDRAM of another size": _solid_guard(0x111E, size=0x00400000),
+    "an EDRAM at another base": _solid_guard(0x111D, base=0x44000000),
+}
+
+
 class NewProbeResultParserTests(unittest.TestCase):
     def _row(self, test_id: str, case_id: str, count: int, *,
              status: str = "PASS", values: dict[int, int] | None = None,
@@ -923,7 +978,7 @@ class NewProbeResultParserTests(unittest.TestCase):
         solid = protocol.GE_SOLID_TRIANGLE_CASE
         bound = {
             f"{solid}-input": dict(enumerate(protocol.ge_solid_triangle_input_words())),
-            f"{solid}-guard": dict(enumerate((480, 272, 0x200000, 2))),
+            f"{solid}-guard": dict(enumerate(SOLID_GUARD_NO_FRAMEBUFFER)),
         }
         row_index = {f"{solid}-r{row}": row for row in range(16)}
         for campaign_case, (spec, out_counts) in CAMPAIGN_PROBE_CASES.items():
@@ -1324,7 +1379,8 @@ class GeCorpusGateTests(unittest.TestCase):
         }
         return document, raw
 
-    def _solid_triangle_stream(self, source: str = "nakagawa") -> tuple[str, bytes]:
+    def _solid_triangle_stream(self, source: str = "nakagawa",
+                               guard: tuple[int, ...] = SOLID_GUARD_NO_FRAMEBUFFER) -> tuple[str, bytes]:
         case = protocol.GE_SOLID_TRIANGLE_CASE
         test_id = protocol.GE_SOLID_TRIANGLE_TEST
 
@@ -1336,8 +1392,8 @@ class GeCorpusGateTests(unittest.TestCase):
         frame = tuple(0x000000ff if i == 4 * 16 + 4 else 0 for i in range(256))
         raw = META.format(source=source, model="PSP-3000", firmware="6.61-ARK",
                           binary=MEASURED_SHA, commit=MEASURED_COMMIT)
+        raw += row("guard", 0, guard)
         raw += row("input", 0, protocol.ge_solid_triangle_input_words())
-        raw += row("guard", 0, (480, 272, 0x200000, 2))
         raw += row("draw", 0, (4, 0, 0, 0))
         raw += row("restore", 0, (0, 0))
         for y in range(16):
@@ -1358,7 +1414,7 @@ class GeCorpusGateTests(unittest.TestCase):
             ("input", "out0", "0xf9798f69", "0xf9798f68", "digest differs"),
             ("input", "out15", f"0x{protocol.ge_solid_triangle_input_words()[-1]:08x}",
              "0x00000000", "digest differs"),
-            ("guard", "out3", "0x00000002", "0x00000001", "guard"),
+            ("guard", "out15", "0x0000111f", "0x0000221f", "does not follow"),
             ("draw", "out2", "0x00000000", "0x00000001", "must be done"),
             ("draw", "out3", "0x00000000", "0x00000001", "initial framebuffer"),
             ("restore", "out0", "0x00000000", "0x00000001", "restoration failed"),
@@ -1371,6 +1427,21 @@ class GeCorpusGateTests(unittest.TestCase):
                 rows[index] = rows[index].replace(f"{field}={previous}", f"{field}={invalid}", 1)
                 with self.assertRaisesRegex(ProtocolError, error):
                     parse_golden.parse_campaign_probe_output("".join(rows), case)
+        # The guard record carries what the probe read; the parser derives the verdict again and
+        # takes only the two accepted scanout states, each with all four conditions met.
+        accepted, _pixels = self._solid_triangle_stream(guard=SOLID_GUARD_DISJOINT)
+        self.assertEqual(parse_golden.ge_solid_triangle_readback(
+            parse_golden.parse_campaign_probe_output(accepted, case)), expected)
+        for name, guard in SOLID_GUARD_REFUSED.items():
+            with self.subTest(guard=name):
+                self.assertNotEqual(guard[15] & 0xF, 0xF)
+                refused, _pixels = self._solid_triangle_stream(guard=guard)
+                with self.assertRaisesRegex(ProtocolError, "guard was not satisfied"):
+                    parse_golden.parse_campaign_probe_output(refused, case)
+                # The same values under a verdict that claims all four conditions.
+                forged, _pixels = self._solid_triangle_stream(guard=(*guard[:15], guard[15] | 0xF))
+                with self.assertRaisesRegex(ProtocolError, "does not follow"):
+                    parse_golden.parse_campaign_probe_output(forged, case)
         missing = "".join(line for line in stream_text.splitlines(keepends=True) if f"case_id={case}-r15 " not in line)
         with self.assertRaises(ProtocolError):
             parse_golden.parse_campaign_probe_output(missing, case)
@@ -13314,8 +13385,11 @@ class GeSampleProbeTests(unittest.TestCase):
         shared = self.issues[self.issues.index("static int s_log_failed;\n"):
                              self.issues.index("/* ---", self.issues.index("int module_stop("))]
         # module_stop adds two refusals that only the solid-triangle case compiles: a restore
-        # that did not verify keeps the PRX resident. Exactly these two blocks, once each;
-        # with them taken out the text is the hle_issues copy, which every other case compiles.
+        # that did not verify keeps the PRX resident. Each has one place: the first before
+        # module_stop reads anything, the second between the worker's end and its deletion.
+        # The hle_issues text with exactly those two insertions is the probe's, as one run of
+        # text, so a block that moved, doubled or left module_stop fails here; every other case
+        # compiles the hle_issues copy.
         solid_only = (
             "#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE\n"
             "    /* A wedged GE may still reference this PRX's list and vertices. */\n"
@@ -13327,11 +13401,20 @@ class GeSampleProbeTests(unittest.TestCase):
             "    if (s_solid_restore_pending) return 1;\n"
             "#endif\n",
         )
-        probe = self.probe
-        for block in solid_only:
-            self.assertEqual(probe.count(block), 1, block)
-            probe = probe.replace(block, "")
-        self.assertIn(shared, probe)
+        after = (
+            "    (void)argp;\n",
+            "    if (sceKernelWaitThreadEnd(main_thread, &timeout) < 0) {\n"
+            "        return 1;\n"
+            "    }\n",
+        )
+        stop = shared.index("int module_stop(")
+        expected = shared
+        for anchor, block in zip(after, solid_only, strict=True):
+            self.assertEqual(shared.count(anchor, stop), 1, anchor)
+            self.assertEqual(self.probe.count(block), 1, block)
+            at = expected.index(anchor, stop) + len(anchor)
+            expected = expected[:at] + block + expected[at:]
+        self.assertIn(expected, self.probe)
 
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
@@ -13373,6 +13456,543 @@ class GeSampleProbeTests(unittest.TestCase):
         self.assertIn("#define GS_WIN_Y0 3u", self.probe)
         self.assertIn("#define GS_WIN_SIDE 16u", self.probe)
         self.assertEqual(parse_golden.GE_SAMPLE_ROWS, tuple(range(3, 19)))
+
+
+def _solid_triangle_section(probe: str) -> str:
+    """The solid-triangle case's section of probe_ge_sample.c."""
+    start = probe.index("#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE\n#include <pspdisplay.h>\n")
+    return probe[start:probe.index("#endif /* GE_CASE_SOLID_TRIANGLE */", start)]
+
+
+def _solid_host_tested(probe: str) -> str:
+    """The section's text between its SOLID_HOST_TESTED markers: what the host mock compiles."""
+    begin, end = "/* SOLID_HOST_TESTED_BEGIN */\n", "/* SOLID_HOST_TESTED_END */\n"
+    if probe.count(begin) != 1 or probe.count(end) != 1:
+        raise AssertionError("the solid-triangle section has one SOLID_HOST_TESTED block")
+    return probe[probe.index(begin) + len(begin):probe.index(end)]
+
+
+class GeSolidTriangleProbeTests(unittest.TestCase):
+    """CASE=solid-triangle-8888-v1 (193, PSP-GE-PIXEL-001) in probe_ge_sample.c, read as text:
+    what it may call, where its guard record stands, and that the parser's copy of the guard
+    decision gives the pinned table. GeSolidTriangleProbeHostTests runs the probe's own text."""
+
+    probe: ClassVar[str]
+    section: ClassVar[str]
+    tested: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe_ge_sample.c").read_text(
+            encoding="utf-8")
+        cls.section = _solid_triangle_section(cls.probe)
+        cls.tested = _solid_host_tested(cls.probe)
+
+    def test_section_reads_the_display_and_writes_only_its_saved_window(self) -> None:
+        code = _c_code(self.section)
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", code)), {
+            "sceGeEdramGetSize", "sceGeEdramGetAddr", "sceGeDrawSync", "sceDisplayGetMode",
+            "sceDisplayGetFrameBuf", "sceGeSaveContext", "sceGeRestoreContext", "sceGeListEnQueue",
+            "sceGeListSync", "sceKernelDcacheWritebackAll", "sceKernelDelayThread"})
+        # No display state is set, no queue is broken, nothing is opened or allocated, and the
+        # only loops are counted ones.
+        for banned in ("sceDisplaySet", "sceGeBreak", "sceIo", "sceGu", "malloc(", "while (", "for (;;)",
+                       "do {", "goto "):
+            self.assertNotIn(banned, code)
+        self.assertEqual(code.count("poll < SOLID_WAIT_POLLS; poll++"), 1)
+        self.assertIn("SOLID_WAIT_POLLS = 200,", code)
+        self.assertIn('finished ? "PASS" : qid < 0 ? "FAIL" : "TIMEOUT"', code)
+
+    def test_host_tested_text_holds_everything_but_the_three_psp_only_helpers(self) -> None:
+        # The comment in the probe says the host test compiles the marked text; this pins what
+        # is left outside it, so the claim cannot go stale: the two includes and three helpers
+        # whose bodies only a PSP can execute (an EDRAM pointer, a MIPS sync, a guest address).
+        outside = _c_code(self.section.replace(self.tested, ""))
+        self.assertEqual(re.findall(r"^static [^\n]*?(\w+)\(", outside, flags=re.M),
+                         ["solid_target", "solid_sync", "solid_vertex_address"])
+        self.assertEqual(re.findall(r"^#include [^\n]+", outside, flags=re.M),
+                         ["#include <pspdisplay.h>", '#include "ge_solid_triangle_inputs.h"'])
+        self.assertIn("GeSolidTriangleProbeHostTests", self.section)
+        tested = _c_code(self.tested)
+        for psp_only in ("__asm__", "(volatile uint32_t *)", "(uintptr_t)solid_vertices", "#include"):
+            self.assertNotIn(psp_only, tested)
+        self.assertIn("static int hle_run(void)", tested)
+
+    def test_guard_record_is_written_before_the_refusal_and_before_any_write(self) -> None:
+        run = _c_code(self.tested[self.tested.index("static int hle_run(void)"):])
+        order = [run.index(text) for text in (
+            'hle_step("display-and-ge-guard");',
+            "solid_guard_read(guard);",
+            'hle_record(HLE_CAMPAIGN_ID "-guard", solid_guard_accepts(guard) ? "PASS" : "SKIP", 0, guard,',
+            'hle_step("display-or-ge-guard-refused");',
+            'hle_record(HLE_CAMPAIGN_ID "-input", "PASS", 0, solid_identity, 16);',
+            'hle_step("guard-recheck-and-draw");',
+            "if (!solid_guard_unchanged(guard)) {",
+            "sceGeSaveContext(&s_solid_context)",
+            "solid_target(guard[SOLID_GUARD_EDRAM_BASE])",
+            "s_solid_restore_pending = 1;",
+            "if (s_hle_stop_requested || !solid_guard_unchanged(guard)) {",
+            "framebuffer[i] = 0;",
+            "sceGeListEnQueue(s_solid_list, NULL, -1, NULL)",
+            "solid_guard_read(after);",
+            "framebuffer[i] = s_solid_save[i];",
+            "if (restore[0] == 0 && restore[1] == 0) s_solid_restore_pending = 0;",
+            'hle_record(HLE_CAMPAIGN_ID "-draw"',
+            'hle_record(HLE_CAMPAIGN_ID "-restore"',
+        )]
+        self.assertEqual(order, sorted(order))
+        # One place forms the EDRAM pointer and one place queues a list.
+        self.assertEqual(run.count("solid_target("), 1)
+        self.assertEqual(run.count("sceGeListEnQueue("), 1)
+        # No expected pixel value is compared in the probe: rows are reported as read.
+        self.assertNotIn("0x000000ff", run.lower())
+
+    def test_parser_guard_verdict_gives_the_decision_table(self) -> None:
+        self.assertGreaterEqual(len(SOLID_GUARD_REFUSED), 3)
+        for accepts, table in ((True, SOLID_GUARD_ACCEPTED), (False, SOLID_GUARD_REFUSED)):
+            for name, guard in table.items():
+                with self.subTest(guard=name):
+                    self.assertEqual(len(guard), parse_golden.GE_SOLID_GUARD_WORDS)
+                    self.assertEqual(guard[15] & 0xF == 0xF, accepts)
+                    self.assertEqual(f"0x{parse_golden.ge_solid_triangle_guard_verdict(guard[:15]):04x}",
+                                     f"0x{guard[15]:04x}")
+        with self.assertRaisesRegex(ProtocolError, "fifteen packed values"):
+            parse_golden.ge_solid_triangle_guard_verdict(SOLID_GUARD_NO_FRAMEBUFFER)
+
+
+_SOLID_HOST_MOCK = r"""
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define HLE_CAMPAIGN_ID "solid-triangle-8888-v1"
+typedef struct PspGeContext { unsigned int context[512]; } PspGeContext;
+enum { PSP_GE_LIST_DONE = 0, PSP_GE_LIST_QUEUED = 1 };
+enum { PSP_DISPLAY_MODE_LCD = 0 };
+enum { PSP_DISPLAY_SETBUF_IMMEDIATE = 0, PSP_DISPLAY_SETBUF_NEXTFRAME = 1 };
+
+#include "ge_solid_triangle_inputs.h"
+
+enum { MOCK_WORDS = 256, MOCK_LIST_WORDS = 34 };
+#define MOCK_INITIAL(i) (0xc0de0000u | (uint32_t)(i))
+
+/* What the mocked console reports and does. `guard` is in the `-guard` record's order. */
+static struct {
+    uint32_t guard[15];
+    uint32_t change_at_read;        /* from this guard read on (1-based) the slots are `changed` */
+    uint32_t changed[8];
+    uint32_t ge_state_after_enqueue;
+    uint32_t list_state;
+    uint32_t enqueue_result;
+    uint32_t save_result;
+    uint32_t restore_result;
+    uint32_t scribble_at_sync;      /* this solid_sync call (1-based) finds a target word changed */
+    uint32_t vertex_address;
+    uint32_t stop_requested;
+} mock;
+static struct {
+    unsigned guard_reads, targets, flushes, saves, enqueues, delays, syncs, restores;
+} seen;
+static uint32_t mock_vram[MOCK_WORDS];
+static volatile int s_hle_stop_requested;
+static volatile int s_solid_restore_pending;
+
+static unsigned int sceGeEdramGetSize(void)
+{
+    seen.guard_reads++; /* the first call of every guard read */
+    return mock.guard[0];
+}
+
+static void *sceGeEdramGetAddr(void)
+{
+    return (void *)(uintptr_t)mock.guard[1];
+}
+
+static int sceGeDrawSync(int type)
+{
+    assert(type == 1); /* a peek: the probe never blocks on the GE */
+    return (int)(seen.enqueues ? mock.ge_state_after_enqueue : mock.guard[2]);
+}
+
+/* As on the PSP, a call that fails writes none of its outputs. */
+static int sceDisplayGetMode(int *mode, int *width, int *height)
+{
+    if (mock.guard[3] == 0) {
+        *mode = (int)mock.guard[4];
+        *width = (int)mock.guard[5];
+        *height = (int)mock.guard[6];
+    }
+    return (int)mock.guard[3];
+}
+
+static int sceDisplayGetFrameBuf(void **top, int *stride, int *format, int sync)
+{
+    assert(sync == PSP_DISPLAY_SETBUF_IMMEDIATE || sync == PSP_DISPLAY_SETBUF_NEXTFRAME);
+    const int changed = mock.change_at_read != 0 && seen.guard_reads >= mock.change_at_read;
+    const uint32_t *slot = (changed ? mock.changed : mock.guard + 7) + 4 * sync;
+    if (slot[0] == 0) {
+        *top = (void *)(uintptr_t)slot[1];
+        *stride = (int)slot[2];
+        *format = (int)slot[3];
+    }
+    return (int)slot[0];
+}
+
+static int sceGeSaveContext(PspGeContext *context)
+{
+    assert(context != NULL);
+    seen.saves++;
+    return (int)mock.save_result;
+}
+
+static int sceGeRestoreContext(const PspGeContext *context)
+{
+    assert(context != NULL);
+    seen.restores++;
+    return (int)mock.restore_result;
+}
+
+/* The mocked GE draws every third word of the target and leaves the rest as it found them,
+   so the rows the probe reports show both what was drawn and that the target was cleared. */
+static int sceGeListEnQueue(const void *list, void *stall, int cbid, void *args)
+{
+    assert(stall == NULL && cbid == -1 && args == NULL);
+    seen.enqueues++;
+    printf("LIST");
+    for (unsigned i = 0; i < MOCK_LIST_WORDS; i++) printf(" 0x%08x", (unsigned)((const uint32_t *)list)[i]);
+    printf("\n");
+    if ((int)mock.enqueue_result < 0) return (int)mock.enqueue_result;
+    for (unsigned i = 0; i < MOCK_WORDS; i += 3) mock_vram[i] = 0x5a000000u | i;
+    return (int)mock.enqueue_result;
+}
+
+static int sceGeListSync(int qid, int type)
+{
+    assert(qid == (int)mock.enqueue_result && type == 1);
+    return (int)mock.list_state;
+}
+
+static void sceKernelDcacheWritebackAll(void)
+{
+    seen.flushes++;
+}
+
+static int sceKernelDelayThread(unsigned int microseconds)
+{
+    assert(microseconds == 1000);
+    seen.delays++;
+    return 0;
+}
+
+static volatile uint32_t *solid_target(uint32_t base)
+{
+    assert(base == 0x04000000u);
+    seen.targets++;
+    return mock_vram;
+}
+
+static void solid_sync(void)
+{
+    if (++seen.syncs == mock.scribble_at_sync) mock_vram[37] ^= 0x00010000u;
+}
+
+static uint32_t solid_vertex_address(void)
+{
+    return mock.vertex_address;
+}
+
+static void hle_step(const char *step)
+{
+    printf("STEP %s\n", step);
+}
+
+static void hle_record(const char *case_id, const char *status, uint32_t result, const uint32_t *out,
+                       uint32_t count)
+{
+    printf("RECORD %s %s 0x%08x", case_id, status, (unsigned)result);
+    for (uint32_t i = 0; i < count; i++) printf(" 0x%08x", (unsigned)out[i]);
+    printf("\n");
+}
+
+/* The probe's own text follows. */
+"""
+
+_SOLID_HOST_MAIN = r"""
+_Static_assert(sizeof(s_solid_list) == MOCK_LIST_WORDS * sizeof(uint32_t), "the queued list's size");
+_Static_assert((int)SOLID_WORDS == (int)MOCK_WORDS, "the mocked target is the probe's window");
+
+static void mock_words(const char *text, uint32_t *out, unsigned count)
+{
+    for (unsigned i = 0; i < count; i++) {
+        char *end = NULL;
+        out[i] = (uint32_t)strtoul(text, &end, 0);
+        assert(end != text && *end == (i + 1 < count ? ',' : '\0'));
+        text = end + 1;
+    }
+}
+
+int main(int argc, char **argv)
+{
+    static const struct {
+        const char *name;
+        uint32_t *words;
+        unsigned count;
+    } fields[] = {
+        {"guard=", mock.guard, 15},
+        {"changed=", mock.changed, 8},
+        {"change_at_read=", &mock.change_at_read, 1},
+        {"ge_state_after_enqueue=", &mock.ge_state_after_enqueue, 1},
+        {"list_state=", &mock.list_state, 1},
+        {"enqueue_result=", &mock.enqueue_result, 1},
+        {"save_result=", &mock.save_result, 1},
+        {"restore_result=", &mock.restore_result, 1},
+        {"scribble_at_sync=", &mock.scribble_at_sync, 1},
+        {"vertex_address=", &mock.vertex_address, 1},
+        {"stop_requested=", &mock.stop_requested, 1},
+    };
+    assert(argc >= 2);
+    if (strcmp(argv[1], "verdict") == 0) {
+        /* The pure decision: one fifteen-word argument per line of output. */
+        for (int i = 2; i < argc; i++) {
+            uint32_t guard[SOLID_GUARD_COUNT] = {0};
+            mock_words(argv[i], guard, SOLID_GUARD_COUNT - 1);
+            printf("VERDICT 0x%04x\n", (unsigned)solid_guard_verdict(guard));
+        }
+        return 0;
+    }
+    assert(strcmp(argv[1], "run") == 0);
+    mock.enqueue_result = 4;
+    mock.vertex_address = 0x08a01230u;
+    for (int i = 2; i < argc; i++) {
+        unsigned field = 0;
+        while (field < sizeof(fields) / sizeof(fields[0]) &&
+               strncmp(argv[i], fields[field].name, strlen(fields[field].name)) != 0) field++;
+        assert(field < sizeof(fields) / sizeof(fields[0]));
+        mock_words(argv[i] + strlen(fields[field].name), fields[field].words, fields[field].count);
+    }
+    for (unsigned i = 0; i < MOCK_WORDS; i++) mock_vram[i] = MOCK_INITIAL(i);
+    s_hle_stop_requested = (int)mock.stop_requested;
+    const int result = hle_run();
+    unsigned changed = 0;
+    for (unsigned i = 0; i < MOCK_WORDS; i++) changed += mock_vram[i] != MOCK_INITIAL(i);
+    printf("END result=%d pending=%d guard_reads=%u targets=%u flushes=%u saves=%u enqueues=%u "
+           "delays=%u syncs=%u restores=%u vram_changed=%u\n",
+           result, (int)s_solid_restore_pending, seen.guard_reads, seen.targets, seen.flushes,
+           seen.saves, seen.enqueues, seen.delays, seen.syncs, seen.restores, changed);
+    return 0;
+}
+"""
+
+
+class GeSolidTriangleProbeHostTests(unittest.TestCase):
+    """The solid-triangle probe's own text (its SOLID_HOST_TESTED block) compiled for the host
+    and run against a mocked console: the guard's decision table, every refusal before a
+    write, the bounded draw wait, and a restore that counts only when it was checked.
+
+    The mock draws its own pattern; no PSP value is involved. Review mutants these tests are
+    held to (NK-343-R01): a restore marked verified without its check, a scanout buffer at
+    EDRAM offset 0 allowed, and a list queued although the cleared target did not read zero."""
+
+    harness: ClassVar[Path]
+    identity: ClassVar[tuple[int, ...]]
+    queued: ClassVar[tuple[int, ...]]
+
+    VERTICES = 0x08A01230
+    #: The rows the mocked GE leaves in a cleared target: every third word drawn.
+    DRAWN = tuple(0x5A000000 | i if i % 3 == 0 else 0 for i in range(256))
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        compiler = shutil.which("gcc")
+        if compiler is None:
+            raise unittest.SkipTest("TOOLCHAIN_MISSING: gcc is unavailable for the solid-triangle probe mock")
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
+        probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        scratch = Path(tempfile.mkdtemp(prefix="solid-probe-host-"))
+        cls.addClassCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        (scratch / "ge_solid_triangle_inputs.h").write_text(
+            protocol.ge_solid_triangle_header(fixture / "ge_corpus.json"), encoding="utf-8")
+        (scratch / "host.c").write_text(_SOLID_HOST_MOCK + _solid_host_tested(probe) + _SOLID_HOST_MAIN,
+                                        encoding="utf-8")
+        cls.harness = scratch / "host.exe"
+        built = subprocess.run([compiler, "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror", "-I", str(scratch),
+                                str(scratch / "host.c"), "-o", str(cls.harness)],
+                               capture_output=True, text=True, check=False)
+        if built.returncode != 0:
+            raise AssertionError("the solid-triangle probe text does not compile for the host:\n" + built.stderr)
+        cls.identity = protocol.ge_solid_triangle_input_words()
+        corpus = json.loads((fixture / "ge_corpus.json").read_text(encoding="utf-8"))
+        case = next(case for case in corpus["cases"] if case["case_id"] == protocol.GE_SOLID_TRIANGLE_CASE)
+        words = [int(word, 16) for word in case["command_words"]]
+        # The two address operands: the vertex address's top byte and its low 24 bits.
+        words[15] |= (cls.VERTICES >> 24) << 16
+        words[16] |= cls.VERTICES & 0x00FFFFFF
+        cls.queued = (*protocol.GE_SOLID_TRIANGLE_PRESTATE, *words)
+
+    def _harness(self, *arguments: str) -> list[list[str]]:
+        result = subprocess.run([str(self.harness), *arguments], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return [line.split() for line in result.stdout.splitlines()]
+
+    def _run(self, guard: tuple[int, ...] = SOLID_GUARD_NO_FRAMEBUFFER, **mock: object) -> dict[str, Any]:
+        """One mocked launch: the steps, the records, the queued list and the end counters."""
+        arguments = ["guard=" + ",".join(f"0x{word:x}" for word in guard[:15])]
+        for name, value in mock.items():
+            values = value if isinstance(value, tuple) else (value,)
+            arguments.append(f"{name}=" + ",".join(f"0x{word:x}" for word in values))
+        lines = self._harness("run", *arguments)
+        self.assertEqual(lines[-1][0], "END")
+        records = [line for line in lines if line[0] == "RECORD"]
+        return {
+            "steps": [line[1] for line in lines if line[0] == "STEP"],
+            "records": {line[1].removeprefix(protocol.GE_SOLID_TRIANGLE_CASE + "-"):
+                        (line[2], int(line[3], 16), tuple(int(word, 16) for word in line[4:]))
+                        for line in records},
+            "order": [line[1].removeprefix(protocol.GE_SOLID_TRIANGLE_CASE + "-") for line in records],
+            "lists": [tuple(int(word, 16) for word in line[1:]) for line in lines if line[0] == "LIST"],
+            **{key: int(value) for key, value in (field.split("=") for field in lines[-1][1:])},
+        }
+
+    def _assert_untouched(self, run: dict[str, Any]) -> None:
+        """Nothing was written: no EDRAM pointer formed, no context saved, no list queued."""
+        self.assertEqual({key: run[key] for key in ("targets", "flushes", "saves", "enqueues", "delays",
+                                                    "syncs", "restores", "vram_changed", "pending")},
+                         dict.fromkeys(("targets", "flushes", "saves", "enqueues", "delays", "syncs",
+                                        "restores", "vram_changed", "pending"), 0))
+        self.assertEqual(run["result"], 0)
+        self.assertEqual(run["lists"], [])
+
+    def test_probe_text_gives_the_decision_table(self) -> None:
+        table = {**SOLID_GUARD_ACCEPTED, **SOLID_GUARD_REFUSED}
+        lines = self._harness("verdict", *(",".join(f"0x{word:x}" for word in guard[:15])
+                                           for guard in table.values()))
+        self.assertEqual(len(lines), len(table))
+        for (name, guard), line in zip(table.items(), lines, strict=True):
+            with self.subTest(guard=name):
+                self.assertEqual(line, ["VERDICT", f"0x{guard[15]:04x}"])
+                self.assertEqual(parse_golden.ge_solid_triangle_guard_verdict(guard[:15]), guard[15])
+
+    def test_accepted_states_draw_report_the_rows_as_read_and_restore(self) -> None:
+        for name, guard in SOLID_GUARD_ACCEPTED.items():
+            with self.subTest(guard=name):
+                run = self._run(guard)
+                self.assertEqual(run["steps"], ["display-and-ge-guard", "guard-recheck-and-draw"])
+                self.assertEqual(run["order"], ["guard", "input", "draw", "restore",
+                                                *(f"r{row}" for row in range(16))])
+                self.assertEqual(run["records"]["guard"], ("PASS", 0, guard))
+                self.assertEqual(run["records"]["input"], ("PASS", 0, self.identity))
+                self.assertEqual(run["records"]["draw"], ("PASS", 0, (4, 0, 0, 0)))
+                self.assertEqual(run["records"]["restore"], ("PASS", 0, (0, 0)))
+                for row in range(16):
+                    self.assertEqual(run["records"][f"r{row}"],
+                                     ("PASS", row, self.DRAWN[row * 16:(row + 1) * 16]))
+                self.assertEqual(run["lists"], [self.queued])
+                # Four guard reads: the record, after its host I/O, before the first write, and
+                # before the restore. The window is back to what it held; nothing is pending.
+                self.assertEqual({key: run[key] for key in ("result", "pending", "guard_reads", "targets",
+                                                            "flushes", "saves", "enqueues", "delays",
+                                                            "syncs", "restores", "vram_changed")},
+                                 {"result": 1, "pending": 0, "guard_reads": 4, "targets": 1, "flushes": 1,
+                                  "saves": 1, "enqueues": 1, "delays": 0, "syncs": 3, "restores": 1,
+                                  "vram_changed": 0})
+
+    def test_refused_states_record_their_values_and_touch_nothing(self) -> None:
+        for name, guard in SOLID_GUARD_REFUSED.items():
+            with self.subTest(guard=name):
+                run = self._run(guard)
+                self.assertEqual(run["steps"], ["display-and-ge-guard", "display-or-ge-guard-refused"])
+                self.assertEqual(run["order"], ["guard"])
+                self.assertEqual(run["records"]["guard"], ("SKIP", 0, guard))
+                self.assertEqual(run["guard_reads"], 1)
+                self._assert_untouched(run)
+
+    def test_state_that_changes_after_the_record_stops_before_the_write(self) -> None:
+        # The second read (after the record's host I/O) sees another state, even an accepted
+        # one: the record would no longer name the state the draw ran in.
+        for name, slots in (("to a buffer after the target", (*_SOLID_CLEAR, *_SOLID_CLEAR)),
+                            ("to a buffer over the target", (*_SOLID_XMB, *_SOLID_XMB))):
+            with self.subTest(change=name):
+                run = self._run(change_at_read=2, changed=slots)
+                self.assertEqual(run["steps"], ["display-and-ge-guard", "guard-recheck-and-draw",
+                                                "display-or-ge-guard-changed"])
+                self.assertEqual(run["order"], ["guard", "input"])
+                self.assertEqual(run["guard_reads"], 2)
+                self._assert_untouched(run)
+        # The third read stands after the window was saved and before its first write.
+        for name, mock in (("the display changed", {"change_at_read": 3, "changed": (*_SOLID_XMB, *_SOLID_XMB)}),
+                           ("a stop was requested", {"stop_requested": 1})):
+            with self.subTest(change=name):
+                run = self._run(**mock)
+                self.assertEqual(run["steps"][-1], "pre-write-refused")
+                self.assertEqual(run["order"], ["guard", "input"])
+                self.assertEqual((run["result"], run["pending"], run["targets"], run["saves"], run["syncs"],
+                                  run["enqueues"], run["vram_changed"]), (0, 0, 1, 1, 0, 0, 0))
+
+    def test_vertex_placement_and_context_save_refuse_before_the_write(self) -> None:
+        for address in (0x08A01231, 0x07FFFFFC, 0x0BFFFFD4):
+            with self.subTest(address=f"0x{address:08x}"):
+                run = self._run(vertex_address=address)
+                self.assertEqual(run["steps"], ["display-and-ge-guard", "vertex-placement-refused"])
+                self.assertEqual(run["order"], ["guard"])
+                self._assert_untouched(run)
+        self.assertEqual(self._run(vertex_address=0x0BFFFFD0)["result"], 1)
+        run = self._run(save_result=0x80000021)
+        self.assertEqual(run["steps"][-1], "ge-context-save-refused")
+        self.assertEqual((run["result"], run["pending"], run["saves"], run["targets"], run["enqueues"],
+                          run["vram_changed"]), (0, 0, 1, 0, 0, 0))
+
+    def test_target_that_does_not_read_zero_is_not_drawn_into(self) -> None:
+        # A word of the cleared target reads nonzero: no list is queued, the window is put back
+        # and the draw record is FAIL with the count (review mutant: the check dropped).
+        run = self._run(scribble_at_sync=1)
+        self.assertEqual(run["lists"], [])
+        self.assertEqual(run["enqueues"], 0)
+        self.assertEqual(run["order"], ["guard", "input", "draw", "restore"])
+        self.assertEqual(run["records"]["draw"], ("FAIL", 0, (0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 1)))
+        self.assertEqual(run["records"]["restore"], ("PASS", 0, (0, 0)))
+        self.assertEqual((run["result"], run["pending"], run["vram_changed"]), (0, 0, 0))
+
+    def test_restore_counts_only_when_it_was_checked(self) -> None:
+        # Review mutant: the restore marked verified without its check. Each leg leaves the
+        # restore pending (module_stop then refuses to unload) and publishes no row.
+        for name, mock, words, changed in (
+            ("a restored word reads back different", {"scribble_at_sync": 3}, (1, 0), 1),
+            ("the GE context restore failed", {"restore_result": 0x80000021}, (0, 0x80000021), 0),
+            ("the display moved over the target", {"change_at_read": 4, "changed": (*_SOLID_XMB, *_SOLID_XMB)},
+             (0xFFFFFFFF, 0xFFFFFFFF), 256),
+        ):
+            with self.subTest(restore=name):
+                run = self._run(**mock)
+                self.assertEqual(run["order"], ["guard", "input", "draw", "restore"])
+                self.assertEqual(run["records"]["draw"], ("PASS", 0, (4, 0, 0, 0)))
+                self.assertEqual(run["records"]["restore"], ("FAIL", 0, words))
+                self.assertEqual((run["result"], run["pending"], run["vram_changed"]), (0, 1, changed))
+
+    def test_draw_wait_is_bounded_and_a_timeout_is_recorded(self) -> None:
+        # The list never ends although the GE reads idle: 200 polls of 1 ms, a TIMEOUT record,
+        # no row, and the window restored and verified.
+        run = self._run(list_state=1)
+        self.assertEqual(run["delays"], 200)
+        self.assertEqual(run["order"], ["guard", "input", "draw", "restore"])
+        self.assertEqual(run["records"]["draw"], ("TIMEOUT", 0, (4, 1, 0, 0)))
+        self.assertEqual(run["records"]["restore"], ("PASS", 0, (0, 0)))
+        self.assertEqual((run["result"], run["pending"], run["syncs"], run["vram_changed"]), (0, 0, 2, 0))
+        # The GE stays busy: the probe breaks nobody's queue and writes nothing more, so the
+        # restore stays pending and the module resident.
+        run = self._run(list_state=1, ge_state_after_enqueue=1)
+        self.assertEqual(run["delays"], 200)
+        self.assertEqual(run["records"]["draw"], ("TIMEOUT", 0, (4, 1, 1, 0)))
+        self.assertEqual(run["records"]["restore"], ("FAIL", 0, (0xFFFFFFFF, 0xFFFFFFFF)))
+        self.assertEqual((run["result"], run["pending"], run["syncs"], run["restores"]), (0, 1, 1, 0))
+        # A list the GE refuses is a FAIL record, and the window is restored.
+        run = self._run(enqueue_result=0x80000021)
+        self.assertEqual(run["records"]["draw"], ("FAIL", 0, (0x80000021, 0xFFFFFFFF, 0xFFFFFFFF, 0)))
+        self.assertEqual(run["records"]["restore"], ("PASS", 0, (0, 0)))
+        self.assertEqual((run["result"], run["pending"], run["delays"], run["vram_changed"]), (0, 0, 0, 0))
 
 
 class DmaTimingProbeTests(unittest.TestCase):

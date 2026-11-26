@@ -5175,9 +5175,42 @@ static int hle_run(void)
 #include <pspdisplay.h>
 #include "ge_solid_triangle_inputs.h"
 
-/* The external run guard owns GE and scanout for this single launch. The probe
-   checks both scanout slots itself, leaves the display untouched, and escapes
-   before testing if either slot cannot be proved disjoint from EDRAM [0,1024). */
+/* The external run guard owns GE and scanout for this single launch. The probe reads the
+   display mode and both scanout slots itself and leaves the display untouched. It records
+   what it read (`-guard`, sixteen words) before it acts on them, so a refusal names its
+   cause, and it refuses before any write unless the EDRAM is the 2 MiB block at 0x04000000,
+   the GE is idle and the scanout is in one of the two states it recognises as clear of
+   EDRAM [0,1024):
+     - both slots hold a known buffer inside EDRAM that starts at or after offset 1024; or
+     - both slots hold no framebuffer at all (the call returns 0 with a null top address).
+       That is what standalone PSPLink, the game context after a PSPLink reset, reports
+       (PSP-CPU-TIMING-001, boots 47 and 49), and what sceDisplaySetFrameBuf(NULL, ...)
+       leaves: nothing is scanned out, so no visible span exists to overlap the target.
+   Every other state is refused: a failed call, an address outside the canonical EDRAM range
+   or in a mirror, an unknown stride or format, a buffer that covers the target, and the
+   two slots in different states (a pending change: somebody else is driving the display).
+   The probe sets no display buffer of its own: that would change display state it would
+   then have to restore, which reading alone never needs. */
+
+/* The three operations only a PSP performs. tools/test_psp_oracle.py compiles the text
+   between the SOLID_HOST_TESTED markers for the host, with these three and every sce call
+   replaced by a mock (GeSolidTriangleProbeHostTests). */
+static volatile uint32_t *solid_target(uint32_t base)
+{
+    return (volatile uint32_t *)(uintptr_t)(base | 0x40000000u);
+}
+
+static void solid_sync(void)
+{
+    __asm__ volatile("sync" ::: "memory");
+}
+
+static uint32_t solid_vertex_address(void)
+{
+    return (uint32_t)(uintptr_t)solid_vertices & 0x0fffffffu;
+}
+
+/* SOLID_HOST_TESTED_BEGIN */
 enum {
     SOLID_SIDE = 16,
     SOLID_WORDS = SOLID_SIDE * SOLID_SIDE,
@@ -5194,40 +5227,121 @@ _Static_assert(SOLID_CASE_COUNT == 20, "pinned command-word count");
 _Static_assert(sizeof(solid_vertices) == 48, "pinned vertex data size");
 _Static_assert(sizeof(solid_identity) == 64, "two complete input digests");
 
+/* The `-guard` record's words, in order: what the probe read, then its verdict. */
+enum {
+    SOLID_GUARD_EDRAM_SIZE,     /* sceGeEdramGetSize */
+    SOLID_GUARD_EDRAM_BASE,     /* sceGeEdramGetAddr */
+    SOLID_GUARD_GE_STATE,       /* sceGeDrawSync(1) */
+    SOLID_GUARD_MODE_RESULT,    /* sceDisplayGetMode, then the mode, width and height it gave */
+    SOLID_GUARD_MODE,
+    SOLID_GUARD_WIDTH,
+    SOLID_GUARD_HEIGHT,
+    SOLID_GUARD_SLOT0,          /* sceDisplayGetFrameBuf(IMMEDIATE): result, address, stride, format */
+    SOLID_GUARD_SLOT1 = SOLID_GUARD_SLOT0 + 4, /* the same four for NEXTFRAME */
+    SOLID_GUARD_VERDICT = SOLID_GUARD_SLOT1 + 4,
+    SOLID_GUARD_COUNT,
+};
+_Static_assert(SOLID_GUARD_COUNT == 16, "one sixteen-word guard record");
+
+/* The verdict word. The probe goes on only when all four condition bits are set. */
+enum {
+    SOLID_OK_EDRAM_SIZE = 1 << 0,
+    SOLID_OK_EDRAM_BASE = 1 << 1,
+    SOLID_OK_GE_IDLE = 1 << 2,
+    SOLID_OK_SCANOUT = 1 << 3,
+    SOLID_OK_ALL = SOLID_OK_EDRAM_SIZE | SOLID_OK_EDRAM_BASE | SOLID_OK_GE_IDLE | SOLID_OK_SCANOUT,
+    SOLID_OK_DISPLAY_MODE = 1 << 4, /* detail of the scanout condition: LCD, 480 by 272 */
+    SOLID_SLOT0_SHIFT = 8,          /* detail: each slot's class, four bits each */
+    SOLID_SLOT1_SHIFT = 12,
+};
+
+enum {
+    SOLID_SLOT_UNKNOWN = 0,  /* the call failed, or a value the probe does not recognise */
+    SOLID_SLOT_ABSENT = 1,   /* no framebuffer: nothing to overlap */
+    SOLID_SLOT_DISJOINT = 2, /* a known EDRAM buffer that starts at or after the target's end */
+    SOLID_SLOT_OVERLAP = 3,  /* a known EDRAM buffer that covers the target */
+};
+
 static PspGeContext s_solid_context __attribute__((aligned(64)));
 static uint32_t s_solid_list[SOLID_PRESTATE_COUNT + SOLID_CASE_COUNT] __attribute__((aligned(64)));
 static uint32_t s_solid_save[SOLID_WORDS];
 static uint32_t s_solid_output[SOLID_WORDS];
 
-/* SOLID_SCANOUT_CHECK_BEGIN (also exercised by the host test) */
-static int solid_scanout_disjoint(uint32_t address, int stride, int format)
+static uint32_t solid_slot_class(const uint32_t *slot)
 {
+    const uint32_t result = slot[0], address = slot[1], stride = slot[2], format = slot[3];
+    if (result != 0) return SOLID_SLOT_UNKNOWN;
+    /* A null top address is the display's "no framebuffer" state. The stride and format the
+       call still reports describe no memory, so they are recorded and not judged. */
+    if (address == 0) return SOLID_SLOT_ABSENT;
     /* Use only the canonical EDRAM range and its uncached view. The mirror
-       mapping and the meaning of an absent pending pointer are unqualified. */
+       mapping is unqualified. */
     const uint32_t physical = address & ~0x40000000u;
     if (physical < 0x04000000u || physical >= 0x04000000u + SOLID_EDRAM_BYTES ||
         stride < SOLID_SCREEN_WIDTH || stride > 2048 || (stride & (stride - 1)) != 0 ||
-        format < 0 || format > 3) return 0;
+        format > 3) return SOLID_SLOT_UNKNOWN;
     const uint32_t offset = physical - 0x04000000u;
-    const uint32_t bytes = (uint32_t)stride * SOLID_SCREEN_HEIGHT * (format == 3 ? 4u : 2u);
-    return offset >= SOLID_BYTES && bytes <= SOLID_EDRAM_BYTES - offset;
+    const uint32_t bytes = stride * SOLID_SCREEN_HEIGHT * (format == 3 ? 4u : 2u);
+    if (bytes > SOLID_EDRAM_BYTES - offset) return SOLID_SLOT_UNKNOWN;
+    return offset >= SOLID_BYTES ? SOLID_SLOT_DISJOINT : SOLID_SLOT_OVERLAP;
 }
-/* SOLID_SCANOUT_CHECK_END */
 
-static int solid_display_disjoint(void)
+static uint32_t solid_guard_verdict(const uint32_t *guard)
 {
+    uint32_t verdict = 0;
+    if (guard[SOLID_GUARD_EDRAM_SIZE] == SOLID_EDRAM_BYTES) verdict |= SOLID_OK_EDRAM_SIZE;
+    if (guard[SOLID_GUARD_EDRAM_BASE] == 0x04000000u) verdict |= SOLID_OK_EDRAM_BASE;
+    if (guard[SOLID_GUARD_GE_STATE] == PSP_GE_LIST_DONE) verdict |= SOLID_OK_GE_IDLE;
+    const int mode_known = guard[SOLID_GUARD_MODE_RESULT] == 0 &&
+                           guard[SOLID_GUARD_MODE] == PSP_DISPLAY_MODE_LCD &&
+                           guard[SOLID_GUARD_WIDTH] == SOLID_SCREEN_WIDTH &&
+                           guard[SOLID_GUARD_HEIGHT] == SOLID_SCREEN_HEIGHT;
+    if (mode_known) verdict |= SOLID_OK_DISPLAY_MODE;
+    const uint32_t slot0 = solid_slot_class(guard + SOLID_GUARD_SLOT0);
+    const uint32_t slot1 = solid_slot_class(guard + SOLID_GUARD_SLOT1);
+    verdict |= (slot0 << SOLID_SLOT0_SHIFT) | (slot1 << SOLID_SLOT1_SHIFT);
+    /* Both slots in the same clear state. One absent and one present is a display change in
+       progress, which the probe does not own. */
+    if (mode_known && slot0 == slot1 &&
+        (slot0 == SOLID_SLOT_ABSENT || slot0 == SOLID_SLOT_DISJOINT)) verdict |= SOLID_OK_SCANOUT;
+    return verdict;
+}
+
+/* Reads only: nothing here changes GE, display or memory state. */
+static void solid_guard_read(uint32_t *guard)
+{
+    guard[SOLID_GUARD_EDRAM_SIZE] = sceGeEdramGetSize();
+    guard[SOLID_GUARD_EDRAM_BASE] = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    guard[SOLID_GUARD_GE_STATE] = (uint32_t)sceGeDrawSync(1);
     int mode = -1, width = 0, height = 0;
-    if (sceDisplayGetMode(&mode, &width, &height) != 0 ||
-        mode != PSP_DISPLAY_MODE_LCD || width != SOLID_SCREEN_WIDTH || height != SOLID_SCREEN_HEIGHT)
-        return 0;
+    guard[SOLID_GUARD_MODE_RESULT] = (uint32_t)sceDisplayGetMode(&mode, &width, &height);
+    guard[SOLID_GUARD_MODE] = (uint32_t)mode;
+    guard[SOLID_GUARD_WIDTH] = (uint32_t)width;
+    guard[SOLID_GUARD_HEIGHT] = (uint32_t)height;
     for (int slot = PSP_DISPLAY_SETBUF_IMMEDIATE; slot <= PSP_DISPLAY_SETBUF_NEXTFRAME; slot++) {
         void *top = NULL;
         int stride = 0, format = -1;
-        if (sceDisplayGetFrameBuf(&top, &stride, &format, slot) != 0 ||
-            !solid_scanout_disjoint((uint32_t)(uintptr_t)top, stride, format))
-            return 0;
+        uint32_t *const out = guard + SOLID_GUARD_SLOT0 + 4 * slot;
+        out[0] = (uint32_t)sceDisplayGetFrameBuf(&top, &stride, &format, slot);
+        out[1] = (uint32_t)(uintptr_t)top;
+        out[2] = (uint32_t)stride;
+        out[3] = (uint32_t)format;
     }
-    return 1;
+    guard[SOLID_GUARD_VERDICT] = solid_guard_verdict(guard);
+}
+
+static int solid_guard_accepts(const uint32_t *guard)
+{
+    return (guard[SOLID_GUARD_VERDICT] & SOLID_OK_ALL) == SOLID_OK_ALL;
+}
+
+/* True when a fresh read gives exactly the recorded words: the state the `-guard` record
+   names is then the state in force at the last check before the first write. */
+static int solid_guard_unchanged(const uint32_t *recorded)
+{
+    uint32_t now[SOLID_GUARD_COUNT];
+    solid_guard_read(now);
+    return memcmp(now, recorded, sizeof(now)) == 0;
 }
 
 static int solid_wait_draw(int qid, uint32_t *out)
@@ -5244,14 +5358,17 @@ static int solid_wait_draw(int qid, uint32_t *out)
 static int hle_run(void)
 {
     hle_step("display-and-ge-guard");
-    const uint32_t size = sceGeEdramGetSize();
-    const uint32_t base = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
-    if (size != SOLID_EDRAM_BYTES || base != 0x04000000u ||
-        sceGeDrawSync(1) != PSP_GE_LIST_DONE || !solid_display_disjoint()) {
+    uint32_t guard[SOLID_GUARD_COUNT];
+    solid_guard_read(guard);
+    /* Recorded before the verdict is acted on. Nothing has been written to VRAM or queued on
+       the GE yet, and the guard is read again after this host I/O. */
+    hle_record(HLE_CAMPAIGN_ID "-guard", solid_guard_accepts(guard) ? "PASS" : "SKIP", 0, guard,
+               SOLID_GUARD_COUNT);
+    if (!solid_guard_accepts(guard)) {
         hle_step("display-or-ge-guard-refused");
         return 0;
     }
-    const uint32_t vertices = (uint32_t)(uintptr_t)solid_vertices & 0x0fffffffu;
+    const uint32_t vertices = solid_vertex_address();
     if (vertices < 0x08000000u || vertices > 0x0c000000u - sizeof(solid_vertices) ||
         (vertices & 3u)) {
         hle_step("vertex-placement-refused");
@@ -5265,11 +5382,9 @@ static int hle_run(void)
 
     /* Record preparation before the guarded span changes; keep host I/O out
        of the interval that may need VRAM or GE restoration. */
-    const uint32_t guard[] = {SOLID_SCREEN_WIDTH, SOLID_SCREEN_HEIGHT, size, 2u};
     hle_record(HLE_CAMPAIGN_ID "-input", "PASS", 0, solid_identity, 16);
-    hle_record(HLE_CAMPAIGN_ID "-guard", "PASS", 0, guard, 4);
     hle_step("guard-recheck-and-draw");
-    if (sceGeDrawSync(1) != PSP_GE_LIST_DONE || !solid_display_disjoint()) {
+    if (!solid_guard_unchanged(guard)) {
         hle_step("display-or-ge-guard-changed");
         return 0;
     }
@@ -5280,16 +5395,16 @@ static int hle_run(void)
     /* The list is now finalized. Flush cached writes before saving and
        clearing the uncached target, so a cached alias cannot undo the clear. */
     sceKernelDcacheWritebackAll();
-    volatile uint32_t *const framebuffer = (volatile uint32_t *)(uintptr_t)(base | 0x40000000u);
+    volatile uint32_t *const framebuffer = solid_target(guard[SOLID_GUARD_EDRAM_BASE]);
     for (unsigned i = 0; i < SOLID_WORDS; i++) s_solid_save[i] = framebuffer[i];
     s_solid_restore_pending = 1;
-    if (s_hle_stop_requested || sceGeDrawSync(1) != PSP_GE_LIST_DONE || !solid_display_disjoint()) {
+    if (s_hle_stop_requested || !solid_guard_unchanged(guard)) {
         s_solid_restore_pending = 0;
         hle_step("pre-write-refused");
         return 0;
     }
     for (unsigned i = 0; i < SOLID_WORDS; i++) framebuffer[i] = 0;
-    __asm__ volatile("sync" ::: "memory");
+    solid_sync();
     uint32_t initial_nonzero = 0;
     for (unsigned i = 0; i < SOLID_WORDS; i++) initial_nonzero += framebuffer[i] != 0;
     int qid = -1;
@@ -5297,17 +5412,19 @@ static int hle_run(void)
     uint32_t draw[4] = {(uint32_t)qid, UINT32_MAX, UINT32_MAX, initial_nonzero};
     int finished = qid >= 0 && solid_wait_draw(qid, draw);
     if (finished) {
-        __asm__ volatile("sync" ::: "memory");
+        solid_sync();
         for (unsigned i = 0; i < SOLID_WORDS; i++) s_solid_output[i] = framebuffer[i];
     }
 
-    /* Restore only after establishing quiescence and a disjoint scanout. On
-       timeout we do not break somebody else's queue. If restoration cannot
+    /* Restore only after establishing quiescence and a scanout that is still clear of the
+       target. On timeout we do not break somebody else's queue. If restoration cannot
        be verified, keep the module resident and return no pixel evidence. */
     uint32_t restore[2] = {UINT32_MAX, UINT32_MAX};
-    if (sceGeDrawSync(1) == PSP_GE_LIST_DONE && solid_display_disjoint()) {
+    uint32_t after[SOLID_GUARD_COUNT];
+    solid_guard_read(after);
+    if (solid_guard_accepts(after)) {
         for (unsigned i = 0; i < SOLID_WORDS; i++) framebuffer[i] = s_solid_save[i];
-        __asm__ volatile("sync" ::: "memory");
+        solid_sync();
         restore[0] = 0;
         for (unsigned i = 0; i < SOLID_WORDS; i++) restore[0] += framebuffer[i] != s_solid_save[i];
         restore[1] = (uint32_t)sceGeRestoreContext(&s_solid_context);
@@ -5324,6 +5441,7 @@ static int hle_run(void)
     }
     return 1;
 }
+/* SOLID_HOST_TESTED_END */
 #endif /* GE_CASE_SOLID_TRIANGLE */
 
 /* ------------------------------------------------------------------------- */

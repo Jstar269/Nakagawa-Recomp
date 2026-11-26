@@ -41,7 +41,14 @@ framebuffer. Its selected pixels and full framebuffer digest are deliberately un
 qualified PSP run records them. The case uses the PSP GE command word layout; address operands are
 explicit relocations to its source-owned vertex words. `solid-triangle-8888-v1` has a dedicated
 `PSP-GE-PIXEL-001` producer. Its build binds the fixed declaration and separate initial GE setup
-digests and the parser checks both digests, the scanout and restore guards, and all 16 raw rows.
+digests and the parser checks both digests, the guard record, the restore and all 16 raw rows.
+The probe writes its `-guard` record before it decides: the EDRAM size and base, the GE state, the
+display mode and, for the immediate and the next-frame scanout slot, the result, address, stride
+and format `sceDisplayGetFrameBuf` gave, then a verdict word, so a refusal names its cause. It
+draws only when the EDRAM is the 2 MiB block at `0x04000000`, the GE is idle, and both slots
+either hold no framebuffer (what standalone PSPLink reports: PSP-CPU-TIMING-001) or hold a known
+buffer that starts after the 1 KiB target; it sets no display buffer of its own. The parser
+derives the verdict again from the recorded values.
 The corpus gate derives `framebuffer_sha256` over exactly 1,024 little-endian bytes and compares the
 three selected packed values from that same readback. The existing `PSP-GE-001` NaN probe has its own
 unchanged route. The triangle remains `NOT_RUN`.

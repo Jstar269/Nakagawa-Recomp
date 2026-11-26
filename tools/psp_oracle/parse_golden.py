@@ -29,7 +29,7 @@ than a lenient pass.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 import re
@@ -3192,10 +3192,54 @@ _register_campaign_probe(
 
 _register_campaign_probe(
     GE_SOLID_TRIANGLE_CASE, GE_SOLID_TRIANGLE_TEST,
-    ((f"{GE_SOLID_TRIANGLE_CASE}-input", 16), (f"{GE_SOLID_TRIANGLE_CASE}-guard", 4),
+    ((f"{GE_SOLID_TRIANGLE_CASE}-guard", 16), (f"{GE_SOLID_TRIANGLE_CASE}-input", 16),
      (f"{GE_SOLID_TRIANGLE_CASE}-draw", 4), (f"{GE_SOLID_TRIANGLE_CASE}-restore", 2),
      *((f"{GE_SOLID_TRIANGLE_CASE}-r{row}", 16) for row in range(16))),
 )
+
+# The `-guard` record of solid-triangle-8888-v1, written before the probe decides: the fifteen
+# words it read (sceGeEdramGetSize, sceGeEdramGetAddr, sceGeDrawSync(1); sceDisplayGetMode's
+# result, mode, width and height; then sceDisplayGetFrameBuf's result, address, stride and
+# format for the immediate and for the next-frame slot) and its verdict word. Verdict bits 0-3
+# are the four conditions (EDRAM size, EDRAM base, GE idle, scanout clear of EDRAM [0,1024));
+# the probe draws only when all four are set. Bit 4 says the display mode is the LCD at
+# 480 by 272; bits 8-11 and 12-15 are the two slots' classes. The functions below are the
+# probe's solid_slot_class and solid_guard_verdict again; tools/test_psp_oracle.py runs the
+# probe's own text on the host and holds the two to one decision table.
+GE_SOLID_GUARD_WORDS = 16
+GE_SOLID_GUARD_ALL = 0xF
+(GE_SOLID_SLOT_UNKNOWN, GE_SOLID_SLOT_ABSENT, GE_SOLID_SLOT_DISJOINT,
+ GE_SOLID_SLOT_OVERLAP) = range(4)
+
+
+def ge_solid_triangle_slot_class(result: int, address: int, stride: int, pixel_format: int) -> int:
+    """Class of one scanout slot: unknown, no framebuffer, clear of the target, or over it."""
+    if result != 0:
+        return GE_SOLID_SLOT_UNKNOWN
+    if address == 0:
+        return GE_SOLID_SLOT_ABSENT
+    physical = address & 0xBFFFFFFF
+    if (not 0x04000000 <= physical < 0x04200000 or not 480 <= stride <= 2048
+            or stride & (stride - 1) or pixel_format > 3):
+        return GE_SOLID_SLOT_UNKNOWN
+    offset = physical - 0x04000000
+    if stride * 272 * (4 if pixel_format == 3 else 2) > 0x00200000 - offset:
+        return GE_SOLID_SLOT_UNKNOWN
+    return GE_SOLID_SLOT_DISJOINT if offset >= 1024 else GE_SOLID_SLOT_OVERLAP
+
+
+def ge_solid_triangle_guard_verdict(words: Sequence[int]) -> int:
+    """The verdict word that follows from the fifteen values of a `-guard` record."""
+    if len(words) != GE_SOLID_GUARD_WORDS - 1 or any(not 0 <= word <= 0xffffffff for word in words):
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: a guard record has fifteen packed values")
+    size, base, ge_state, mode_result, mode, width, height = words[:7]
+    slot0 = ge_solid_triangle_slot_class(*words[7:11])
+    slot1 = ge_solid_triangle_slot_class(*words[11:15])
+    mode_known = (mode_result, mode, width, height) == (0, 0, 480, 272)
+    scanout = mode_known and slot0 == slot1 and slot0 in (GE_SOLID_SLOT_ABSENT,
+                                                           GE_SOLID_SLOT_DISJOINT)
+    return (int(size == 0x00200000) | int(base == 0x04000000) << 1 | int(ge_state == 0) << 2
+            | int(scanout) << 3 | int(mode_known) << 4 | slot0 << 8 | slot1 << 12)
 
 
 def ge_solid_triangle_readback(sequence: SequenceReport) -> bytes:
@@ -3214,8 +3258,13 @@ def ge_solid_triangle_readback(sequence: SequenceReport) -> bytes:
 
     if record("input", 16) != ge_solid_triangle_input_words():
         raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: declaration or GE prestate digest differs")
-    if record("guard", 4) != (480, 272, 0x200000, 2):
-        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: scanout guard was not satisfied")
+    guard = record("guard", GE_SOLID_GUARD_WORDS)
+    if guard[-1] != ge_solid_triangle_guard_verdict(guard[:-1]):
+        raise ProtocolError(
+            f"{GE_SOLID_TRIANGLE_CASE}: guard verdict does not follow from its values")
+    if guard[-1] & GE_SOLID_GUARD_ALL != GE_SOLID_GUARD_ALL:
+        raise ProtocolError(
+            f"{GE_SOLID_TRIANGLE_CASE}: EDRAM, GE or scanout guard was not satisfied")
     qid, list_state, draw_state, initial_nonzero = record("draw", 4)
     if initial_nonzero != 0:
         raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: initial framebuffer was not zero")
