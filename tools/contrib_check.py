@@ -25,7 +25,7 @@ defines the Makefile compiles it with (``STRICT_C_UNITS``), plus ``-Werror``.
 A source whose SDK header is not installed is ``SKIP``; one that includes a
 header only a build step writes, when that step has not run, is ``NOT_RUN``.
 
-The publication-safety gate is the one place this script interprets output.
+The Python gate names failing unittest cases alongside its short output excerpt.
 The publication audit's provenance self-consistency leg compares the working
 tree against the checked-in ledger, which only a maintainer holding the private
 trusted ledger can regenerate.  Those findings are therefore reported as
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 import os
@@ -867,7 +868,10 @@ def python_test_modules(paths: list[str]) -> list[str]:
     return sorted(modules)
 
 
-def _run(label: str, command: list[str], *, timeout: int) -> Gate:
+def _run(
+    label: str, command: list[str], *, timeout: int,
+    failure_notes: Callable[[str], list[str]] | None = None,
+) -> Gate:
     try:
         result = subprocess.run(
             command, cwd=ROOT, capture_output=True, text=True, timeout=timeout,
@@ -880,7 +884,10 @@ def _run(label: str, command: list[str], *, timeout: int) -> Gate:
         return Gate(label, PASS)
     text = (result.stdout + result.stderr).strip()
     output = text.splitlines()
-    return Gate(label, FAIL, " | ".join(output[-6:]) or f"exit {result.returncode}", text)
+    detail = " | ".join(output[-6:]) or f"exit {result.returncode}"
+    if failure_notes is not None:
+        detail += "".join(f"\n    {note}" for note in failure_notes(result.stderr))
+    return Gate(label, FAIL, detail, text)
 
 
 def _python_tool(tool: str, arguments: list[str], *, timeout: int) -> Gate:
@@ -904,10 +911,26 @@ def ruff_gate(paths: list[str]) -> Gate:
     return _python_tool("ruff", ["check", *paths], timeout=300)
 
 
+# Match unittest's own failure headings on stderr. Extract the dotted identifier
+# without retaining descriptions, exceptions, or optional subtest parameters.
+_UNITTEST_FAILURE = re.compile(r"^={70}\n(FAIL|ERROR): \w+ \((\w+(?:\.\w+)+)\)", re.MULTILINE)
+
+
+def _unittest_failure_notes(stderr: str) -> list[str]:
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", stderr)
+    failures: dict[str, set[str]] = {}
+    for status, name in _UNITTEST_FAILURE.findall(plain):
+        failures.setdefault(name, set()).add(status)
+    return [f"{'/'.join(sorted(statuses))}: {name}" for name, statuses in failures.items()]
+
+
 def unit_gate(modules: list[str]) -> Gate:
     if not modules:
         return Gate("python-unittest", NOT_RUN, "no matching test module for changed paths")
-    return _run("python-unittest", [GATE_PYTHON, "-m", "unittest", *modules], timeout=1800)
+    return _run(
+        "python-unittest", [GATE_PYTHON, "-m", "unittest", *modules], timeout=1800,
+        failure_notes=_unittest_failure_notes,
+    )
 
 
 def markdown_gate(paths: list[str]) -> Gate:

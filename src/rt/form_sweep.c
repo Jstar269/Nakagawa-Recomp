@@ -19,9 +19,6 @@
  *     infinities, NaNs, FLT_MAX) 30% of the time, with a random FCR31 rounding mode;
  *   - on odd states makes the registers the instance names pairwise distinct, so an
  *     aliasing defect cannot hide behind equal values;
- *   - when two named float registers hold NaNs with different payloads, makes them equal:
- *     an arithmetic result then carries whichever payload the host compiler's operand order
- *     picks inside the shared helper, and the PSP's choice is unmeasured (counted on stderr);
  *   - for a memory form points the base register so base + offset falls inside the
  *     scratch window, aligned as the form requires, and fills the window with random bytes
  *     on both sides;
@@ -170,8 +167,6 @@ typedef struct {
     uint32_t fmask;
 } SweepInst;
 
-static uint32_t g_nan_ties;   /* states changed by the NaN-payload rule in make_state */
-
 static uint64_t rng_next(uint64_t *state) {
     uint64_t z = (*state += 0x9E3779B97F4A7C15ull);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
@@ -263,24 +258,6 @@ static void make_state(CpuState *cpu, const SweepInst *in, uint32_t state_index,
                 cpu->fi[i] = draw_fpr(&rng);
             }
             seen[n++] = cpu->fi[i];
-        }
-    }
-    /* Two named float registers that both hold a NaN, with different payloads: which payload
-     * an arithmetic result carries depends on the operand order the host compiler chose in
-     * the shared helper (src/rt/fp_convert.h), and the PSP's choice is unmeasured. The
-     * translated body and the reference are built with different flags, so they can pick
-     * differently and neither is wrong. Make such a pair equal and count it, so the case is
-     * visible in the summary instead of a mismatch no source change can settle. */
-    {
-        int first = -1;
-        for (int i = 0; i < 32; i++) {
-            if (!((in->fmask >> i) & 1u) || (cpu->fi[i] & 0x7FFFFFFFu) <= 0x7F800000u) continue;
-            if (first < 0) {
-                first = i;
-            } else if (cpu->fi[i] != cpu->fi[first]) {
-                cpu->fi[i] = cpu->fi[first];
-                g_nan_ties++;
-            }
         }
     }
     if (in->base_reg > 0) {
@@ -519,8 +496,6 @@ int main(int argc, char **argv) {
         }
         instance_verdict(in->index, &tally, end, stop, &mismatched, &aot_failed);
     }
-    fprintf(stderr, "form_sweep: %u float register pairs held NaNs with different payloads and were "
-            "made equal (operand-order-dependent result, PSP choice unmeasured)\n", g_nan_ties);
     nk_ref_destroy(ref);
     free(insts);
     return (mismatched || aot_failed) ? 1 : 0;

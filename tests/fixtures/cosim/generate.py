@@ -1019,6 +1019,7 @@ def _cell_muldiv() -> list[int]:
         _i(0x09, ZERO, T9, 0xFFFF),         # addiu t9, zero, -1
         _r(T8, T9, 0, 0, 0x1A),             # div   t8, t9 (overflow)
         _r(0, 0, A1, 0, 0x12),              # mflo  a1               -> 0x80000000
+        _r(0, 0, V0, 0, 0x10),              # mfhi  v0               -> 0 (HI was 2)
         _r(T1, 0, 0, 0, 0x11),              # mthi  t1
         _r(T0, 0, 0, 0, 0x13),              # mtlo  t0
         _r(T0, T1, 0, 0, 0x1C),             # madd  t0, t1

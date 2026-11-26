@@ -494,13 +494,14 @@ class GradleWiringTests(unittest.TestCase):
     def test_a_bundled_title_without_its_image_or_package_is_refused(self) -> None:
         # stageBundledAssets is a Sync, which skips a missing source file without an error
         # (audit F-6fa82be1), so the nk.titles parse checks both files before any task runs.
-        parse = re.search(r'val titles: List<Pair<String, File>> = .*?\n    }\n', self.gradle, re.S)
+        parse = re.search(r'val titles: List<BundledTitle> = .*?\n    }\n', self.gradle, re.S)
         self.assertIsNotNone(parse, "build.gradle.kts parses nk.titles")
         assert parse is not None
-        self.assertIn('listOf("${id}_image.bin", "package.json")', parse.group(0))
-        self.assertIn("require(File(dir, name).isFile)", parse.group(0))
-        staged = re.findall(r'from\(File\(dir, "([^"]+)"\)\) \{ into\("app/titles/\$id"\) \}', self.gradle)
-        self.assertEqual(sorted(staged), sorted(["${id}_image.bin", "package.json"]))
+        self.assertIn('readPackage("nk.titles \'$id\'", dir)', parse.group(0))
+        self.assertIn("require(image.isFile)", parse.group(0))
+        self.assertIn('from(title.image) { into("app/titles/${title.id}")', self.gradle)
+        self.assertIn('from(File(title.dir, "package.json")) { into("app/titles/${title.id}") }',
+                      self.gradle)
 
     def test_the_toolchain_is_bundled_for_arm64_only(self) -> None:
         self.assertIn('require(abis == listOf("arm64-v8a"))', self.gradle)
@@ -1018,6 +1019,93 @@ class ToolchainInstallTests(unittest.TestCase):
         # Not knowing the version is no evidence against the toolchain: it is left as it is.
         self.assertEqual(seen["left-as-is"], "true")
         self.assertEqual(seen["complete-for-v1"], "true")
+
+
+#: Runs ToolchainArchive.removeUnbundled(<files folder>, <the APK's assets/app children>) and
+#: prints the folders it deleted, one per line; "-" alone stands for an APK with no assets/app.
+UNBUNDLED_MAIN = """package io.github.jstar269.nakagawa;
+public final class UnbundledMain {
+    public static void main(String[] args) throws Exception {
+        String[] bundled = args.length == 2 && args[1].equals("-")
+            ? null : java.util.Arrays.copyOfRange(args, 1, args.length);
+        for (String name : ToolchainArchive.removeUnbundled(new java.io.File(args[0]), bundled)) {
+            System.out.println("REMOVED " + name);
+        }
+    }
+}
+"""
+
+
+@unittest.skipIf(shutil.which("javac") is None or shutil.which("java") is None, "needs a JDK")
+class BundledFoldersTests(unittest.TestCase):
+    """An update to an APK without nk.demos (or nk.titles) removes the demos/ (titles/) an earlier
+    APK unpacked; otherwise the launcher keeps listing those demos and Play loads their old
+    libraries against the new app (NakagawaHost.prepare, #360)."""
+
+    classes: Path
+    _tmp: tempfile.TemporaryDirectory[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory(prefix="nk-bundled-java-")
+        root = Path(cls._tmp.name)
+        main = root / "src" / "io" / "github" / "jstar269" / "nakagawa" / "UnbundledMain.java"
+        main.parent.mkdir(parents=True)
+        main.write_text(UNBUNDLED_MAIN, encoding="utf-8")
+        cls.classes = root / "classes"
+        subprocess.run(["javac", "--release", "17", "-Xlint:all", "-Werror", "-d", str(cls.classes),
+                        str(ARCHIVE_JAVA), str(main)], check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    #: What a demo APK followed by an nk.titles APK leaves in the files folder, and the user's own.
+    FILES = ("demos/packages/TEST00007/libshowcase-scene.so", "demos/images/TEST00007.iso",
+             "titles/showcase-scene-v1/showcase-scene-v1_image.bin", "assets/fonts/ui/a.ttf",
+             "Nakagawa/settings.json", "toolchain/sysroot/a.h", ".unpacked")
+
+    def run_update(self, *bundled: str) -> tuple[list[str], set[str]]:
+        with tempfile.TemporaryDirectory(prefix="nk-bundled-test-") as tmp:
+            files = Path(tmp) / "files"
+            for name in self.FILES:
+                (files / name).parent.mkdir(parents=True, exist_ok=True)
+                (files / name).write_bytes(b"x")
+            result = subprocess.run(["java", "-cp", str(self.classes), "io.github.jstar269.nakagawa.UnbundledMain",
+                                     str(files), *bundled], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            left = {p.relative_to(files).as_posix() for p in files.rglob("*") if p.is_file()}
+            return result.stdout.splitlines(), left
+
+    def test_an_update_without_the_demos_removes_them(self) -> None:
+        # The launcher-only APK (hosted CI's artifact) installed over a demo APK.
+        removed, left = self.run_update("assets")
+        self.assertEqual(removed, ["REMOVED demos", "REMOVED titles"])
+        self.assertEqual(left, {"assets/fonts/ui/a.ttf", "Nakagawa/settings.json", "toolchain/sysroot/a.h",
+                                ".unpacked"})
+
+    def test_a_folder_the_apk_still_bundles_is_left_to_the_copy(self) -> None:
+        removed, left = self.run_update("assets", "demos")
+        self.assertEqual(removed, ["REMOVED titles"])
+        self.assertIn("demos/packages/TEST00007/libshowcase-scene.so", left)
+        removed, left = self.run_update("assets", "demos", "titles")
+        self.assertEqual(removed, [])
+        self.assertEqual(left, set(self.FILES))
+
+    def test_an_apk_with_no_bundled_files_removes_both(self) -> None:
+        removed, left = self.run_update("-")
+        self.assertEqual(removed, ["REMOVED demos", "REMOVED titles"])
+        self.assertNotIn("demos/images/TEST00007.iso", left)
+        self.assertIn("Nakagawa/settings.json", left)
+
+    def test_prepare_removes_them_before_it_copies_on_a_new_apk(self) -> None:
+        host = (JAVA_SOURCES / "io" / "github" / "jstar269" / "nakagawa" / "NakagawaHost.java").read_text(
+            encoding="utf-8")
+        unpack = host[host.index("if (!stamp.equals(ToolchainArchive.readText(stampFile)))"):]
+        unpack = unpack[:unpack.index("ToolchainArchive.writeText(stampFile, stamp)")]
+        self.assertIn("ToolchainArchive.removeUnbundled(app, bundled)", unpack)
+        self.assertLess(unpack.index("ToolchainArchive.removeUnbundled(app, bundled)"),
+                        unpack.index("copyAssetTree("))
 
 
 class StampTests(unittest.TestCase):
