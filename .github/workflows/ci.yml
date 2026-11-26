@@ -891,14 +891,24 @@ jobs:
     #   core:        FFmpeg H.264 media, import and provenance gates, portable
     #                objects, native core suite
     #   translation: HLE, scheduler, dispatch, cosimulation and its mutation
-    #                corpus, GPU selftests on lavapipe, interpreter and codec
+    #                corpus, interpreter and codec
     #                selftests, codegen gates
+    #   gpu:         GPU selftests on lavapipe, the pinned DXC and glslc shader
+    #                reproductions
     #   player:      present pacing, player UI, CMake player, showcase and the
     #                player smokes that use its ISO
+    #   routes:      the pinned gu-cube player smoke and the profile-zero route,
+    #                each of which builds its own player and guest
+    # #3166: over the 20 newest successful full runs (2026-11-25 and 26), translation
+    # was the longest Linux job (median 20.1 min, p90 25.8) and player took 16.1, so
+    # the GPU steps left translation for gpu and the two routes left player for
+    # routes; no step moved in the file or changed. Expected minutes (step medians
+    # plus the part's setup; no hosted run has measured this layout): core 12.9,
+    # translation 8.4, gpu 12.4, player 10.7, routes 6.4.
     strategy:
       fail-fast: false
       matrix:
-        part: [core, translation, player]
+        part: [core, translation, gpu, player, routes]
     timeout-minutes: 45
     steps:
       - name: Check out repository
@@ -1281,7 +1291,7 @@ jobs:
         run: python3 tests/fixtures/cosim/mutate.py --build-dir build/cosim --jobs 4
 
       - name: Run Linux GPU snapshot sync selftest
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1302,7 +1312,7 @@ jobs:
         run: SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software make CC=gcc player-ui-tests
 
       - name: Verify lavapipe and run GPU capture selftest
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1329,7 +1339,7 @@ jobs:
       # F-1cbdad44). The recipe still passes the gpu-timestamps legs' SKIP (its own and the
       # twin's) and ge-first-bad-draw-selftest's (GE_FBD_SKIP_STATUS=0); those stay green here.
       - name: Run GPU coherence selftest on lavapipe
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1344,7 +1354,7 @@ jobs:
       # (src/rt/gpu_sdl3vk/tex_scale_gpu_selftest.inc), and the mutant that binds a scaled
       # copy without its content check, which must fail for that reason.
       - name: Run GPU texture scaling selftest on lavapipe
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1360,7 +1370,7 @@ jobs:
       # its own reason: the mip chain's four, texture scaling without its Ace gate, and the
       # movie cells' three. A SKIP line, or an exit 77 skip, fails the step.
       - name: Run GPU Ace and mip chain selftests and their mutants on lavapipe
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1375,7 +1385,7 @@ jobs:
       # The host twin's fourteen mutants (gpu-coherence-twin-mutants) each build their own
       # coherence selftest, so they run nightly; an exit 77 skip fails the step.
       - name: Run the GPU coherence host twin mutants on lavapipe (nightly)
-        if: matrix.part == 'translation' && github.event_name == 'schedule'
+        if: matrix.part == 'gpu' && github.event_name == 'schedule'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1386,7 +1396,7 @@ jobs:
       # synchronisation validation of shader accesses included. Headless: no window or SDL. An exit
       # 77 skip, including one for synchronisation validation that is not active, fails the step.
       - name: Run the FSR 3 pass selftest on lavapipe
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1397,7 +1407,7 @@ jobs:
       # out, refused with one reason and no Vulkan call. The frame cells need a device the pass
       # accepts, so they run on a GPU (make fsr3-fg-pass-selftest). An exit 77 skip fails the step.
       - name: Run the FSR 3 frame generation refusal on lavapipe
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
@@ -1407,7 +1417,7 @@ jobs:
       # HLSL (tools/shader_embed.py, DXC_RELEASE). The Linux archive is checked against its pinned
       # SHA-256 before it runs, and the tool is run directly, so a SKIP (exit 77) fails the step.
       - name: Reproduce the FSR 3 shaders with the pinned DXC
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         run: |
           set -euo pipefail
           dxc_dir="$RUNNER_TEMP/dxc-v1.9.2609"
@@ -1427,7 +1437,7 @@ jobs:
       # anything is unpacked, only glslc is extracted, and the tool is run directly, so a SKIP
       # (exit 77, any other glslc) fails the step.
       - name: Reproduce the GLSL shaders with the pinned glslc
-        if: matrix.part == 'translation'
+        if: matrix.part == 'gpu'
         timeout-minutes: 15
         run: |
           set -euo pipefail
@@ -1456,7 +1466,7 @@ jobs:
           grep -Fq "Usage: nakagawa_player" <<<"$help_output"
 
       - name: Run the pinned gu-cube player smoke
-        if: matrix.part == 'player'
+        if: matrix.part == 'routes'
         env:
           NK_HOMEBREW_RUNTIME_REQUIRED: "1"
           SDL_VIDEODRIVER: x11
@@ -1498,7 +1508,7 @@ jobs:
       # guest clock, whose output digests are pinned in the test and so must equal Windows'.
       # NK_PROFILE_ZERO_REQUIRED turns a missing dependency into a failure, not a SKIP.
       - name: Build and run the profile-zero production route on Linux
-        if: matrix.part == 'player'
+        if: matrix.part == 'routes'
         env:
           NK_PROFILE_ZERO_REQUIRED: "1"
         run: make --no-print-directory CC=gcc profile-zero-e2e

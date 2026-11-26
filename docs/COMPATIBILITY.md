@@ -80,7 +80,7 @@ Use a new output path for each build. The tool checks the sample's source hashes
 copy. The [corpus provenance](../tests/fixtures/homebrew_corpus/PROVENANCE.md) records the source pins, licences
 and the deferred savedata sample.
 
-The Linux native CI player leg exercises `gu-cube`. With the pinned PSPDEV tools, the native player build
+The Linux native CI routes part exercises `gu-cube`. With the pinned PSPDEV tools, the native player build
 dependencies, Xvfb and a Vulkan device installed, run the same check offline:
 
 ```sh
