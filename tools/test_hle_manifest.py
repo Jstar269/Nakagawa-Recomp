@@ -2428,6 +2428,59 @@ class ConformanceJoinTests(unittest.TestCase):
         self.assertIn(0x2E2E2E2E, found)
         self.assertNotIn(0x1D1D1D1D, found)
 
+    def test_selftest_dispatch_preserves_scopes_after_alternate_function_heads(self) -> None:
+        prefix = (
+            "#ifdef _WIN32\n"
+            "static unsigned __stdcall thread_entry(void *arg) {\n"
+            "#else\n"
+            "static void *thread_entry(void *arg) {\n"
+            "#endif\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        tail = (
+            "static uint32_t call(uint32_t nid) { CpuState cpu; return sr_syscall(&cpu, nid); }\n"
+            "static void test_call(void) {\n"
+            "    enum { NID_SAME = 0x12345678u };\n"
+            "    CpuState cpu;\n"
+            "    sr_syscall(&cpu, NID_SAME);\n"
+            "    call(0x24681357u);\n"
+            "}\n"
+            "static void unrelated(void) { enum { NID_SAME = 0x87654321u }; }\n"
+        )
+        shared_brace = prefix.replace("arg) {", "arg)").replace("#endif\n", "#endif\n{\n")
+        variants = {
+            "alternate heads": prefix,
+            "consecutive alternate pairs": prefix + prefix.replace("thread_entry", "second_entry"),
+            "shared brace": shared_brace,
+        }
+        for description, variant in variants.items():
+            with self.subTest(header=description):
+                self.assertEqual(hle_manifest.selftest_dispatched_nids(variant + tail),
+                                 {0x12345678, 0x24681357})
+
+    def test_selftest_dispatch_ignores_disabled_branch_calls_and_names(self) -> None:
+        source = (
+            "static void test_call(void) {\n"
+            "    enum { NID_SAME = 0x12345678u };\n"
+            "#if 0\n"
+            "    enum { NID_SAME = 0x87654321u };\n"
+            "#ifdef INNER\n"
+            "    sr_syscall(&cpu, 0x11111111u);\n"
+            "#else\n"
+            "    sr_syscall(&cpu, 0x22222222u);\n"
+            "#endif\n"
+            "#elif 0\n"
+            "    sr_syscall(&cpu, 0x33333333u);\n"
+            "#elif 1\n"
+            "    sr_syscall(&cpu, NID_SAME);\n"
+            "#else\n"
+            "    sr_syscall(&cpu, 0x44444444u);\n"
+            "#endif\n"
+            "}\n"
+        )
+        self.assertEqual(hle_manifest.selftest_dispatched_nids(source), {0x12345678})
+
     def test_selftest_dispatch_credits_an_iterated_initializer_table(self) -> None:
         """`sr_syscall(&cpu, rows[i].nid)` over a `{NID_X, error}` table dispatches every row's NID."""
         source = (
