@@ -31970,7 +31970,19 @@ static void test_refer_run_and_callback_status_check_their_span(void) {
  * names none answers UNKNOWN_THID (0x80020198), the code every other thread call returns
  * (sched.c) and the one PPSSPP's kernelObjects.Get<PSPThread> gives both calls
  * (Core/HLE/sceKernelThread.cpp). 0x800201A0 is UNKNOWN_TEID, the thread-event-handler code.
- * Not PSP-measured here. */
+ * Not PSP-measured here.
+ * Error precedence (#3071 review): the thread is looked up before the output pointer, so an
+ * unknown UID answers UNKNOWN_THID with a null output and with an unwritable one, and a known
+ * thread with a null output still answers 0. PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, sceKernelReferThreadRunStatus).
+ * This selftest build leaves both NIDs unregistered (SR_HLE_THREAD_SELFTEST compiles out
+ * hle_register_init_kernel_thread_1, which registers 0xfccfad26 and 0xffc36a14), so the cells
+ * call the production handlers through the test-build-only wrappers
+ * sr_hle_test_cancel_wakeup_thread and sr_hle_test_refer_thread_run_status that
+ * hle_kernel_thread.c exports under SR_HLE_THREAD_SELFTEST, not through sr_syscall; the
+ * dispatch path itself is not exercised here.
+ * MUTANT: look the thread up only inside the non-null output branch -- an unknown UID with a
+ * null output answers 0. */
 extern uint32_t sr_hle_test_cancel_wakeup_thread(CpuState *s);
 static void test_cancel_wakeup_and_run_status_unknown_thread(void) {
     enum {
@@ -32004,6 +32016,32 @@ static void test_cancel_wakeup_and_run_status_unknown_thread(void) {
     expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID &&
                MEM_R32(RUN_INFO) == 0xa5a5a5a5u,
            "ReferThreadRunStatus answers UNKNOWN_THID for a UID that names no thread");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus answers UNKNOWN_THID for an unknown UID with a null output");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = 0x0c000000u;          /* unmapped */
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus checks the UID before an unwritable output pointer");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus answers UNKNOWN_THID for a deleted thread with a null output");
+    other->deleted = 0;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u,
+           "ReferThreadRunStatus with a known thread and a null output still answers 0");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0x0c000000u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0x80000103u,
+           "ReferThreadRunStatus with a known thread and an unwritable output is ILLEGAL_ADDR");
     (void)self;
     reset_fixture();
 }

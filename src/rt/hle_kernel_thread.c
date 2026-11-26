@@ -395,16 +395,29 @@ static uint32_t h_WaitThreadEnd(CpuState *s) {
 static uint32_t h_WaitThreadEndCB(CpuState *s) {
     return h_WaitThreadEnd_impl(s, 1);
 }
+/* Error precedence: the thread is looked up before the output pointer is examined, so a UID
+ * that names no thread answers UNKNOWN_THID whatever the pointer is, a null one included.
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelThread.cpp, sceKernelReferThreadRunStatus (kernelObjects.Get<PSPThread>
+ * first, then the status range). Logged once per run, at the first unknown-UID answer. */
+static int s_refer_run_status_order_noted;
 static uint32_t h_ReferThreadRunStatus(CpuState *s) {
     uint32_t out = A1;
+    SrThreadRunStatus rs;
+    if (sched_thread_run_status(A0, &rs) < 0) {
+        if (!s_refer_run_status_order_noted) {
+            s_refer_run_status_order_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelReferThreadRunStatus "
+                            "checks thread 0x%x before its output pointer 0x%08x
+", A0, out);
+        }
+        return SCE_KERNEL_ERROR_UNKNOWN_THID;
+    }
     if (out) {
         /* The whole 0x2c-byte record must be guest memory before the first write, as for
          * ReferThreadStatus: a partly mapped or unmapped out pointer answers ILLEGAL_ADDR
          * instead of a partial record and success. */
         if (!sr_guest_span_writable(out, 0x2cu)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-        SrThreadRunStatus rs;
-        int rc = sched_thread_run_status(A0, &rs);
-        if (rc < 0) return SCE_KERNEL_ERROR_UNKNOWN_THID;
         for (uint32_t i = 0; i < 0x2c; i++) MEM_W8(out + i, 0);
         MEM_W32(out + 0x00, rs.size);
         MEM_W32(out + 0x04, rs.status);
