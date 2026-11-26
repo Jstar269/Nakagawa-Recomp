@@ -24,9 +24,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 181 | 88 |
+| `ppsspp-derived` | 182 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 301 | 183 |
+| `synthetic` | 300 | 183 |
 | `unverified` | 172 | 22 |
 | total | 718 | 367 |
 
@@ -314,7 +314,7 @@ a title that translates none has generated code unchanged.
 | `0x4d4e10ec` | `sceDisplayIsVblank` | display | `synthetic` | HLE selftest dispatch |
 | `0x4da4c788` | `sceNetAdhocPtpSend` | network | `ppsspp-derived` | handler comment names PPSSPP; sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x4db1e739` | `sceUtilityNetconfInitStart` | utility | `synthetic` | HLE selftest dispatch |
-| `0x4e3a1105` | `sceKernelWaitSema` | kernel_sync | `ppsspp-derived` | registry notes name PPSSPP; unlinked hardware note |
+| `0x4e3a1105` | `sceKernelWaitSema` | kernel_sync | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP; unlinked hardware note |
 | `0x4f160bf4` | `sceVideocodecReleaseEDRAM` | videocodec | `unverified` | no recorded evidence |
 | `0x500f0429` | `sceMpegFlushStream` | mpeg | `ppsspp-derived` | handler comment names PPSSPP; sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x50647530` | `sceNetFreeThreadinfo` | network | `unverified` | no recorded evidence |
@@ -487,7 +487,7 @@ a title that translates none has generated code unchanged.
 | `0x8f2df740` | `sceKernelStopUnloadSelfModuleWithStatus` | kernel_module | `synthetic` | HLE selftest dispatch |
 | `0x8f450998` | `sceMp3GetSamplingRate` | audio_codec | `ppsspp-derived` | sceMp3 block: derived-translated from PPSSPP at a pinned revision |
 | `0x8f58bedf` | `sceNetAdhocMatchingCancelTargetWithOpt` | network | `ppsspp-derived` | sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
-| `0x8ffdf9a2` | `sceKernelCancelSema` | kernel_sync | `synthetic` | HLE selftest dispatch; unlinked hardware note |
+| `0x8ffdf9a2` | `sceKernelCancelSema` | kernel_sync | `ppsspp-derived` | handler comment names PPSSPP; unlinked hardware note |
 | `0x912354a7` | `sceKernelRotateThreadReadyQueue` | kernel_thread | `unverified` | no recorded evidence |
 | `0x91929a21` | `sceMpegBaseCscAvc` | videocodec | `unverified` | no recorded evidence |
 | `0x91de343c` | `sceKernelSetCompiledSdkVersion500_505` | kernel_memory | `synthetic` | registry evidence `tools/test_sdkver_c.py` |
