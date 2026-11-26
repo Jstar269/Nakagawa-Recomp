@@ -32,6 +32,10 @@ void player_host_show_picker(PlayerHostPick what, SDL_Window *window,
     static const SDL_DialogFileFilter font_filters[] = {
         { "PSP fonts (*.pgf)", "pgf" }
     };
+    static const SDL_DialogFileFilter cheat_db_filters[] = {
+        { "CWCheat database (*.db, *.ini)", "db;ini" },
+        { "All Files (*.*)", "*" }
+    };
     /* The fonts import shows the .pgf files themselves, which a folder picker
        hides, so the user can see they are in the right folder. */
     if (what == PLAYER_HOST_PICK_SAVE || what == PLAYER_HOST_PICK_TEXPACK) {
@@ -40,6 +44,9 @@ void player_host_show_picker(PlayerHostPick what, SDL_Window *window,
     } else if (what == PLAYER_HOST_PICK_FONTS) {
         SDL_ShowOpenFileDialog(callback, userdata, window, font_filters, 1,
                                start_folder, true);
+    } else if (what == PLAYER_HOST_PICK_CHEAT_DB) {
+        SDL_ShowOpenFileDialog(callback, userdata, window, cheat_db_filters, 2,
+                               start_folder, false);
     } else {
         SDL_ShowOpenFileDialog(callback, userdata, window, disc_filters, 2,
                                start_folder, false);
