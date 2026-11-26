@@ -880,13 +880,14 @@ class AndroidBundledDemoTests(unittest.TestCase):
     cmake = (ANDROID / "app" / "CMakeLists.txt").read_text(encoding="utf-8")
     docs = (ROOT / "docs" / "ANDROID_DEVELOPMENT.md").read_text(encoding="utf-8")
 
-    def _demos(self) -> tuple[dict[str, object], ...]:
+    def _demo_discs(self) -> dict[str, str]:
+        """Each showcase demo's catalogue id and its disc id, from showcase.py's DEMOS."""
         sys.path.insert(0, str(ROOT / "tests" / "fixtures" / "showcase"))
         try:
             import showcase  # noqa: PLC0415
         finally:
             sys.path.remove(str(ROOT / "tests" / "fixtures" / "showcase"))
-        return showcase.DEMOS
+        return {str(demo["id"]): str(demo["disc_id"]) for demo in showcase.DEMOS}
 
     def test_nk_titles_is_named_by_the_id_the_package_records(self) -> None:
         """F1: a showcase package records the catalogue id (showcase-scene-v1) while its files
@@ -904,7 +905,7 @@ class AndroidBundledDemoTests(unittest.TestCase):
         self.assertIn('nk_add_title_runtime(${target} "${package_dir}" "${code_name}")', self.cmake)
         self.assertIn('set(target "nk_title_${title_id}")', self.cmake)
 
-        demos = {str(demo["id"]): str(demo["disc_id"]) for demo in self._demos()}
+        demos = self._demo_discs()
         titles = re.findall(r'-Pnk\.titles=([^"\s]+)', self.docs)
         self.assertTrue(titles, "the documentation shows the nk.titles command")
         for value in titles:
