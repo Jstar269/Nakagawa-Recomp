@@ -4379,6 +4379,193 @@ static void test_skipped_showcase_logs_its_reason(void) {
     printf("[PLAYER_STATE_TEST] a skipped showcase demo logs why PASS\n");
 }
 
+/* The library an Android demo package records (title_codegen_plan.py --target android names
+   the executable lib<game>.so and its image lib<game>_image.bin). */
+#define ANDROID_DEMO_LIBRARY "libshowcase-demo.so"
+#define ANDROID_DEMO_IMAGE "libshowcase-demo_image.bin"
+
+/* One showcase demo as an APK built with -Pnk.demos leaves it in the app's files folder after
+   the first-start unpack (#360): <base>demos/images/<disc>.iso and the complete Android package
+   <base>demos/packages/<disc>/ (package.json, completion-manifest.json, build-report.json, the
+   library and its image), with no per-user title-input identity, as the desktop demos have none.
+   `base` gets the folder (with its trailing separator), `package_dir` the package's. */
+static void write_android_demo_fixture(const char *case_name, const NkTitleEntry *title,
+                                       char *base, size_t base_size,
+                                       char *package_dir, size_t package_dir_size) {
+    char sep = nk_platform_path_separator();
+    char demos[NK_MAX_PATH + 64];
+    char images[NK_MAX_PATH + 96];
+    char path[NK_MAX_PATH + 192];
+    char renamed[NK_MAX_PATH + 192];
+    int written = snprintf(base, base_size, "%s%candroid_demo_fixture%c%s%c",
+                           SR_SELFTEST_BUILD_ROOT, sep, sep, case_name, sep);
+    assert(written > 0 && (size_t)written < base_size);
+    (void)nk_platform_remove_tree(base, NULL);
+    snprintf(demos, sizeof(demos), "%sdemos", base);
+    snprintf(images, sizeof(images), "%s%cimages", demos, sep);
+    assert(nk_platform_mkdir_p(images));
+    snprintf(path, sizeof(path), "%s%c%s.iso", images, sep, title->primary_disc_id);
+    write_file(path);
+
+    write_runtime_package_fixture_with_synthetic_title_identity(
+        demos, title->primary_disc_id, title->id, SR_CPUSTATE_ABI_VERSION,
+        ANDROID_DEMO_LIBRARY, FIXTURE_SHA256, NULL);
+    snprintf(path, sizeof(path), "%s%ctitle-input-identities%c%s%ctitle-input-identity.json",
+             demos, sep, sep, title->primary_disc_id, sep);
+    assert(remove(path) == 0);
+    written = snprintf(package_dir, package_dir_size, "%s%cpackages%c%s", demos, sep, sep,
+                       title->primary_disc_id);
+    assert(written > 0 && (size_t)written < package_dir_size);
+    /* The fixture writes the executable bytes as <title id>.exe; the package records them as
+       the library, so they move to its name, and the image beside them. */
+    snprintf(path, sizeof(path), "%s%c%s.exe", package_dir, sep, title->id);
+    snprintf(renamed, sizeof(renamed), "%s%c%s", package_dir, sep, ANDROID_DEMO_LIBRARY);
+    assert(rename(path, renamed) == 0);
+    snprintf(path, sizeof(path), "%s%c%s_image.bin", package_dir, sep, title->id);
+    snprintf(renamed, sizeof(renamed), "%s%c%s", package_dir, sep, ANDROID_DEMO_IMAGE);
+    assert(rename(path, renamed) == 0);
+}
+
+/* The developer-log line that says why `disc` was left out of the library, or NULL. */
+static const char *android_demo_skip_line(PlayerApp *app, const char *disc) {
+    for (size_t i = 0; i < player_dev_log_count(app); i++) {
+        const char *line = player_dev_log_line(app, i);
+        if (strncmp(line, "[showcase] ", 11) == 0 && strstr(line, disc) &&
+            strstr(line, "skipped: ")) return line;
+    }
+    return NULL;
+}
+
+static bool android_demo_listed(const PlayerApp *app, const char *disc) {
+    for (int i = 0; i < app->showcase_count; i++) {
+        if (strcmp(app->showcase_games[i].disc_id, disc) == 0) return true;
+    }
+    return false;
+}
+
+/* Runs the desktop showcase discovery on an Android-shaped demos folder that `damage` changed,
+   and requires the demo left out with a reason naming it and containing `expected`. */
+static void expect_android_demo_refused(const char *case_name, const NkTitleEntry *title,
+                                        const char *damage_file, const char *damage_bytes,
+                                        const char *expected) {
+    char base[NK_MAX_PATH];
+    char package_dir[NK_MAX_PATH + 128];
+    char path[NK_MAX_PATH + 256];
+    write_android_demo_fixture(case_name, title, base, sizeof(base),
+                               package_dir, sizeof(package_dir));
+    snprintf(path, sizeof(path), "%s%c%s", package_dir, nk_platform_path_separator(),
+             damage_file);
+    if (damage_bytes) {
+        write_text_file(path, damage_bytes);
+    } else {
+        assert(remove(path) == 0);
+    }
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    (void)player_app_discover_showcase(app, base);
+    assert(!android_demo_listed(app, title->primary_disc_id));
+    const char *line = android_demo_skip_line(app, title->primary_disc_id);
+    if (!line || !strstr(line, title->id) || !strstr(line, expected)) {
+        fprintf(stderr, "android demo %s: expected a skip naming %s and '%s', got: %s\n",
+                case_name, title->id, expected, line ? line : "(none)");
+    }
+    assert(line != NULL && strstr(line, title->id) != NULL && strstr(line, expected) != NULL);
+    for (int i = 0; i < app->game_count; i++) {
+        assert(strcmp(app->games[i].disc_id, title->primary_disc_id) != 0);
+    }
+    free(app);
+    (void)nk_platform_remove_tree(base, NULL);
+}
+
+/* #360: an APK built with -Pnk.demos bundles each showcase demo as a complete Android package
+   in the desktop demos layout, and the launcher lists it through the same discovery and the same
+   runtime-package validation as the desktop; Play names the package's own library. */
+static void test_android_demo_packages_use_the_desktop_discovery(void) {
+    const NkTitleEntry *title = NULL;
+    for (int i = 0; i < nk_title_catalog_count && !title; i++) {
+        const NkTitleEntry *entry = &nk_title_catalog_entries[i];
+        if (entry->id && strncmp(entry->id, "showcase-", 9) == 0 &&
+            entry->primary_disc_id && entry->display_name) title = entry;
+    }
+    assert(title != NULL);
+    char sep = nk_platform_path_separator();
+    char base[NK_MAX_PATH];
+    char package_dir[NK_MAX_PATH + 128];
+    char absolute[NK_MAX_PATH * 2];
+    char expected[sizeof(absolute) + 64];
+
+    /* Listed, and its launch names the validated library and image by full path, from the
+       files folder as the working directory with SDL's "./" base, as on a device. */
+    write_android_demo_fixture("listed", title, base, sizeof(base),
+                               package_dir, sizeof(package_dir));
+    assert(nk_platform_absolute_path(package_dir, absolute, sizeof(absolute)));
+    char saved_cwd[NK_MAX_PATH];
+    assert(nk_ps_getcwd(saved_cwd, sizeof(saved_cwd)) != NULL);
+    assert(nk_ps_chdir(base) == 0);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    char relative_base[3] = { '.', sep, '\0' };
+    assert(player_app_discover_showcase(app, relative_base));
+    assert(android_demo_listed(app, title->primary_disc_id));
+    const GameRecord *game = NULL;
+    for (int i = 0; i < app->game_count; i++) {
+        if (strcmp(app->games[i].disc_id, title->primary_disc_id) == 0) game = &app->games[i];
+    }
+    assert(game != NULL && game->is_prepared && game->is_showcase_package);
+    assert(strcmp(game->title_id, title->id) == 0);
+    assert(android_demo_skip_line(app, title->primary_disc_id) == NULL);
+    NkLaunchSession *session = (NkLaunchSession *)calloc(1, sizeof(NkLaunchSession));
+    assert(session != NULL);
+    NkResult prepared = nk_launch_prepare_session(session, game,
+                                                  player_app_package_root(app, game));
+    if (prepared != NK_OK) fprintf(stderr, "android demo launch: %s\n", session->last_error);
+    assert(prepared == NK_OK);
+    assert(session->package_launch && session->showcase_package);
+    snprintf(expected, sizeof(expected), "%s%c%s", absolute, sep, ANDROID_DEMO_LIBRARY);
+    /* What nk_platform_spawn_process hands TitleActivity as its library extra, and the
+       --image argument after it (nk_launch_start). */
+    assert(nk_platform_path_is_absolute(session->executable_path));
+    assert(strcmp(session->executable_path, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%c%s", absolute, sep, ANDROID_DEMO_IMAGE);
+    assert(strcmp(session->image_path, expected) == 0);
+    assert(strcmp(session->working_directory, absolute) == 0);
+    free(session);
+    free(app);
+    assert(nk_ps_chdir(saved_cwd) == 0);
+    (void)nk_platform_remove_tree(base, NULL);
+    printf("[PLAYER_STATE_TEST] an Android demo package is listed and names its own library PASS\n");
+
+    /* Each refused by name, never listed as playable: a library from another build (what an
+       update that kept an old package beside a new library would leave), no library at all, a
+       listed file missing (what an interrupted unpack leaves), and an unreadable record. */
+    expect_android_demo_refused("library-mismatch", title, ANDROID_DEMO_LIBRARY,
+                                "a library from another build", ANDROID_DEMO_LIBRARY);
+    expect_android_demo_refused("library-missing", title, ANDROID_DEMO_LIBRARY, NULL,
+                                ANDROID_DEMO_LIBRARY);
+    expect_android_demo_refused("image-missing", title, ANDROID_DEMO_IMAGE, NULL,
+                                ANDROID_DEMO_IMAGE);
+    expect_android_demo_refused("record-corrupt", title, "package.json", "{\"format\":",
+                                "skipped: package ");
+    printf("[PLAYER_STATE_TEST] a damaged Android demo package is refused by name PASS\n");
+
+    /* A launcher-only APK: no demos folder at all. Nothing is listed and no error is raised. */
+    snprintf(base, sizeof(base), "%s%candroid_demo_fixture%claunch-only%c",
+             SR_SELFTEST_BUILD_ROOT, sep, sep, sep);
+    (void)nk_platform_remove_tree(base, NULL);
+    assert(nk_platform_mkdir_p(base));
+    app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(!player_app_discover_showcase(app, base));
+    assert(app->showcase_count == 0 && app->game_count == 0);
+    assert(app->last_error.error_code[0] == '\0');
+    free(app);
+    (void)nk_platform_remove_tree(base, NULL);
+    printf("[PLAYER_STATE_TEST] a launcher-only APK lists no demo and raises no error PASS\n");
+}
+
 /* #1277: the main loop asks for the build outcome every frame. A failure card
    and a cancel's return to the Library are shown once per build session, so
    the card can be dismissed and the Library left. */
@@ -15922,6 +16109,7 @@ int main(int argc, char **argv) {
     test_platform_cards_name_this_platform();
     test_windows_block_cards_name_the_block();
     test_skipped_showcase_logs_its_reason();
+    test_android_demo_packages_use_the_desktop_discovery();
     test_build_outcome_is_shown_once_per_session();
     test_display_path_hides_profile_folder();
     test_report_this_game();
