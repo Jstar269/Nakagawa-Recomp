@@ -2161,8 +2161,11 @@ class WindowsPlayerStageSmokeTests(unittest.TestCase):
 
     def test_disc_writer_action_is_the_one_the_step_calls(self) -> None:
         showcase = (ROOT / "tests" / "fixtures" / "showcase" / "showcase.py").read_text(encoding="utf-8")
-        self.assertIn('choices=("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke")',
-                      showcase)
+        choices = re.search(r"choices=\(([^)]*)\)", showcase)
+        self.assertIsNotNone(choices, "showcase.py names its actions")
+        assert choices is not None
+        for action in ("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke"):
+            self.assertIn(f'"{action}"', choices.group(1))
         self.assertIn("def stage_iso(out_dir: Path) -> Path:", showcase)
         self.assertIn("def loadexec_smoke() -> None:", showcase)
 

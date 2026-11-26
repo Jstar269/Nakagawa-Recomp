@@ -908,9 +908,10 @@ class AndroidDemoAuditTests(unittest.TestCase):
                                 for problem in showcase.audit_demo_root(demo_root)))
 
 
-def _make_dry_run(*arguments: str) -> str:
-    result = subprocess.run(["make", "-n", "-B", *arguments], cwd=ROOT, check=False,
-                            capture_output=True, text=True)
+def _make_dry_run(build_root: Path, *arguments: str) -> str:
+    """What Make would run, with every output of the parse under a scratch BUILD_ROOT."""
+    result = subprocess.run(["make", "-n", "-B", f"BUILD_ROOT={build_root.as_posix()}", *arguments],
+                            cwd=ROOT, check=False, capture_output=True, text=True)
     return result.stdout.replace("\\\n", " ") + result.stderr
 
 
@@ -926,12 +927,14 @@ class LinuxLinkLineTests(unittest.TestCase):
     """The link lines write a relative run path and never a developer folder (#306)."""
 
     def test_the_makefile_player_runs_from_the_folder_it_is_installed_in(self) -> None:
-        output = _make_dry_run("player", "CC=gcc", f"PYTHON={sys.executable}")
-        links = [line for line in output.splitlines()
-                 if " -o build/nakagawa_player" in line and "-lSDL3" in line]
-        self.assertEqual(len(links), 1, output[-2000:])
-        self.assertIn("-Wl,-rpath,'$ORIGIN'", links[0])
-        self.assertNotRegex(links[0], r"-rpath,'?/")
+        with tempfile.TemporaryDirectory() as temp:
+            scratch = Path(temp) / "build"
+            output = _make_dry_run(scratch, "player", "CC=gcc", f"PYTHON={sys.executable}")
+            links = [line for line in output.splitlines()
+                     if f" -o {scratch.as_posix()}/nakagawa_player" in line and "-lSDL3" in line]
+            self.assertEqual(len(links), 1, output[-2000:])
+            self.assertIn("-Wl,-rpath,'$ORIGIN'", links[0])
+            self.assertNotRegex(links[0], r"-rpath,'?/")
 
     def test_the_title_runtime_link_takes_a_relative_run_path_from_the_caller(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -939,11 +942,13 @@ class LinuxLinkLineTests(unittest.TestCase):
             common = ["compile", "CC=gcc", f"PYTHON={sys.executable}", "GAME_NAME=probe",
                       f"GAME_ELF={temp}/probe.prx", f"BUILD_DIR={build}"]
             marker = f"-o {build}/probe "
-            links = [line for line in _make_dry_run(*common, "RUNTIME_RUNPATH_ORIGIN=../../..")
+            links = [line for line in _make_dry_run(Path(temp), *common,
+                                                    "RUNTIME_RUNPATH_ORIGIN=../../..")
                      .splitlines() if marker in line]
             self.assertEqual(len(links), 1)
             self.assertIn("-Wl,-rpath,'$ORIGIN/../../..'", links[0])
-            plain = [line for line in _make_dry_run(*common).splitlines() if marker in line]
+            plain = [line for line in _make_dry_run(Path(temp), *common).splitlines()
+                     if marker in line]
             self.assertEqual(len(plain), 1)
             self.assertNotIn("-rpath", plain[0],
                              "no caller, no run path: a title build is unchanged")
