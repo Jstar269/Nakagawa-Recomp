@@ -55617,6 +55617,7 @@ static void test_kernel_nested_mutex_case(uint32_t attr, int departure) {
     if (thread->coro) { sr_coro_destroy(thread->coro); thread->coro = NULL; }
 }
 
+static void test_mutex_departure_schedules_released_waiter(int cancel, int waiter_priority);
 static void test_kernel_nested_mutex(void) {
     test_kernel_nested_mutex_case(0x0200u, 0); /* recursive: 1 + 2 */
     test_kernel_nested_mutex_case(0u, 0);      /* nonrecursive child rejects */
@@ -55624,6 +55625,130 @@ static void test_kernel_nested_mutex(void) {
     test_kernel_nested_mutex_case(0x0200u, 2); /* nested delete */
     test_kernel_nested_mutex_case(0x0200u, 3); /* owner abandonment */
     test_kernel_nested_mutex_case(0x0200u, 4); /* child release, parent reblocks */
+    for (int cancel = 0; cancel <= 1; cancel++) {
+        test_mutex_departure_schedules_released_waiter(cancel, 18); /* stronger */
+        test_mutex_departure_schedules_released_waiter(cancel, 32); /* equal */
+        test_mutex_departure_schedules_released_waiter(cancel, 40); /* weaker */
+    }
+}
+
+/* pspautotests tests/threads/mutex/delete.expected "Delete same: A1B1C2D1E2F1" and
+ * cancel.expected "Cancel waited: A1B1C2D1E2F1" and "Cancel waited with threads:
+ * A1B1C2D1 (wait: 1) E2F1" (2ed7c9c5, recorded on a PSP; waiter 0x12, caller 0x20):
+ * when DeleteMutex or CancelMutex releases a waiter of higher priority than the
+ * caller, the waiter runs (D) before the caller's call returns (E), with WAIT_DELETE
+ * or WAIT_CANCEL, and CancelMutex(uid, 1, &n) reports n = 1 and leaves the caller
+ * holding the mutex once. An equal or weaker waiter is readied but does not run
+ * before the call returns: the PSP records above do not cover that case; it is the
+ * scheduler's strict-priority rule (sched_preempt), which PPSSPP 38d92884
+ * (Core/HLE/sceKernelMutex.cpp hleReSchedule, ThreadQueueList pop_first_better)
+ * also follows. PPSSPP-derived, not PSP-measured. */
+typedef struct { uint32_t uid, nid, a1, a2, ret; int returned; } MtxDepartCallCtx;
+static void mtx_depart_call_fiber_body(void *arg) {
+    MtxDepartCallCtx *ctx = (MtxDepartCallCtx *)arg;
+    CpuState cpu = {0};
+    cpu.r[4] = ctx->uid;
+    cpu.r[5] = ctx->a1;
+    cpu.r[6] = ctx->a2;
+    ctx->ret = sr_syscall(&cpu, ctx->nid);
+    ctx->returned = 1;
+    s_mtx_parks++;
+    selftest_park_on_scheduler();
+}
+
+static void test_mutex_departure_schedules_released_waiter(int cancel, int waiter_priority) {
+    const char *who = cancel ? "CancelMutex" : "DeleteMutex";
+    const char *rank = waiter_priority < 32 ? "higher" : waiter_priority == 32 ? "equal" : "lower";
+    const int stronger = waiter_priority < 32;
+    const uint32_t num_wait_addr = 0x00271000u;
+    char msg[192];
+    reset_fixture();
+    sr_hle_init();
+    uint32_t base = 0x6a10u + (uint32_t)cancel * 0x10u + (uint32_t)waiter_priority * 0x100u;
+    TCB *owner = fixture_thread(base, TH_RUNNING, 32);
+    TCB *thread = fixture_thread(base + 1u, TH_READY, waiter_priority);
+    owner->started = thread->started = 1;
+    int owner_index = (int)(owner - s_tcb);
+    s_cur = owner_index;
+    uint32_t mutex = mtx_create("schedTest1", 0u, 1);
+    snprintf(msg, sizeof msg, "%s %s-priority fixture creates a mutex its caller holds", who, rank);
+    expect((int32_t)mutex > 0, msg);
+    if ((int32_t)mutex <= 0) { s_cur = -1; return; }
+
+    MtxWaiterCtx waiter = {0};
+    waiter.tcb = thread; waiter.uid = thread->uid;
+    waiter.mtx_uid = mutex; waiter.count = 1;
+    thread->coro = sr_coro_create(mtx_waiter_fiber_body, &waiter, (size_t)4 << 20);
+    snprintf(msg, sizeof msg, "%s %s-priority fixture creates the waiter coroutine", who, rank);
+    expect(thread->coro != NULL, msg);
+    if (!thread->coro) { s_cur = -1; return; }
+    kernel_nested_resume(thread);
+    snprintf(msg, sizeof msg, "a %s-priority thread waits on the held mutex", rank);
+    expect(!waiter.returned && thread->state == TH_WAIT_OBJ, msg);
+
+    MtxDepartCallCtx call = {0};
+    call.uid = mutex;
+    call.nid = cancel ? 0x87d9223cu : 0xf8170fbeu;
+    if (cancel) {
+        /* cancel.expected "Cancel waited with threads": CancelMutex(mutex1, 1, &n). */
+        call.a1 = 1u;
+        call.a2 = num_wait_addr;
+        MEM_W32(num_wait_addr, 99u);
+    }
+    owner->coro = sr_coro_create(mtx_depart_call_fiber_body, &call, (size_t)4 << 20);
+    snprintf(msg, sizeof msg, "%s %s-priority fixture creates the caller coroutine", who, rank);
+    expect(owner->coro != NULL, msg);
+    if (!owner->coro) {
+        sr_coro_destroy(thread->coro); thread->coro = NULL;
+        s_cur = -1;
+        return;
+    }
+    s_cur = owner_index;
+    sr_coro_switch(owner->coro);
+    if (stronger) {
+        snprintf(msg, sizeof msg,
+                 "%s yields to the higher-priority waiter it releases before returning", who);
+        expect(!call.returned && owner->state == TH_READY && thread->state == TH_READY, msg);
+    } else {
+        snprintf(msg, sizeof msg,
+                 "%s returns 0 before the %s-priority waiter it releases runs", who, rank);
+        expect(call.returned && call.ret == 0u && !waiter.returned &&
+               thread->state == TH_READY, msg);
+    }
+    if (cancel) {
+        snprintf(msg, sizeof msg,
+                 "CancelMutex records the one waiter it cancels (%s priority)", rank);
+        expect(MEM_R32(num_wait_addr) == 1u, msg);
+    }
+
+    if (!waiter.returned) kernel_nested_resume(thread);
+    snprintf(msg, sizeof msg, "%s releases the %s-priority waiter with %s", who, rank,
+             cancel ? "WAIT_CANCEL" : "WAIT_DELETE");
+    expect(waiter.returned && waiter.ret == (cancel ? 0x800201a9u : 0x800201b5u), msg);
+    if (!call.returned) {
+        owner->state = TH_RUNNING;
+        s_cur = owner_index;
+        sr_coro_switch(owner->coro);
+    }
+    snprintf(msg, sizeof msg, "%s then returns 0 to its caller (%s-priority waiter)", who, rank);
+    expect(call.returned && call.ret == 0u, msg);
+    s_cur = owner_index;
+    if (cancel) {
+        SceKernelMutexInfoTest info;
+        int got = mtx_get_info(mutex, &info);
+        snprintf(msg, sizeof msg,
+                 "CancelMutex count 1 leaves the caller holding the mutex once, no waiter "
+                 "(%s priority)", rank);
+        expect(got && info.currentCount == 1 && info.lockThread == (int32_t)owner->uid &&
+               info.numWaitThreads == 0, msg);
+        (void)mtx_delete(mutex);
+    } else {
+        snprintf(msg, sizeof msg, "DeleteMutex removed the mutex (%s-priority waiter)", rank);
+        expect(mtx_delete(mutex) == 0x800201c3u, msg); /* UNKNOWN_MUTEXID */
+    }
+    if (thread->coro) { sr_coro_destroy(thread->coro); thread->coro = NULL; }
+    if (owner->coro) { sr_coro_destroy(owner->coro); owner->coro = NULL; }
+    s_cur = -1;
 }
 
 static void test_psp_mutex(void) {
