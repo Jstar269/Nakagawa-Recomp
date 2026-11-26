@@ -126,6 +126,16 @@ extern uint32_t (*sr_rt_uid_fn)(void);
 extern int sr_perf_aot_active;
 extern int sr_perf_enabled;
 
+/* Explicit route benchmark windows. Only the scheduler thread changes them. */
+extern int sr_perf_windows_enabled;
+void sr_perf_window_route_loaded(const uint8_t digest[32], uint32_t observable_steps);
+void sr_perf_window_step(uint32_t step, uint32_t vblank, uint64_t guest_us,
+                         unsigned long cache_hits, int paced, uint32_t clock_epoch);
+void sr_perf_window_route_done(void);
+void sr_perf_window_note_umd_us(uint64_t started, uint64_t completed);
+void sr_perf_window_note_ge_draw(void);
+int sr_perf_window_skips_vertex_cache(void);
+
 /* ---- execution share (always on; no SR_PERF needed) --------------------------------
  * How much executed guest work ran natively (AOT) and how much in the interpreter floor
  * (#118), reported once at exit as one EXEC_SHARE line on stderr and, when

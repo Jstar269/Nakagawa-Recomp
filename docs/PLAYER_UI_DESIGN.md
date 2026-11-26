@@ -572,7 +572,7 @@ its `PARAM.SFO` inside a `SAVEDATA` folder, and it is copied into the game's `PS
 already there asks "A save named *name* is already here. Replace it?" with CANCEL (first focus) and REPLACE
 (`DANGER`). Back answers a question with Cancel; with no question up, Back closes the card.
 
-Every change backs the saves up first. A restore checks the whole backup before it touches anything, writes it into
+Restore and Add a save back the saves up first. A restore checks the whole backup before it touches anything, writes it into
 a new folder beside the save folder, and only then renames the save folder to `<folder>-backup-<date>` and puts the
 new one in its place; any failure before that swap leaves the saves as they were, and a failed swap puts the old
 folder back. A failure shows the error card ("Your saves were not backed up", "Your saves were not restored" or "The
@@ -582,6 +582,14 @@ runs." The save folder is `<saves>/<DISC_ID>`, the game's Memory Stick; backups 
 `<user data>/titles/<DISC_ID>/save-backups`, named `<DISC_ID>-saves-<date>-<time>.zip` with a `-before-restore`,
 `-before-add` or `-before-remove` ending for the automatic ones. Nothing is uploaded and nothing is deleted
 automatically. Prompt bar: MOVE, SELECT, BACK.
+
+With a ready shared Memory Stick (#2744), the title's Saves card offers BRING IN for a
+new or changed save found in that title's legacy folder. The question names the whole
+save folder and focuses CANCEL first. If the shared stick already holds a different
+save of that name, its progress stays active and the older version goes to Kept copies.
+An interrupted copy can be confirmed again. Bring In leaves the older player's folder
+in place. This action requires a ready stick. First migration and the switch to shared
+storage for ordinary launches are separate.
 
 ### Add to Steam (built)
 

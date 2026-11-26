@@ -1143,6 +1143,98 @@ static void test_trace_window_limit_completes_the_window(const char *tmp) {
      * file is overwritten by the next run rather than removed here. */
 }
 
+static void test_route_benchmark_windows(void) {
+    const uint8_t digest[32] = {0x12u};
+    char json_path[600], summary[16384];
+    snprintf(json_path, sizeof json_path, "%.*s.json", (int)(strlen(s_csv_path) - 4u), s_csv_path);
+    set_env("SR_PERF", NULL);
+    set_env("SR_PERF_JSON", json_path);
+    set_env("SR_PERF_WINDOWS", "2-5,7-9");
+    set_env("SR_PERF_RUN_ID", "fixture-1");
+    set_env("SR_PERF_AB", "ge.vertex_cache");
+    set_env("SR_GE_VERTEX_CACHE_DISABLE", NULL);
+    sr_perf_test_set_report_sink(capture_report_line);
+    s_report_count = 0;
+    sr_perf_test_set_clocks(fake_wall, fake_cpu);
+    s_fake_wall_ns = 1000000u;
+    sr_perf_test_reinit();
+    CHECK(sr_perf_windows_enabled && !sr_perf_window_skips_vertex_cache(), "route plan is armed");
+    sr_perf_window_route_loaded(digest, 9u);
+    sr_perf_window_step(1u, 7u, 19000u, 11ul, 1, 0u);
+    sr_perf_window_step(2u, 8u, 20000u, 11ul, 1, 0u);
+    CHECK(sr_perf_window_skips_vertex_cache(), "reference arm bypasses the cache");
+    sr_perf_window_note_ge_draw();
+    sr_perf_window_note_ge_draw();
+    sr_perf_storage_read(SR_PERF_STORAGE_ISO, 4096u, s_fake_wall_ns - 700u, 1);
+    sr_perf_window_note_umd_us(100u, 1000u);
+    s_fake_wall_ns += 2000000u;
+    sr_perf_window_step(5u, 9u, 23000u, 11ul, 1, 0u);
+    CHECK(!sr_perf_window_skips_vertex_cache(), "cache returns between windows");
+
+    s_fake_wall_ns += 1000000u;
+    sr_perf_window_step(7u, 10u, 24000u, 11ul, 1, 0u);
+    CHECK(!sr_perf_window_skips_vertex_cache(), "optimized arm allows the cache");
+    sr_perf_window_note_ge_draw();
+    sr_perf_window_note_ge_draw();
+    s_fake_wall_ns += 1000000u;
+    sr_perf_window_step(9u, 11u, 25000u, 12ul, 1, 0u);
+    sr_perf_window_route_done();
+    CHECK(s_report_count == 8 && whole_line(0, "PERF_BENCH_BEGIN "), "benchmark emits eight complete records");
+    CHECK(whole_line(1, "PERF_LOAD id=1 edge=begin step=2 ") &&
+          strstr(s_report_lines[1], "iso_reads=0 iso_bytes=0 iso_ns=0") != NULL,
+          "load start snapshots the counters");
+    CHECK(whole_line(2, "PERF_LOAD id=1 edge=end step=5 wall_ns=2000000 ") &&
+          strstr(s_report_lines[2], "iso_reads=1 iso_bytes=4096 iso_ns=700") != NULL &&
+          strstr(s_report_lines[2], "umd_us=900 present_submits=0") != NULL,
+          "end captures storage evidence without depending on a frame");
+    CHECK(whole_line(3, "PERF_AB id=1 path=ge.vertex_cache arm=A eligible=2 hits=0"),
+          "reference arm reports eligible draws and zero cache hits");
+    CHECK(whole_line(6, "PERF_AB id=2 path=ge.vertex_cache arm=B eligible=2 hits=1"),
+          "optimized arm counts the cache hit");
+    CHECK(whole_line(7, "PERF_BENCH_END run_id=fixture-1 completed=2"),
+          "completed route seals both planned arms");
+    sr_perf_shutdown();
+    CHECK(read_file(json_path, summary, sizeof summary) > 0 &&
+          strstr(summary, "\"benchmark\":{\"run_id\":\"fixture-1\",\"origin_ns\":1000000,"
+                          "\"planned\":2,\"completed\":2,\"mode\":\"ge.vertex_cache\","
+                          "\"runtime_sha256\":\"") != NULL &&
+          strstr(summary, "\"valid\":true}") != NULL &&
+          strstr(s_report_lines[0], " runtime_sha256=") != NULL &&
+          strstr(s_report_lines[0], " route_sha256=12000000") != NULL &&
+          strstr(summary, "\"route_sha256\":\"12000000") != NULL,
+          "the JSON binds successful arm totals to the run identity");
+
+    s_report_count = 0;
+    sr_perf_test_reinit();
+    sr_perf_window_route_loaded(digest, 9u);
+    sr_perf_window_step(2u, 8u, 20000u, 0ul, 1, 0u);
+    sr_perf_window_route_done();
+    CHECK(!sr_perf_windows_enabled && !sr_perf_window_skips_vertex_cache() &&
+          whole_line(2, "PERF_BENCH_REFUSED reason=incomplete_windows"),
+          "unfinished windows cannot be sealed and restore the normal cache");
+
+    s_report_count = 0;
+    sr_perf_test_reinit();
+    sr_perf_window_route_loaded(digest, 8u);
+    CHECK(!sr_perf_windows_enabled && whole_line(0, "PERF_BENCH_REFUSED reason=window_after_final_observable_step"),
+          "a window may not use the terminal END ordinal");
+
+    set_env("SR_PERF_WINDOWS", "2-5,5-9");
+    s_report_count = 0;
+    sr_perf_test_reinit();
+    CHECK(!sr_perf_windows_enabled && whole_line(0, "PERF_BENCH_REFUSED reason=invalid_windows"),
+          "overlapping windows are refused at initialization");
+
+    set_env("SR_PERF_WINDOWS", NULL);
+    set_env("SR_PERF_RUN_ID", NULL);
+    set_env("SR_PERF_AB", NULL);
+    set_env("SR_PERF_JSON", NULL);
+    set_env("SR_PERF", "1");
+    sr_perf_test_set_report_sink(NULL);
+    sr_perf_test_set_clocks(NULL, NULL);
+    sr_perf_test_reinit();
+}
+
 int main(void) {
     const char *tmp = getenv("TMPDIR");
     if (!tmp || !tmp[0]) tmp = getenv("TEMP");
@@ -1164,6 +1256,7 @@ int main(void) {
     test_frame_intervals_and_work();
     test_thread_clock_guard();
     test_files_only_counters();
+    test_route_benchmark_windows();
     test_thread_clock();
     test_per_frame_rows();
     test_per_frame_gpu_columns_no_queries();

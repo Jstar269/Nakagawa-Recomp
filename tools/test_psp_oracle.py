@@ -37,7 +37,7 @@ from import_fixtures import (
 )
 from psp_import_table import UNATTRIBUTED_LIBRARY
 from psp_oracle import user_mode_imports
-from psp_oracle import parse_golden
+from psp_oracle import parse_golden, protocol
 from psp_oracle.protocol import (
     ProtocolError,
     STATUSES,
@@ -487,14 +487,15 @@ class PspOracleProtocolTests(unittest.TestCase):
 
 class NewProbeResultParserTests(unittest.TestCase):
     def _row(self, test_id: str, case_id: str, count: int, *,
-             status: str = "PASS", values: dict[int, int] | None = None) -> str:
+             status: str = "PASS", values: dict[int, int] | None = None,
+             result: int = 0) -> str:
         outputs = values or {}
         fields = " ".join(
             f"out{i}=0x{outputs.get(i, 0):08x}" for i in range(count)
         )
         return (
             f"NAKAGAWA_PSP_TEST schema=1 test_id={test_id} case_id={case_id} "
-            f"status={status} result=0x00000000 {fields}\n"
+            f"status={status} result=0x{result:08x} {fields}\n"
         )
 
     def _stream(self, rows: list[str]) -> str:
@@ -916,11 +917,22 @@ class NewProbeResultParserTests(unittest.TestCase):
 
 
     def test_campaign_probe_parsers_accept_complete_synthetic_records(self) -> None:
+        # The solid triangle's parser also binds its pinned input digests, its guard words and
+        # each row's index, so an all-zero stream is not a complete one for it. Its rows carry
+        # those words here; GeCorpusGateTests covers each refusal.
+        solid = protocol.GE_SOLID_TRIANGLE_CASE
+        bound = {
+            f"{solid}-input": dict(enumerate(protocol.ge_solid_triangle_input_words())),
+            f"{solid}-guard": dict(enumerate((480, 272, 0x200000, 2))),
+        }
+        row_index = {f"{solid}-r{row}": row for row in range(16)}
         for campaign_case, (spec, out_counts) in CAMPAIGN_PROBE_CASES.items():
             rows = [
                 self._row(
                     spec.test_id, case_id, out_counts[case_id],
-                    values={0: spec.terminal_count} if case_id == spec.terminal_case else None,
+                    values=({0: spec.terminal_count} if case_id == spec.terminal_case
+                            else bound.get(case_id)),
+                    result=row_index.get(case_id, 0),
                 )
                 for case_id in spec.ordered_cases
             ]
@@ -1268,6 +1280,9 @@ class GeCorpusGateTests(unittest.TestCase):
     ) -> tuple[dict[str, Any], str]:
         document: dict[str, Any] = json.loads(json.dumps(self.corpus))
         case = document["cases"][0]
+        # Exercise the older scalar command-case reader independently of the
+        # new pinned triangle's mandatory raw rows.
+        case["case_id"] = "legacy-synthetic-command-case"
         case["source_tier"] = "PSP_HARDWARE"
         framebuffer_sha = "a" * 64
         case["framebuffer_sha256"] = framebuffer_sha
@@ -1308,6 +1323,171 @@ class GeCorpusGateTests(unittest.TestCase):
             },
         }
         return document, raw
+
+    def _solid_triangle_stream(self, source: str = "nakagawa") -> tuple[str, bytes]:
+        case = protocol.GE_SOLID_TRIANGLE_CASE
+        test_id = protocol.GE_SOLID_TRIANGLE_TEST
+
+        def row(suffix: str, result: int, words: tuple[int, ...]) -> str:
+            return (f"NAKAGAWA_PSP_TEST schema=1 test_id={test_id} case_id={case}-{suffix} "
+                    f"status=PASS result=0x{result:08x} " +
+                    " ".join(f"out{i}=0x{word:08x}" for i, word in enumerate(words)) + "\n")
+
+        frame = tuple(0x000000ff if i == 4 * 16 + 4 else 0 for i in range(256))
+        raw = META.format(source=source, model="PSP-3000", firmware="6.61-ARK",
+                          binary=MEASURED_SHA, commit=MEASURED_COMMIT)
+        raw += row("input", 0, protocol.ge_solid_triangle_input_words())
+        raw += row("guard", 0, (480, 272, 0x200000, 2))
+        raw += row("draw", 0, (4, 0, 0, 0))
+        raw += row("restore", 0, (0, 0))
+        for y in range(16):
+            raw += row(f"r{y}", y, frame[y * 16:(y + 1) * 16])
+        raw += row("done", 0, (20,))
+        return raw, b"".join(word.to_bytes(4, "little") for word in frame)
+
+    def test_solid_triangle_parser_binds_identity_guards_and_all_raw_rows(self) -> None:
+        case = protocol.GE_SOLID_TRIANGLE_CASE
+        stream_text, expected = self._solid_triangle_stream()
+        sequence = parse_golden.parse_campaign_probe_output(stream_text, case)
+        self.assertEqual(parse_golden.ge_solid_triangle_readback(sequence), expected)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), case).name,
+                         "solid_triangle_8888_v1_log.txt")
+        self.assertEqual(_campaign_completeness_contract(case), "strict-golden-sequence")
+        self.assertNotIn(case, CAMPAIGN_QUEUE_CASES)
+        for suffix, field, previous, invalid, error in (
+            ("input", "out0", "0xf9798f69", "0xf9798f68", "digest differs"),
+            ("input", "out15", f"0x{protocol.ge_solid_triangle_input_words()[-1]:08x}",
+             "0x00000000", "digest differs"),
+            ("guard", "out3", "0x00000002", "0x00000001", "guard"),
+            ("draw", "out2", "0x00000000", "0x00000001", "must be done"),
+            ("draw", "out3", "0x00000000", "0x00000001", "initial framebuffer"),
+            ("restore", "out0", "0x00000000", "0x00000001", "restoration failed"),
+            ("r15", "result", "0x0000000f", "0x0000000e", "invalid result"),
+        ):
+            with self.subTest(suffix=suffix, field=field):
+                rows = stream_text.splitlines(keepends=True)
+                index = next(i for i, line in enumerate(rows) if f"case_id={case}-{suffix} " in line)
+                self.assertIn(f"{field}={previous}", rows[index])
+                rows[index] = rows[index].replace(f"{field}={previous}", f"{field}={invalid}", 1)
+                with self.assertRaisesRegex(ProtocolError, error):
+                    parse_golden.parse_campaign_probe_output("".join(rows), case)
+        missing = "".join(line for line in stream_text.splitlines(keepends=True) if f"case_id={case}-r15 " not in line)
+        with self.assertRaises(ProtocolError):
+            parse_golden.parse_campaign_probe_output(missing, case)
+        failed = stream_text.replace(f"case_id={case}-restore status=PASS",
+                                     f"case_id={case}-restore status=FAIL")
+        with self.assertRaisesRegex(ProtocolError, "complete passing pixel stream"):
+            parse_golden.parse_campaign_probe_output(failed, case)
+        old_id = stream_text.replace(protocol.GE_SOLID_TRIANGLE_TEST, "PSP-GE-001")
+        with self.assertRaises(ProtocolError):
+            parse_golden.parse_campaign_probe_output(old_id, case)
+        self.assertEqual(parse_golden.GE_NAN_SPEC.test_id, "PSP-GE-001")
+
+    def test_solid_triangle_gate_checks_raw_digest_and_selected_words(self) -> None:
+        # Synthetic protocol test only: no on-device observation or attestation.
+        raw, expected = self._solid_triangle_stream(source="psp")
+        document = self._hardware_case(raw)
+        case = document["cases"][0]
+        case["framebuffer_sha256"] = hashlib.sha256(expected).hexdigest()
+        case["selected_pixels"][1]["pixel_value"] = 0xff
+        completed = self._run_gate(document, {"ge/run.txt": raw})
+        self.assertEqual(self._report(completed)["cases"][0]["status"], "MEASURED")
+        for change, message in (
+            ("input", "pinned command-case declaration differs"),
+            ("digest", "framebuffer_sha256 does not match"),
+            ("pixel", "pixel_4_4 does not match"),
+        ):
+            altered = json.loads(json.dumps(document))
+            selected = altered["cases"][0]
+            if change == "input":
+                selected["vertex_words"][1] = "0x40400000"
+            elif change == "digest":
+                selected["framebuffer_sha256"] = "a" * 64
+            else:
+                selected["selected_pixels"][1]["pixel_value"] = 0
+            result = self._report(self._run_gate(altered, {"ge/run.txt": raw}))["cases"][0]
+            self.assertEqual(result["status"], "REFUSED")
+            self.assertIn(message, result["reason"])
+
+    def test_solid_triangle_header_refuses_changed_fixture(self) -> None:
+        source = self.root / "tests" / "fixtures" / "psp_oracle" / "ge_corpus.json"
+        header = protocol.ge_solid_triangle_header(source)
+        self.assertIn("0x1280019cu, 0x10000000u, 0x01000000u, 0x04030003u", header)
+        self.assertIn("0x16003c0fu", header)
+        self.assertNotIn("PSP_HARDWARE", header)
+        with tempfile.TemporaryDirectory() as scratch:
+            altered = Path(scratch) / "case.json"
+            altered.write_text(source.read_text(encoding="utf-8").replace("0x1280019c", "0x1280019d"),
+                               encoding="utf-8")
+            with self.assertRaisesRegex(ProtocolError, "pinned case input changed"):
+                protocol.ge_solid_triangle_header(altered)
+
+    def _solid_module_stop_control(self, probe: str, compiler: str) -> subprocess.CompletedProcess[str]:
+        start = probe.index("int module_stop(SceSize")
+        stop = probe[start:probe.index("\n/* ---", start)]
+        source = r"""
+#include <assert.h>
+typedef unsigned SceSize;
+typedef unsigned SceUInt;
+typedef int SceUID;
+#define GE_CASE_SOLID_TRIANGLE 193
+#define PSP_ORACLE_CASE GE_CASE_SOLID_TRIANGLE
+#define HLE_MAIN_STOP_TIMEOUT_US 1000000u
+static volatile int s_solid_restore_pending;
+static volatile SceUID s_hle_main_thread = 7;
+static volatile int s_hle_stop_requested;
+static int joined_with_pending;
+static int wakes, waits, deletes;
+static int sceKernelWakeupThread(SceUID thread) {
+    assert(thread == 7);
+    wakes++;
+    return 0;
+}
+static int sceKernelWaitThreadEnd(SceUID thread, SceUInt *timeout) {
+    assert(thread == 7 && *timeout == HLE_MAIN_STOP_TIMEOUT_US);
+    assert(s_hle_stop_requested == 1);
+    waits++;
+    s_solid_restore_pending = joined_with_pending;
+    return 0;
+}
+static int sceKernelDeleteThread(SceUID thread) {
+    assert(thread == 7);
+    deletes++;
+    return 0;
+}
+""" + stop + r"""
+int main(void) {
+    s_solid_restore_pending = 1;
+    assert(module_stop(0, 0) != 0 && wakes == 0 && waits == 0 && deletes == 0);
+    /* The worker acquired the reservation after the first pending check,
+       before observing the stop request, and exited with restoration unresolved. */
+    s_solid_restore_pending = 0;
+    joined_with_pending = 1;
+    if (module_stop(0, 0) == 0 || deletes != 0 || s_hle_main_thread != 7)
+        return 19;
+    assert(wakes == 1 && waits == 1);
+    s_solid_restore_pending = 0;
+    joined_with_pending = 0;
+    assert(module_stop(0, 0) == 0 && deletes == 1 && s_hle_main_thread == -1);
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="solid-stop-control-") as scratch:
+            harness = Path(scratch) / "stop.c"
+            executable = Path(scratch) / "stop.exe"
+            harness.write_text(source, encoding="utf-8")
+            subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            str(harness), "-o", str(executable)], check=True)
+            return subprocess.run([str(executable)], capture_output=True, text=True, check=False)
+
+    def test_solid_triangle_refuses_unload_when_worker_stops_with_pending_restore(self) -> None:
+        compiler = shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("TOOLCHAIN_MISSING: gcc is unavailable for the module-stop mock")
+        probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe_ge_sample.c").read_text(
+            encoding="utf-8")
+        result = self._solid_module_stop_control(probe, compiler)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_measured_hardware_case_rederives_identity_digest_case_and_pixels(self) -> None:
         document, raw = self._measured_case_record()
@@ -3641,7 +3821,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 169)
+        self.assertEqual(len(routes), 170)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -3650,11 +3830,18 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
         self.assertNotIn("psp_b3_imports.S", self.makefile)
+
+    def test_ge_solid_triangle_build_has_its_own_input_header_dependency(self) -> None:
+        self.assertIn("else ifeq ($(CASE),solid-triangle-8888-v1)\nCASE_ID = 193\n", self.makefile)
+        self.assertIn("TARGET = $(BUILD_DIR)/solid_triangle_8888_v1", self.makefile)
+        self.assertIn("$(BUILD_DIR)/probe_ge_sample.o: $(BUILD_DIR)/ge_solid_triangle_inputs.h",
+                      self.makefile)
+        self.assertIn("ge_solid_triangle_header(Path(sys.argv[2]))", self.makefile)
 
     def test_vfpu_compare_route_has_its_own_case_id(self) -> None:
         # Each probe added after 67 also pins its own route here, so a wrong id names the
@@ -13126,7 +13313,25 @@ class GeSampleProbeTests(unittest.TestCase):
     def test_writer_round_trip_and_lifecycle_are_the_hle_issues_copies(self) -> None:
         shared = self.issues[self.issues.index("static int s_log_failed;\n"):
                              self.issues.index("/* ---", self.issues.index("int module_stop("))]
-        self.assertIn(shared, self.probe)
+        # module_stop adds two refusals that only the solid-triangle case compiles: a restore
+        # that did not verify keeps the PRX resident. Exactly these two blocks, once each;
+        # with them taken out the text is the hle_issues copy, which every other case compiles.
+        solid_only = (
+            "#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE\n"
+            "    /* A wedged GE may still reference this PRX's list and vertices. */\n"
+            "    if (s_solid_restore_pending) return 1;\n"
+            "#endif\n",
+            "#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE\n"
+            "    /* The worker could enter the draw before it observed the stop request.\n"
+            "       Its exit does not release the GE's references to the PRX. */\n"
+            "    if (s_solid_restore_pending) return 1;\n"
+            "#endif\n",
+        )
+        probe = self.probe
+        for block in solid_only:
+            self.assertEqual(probe.count(block), 1, block)
+            probe = probe.replace(block, "")
+        self.assertIn(shared, probe)
 
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {

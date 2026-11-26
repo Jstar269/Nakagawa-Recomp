@@ -19,8 +19,11 @@ project(nakagawa_android LANGUAGES C)
 get_filename_component(NK_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(NK_ANDROID_DEPS_DIR "${NK_REPO_ROOT}/build/android-deps" CACHE PATH
     "Where the pinned SDL3 and SDL3_ttf sources are fetched")
-# Semicolon-separated <title-id>=<package-dir> pairs.
-set(NK_ANDROID_TITLES "" CACHE STRING "Bundled title packages: <title-id>=<package-dir>;...")
+# Semicolon-separated <title-id>=<code-name>=<package-dir> entries (build.gradle.kts writes them
+# from nk.titles): the library is libnk_title_<title-id>.so, the catalogue's id, and the package's
+# generated C files are <code-name>_recomp*.c.
+set(NK_ANDROID_TITLES "" CACHE STRING
+    "Bundled title packages: <title-id>=<code-name>=<package-dir>;...")
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/deps.cmake")   # NK_SDL3_DIR, NK_SDL3_TTF_DIR
 
@@ -50,13 +53,15 @@ add_subdirectory("${NK_REPO_ROOT}" nk EXCLUDE_FROM_ALL)
 
 set(nk_android_targets nakagawa_player SDL3-shared SDL3_ttf-shared)
 foreach(pair IN LISTS NK_ANDROID_TITLES)
-    if(NOT pair MATCHES "^([A-Za-z0-9._-]+)=(.+)$")
-        message(FATAL_ERROR "NK_ANDROID_TITLES entry '${pair}' is not <title-id>=<package-dir>")
+    if(NOT pair MATCHES "^([A-Za-z0-9._-]+)=([A-Za-z0-9._-]+)=(.+)$")
+        message(FATAL_ERROR
+            "NK_ANDROID_TITLES entry '${pair}' is not <title-id>=<code-name>=<package-dir>")
     endif()
     set(title_id "${CMAKE_MATCH_1}")
-    file(TO_CMAKE_PATH "${CMAKE_MATCH_2}" package_dir)   # Gradle on Windows passes backslashes
+    set(code_name "${CMAKE_MATCH_2}")
+    file(TO_CMAKE_PATH "${CMAKE_MATCH_3}" package_dir)   # Gradle on Windows passes backslashes
     set(target "nk_title_${title_id}")
-    nk_add_title_runtime(${target} "${package_dir}" "${title_id}")
+    nk_add_title_runtime(${target} "${package_dir}" "${code_name}")
     # The Android process start and end (pid and exit status for the launcher).
     target_sources(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/nk_android_title.c")
     target_include_directories(${target} PRIVATE "${NK_REPO_ROOT}/src/core")

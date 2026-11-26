@@ -243,6 +243,21 @@ void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
     app->runtime_package_cache_generation++;
 }
 
+static size_t player_package_key_length(const char *text, size_t capacity) {
+    const char *end = memchr(text, '\0', capacity);
+    return end ? (size_t)(end - text) : capacity;
+}
+
+static void player_copy_package_key_field(char *dst, size_t dst_capacity,
+                                          const char *src, size_t src_capacity) {
+    /* Cache slots can be wider than the source field, notably selected_executable. */
+    size_t limit = dst_capacity - 1;
+    if (src_capacity < limit) limit = src_capacity;
+    size_t length = player_package_key_length(src, limit);
+    memmove(dst, src, length);
+    dst[length] = '\0';
+}
+
 /* The four fields that name one package of a title (its variant): a GameRecord, a cache entry
    and a worker-failure record all carry them under these names, so one comparison and one copy
    serve each; a fifth field goes here once. */
@@ -251,15 +266,15 @@ void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
      strcmp((a)->title_id, (b)->title_id) == 0 &&                               \
      strcmp((a)->selected_executable, (b)->selected_executable) == 0 &&         \
      strcmp((a)->enhancement_package_id, (b)->enhancement_package_id) == 0)
+#define PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, field)                           \
+    player_copy_package_key_field((dst)->field, sizeof((dst)->field),            \
+                                  (src)->field, sizeof((src)->field))
 #define PLAYER_PACKAGE_KEY_COPY(dst, src)                                        \
     do {                                                                         \
-        snprintf((dst)->disc_id, sizeof((dst)->disc_id), "%s", (src)->disc_id);  \
-        snprintf((dst)->title_id, sizeof((dst)->title_id), "%s", (src)->title_id); \
-        snprintf((dst)->selected_executable, sizeof((dst)->selected_executable), \
-                 "%s", (src)->selected_executable);                              \
-        snprintf((dst)->enhancement_package_id,                                  \
-                 sizeof((dst)->enhancement_package_id), "%s",                    \
-                 (src)->enhancement_package_id);                                 \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, disc_id);                        \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, title_id);                       \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, selected_executable);            \
+        PLAYER_PACKAGE_KEY_COPY_FIELD(dst, src, enhancement_package_id);         \
     } while (0)
 
 static bool player_runtime_worker_failure_matches(
@@ -490,13 +505,10 @@ NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data
     return nk_launch_validate_runtime_package(user_data_root, game, out, reason, reason_size);
 }
 
-void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
-                                                         const char *commit,
-                                                         const char *origin,
-                                                         const char *reason) {
-    if (!app || game_index < 0 || game_index >= app->game_count) return;
-    char *out = app->runtime_package_cache[game_index].runtime_source;
-    const size_t cap = sizeof(app->runtime_package_cache[game_index].runtime_source);
+/* The report's Runtime source line for a package's record (#2875): "" when the package
+ * predates the record (an empty origin). */
+static void player_runtime_source_text(const char *commit, const char *origin,
+                                       const char *reason, char *out, size_t cap) {
     out[0] = '\0';
     if (!origin || !origin[0]) return;
     if (commit && commit[0]) {
@@ -511,6 +523,16 @@ void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int gam
     for (char *c = out; *c; c++) {
         if ((unsigned char)*c < 0x20u || (unsigned char)*c == 0x7fu) *c = ' ';
     }
+}
+
+void player_app_runtime_package_cache_set_runtime_source(PlayerApp *app, int game_index,
+                                                         const char *commit,
+                                                         const char *origin,
+                                                         const char *reason) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return;
+    player_runtime_source_text(commit, origin, reason,
+                               app->runtime_package_cache[game_index].runtime_source,
+                               sizeof(app->runtime_package_cache[game_index].runtime_source));
 }
 
 const char *player_app_runtime_package_reason(const PlayerApp *app,
@@ -2851,6 +2873,18 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
+    if (row->part[PLAYER_PART_UPSCALE] == 1 &&
+        app->fsr1_session_preset == player_app_graphics_preset(app) &&
+        app->fsr1_session_refusal != NK_FSR1_REFUSAL_NONE) {
+        const int n = snprintf(out, cap,
+            app->fsr1_session_refusal == NK_FSR1_REFUSAL_QUEUE_NO_COMPUTE
+                ? NK_UI_STR(SETTINGS_PRESET_FSR1_QUEUE_REFUSED)
+                : NK_UI_STR(SETTINGS_PRESET_FSR1_STARTUP_REFUSED),
+            row->label);
+        if (n > 0 && (size_t)n < cap) return true;
+        out[0] = '\0';
+        return false;
+    }
     /* The parts it sets, "with A, B and C on" or "with A on and B off", in short words (crisp
        text, FSR 1, full 32-bit colour): the line must stay one line, so the page fits 960 x 540
        and 853 x 480 (test_player_screens.c). */
@@ -3045,6 +3079,13 @@ bool player_app_boot_event_is_window_ready(const char *line) {
 
 static void player_read_boot_events(PlayerApp *app, bool live);
 
+/* The runtime writes this at the first guest frame or the first GPU present
+   (src/rt/gui.c), after guest code has run; window_ready comes from gui_init
+   before the guest starts and proves no game ran. */
+static bool player_boot_event_is_first_frame(const char *line) {
+    return line && strstr(line, "BOOT_EVENT phase=first_frame") != NULL;
+}
+
 bool player_app_child_window_ready(PlayerApp *app) {
     if (!app || app->child_window_ready || !app->boot_event_file_path[0]) {
         return app && app->child_window_ready;
@@ -3120,6 +3161,7 @@ static bool player_monitor_game_start(PlayerApp *app, uint64_t now_ms) {
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
     char kept_log[NK_MAX_PATH] = "";
     if (app->boot_event_file_path[0]) {
         /* The run's output stays in the logs folder (#1303). */
@@ -3603,22 +3645,33 @@ static void player_app_select_package_variant(PlayerApp *app, int game_index) {
     bool cull = enhancement->cull_available &&
                 player_app_title_cull_on_play(app, game_index, &play, logic_60_on);
     game->enhancement_hook_only = false;
-    if (logic_60 && cull) {
-        /* cull_available holds beside a usable timing package only when the joined name is a
-           valid variant (player_read_title_enhancement), so it fits; were it ever cut, the
-           timing build stays, as for a culling package that cannot be used. */
-        int n = snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id),
-                         "%s+%s", enhancement->package_id, enhancement->cull_package_id);
-        if (n < 0 || (size_t)n >= sizeof(game->enhancement_package_id)) {
-            snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                     enhancement->package_id);
+    if (logic_60) {
+        if (cull) {
+            size_t timing_length = player_package_key_length(
+                enhancement->package_id, sizeof(enhancement->package_id));
+            size_t cull_length = player_package_key_length(
+                enhancement->cull_package_id, sizeof(enhancement->cull_package_id));
+            /* Keep the timing build if the pair cannot be written as a complete variant. */
+            char variant[sizeof(game->enhancement_package_id)];
+            size_t variant_size = timing_length + cull_length + 2;
+            if (timing_length < sizeof(enhancement->package_id) &&
+                cull_length < sizeof(enhancement->cull_package_id) &&
+                variant_size <= sizeof(variant)) {
+                memcpy(variant, enhancement->package_id, timing_length);
+                variant[timing_length] = '+';
+                memcpy(variant + timing_length + 1, enhancement->cull_package_id, cull_length + 1);
+                memcpy(game->enhancement_package_id, variant, variant_size);
+                return;
+            }
         }
-    } else if (logic_60) {
-        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                 enhancement->package_id);
+        player_copy_package_key_field(game->enhancement_package_id,
+                                     sizeof(game->enhancement_package_id),
+                                     enhancement->package_id, sizeof(enhancement->package_id));
     } else if (cull) {
-        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
-                 enhancement->cull_package_id);
+        player_copy_package_key_field(game->enhancement_package_id,
+                                     sizeof(game->enhancement_package_id),
+                                     enhancement->cull_package_id,
+                                     sizeof(enhancement->cull_package_id));
         game->enhancement_hook_only = true;
     } else {
         game->enhancement_package_id[0] = '\0';
@@ -5679,6 +5732,9 @@ void player_app_set_error(PlayerApp *app, const char *code, const char *title, c
     app->last_error.stop_boundary[0] = '\0';
     app->last_error.stop_exit_code = 0;
     app->last_error.stop_has_exit_code = false;
+    app->last_error.about_launch = false;
+    app->last_error.launch_package[0] = '\0';
+    app->last_error.launch_runtime_source[0] = '\0';
     app->active_view = VIEW_ERROR;
     player_dev_log_add(app, "error", "%s: %s", app->last_error.error_code,
                        app->last_error.title);
@@ -6027,6 +6083,13 @@ static const char *player_package_status_word(NkRuntimePackageStatus status) {
     }
 }
 
+/* The report's Package line: the package's status and the start of its cache key. */
+static void player_package_report_line(NkRuntimePackageStatus status, const char *identity,
+                                       char *out, size_t out_size) {
+    snprintf(out, out_size, "%s%s%.12s", player_package_status_word(status),
+             identity && identity[0] ? ", identity " : "", identity ? identity : "");
+}
+
 size_t player_app_format_error_report(const PlayerApp *app, const char *version,
                                       char *out, size_t out_size) {
     const char *profile = NULL;
@@ -6060,20 +6123,24 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
     if (index >= 0) {
         player_report_append(raw, sizeof(raw), &used, "Disc version: ",
                              app->games[index].disc_version);
+    }
+    /* Beside the player's own commit on the version line (#2875). A card about a
+       launch names the package that launch spawned, as it recorded it then (#2998);
+       the library's stored status may be another build's by now. */
+    if (error->about_launch) {
+        player_report_append(raw, sizeof(raw), &used, "Package: ", error->launch_package);
+        player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
+                             error->launch_runtime_source);
+    } else if (index >= 0) {
         const PlayerRuntimePackageCacheEntry *package =
             player_runtime_cache_for_game(app, &app->games[index]);
         if (package && package->status_valid) {
             char line[128];
-            snprintf(line, sizeof(line), "%s%s%.12s",
-                     player_package_status_word(package->status),
-                     package->package_identity[0] ? ", identity " : "",
-                     package->package_identity);
+            player_package_report_line(package->status, package->package_identity, line,
+                                       sizeof(line));
             player_report_append(raw, sizeof(raw), &used, "Package: ", line);
-            /* Beside the player's own commit on the version line (#2875). */
-            if (package->runtime_source[0]) {
-                player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
-                                     package->runtime_source);
-            }
+            player_report_append(raw, sizeof(raw), &used, "Runtime source: ",
+                                 package->runtime_source);
         }
     }
     player_report_append(raw, sizeof(raw), &used, "Boundary: ", error->stop_boundary);
@@ -6476,6 +6543,7 @@ const char *player_runtime_stop_feature(const char *boundary) {
     };
     static const char import_prefix[] = "unsupported-import-";
     if (!boundary) return "a system feature";
+    if (strcmp(boundary, "osk-host-unavailable") == 0) return "the on-screen keyboard";
     if (strncmp(boundary, import_prefix, sizeof(import_prefix) - 1u) == 0) {
         const char *name = boundary + sizeof(import_prefix) - 1u;
         for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
@@ -6582,13 +6650,26 @@ void player_app_set_game_stop_error(PlayerApp *app, const char *code,
         snprintf(app->last_error.log_file_path, sizeof(app->last_error.log_file_path),
                  "%s", log_file_path);
     }
+    app->last_error.about_launch = true;
     if (disc_id && disc_id[0]) {
         snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                  "%s", disc_id);
-        /* The image that ran, when this stop is the running game's. */
+        /* The image that ran, and the package the launch spawned for it (#2998), when
+           this stop is the running game's. */
         if (strcmp(disc_id, app->launch_session.disc_id) == 0) {
             snprintf(app->last_error.subject_iso_path, sizeof(app->last_error.subject_iso_path),
                      "%s", app->running_iso_path);
+            if (app->launch_session.package_launch) {
+                player_package_report_line(NK_RUNTIME_PACKAGE_OK,
+                                           app->launch_session.package_identity,
+                                           app->last_error.launch_package,
+                                           sizeof(app->last_error.launch_package));
+                player_runtime_source_text(app->launch_session.runtime_source_commit,
+                                           app->launch_session.runtime_source_origin,
+                                           app->launch_session.runtime_source_reason,
+                                           app->last_error.launch_runtime_source,
+                                           sizeof(app->last_error.launch_runtime_source));
+            }
         }
         app->last_error.retry = PLAYER_ERROR_RETRY_RESTART_GAME;
     }
@@ -6734,6 +6815,8 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
     player_clear_stalled_game_notice(app, false);
     app->stalled_game_restore_game_front_requested = false;
     app->render_path_known = false;
+    app->fsr1_session_preset = PLAYER_PRESET_CUSTOM;
+    app->fsr1_session_refusal = NK_FSR1_REFUSAL_NONE;
     app->render_path_disc[0] = '\0';
     app->render_effects = 0u;
     app->render_effects_text[0] = '\0';
@@ -6793,6 +6876,16 @@ static void player_set_boundary_text(PlayerApp *app, const char *reason) {
 static NkResult player_resolve_input_profile(PlayerApp *app, const GameRecord *game,
                                              char *out, size_t out_size);
 
+void player_app_select_launch_game(const PlayerApp *app, const GameRecord *game,
+                                   GameRecord *launch_game) {
+    *launch_game = *game;
+    if (app->headless_accept_presented_frames > 0u) {
+        /* The Authentic checkpoint needs the stock executable as well as Ace off. */
+        launch_game->enhancement_package_id[0] = '\0';
+        launch_game->enhancement_hook_only = false;
+    }
+}
+
 bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *work) {
     if (!app || !work || game_index < 0 || game_index >= app->game_count) return false;
     const GameRecord *game = &app->games[game_index];
@@ -6805,7 +6898,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     const bool without_pack = have_key && app->launch_without_pack[0] &&
                               strcmp(app->launch_without_pack, game_key) == 0;
     app->launch_without_pack[0] = '\0';
-    if (player_app_title_60hz_blocked(app, game_index)) {
+    if (app->headless_accept_presented_frames == 0u &&
+        player_app_title_60hz_blocked(app, game_index)) {
         /* 60 FPS game logic is on and its package is gone: the original game
            is not started in its place. */
         player_app_set_error(
@@ -6835,6 +6929,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
                      "on the game's Enhanced page.", info.error);
             player_app_set_error(app, "TEXTURE_PACK_REFUSED", "Texture pack not used", message,
                                  "Back to library", VIEW_LIBRARY);
+            /* No child started: Copy details names no package for it (#2998). */
+            app->last_error.about_launch = true;
             if (have_key) {
                 snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                          "%s", game->disc_id);
@@ -6849,7 +6945,7 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
        package preflight rejects it before launch-session preparation. */
     app->launch_session.config.gui_mode = !app->launch_headless;
     work->game_index = game_index;
-    work->game = *game;
+    player_app_select_launch_game(app, game, &work->game);
     if (root) {
         snprintf(work->package_root, sizeof(work->package_root), "%s", root);
         work->has_package_root = true;
@@ -6873,6 +6969,7 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     /* The boot-event marker and the input mapping are written here, on the
        thread that owns the app; the work only reads the resulting paths. */
     app->child_window_ready = false;
+    app->child_first_frame = false;
     app->launch_running_check_logged = false;
     app->child_boot_event_seen = false;
     app->child_boot_wait_noted = false;
@@ -7110,6 +7207,10 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
     snprintf(app->running_title, sizeof(app->running_title), "%s", work->game.title_name);
     snprintf(app->running_iso_path, sizeof(app->running_iso_path), "%s", work->game.iso_path);
     app->running_play_mode = work->play_mode;
+    if (work->play_mode != PLAYER_PLAY_AUTHENTIC &&
+        app->launch_session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1) {
+        app->fsr1_session_preset = work->settings.graphics_preset;
+    }
     app->running_start_ms = (int64_t)time(NULL) * 1000;
     /* The library may have changed while the work ran: find the game again. */
     if (game_index < 0 || game_index >= app->game_count ||
@@ -7314,6 +7415,7 @@ void player_app_stop_game(PlayerApp *app) {
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
     player_clear_stalled_game_notice(app, true);
     if (app->boot_event_file_path[0]) {
         /* The run's output stays in the logs folder (#1303). */
@@ -7367,6 +7469,7 @@ void player_app_stop_stalled_game(PlayerApp *app) {
     app->is_game_running = false;
     app->close_confirmation_pending = false;
     app->child_window_ready = false;
+    app->child_first_frame = false;
 
     char kept_log[NK_MAX_PATH] = "";
     if (app->boot_event_file_path[0]) {
@@ -7703,6 +7806,14 @@ void player_app_consume_render_path_line(PlayerApp *app, const char *line) {
     NkRenderPath path;
     NkRenderFallbackEvent fallback;
     if (!app) return;
+    NkFsr1Refusal refusal = nk_fsr1_refusal_event_parse(line);
+    if (refusal != NK_FSR1_REFUSAL_NONE) {
+        if (app->fsr1_session_preset != PLAYER_PRESET_CUSTOM &&
+            app->fsr1_session_refusal == NK_FSR1_REFUSAL_NONE) {
+            app->fsr1_session_refusal = refusal;
+        }
+        return;
+    }
     if (nk_render_fallback_event_parse(line, &fallback)) {
         const uint16_t bit = (uint16_t)(1u << fallback.reason);
         if (app->render_effects & bit) return;
@@ -7865,6 +7976,11 @@ static void player_read_boot_events(PlayerApp *app, bool live) {
                 if (live && player_app_boot_event_is_window_ready(line)) {
                     app->child_window_ready = true;
                 }
+                /* Also on the final drain: a child that presented its first
+                   frame and exited between two reads still ran the game. */
+                if (player_boot_event_is_first_frame(line)) {
+                    app->child_first_frame = true;
+                }
             }
             app->boot_event_read_offset = offset;
             used = 0u;
@@ -7877,12 +7993,19 @@ static void player_read_boot_events(PlayerApp *app, bool live) {
     fclose(events);
 }
 
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+void (*g_player_state_test_after_live_read)(PlayerApp *app) = NULL;
+#endif
+
 bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
     if (!app || !app->is_game_running) return false;
     if (app->launch_time_ms == 0) {
         app->launch_time_ms = now_ms;
     }
     player_read_boot_events(app, true);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+    if (g_player_state_test_after_live_read) g_player_state_test_after_live_read(app);
+#endif
     if (nk_launch_is_running(&app->launch_session)) {
         return player_monitor_game_start(app, now_ms);
     }
@@ -7896,7 +8019,12 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
     bool has_semantic_stop = player_read_semantic_stop(
         app->boot_event_file_path, stopped_boundary, sizeof(stopped_boundary),
         &stopped_issue);
-    bool runtime_failed = elapsed_ms < 500 || code != 0 || has_semantic_stop;
+    /* An exit inside 500 ms closed the game while it was starting when the
+       code is non-zero or the game never presented its first frame. A clean
+       exit 0 after the first frame is a short but successful run (#306).
+       window_ready alone is not that: it is written before guest code runs. */
+    bool premature_exit = elapsed_ms < 500 && (code != 0 || !app->child_first_frame);
+    bool runtime_failed = premature_exit || code != 0 || has_semantic_stop;
     /* Restart game on the card relaunches this one. */
     char stopped_disc_id[sizeof(app->last_error.subject_disc_id)];
     snprintf(stopped_disc_id, sizeof(stopped_disc_id), "%s",
@@ -7911,6 +8039,7 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
        one job handle per finished game in the long-lived player (#511). */
     nk_launch_stop(&app->launch_session);
     app->child_window_ready = false;
+    app->child_first_frame = false;
     player_dev_log_add(app, "runtime", "game exited with code %d after %llu ms", code,
                        (unsigned long long)elapsed_ms);
     if (app->boot_event_file_path[0]) {
@@ -7953,7 +8082,7 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
         player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", stopped_boundary,
                                        stopped_issue, code, elapsed_ms, stopped_disc_id,
                                        run_log);
-    } else if (elapsed_ms < 500) {
+    } else if (premature_exit) {
         player_app_set_game_stop_error(app, "RUNTIME_PREMATURE_EXIT", NULL, 0, code,
                                        elapsed_ms, stopped_disc_id, run_log);
     } else if (code != 0) {
@@ -7991,8 +8120,9 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
             player_app_package_build_preflight_blocker(app, game_index);
         if (blocker) {
             player_app_set_build_error(app, "preflight", blocker->message, "");
-            snprintf(app->last_error.message, sizeof(app->last_error.message), "%s",
-                     player_preflight_plain_message(blocker));
+            nk_shared_text_copy(app->last_error.message, sizeof(app->last_error.message),
+                                player_preflight_plain_message(blocker),
+                                NK_SHARED_TEXT_COPY_TRUNCATE);
         }
         return false;
     }
@@ -8718,6 +8848,31 @@ const char *player_app_saves_blocker(const PlayerApp *app, int game_index) {
         return "Stop the game first: it uses its save folder while it runs.";
     }
     return NULL;
+}
+
+NkMemstickCollisionResult player_app_bring_in_offer(const PlayerApp *app, int game_index,
+                                                    NkMemstickPlanUnit *offer) {
+    if (!offer) return NK_MEMSTICK_COLLISION_INVALID;
+    memset(offer, 0, sizeof(*offer));
+    char root[NK_MAX_PATH];
+    if (!app || game_index < 0 || game_index >= app->game_count ||
+        !player_removal_disc_id_ok(app->games[game_index].disc_id))
+        return NK_MEMSTICK_COLLISION_INVALID;
+    if (!nk_platform_get_path(NK_PATH_SAVES, root, sizeof(root)))
+        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    return nk_memstick_savedata_bring_in_offer(root, app->games[game_index].disc_id, offer);
+}
+
+NkMemstickCollisionResult player_app_bring_in(const PlayerApp *app, int game_index,
+                                              const NkMemstickPlanUnit *offer) {
+    if (!app || game_index < 0 || game_index >= app->game_count ||
+        !player_removal_disc_id_ok(app->games[game_index].disc_id))
+        return NK_MEMSTICK_COLLISION_INVALID;
+    if (app->is_game_running || app->launch_pending) return NK_MEMSTICK_COLLISION_STICK_IN_USE;
+    char root[NK_MAX_PATH];
+    if (!nk_platform_get_path(NK_PATH_SAVES, root, sizeof(root)))
+        return NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED;
+    return nk_memstick_savedata_bring_in(root, app->games[game_index].disc_id, offer);
 }
 
 void player_app_save_stamp_now(char *out, size_t out_size) {
@@ -11707,11 +11862,15 @@ static bool player_assign_module_host_names(NkIsoReader *reader,
             if (player_name_equals_ignore_case(modules[j].name, module->name)) {
                 *duplicate = true;
                 if (boundary_message && boundary_message_size) {
-                    snprintf(boundary_message, boundary_message_size,
-                             "DUPLICATE_DISC_MODULE_BASENAME: module host name "
-                             "%.200s stands for both %.900s and %.900s; their "
-                             "copies would share one file in the per-title folder.",
+                    static const char format[] =
+                        "DUPLICATE_DISC_MODULE_BASENAME: module host name "
+                        "%.200s stands for both %.900s and %.900s; their "
+                        "copies would share one file in the per-title folder.";
+                    char diagnostic[sizeof(format) + 200 + 900 + 900];
+                    snprintf(diagnostic, sizeof(diagnostic), format,
                              module->name, modules[j].rel_path, module->rel_path);
+                    nk_shared_text_copy(boundary_message, boundary_message_size, diagnostic,
+                                        NK_SHARED_TEXT_COPY_TRUNCATE);
                 }
                 return false;
             }
@@ -14419,8 +14578,11 @@ static bool player_steam_join_rel(char *out, size_t cap, const char *root, const
 static void player_steam_note_skip(char *note, size_t cap, const char *label, const char *why) {
     size_t used = strlen(note);
     if (used >= cap) return;
-    (void)snprintf(note + used, cap - used, "%s%s%s%s", used > 0u ? "; " : "", label,
-                   label[0] != '\0' ? " " : "", why);
+    const char *parts[] = {used > 0u ? "; " : "", label, label[0] != '\0' ? " " : "", why};
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]) && used + 1u < cap; ++i) {
+        nk_shared_text_copy(note + used, cap - used, parts[i], NK_SHARED_TEXT_COPY_TRUNCATE);
+        used += strlen(note + used);
+    }
 }
 
 /* Reads up to NK_STEAM_GRID_MAX_BYTES from the first local PNG under `root` that exists. The

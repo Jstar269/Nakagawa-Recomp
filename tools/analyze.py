@@ -1250,6 +1250,8 @@ def _constant_arguments_at_calls(elf, covered, relocated):
             consts = {}
             continue
         if op in (0x02, 0x03):
+            if op == 0x03:
+                consts.pop(31, None)  # JAL writes the link before its slot reads the arguments.
             target = None if is_jal_pc_read(address, word) else jump_target(address, word)
             pending = (address, target)
         elif (op == 0 and (word & 0x3F) in (0x08, 0x09)) or branch_target(address, word) is not None:
@@ -1878,7 +1880,9 @@ def bounded_computed_goto_targets(elf, ranges):
                 break
             sign = -1 if funct == 0x23 else 1
             pads = {(base + sign * value) & 0xFFFFFFFF for value in values}
-            if all(in_ranges(pad, ranges) for pad in pads):
+            # A `jr` to an unaligned address raises an address error and lands nowhere, so a
+            # base that is not word-aligned names no pad at all.
+            if all((pad & 3) == 0 and in_ranges(pad, ranges) for pad in pads):
                 targets.update(pads)
             break
     return frozenset(targets)
