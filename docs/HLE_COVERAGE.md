@@ -26,8 +26,8 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 74 |
 | `ppsspp-derived` | 184 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 402 | 183 |
-| `unverified` | 70 | 22 |
+| `synthetic` | 403 | 183 |
+| `unverified` | 69 | 22 |
 | total | 720 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -726,7 +726,7 @@ a title that translates none has generated code unchanged.
 | `0xe81caf8f` | `sceKernelCreateCallback` | kernel_thread | `synthetic` | HLE selftest dispatch |
 | `0xe83742ba` | `sceUmdDeactivate` | umd | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP; unlinked hardware note |
 | `0xe8454c65` | `sceNetAdhocMatchingStart2` | network | `ppsspp-derived` | sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
-| `0xe855bf76` | `__sceSasSetOutputmode` | audio | `unverified` | no recorded evidence |
+| `0xe855bf76` | `__sceSasSetOutputmode` | audio | `synthetic` | HLE selftest dispatch |
 | `0xe88f759b` | `sceAtracGetInternalErrorInfo` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xe95a012b` | `sceIoIoctlAsync` | io | `synthetic` | HLE selftest dispatch |
 | `0xe9b3061e` | `sceKernelSendMbx` | kernel_sync | `synthetic` | HLE selftest dispatch |
