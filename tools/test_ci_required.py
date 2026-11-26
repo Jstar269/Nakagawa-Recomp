@@ -30,6 +30,7 @@ def _results(**overrides: str) -> dict[str, str]:
         "classify": "success",
         "hygiene": "success",
         "public-export": "success",
+        "guest-fixtures": "skipped",
         "python-tools": "skipped",
         "native-tools": "skipped",
         "android-build": "skipped",
@@ -84,6 +85,7 @@ class CiRequiredTests(unittest.TestCase):
             "CLASSIFY_RESULT": "success",
             "HYGIENE_RESULT": "success",
             "PUBLIC_EXPORT_RESULT": "success",
+            "GUEST_FIXTURES_RESULT": "success",
             "MARKDOWN_RESULT": "skipped",
             "PYTHON_RESULT": "skipped",
             "NATIVE_RESULT": "success",
@@ -142,6 +144,7 @@ class CiRequiredTests(unittest.TestCase):
             "CLASSIFY_RESULT": "success",
             "HYGIENE_RESULT": "success",
             "PUBLIC_EXPORT_RESULT": "success",
+            "GUEST_FIXTURES_RESULT": "skipped",
             "PYTHON_RESULT": "skipped",
             "NATIVE_RESULT": "skipped",
             "ANDROID_RESULT": "skipped",
@@ -163,6 +166,7 @@ class CiRequiredTests(unittest.TestCase):
         ready_env = dict(draft_env)
         ready_env.update(
             {
+                "GUEST_FIXTURES_RESULT": "success",
                 "PYTHON_RESULT": "success",
                 "NATIVE_RESULT": "success",
                 "ANDROID_RESULT": "success",
@@ -215,10 +219,11 @@ class CiRequiredTests(unittest.TestCase):
         )
 
     def test_folded_jobs_are_no_separate_inputs(self) -> None:
-        """Markdown, main smoke and the profile-zero fixture are steps of required jobs.
+        """Markdown and main smoke are steps of the required hygiene job.
 
-        They reach the aggregate through hygiene and public-export, which must succeed on
-        every event; the workflow no longer passes a result or run flag of their own.
+        They reach the aggregate through hygiene, which must succeed on every event; the
+        workflow no longer passes a result or run flag of their own. (The fixture builds,
+        once steps of public-export, are their own job again: ``GuestFixturesTests``.)
         """
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
@@ -238,6 +243,7 @@ class CiRequiredTests(unittest.TestCase):
             "CLASSIFY_RESULT": "success",
             "HYGIENE_RESULT": "success",
             "PUBLIC_EXPORT_RESULT": "success",
+            "GUEST_FIXTURES_RESULT": "success",
             "PYTHON_RESULT": "success",
             "NATIVE_RESULT": "skipped",
             "ANDROID_RESULT": "skipped",
@@ -266,6 +272,7 @@ def _draft_env(**overrides: str) -> dict[str, str]:
         "CLASSIFY_RESULT": "success",
         "HYGIENE_RESULT": "success",
         "PUBLIC_EXPORT_RESULT": "success",
+        "GUEST_FIXTURES_RESULT": "skipped",
         "PYTHON_RESULT": "skipped",
         "NATIVE_RESULT": "skipped",
         "WINDOWS_RESULT": "skipped",
@@ -295,6 +302,7 @@ class DraftLightRunTests(unittest.TestCase):
 
     def test_a_draft_is_not_green_even_if_every_substantive_job_passed(self) -> None:
         env = _draft_env(
+            GUEST_FIXTURES_RESULT="success",
             PYTHON_RESULT="success", NATIVE_RESULT="success", ANDROID_RESULT="success",
             WINDOWS_RESULT="success", INSTALLER_RESULT="success", RUN_PYTHON="true", RUN_NATIVE="true",
             RUN_WINDOWS="true", RUN_INSTALLER="true", ALLOW_SUBSTANTIVE="true",
@@ -364,6 +372,7 @@ class AllowSubstantiveParsingTests(unittest.TestCase):
             "CLASSIFY_RESULT": "success",
             "HYGIENE_RESULT": "success",
             "PUBLIC_EXPORT_RESULT": "success",
+            "GUEST_FIXTURES_RESULT": "skipped",
             "PYTHON_RESULT": "skipped",
             "NATIVE_RESULT": "skipped",
             "ANDROID_RESULT": "skipped",
@@ -412,6 +421,7 @@ class ApplicabilityParsingTests(unittest.TestCase):
             "CLASSIFY_RESULT": "success",
             "HYGIENE_RESULT": "success",
             "PUBLIC_EXPORT_RESULT": "success",
+            "GUEST_FIXTURES_RESULT": "success",
             "PYTHON_RESULT": "success",
             "NATIVE_RESULT": "success",
             "ANDROID_RESULT": "success",
@@ -539,6 +549,73 @@ class ApplicabilityParsingTests(unittest.TestCase):
                     self.assertFalse(evaluate_environment(env))
 
 
+class GuestFixturesTests(unittest.TestCase):
+    """The guest fixtures job is required whenever its condition holds (.github/workflows/ci.yml).
+
+    It builds the programs the Python suite and the Windows job download, so it is routed by
+    run_python, run_windows and run_installer, and like every substantive job only while
+    allow_substantive is true. A failed, cancelled or wrongly skipped run fails CI required;
+    a run its condition skipped does not.
+    """
+
+    ROUTES = ("RUN_PYTHON", "RUN_WINDOWS", "RUN_INSTALLER")
+    QUIET = {"RUN_PYTHON": "false", "RUN_NATIVE": "false", "RUN_WINDOWS": "false", "RUN_INSTALLER": "false",
+             "PYTHON_RESULT": "skipped", "NATIVE_RESULT": "skipped", "ANDROID_RESULT": "skipped",
+             "WINDOWS_RESULT": "skipped", "INSTALLER_RESULT": "skipped", "GUEST_FIXTURES_RESULT": "skipped"}
+    RESULTS = {"RUN_PYTHON": "PYTHON_RESULT", "RUN_WINDOWS": "WINDOWS_RESULT", "RUN_INSTALLER": "INSTALLER_RESULT"}
+
+    def _routed(self, run_key: str, outcome: str | None) -> dict[str, str]:
+        """A full run in which only ``run_key`` routes the fixtures, its gate passed, and the
+        fixture job ended with ``outcome`` (``None``: the workflow passed no result)."""
+        env = _tier_env(**self.QUIET)
+        env[run_key] = "true"
+        env[self.RESULTS[run_key]] = "success"
+        if run_key == "RUN_INSTALLER":
+            env["WINDOWS_RESULT"] = "success"
+        if outcome is None:
+            del env["GUEST_FIXTURES_RESULT"]
+        else:
+            env["GUEST_FIXTURES_RESULT"] = outcome
+        return env
+
+    def test_a_routed_fixture_job_must_succeed(self) -> None:
+        for run_key in self.ROUTES:
+            with self.subTest(run_key=run_key):
+                self.assertTrue(evaluate_environment(self._routed(run_key, "success")))
+            for outcome in ("failure", "cancelled", "skipped", "", "garbage", None):
+                with self.subTest(run_key=run_key, outcome=outcome):
+                    self.assertFalse(evaluate_environment(self._routed(run_key, outcome)))
+
+    def test_a_fixture_job_its_condition_skipped_passes(self) -> None:
+        # No consumer routed (a native-only change): the job is skipped, and that is right.
+        native = _tier_env(**dict(self.QUIET, RUN_NATIVE="true", NATIVE_RESULT="success", ANDROID_RESULT="success"))
+        self.assertTrue(evaluate_environment(native))
+        self.assertTrue(evaluate_environment(_tier_env(**self.QUIET)))
+        # A push to main suppresses the substantive jobs, the fixture job among them.
+        push = _tier_env(**dict(self.QUIET, RUN_PYTHON="true", RUN_WINDOWS="true", RUN_INSTALLER="true"),
+                         EVENT_NAME="push", ALLOW_SUBSTANTIVE="false")
+        self.assertTrue(evaluate_environment(push))
+        self.assertFalse(evaluate_environment(dict(push, EVENT_NAME="pull_request")))
+
+    def test_a_light_run_is_not_green_whatever_the_fixture_job_did(self) -> None:
+        for outcome in ("success", "skipped", "failure"):
+            for overrides in ({"TIER": "light", "ALLOW_SUBSTANTIVE": "false"}, {"DRAFT": "true"}):
+                with self.subTest(outcome=outcome, overrides=overrides):
+                    env = dict(_tier_env(GUEST_FIXTURES_RESULT=outcome), **overrides)
+                    self.assertFalse(evaluate_environment(env))
+
+    def test_the_aggregate_function_requires_an_applicable_fixture_job(self) -> None:
+        applicable = {"guest-fixtures": True, "python-tools": True}
+        passed = _results(**{"guest-fixtures": "success", "python-tools": "success"})
+        self.assertTrue(required_gate_passes(passed, applicable, event_name="pull_request"))
+        for outcome in ("failure", "cancelled", "skipped", ""):
+            with self.subTest(outcome=outcome):
+                results = dict(passed, **{"guest-fixtures": outcome})
+                self.assertFalse(required_gate_passes(results, applicable, event_name="pull_request"))
+        # Suppressed on a push to main, as every substantive job is.
+        self.assertTrue(required_gate_passes(_results(), applicable, event_name="push", allow_substantive=False))
+
+
 _SUBSTANTIVE = (
     ("PYTHON_RESULT", "RUN_PYTHON"),
     ("NATIVE_RESULT", "RUN_NATIVE"),
@@ -553,6 +630,7 @@ def _tier_env(**overrides: str) -> dict[str, str]:
         "CLASSIFY_RESULT": "success",
         "HYGIENE_RESULT": "success",
         "PUBLIC_EXPORT_RESULT": "success",
+        "GUEST_FIXTURES_RESULT": "success",
         "PYTHON_RESULT": "success",
         "NATIVE_RESULT": "success",
         "ANDROID_RESULT": "success",

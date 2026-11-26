@@ -8,7 +8,7 @@ on:
   #   * light, the quick checks: classify, hygiene, public_export,
   #     quick_checks and their aggregate ci_quick. allow_substantive is false,
   #     which skips python_tools, native_tools, linux_gcc16, android_build,
-  #     windows_runtime, windows_installer and the profile-zero fixture build.
+  #     windows_runtime, windows_installer and guest_fixtures (the fixture builds).
   #     ci_required does not run, and tools/ci_required.py would fail it if it
   #     did, so a light run never turns `CI required` green.
   #   * full: every gate the changed paths route, and ci_required.
@@ -380,36 +380,22 @@ jobs:
 
   # Public-export candidate audit (#293/#294), in its own job so it overlaps the all-files
   # hygiene checks instead of running after them (#735 item 5). It is a separate required
-  # result: ci_required fails unless it succeeds, and every gate that waited for hygiene
-  # also waits for it. The job runs on every event, because publication integrity must
+  # result: ci_required fails unless it succeeds, but no gate waits for it, as none waits
+  # for hygiene (docs/CI.md, "Hygiene beside the substantive gates"). The job runs on every
+  # event, because publication integrity must
   # never be path-dependent (tools/test_ci_paths.py). Its export step runs when the
   # classifier routes security_publication: the publication files and the export tool
   # and every gate it runs (tools/ci_paths.py PUBLIC_EXPORT_TOOLS), every full-matrix
   # event, and every manual run.
-  #
-  # The job also builds the profile-zero fixture, the steps of the former
-  # profile_zero_fixture job (docs/CI.md, "Jobs per run"). They run after the export
-  # step, so the export still sees the clean checkout, and only under BUILD_PROFILE_ZERO:
-  # that job's old condition, plus run_installer, which also starts the Windows job whose
-  # smoke and routes parts download these fixtures (an installer-only change starts it with
-  # run_python and run_windows both false). The steps never gate the
-  # export: the job-level condition names no path output, and the export step names
-  # only security_publication.
   public_export:
-    name: Public export audit and profile-zero fixture
+    name: Public export audit
     # The classifier picks the runner (docs/CI.md, "Self-hosted Linux runners"):
     # ubuntu-26.04, or the nk-wsl pool for a trusted run while the pool is up.
     runs-on: ${{ fromJSON(needs.classify.outputs.linux_runner_2604 || '"ubuntu-26.04"') }}
     needs: classify
     if: ${{ always() && needs.classify.result == 'success' }}
-    # The sum of the two former jobs' limits (15 + 15).
-    timeout-minutes: 30
-    env:
-      BUILD_PROFILE_ZERO: >-
-        ${{ needs.classify.outputs.allow_substantive == 'true' &&
-            (needs.classify.outputs.run_python == 'true' ||
-             needs.classify.outputs.run_windows == 'true' ||
-             needs.classify.outputs.run_installer == 'true') }}
+    # Its own limit from before the fixture steps joined it (docs/CI.md, "Jobs per run").
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -485,13 +471,58 @@ jobs:
             exit 1
           fi
 
-      # The former profile_zero_fixture job. The profile-zero guest
+  guest_fixtures:
+    name: Guest fixtures built from source
+    # The guest programs built from source for the jobs that run them. This was the
+    # profile_zero_fixture job until #2198 merged it into public_export after the export step;
+    # it is its own job again so that the gates no longer wait for the export audit (docs/CI.md,
+    # "Hygiene beside the substantive gates"). python_tools and windows_runtime download its
+    # artifacts and need it; ci_required requires its success whenever its condition holds.
+    # The condition is the one BUILD_PROFILE_ZERO carried in public_export: the former job's
+    # (allow_substantive, and run_python or run_windows) plus run_installer, which also starts
+    # the Windows job whose smoke and routes parts download these fixtures (an installer-only
+    # change starts it with run_python and run_windows both false). The steps keep it as their
+    # own condition too, as they had in public_export.
+    #
+    # The classifier picks the runner (docs/CI.md, "Self-hosted Linux runners"):
+    # ubuntu-26.04, or the nk-wsl pool for a trusted run while the pool is up.
+    runs-on: ${{ fromJSON(needs.classify.outputs.linux_runner_2604 || '"ubuntu-26.04"') }}
+    needs: [classify]
+    if: >-
+      ${{ always() && needs.classify.result == 'success' &&
+          needs.classify.outputs.allow_substantive == 'true' &&
+          (needs.classify.outputs.run_python == 'true' ||
+           needs.classify.outputs.run_windows == 'true' ||
+           needs.classify.outputs.run_installer == 'true') }}
+    # The profile_zero_fixture job's limit (docs/CI.md, "Jobs per run").
+    timeout-minutes: 15
+    env:
+      BUILD_PROFILE_ZERO: >-
+        ${{ needs.classify.outputs.allow_substantive == 'true' &&
+            (needs.classify.outputs.run_python == 'true' ||
+             needs.classify.outputs.run_windows == 'true' ||
+             needs.classify.outputs.run_installer == 'true') }}
+    steps:
+      # The default depth-1 checkout: public_export's full history is for its history audit,
+      # and the homebrew build below checks only that HEAD is this run's commit.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+
+      # The profile-zero guest
       # (tests/fixtures/profile_zero/main.c) is built here from source with the PSPDEV
       # distribution pinned by assets/upstream/pspdev.lock.json and checked byte-for-byte
       # against the committed tests/fixtures/profile_zero/prebuilt/SHA256SUMS, so the repository
       # stores no generated executable (#1100, OpenSSF OSPS-QA-05.01). The Python and
       # Windows route jobs download the verified bytes as an artifact. `python3` in these
-      # steps is the CPython 3.15.2 set up above; the separate job ran the image's own.
+      # steps is the CPython 3.15.2 set up above, as in public_export; profile_zero_fixture
+      # ran the image's own.
       - name: Install PSPDEV from the checked-in lock
         if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
         run: |
@@ -705,10 +736,10 @@ jobs:
     # (audit 2026-11-17 F-6a075a43).
     permissions:
       contents: read
-    # Waits for classify and the public-export job (which also builds the profile-zero
-    # fixture), not hygiene: hygiene runs beside it and ci_required still requires its
-    # result (docs/CI.md, "Hygiene beside the substantive gates").
-    needs: [classify, public_export]
+    # Waits for classify and guest_fixtures (which builds the profile-zero fixture it
+    # downloads), not hygiene or the public-export audit: they run beside it and ci_required
+    # still requires their results (docs/CI.md, "Hygiene beside the substantive gates").
+    needs: [classify, guest_fixtures]
     # The suite is ~58 minutes serially on a hosted runner under coverage (the
     # median of five landing-batch runs, 2026-11-10). Four runners split the test files with
     # tools/ci_test_shards.py: a deterministic longest-first bin packing over the
@@ -731,7 +762,7 @@ jobs:
         shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3]') }}
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
-          needs.public_export.result == 'success' &&
+          needs.guest_fixtures.result == 'success' &&
           needs.classify.outputs.allow_substantive == 'true' &&
           needs.classify.outputs.run_python == 'true' }}
     # A shard was planned at about 7 minutes of hosted-runner time and measured 17-20
@@ -873,10 +904,9 @@ jobs:
     permissions:
       contents: read
     # Not gated on hygiene (docs/CI.md, "Hygiene beside the substantive gates").
-    needs: [classify, public_export]
+    needs: [classify]
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
-          needs.public_export.result == 'success' &&
           needs.classify.outputs.allow_substantive == 'true' &&
           needs.classify.outputs.run_native == 'true' }}
     # The gates are split into parallel matrix parts of comparable length, as
@@ -1780,10 +1810,9 @@ jobs:
       options: --init
     permissions:
       contents: read
-    needs: [classify, public_export]
+    needs: [classify]
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
-          needs.public_export.result == 'success' &&
           needs.classify.outputs.allow_substantive == 'true' &&
           needs.classify.outputs.run_native == 'true' }}
     timeout-minutes: 20
@@ -1845,10 +1874,9 @@ jobs:
     # token; coverage_upload sends its reports to Codecov (audit 2026-11-17 F-6a075a43).
     permissions:
       contents: read
-    needs: [classify, public_export]
+    needs: [classify]
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
-          needs.public_export.result == 'success' &&
           needs.classify.outputs.allow_substantive == 'true' &&
           needs.classify.outputs.run_native == 'true' &&
           (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
@@ -2445,10 +2473,9 @@ jobs:
     permissions:
       contents: read
     # Not gated on hygiene (docs/CI.md, "Hygiene beside the substantive gates").
-    needs: [classify, public_export]
+    needs: [classify]
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
-          needs.public_export.result == 'success' &&
           needs.classify.outputs.allow_substantive == 'true' &&
           needs.classify.outputs.run_native == 'true' }}
     timeout-minutes: 45
@@ -2567,11 +2594,11 @@ jobs:
     # PR's critical path. A Linux failure still fails ci_required; the Windows run
     # is then merely redundant, which costs nothing on a public repository.
     # Not gated on hygiene (docs/CI.md, "Hygiene beside the substantive gates"). The
-    # public_export job also builds the profile-zero fixture the routes part downloads.
-    needs: [classify, public_export]
+    # guest_fixtures job builds the fixtures the routes and smoke parts download.
+    needs: [classify, guest_fixtures]
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
-          needs.public_export.result == 'success' &&
+          needs.guest_fixtures.result == 'success' &&
           needs.classify.outputs.allow_substantive == 'true' &&
           (needs.classify.outputs.run_windows == 'true' ||
            needs.classify.outputs.run_installer == 'true') }}
@@ -2954,7 +2981,7 @@ jobs:
 
       # The two #309 manifests use this manifest-driven guest -> ProgramImage ->
       # AOT package -> production runtime route (#557). The Windows runner has no
-      # PSPDEV/PSPSDK, so the route runs on the fixture the public_export job
+      # PSPDEV/PSPSDK, so the route runs on the fixture the guest_fixtures job
       # built from source and verified against the pinned digests; on hosts with
       # PSPDEV the test rebuilds it itself. A missing host multimedia dependency
       # (Vulkan SDK / SDL3) fails the step (NK_PROFILE_ZERO_REQUIRED) instead of
@@ -2999,7 +3026,7 @@ jobs:
       # homebrew_view probe) runs from ms0:/PSP/GAME/<folder>/ and checks the files beside it;
       # the same program added again from a second folder stops by name, and the problem
       # report keeps both folders out (#2426).
-      # The programs are the ones public_export built from this commit, handed over in this
+      # The programs are the ones guest_fixtures built from this commit, handed over in this
       # run; the step checks their digests and BUILT_FROM. NK_HOMEBREW_E2E_REQUIRED=1 makes a
       # missing or unreadable folder, or a tool or player build the route lacks, fail rather
       # than skip, and a skipped test is not a pass either: the summary must be a bare OK.
@@ -3432,9 +3459,10 @@ jobs:
     # The classifier picks the runner (docs/CI.md, "Self-hosted Linux runners"):
     # ubuntu-26.04, or the nk-wsl pool for a trusted run while the pool is up.
     runs-on: ${{ fromJSON(needs.classify.outputs.linux_runner_2604 || '"ubuntu-26.04"') }}
-    # The Markdown lint and the main smoke are steps of hygiene, and the profile-zero
-    # fixture build is a step of public_export, so those jobs' results carry them.
-    needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime, windows_installer]
+    # The Markdown lint and the main smoke are steps of hygiene, so its result carries them.
+    # guest_fixtures is routed like a gate: tools/ci_required.py requires its success whenever
+    # its condition holds (allow_substantive, and run_python, run_windows or run_installer).
+    needs: [classify, hygiene, public_export, guest_fixtures, python_tools, native_tools, android_build, windows_runtime, windows_installer]
     # Not on a light run: it suppressed the substantive gates, so this job could only
     # fail there (tools/ci_required.py refuses it by TIER and by EVENT_NAME), and a
     # red mark on every healthy pull request would read as a broken one. Skipped is
@@ -3447,6 +3475,7 @@ jobs:
       CLASSIFY_RESULT: ${{ needs.classify.result }}
       HYGIENE_RESULT: ${{ needs.hygiene.result }}
       PUBLIC_EXPORT_RESULT: ${{ needs.public_export.result }}
+      GUEST_FIXTURES_RESULT: ${{ needs.guest_fixtures.result }}
       PYTHON_RESULT: ${{ needs.python_tools.result }}
       NATIVE_RESULT: ${{ needs.native_tools.result }}
       ANDROID_RESULT: ${{ needs.android_build.result }}

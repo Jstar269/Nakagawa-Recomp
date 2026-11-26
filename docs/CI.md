@@ -20,7 +20,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 
 | Event/change | Jobs that run | Jobs intentionally skipped |
 | --- | --- | --- |
-| Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the profile-zero fixture build and `CI required`, whatever the changed paths |
+| Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the guest fixture builds and `CI required`, whatever the changed paths |
 | Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required; Python tooling (the whole suite) when a module under `tools/` names a changed document's file name, since a Python test can pin its text (`docs/SETUP.md`'s Network use list, for one) | native/translation, Windows; Python tooling when no `tools/` module names any changed document |
 | Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over four shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
@@ -57,9 +57,11 @@ change, a manual run, the nightly schedule, a merge group) used to need 23 jobs,
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
 shard makes 16, a fourth Windows group makes 17, the short coverage upload job
-(`coverage_upload`), which starts only after the Python shards end, makes 18, and installer and
+(`coverage_upload`), which starts only after the Python shards end, makes 18, the guest fixture
+builds, split out of the public-export job again (`guest_fixtures`, which ends before the Python
+and Windows jobs start, so it never runs beside them), make 19, and installer and
 Windows-runtime changes add one path-gated Windows installer job. The nightly schedule and a manual
-run add the informational C coverage job (`c_coverage`): 20 jobs in all, with the installer job
+run add the informational C coverage job (`c_coverage`): 21 jobs in all, with the installer job
 they also run. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
@@ -68,10 +70,13 @@ where it ran before:
 - The main smoke steps no longer wait for the public-export job. The old `main_smoke` job
   needed `public_export` to succeed; as hygiene steps they wait only for hygiene's own steps,
   so they run in more cases, not fewer.
-- The profile-zero steps now also wait for the export step to succeed, because they follow
-  it in one job. Their consumers already needed `public_export` to succeed, and a failed
-  export still fails `CI required`.
-- The profile-zero steps' `python3` is the job's CPython 3.15.2, not the runner image's own.
+- The profile-zero steps also waited for the export step to succeed while they followed it
+  in one job. Their consumers already needed `public_export` to succeed, and a failed
+  export still failed `CI required`. They are their own job again, `guest_fixtures` (see
+  [Hygiene beside the substantive gates](#hygiene-beside-the-substantive-gates)), and wait
+  for the export step no more.
+- The profile-zero steps' `python3` is the job's CPython 3.15.2, not the runner image's own;
+  `guest_fixtures` keeps that Python setup.
 
 The jobs:
 
@@ -79,7 +84,8 @@ The jobs:
 | --- | --- | --- |
 | `classify` | 1 job | unchanged |
 | `hygiene` ("Hygiene and security") | 3 jobs: `hygiene` 2.2 min, `markdown` 0.4 min, `main_smoke` (pushes to `main` and full-matrix events only) | 1 job, about 2.5 min: hygiene's steps, then the main smoke steps, then the Markdown lint |
-| `public_export` | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job, about 0.7 min: the export audit, then the profile-zero fixture build |
+| `public_export` ("Public export audit") | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job: the export audit. The fixture builds were its later steps (the merged job's median 0.7 min) until they became `guest_fixtures` again |
+| `guest_fixtures` ("Guest fixtures built from source") | the `profile_zero_fixture` job above | 1 job again, on the Python, Windows and installer routes: the profile-zero, Nakagawa Font Copy and homebrew builds |
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
 | `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
 | `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
@@ -99,20 +105,28 @@ The jobs:
   same two commands on the same commit. The Markdown steps carry `run_markdown` with `!cancelled()`: the
   Markdown job never waited for hygiene, so its lint still runs and reports when an earlier
   step failed. Node.js is set up after pre-commit, so no hook's environment changes.
-- **Public export.** The export step runs first, on the clean checkout, under its own
-  condition; the job and that step still read no path output. The profile-zero steps follow,
-  under the former job's condition (`allow_substantive` and `run_python` or `run_windows`,
-  carried by the job's `BUILD_PROFILE_ZERO`), and upload the same `profile-zero-fixture`
-  artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
-  Under the same condition, the job then builds the two homebrew fixtures
+- **Public export.** The job holds the export step, on its own full-history checkout, under its
+  own condition, and nothing else; neither the job nor that step reads a path output. From
+  #2198 the profile-zero steps followed it in the same job; they are the `guest_fixtures` job
+  again, so that no gate waits for the export audit (see
+  [Hygiene beside the substantive gates](#hygiene-beside-the-substantive-gates)). Its limit is
+  its former 15 minutes again.
+- **Guest fixtures.** The job runs under the former job's condition (`allow_substantive` and
+  `run_python` or `run_windows`) plus `run_installer`, the condition its steps carried in
+  `public_export` as `BUILD_PROFILE_ZERO` and still carry. It builds the profile-zero fixture
+  and uploads the same `profile-zero-fixture` artifact, with `python3` the job's CPython 3.15.2
+  as in `public_export`, rather than the runner image's. It then builds Nakagawa Font Copy and
+  the two homebrew fixtures
   (`tests/fixtures/pspdev_phase5`, `tests/fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
-  for the Windows `smoke` part (#2143). `BUILD_PROFILE_ZERO` also holds for `run_installer`:
+  for the Windows `smoke` part (#2143). The condition holds for `run_installer` because
   an installer-only change (`assets/installer/**`, say) starts the Windows job with
   `run_python` and `run_windows` both false, and its `smoke` and `routes` parts download
-  this job's artifacts.
-  The Python, native and Windows jobs wait for this job as before; native now also waits for
-  the fixture builds: about 25 seconds for the profile-zero fixture, plus a few seconds for
-  the two homebrew programs (3 seconds locally in WSL).
+  this job's artifacts. Its checkout is the default single commit: the full history
+  `public_export` fetches is for the export's history audit. Its limit is the former job's 15
+  minutes.
+  The Python and Windows jobs wait for it, because they download its artifacts; native no longer
+  waits for the fixture builds (about 25 seconds for the profile-zero fixture, plus a few seconds
+  for the two homebrew programs, 3 seconds locally in WSL).
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
   about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
@@ -151,12 +165,16 @@ The jobs:
   (or the log's last lines) beside its exit code. The job requires
   `allow_substantive == true`, so quick runs skip this heavy gate.
 
-`CI required` needs `classify`, `hygiene`, `public_export`, `python_tools`, `native_tools`,
+`CI required` needs `classify`, `hygiene`, `public_export`, `guest_fixtures`, `python_tools`, `native_tools`,
 `windows_runtime`, `windows_installer` and `android_build`. The installer result is required
-only when `run_installer` is true. The Markdown lint, the main smoke and the fixture build reach it through the
-two always-required jobs they now belong to, so `tools/ci_required.py` no longer takes a result
-or run flag of their own. Each merged job's `timeout-minutes` covers its parts: hygiene 35
-(15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part plus the own
+only when `run_installer` is true, and the fixture job's (`GUEST_FIXTURES_RESULT`) whenever its
+condition holds: `allow_substantive`, and `run_python`, `run_windows` or `run_installer`. The
+Markdown lint and the main smoke reach it through the always-required hygiene job they now belong
+to, so `tools/ci_required.py` takes no result or run flag of their own. The fixture build reached
+it through `public_export` while it was a step there; the separate `profile_zero_fixture` job
+before that reached it only through the gates that needed it. Each merged job's `timeout-minutes`
+covers its parts: hygiene 35 (15 + 10 + 10), public export 30 (15 + 15) while it held the
+fixture steps, 15 each for it and `guest_fixtures` now, each Windows group 25 per part plus the own
 limit of a step added to a part since (smoke 40 with the homebrew import routes' 15, routes
 25, ladder-fuzz 75, selftests 25), and each Python shard 60, twice the former 30 because it
 does about twice the work.
@@ -169,7 +187,8 @@ shorter than a Python shard, so a run on idle runners takes about as long as bef
 time waiting when other runs are queued.
 `tools/test_public_ci_wiring.py` (`PublicExportJobTests`, `WindowsRuntimePartitionTests`)
 pins the merged jobs: every former step with its command and condition, its order, and every
-Windows part in exactly one group.
+Windows part in exactly one group. It pins the split of `public_export` and `guest_fixtures` the
+same way: each step in exactly one of the two, in order, with its command and condition.
 
 #### Tests-only changes
 
@@ -314,7 +333,7 @@ Hosted CI has two tiers. The **quick checks** are `Classify change`, `Hygiene an
 Markdown step), the public export audit, `Generated files and repository lints` and their aggregate,
 `CI quick checks`: about 5 runner-minutes. The **full checks** add the Python tooling gates, the native
 and translation gates, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the
-Windows installer job and the profile-zero fixture build, as the changed paths route them, and their
+Windows installer job and the guest fixture builds, as the changed paths route them, and their
 aggregate, `CI required`: about 144 runner-minutes for a change that routes everything. OSV-Scanner,
 Dependency Review, the provenance attestation and the Trusted CI verdict run on every push in both
 tiers.
@@ -431,18 +450,33 @@ the page's status text in step with `README.md`, `docs/COMPATIBILITY.md` and the
 
 ### Hygiene beside the substantive gates
 
-The native job waits only for `classify` and the public-export audit
-(`needs: [classify, public_export]`), as do the Python and Windows jobs, which also use
-the profile-zero fixture that job builds. None of them waits for `hygiene`, which runs
-beside them. Before this change they waited for hygiene too,
-so its all-files pre-commit run, Betterleaks history scan and canaries (98 s median
-across 40 recent pull requests, as measured from their job timings) sat in front of
-every expensive gate. The public-export audit stays a dependency: it is the
-publication-integrity boundary, it runs in about 52 s, and it keeps the candidate
-export ordered before any substantive job starts. `CI required` still requires the
-hygiene result (`HYGIENE_RESULT`) and the public-export result, so no failure is
-hidden. The trade-off is that a pull request that fails hygiene now also spends
-runner time on the expensive gates that started beside it. The main smoke is not
+The native job, the GCC 16 canary, the Android launcher build and the C coverage job wait
+only for `classify` (`needs: [classify]`). The Python and Windows jobs also wait for
+`guest_fixtures` (`needs: [classify, guest_fixtures]`) and require its success, because they
+download the profile-zero and homebrew fixtures it builds. None of them waits for `hygiene`
+or the public-export audit, which run beside them. `CI required` still requires the hygiene
+result (`HYGIENE_RESULT`), the public-export result (`PUBLIC_EXPORT_RESULT`) and, whenever
+its condition holds, the fixture job's (`GUEST_FIXTURES_RESULT`), so no failure is hidden.
+The trade-off is that a pull request that fails hygiene or the export audit also spends
+runner time on the expensive gates that started beside it, where a failed audit used to skip
+them.
+
+The gates first waited for hygiene too, so its all-files pre-commit run, Betterleaks history
+scan and canaries (98 s median across 40 recent pull requests, as measured from their job
+timings) sat in front of every expensive gate. When they stopped waiting for it, the
+public-export audit stayed a dependency: it is the publication-integrity boundary, it was
+measured at about 52 s, and it kept the candidate export ordered before any substantive job
+started. In #2198 the separate `profile_zero_fixture` job became later steps of
+`public_export`, so the jobs that download the fixtures waited for the export step as well.
+That step runs only when the classifier routes `security_publication` and on a manual run,
+and then it is long. Over the 20 newest successful first-attempt runs of `ci.yml` that ran the
+full matrix (2026-11-25 20:44 to 2026-11-26 18:05 UTC), it ran in 4, for a median of 233 s
+(189 to 237 s). The merged job's median was 0.7 minutes, but its 90th percentile was
+4.5 minutes and its longest 4.7, and the gates' jobs were created a median of 1.1 minutes
+after the run started, 5.0 minutes at the 90th percentile and 5.1 at most. So the fixture
+builds are their own job again, `guest_fixtures`: on a run whose export step runs, the gates
+are expected to start about as early as on one whose step is skipped, once the fixture job
+has ended, and the audit runs beside them. The main smoke is not
 changed: its steps, now in the hygiene job after hygiene's own, run on pushes to `main` and
 on manual and merge-queue runs (the full-matrix events), never on pull requests, and they are
 not a substantive gate.
@@ -1469,7 +1503,7 @@ belongs to a new subsystem.
 
 GitHub-hosted Windows time is billed at a higher multiplier than Linux time. The
 workflow therefore starts the Windows runner only after the cheaper Linux classify
-and public-export jobs (the second also builds the fixture), cancels superseded PR runs (runs on
+and guest fixture jobs (the second builds the fixtures it downloads), cancels superseded PR runs (runs on
 `main` never cancel each other: each push, schedule, manual run and merge group is its own
 concurrency group), and avoids repeating the full matrix on
 ordinary main pushes. Besides dependency and tool caches (pip, the SDL3 installs),
@@ -2184,7 +2218,7 @@ hosted images, exactly as before.
 (`tools/ci_paths.py`) name the runner for every Linux job of CI except `classify`, which
 decides and so stays hosted: the native and translation gates and the Python shards
 (hosted fallback `ubuntu-24.04`), and hygiene with its Markdown and main smoke steps,
-the export audit with the profile-zero fixture build, and `CI required` (hosted fallback
+the export audit, the guest fixture builds, and `CI required` (hosted fallback
 `ubuntu-26.04`; the
 pool's image is Ubuntu 24.04 for all of them). The Windows gates stay on GitHub's
 Windows runners. The outputs name the pool only for a trusted run, whose code is
@@ -2281,7 +2315,7 @@ first on `PATH` (#294). The contract is explicit:
 
 | Job / environment | Python running `tools/*` and the fixture generators |
 | --- | --- |
-| Linux jobs (`classify`, `hygiene`, `public_export`, `python_tools`, `native_tools`, `ci_required`) | `actions/setup-python` CPython 3.15.2 |
+| Linux jobs (`classify`, `hygiene`, `public_export`, `guest_fixtures`, `python_tools`, `native_tools`, `ci_required`) | `actions/setup-python` CPython 3.15.2 |
 | `windows_runtime` (MSYS2 UCRT64 shell) | Windows CPython 3.15.2 from `actions/setup-python`, passed through `PYTHON`; MSYS2's UCRT64 Python 3.14.8 is not used for repository tools |
 | Local Windows runs | Windows CPython 3.15.x from the python.org installer; set `PYTHON` explicitly when MSYS2 comes first on `PATH` |
 
@@ -2364,7 +2398,7 @@ developer runs locally, without private inputs:
   guest-service cases for each manifest. It runs in the `routes` part, in the
   `routes` group (25 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
   builds and runtime launches. The guest bytes are built from the fixture's own
-  `main.c` and `Makefile` by the profile-zero steps of the `public_export` job (pinned PSPDEV, checked
+  `main.c` and `Makefile` by the profile-zero steps of the `guest_fixtures` job (pinned PSPDEV, checked
   against the committed `tests/fixtures/profile_zero/prebuilt/SHA256SUMS`) and downloaded
   as an artifact, so the repository stores no generated executable (#1100) and the
   Windows runner still executes the whole route; where PSPDEV is installed, the
@@ -2394,7 +2428,7 @@ developer runs locally, without private inputs:
     from a second folder stops with `HOMEBREW_ALREADY_ADDED`, and a problem report built from
     that run names neither folder.
 
-  The Windows runner has no PSPDEV, so the programs come from the `public_export` job, built
+  The Windows runner has no PSPDEV, so the programs come from the `guest_fixtures` job, built
   with the locked PSPDEV from the fixtures' own `main.c` and `Makefile`. That job puts them in
   one folder: each program's `EBOOT.PBP` beside the sources it was built from, `BUILT_FROM`
   (the commit) and `SHA256SUMS` over all of them. It uploads the folder as the
@@ -2427,7 +2461,7 @@ developer runs locally, without private inputs:
   test reports an explicit `SKIP` with the printed missing-dependency reason.
   The job also runs the production smoke with its executable staged into a fresh
   directory outside the build tree (`production-smoke-staged`).
-- The `public_export` job ("Public export audit and profile-zero fixture") is ungated
+- The `public_export` job ("Public export audit") is ungated
   and runs in parallel with `hygiene` (#735 item 5). Its step "Exercise public-export
   generation and candidate audit" runs on `security_publication` changes (which include the
   export tool and every gate it runs, `PUBLIC_EXPORT_TOOLS` in `tools/ci_paths.py`), every

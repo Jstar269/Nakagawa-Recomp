@@ -8,7 +8,7 @@ profile-zero manifests (`assets/titles/synthetic.json` and
 `assets/titles/synthetic-title2.json`). The repository commits only the digests
 of the PSPDEV build output (`prebuilt/SHA256SUMS`), not the generated executables
 themselves (#1100). Hosted CI builds them from this source in the
-`public_export` job, checks them against the digests and hands them to the
+`guest_fixtures` job, checks them against the digests and hands them to the
 jobs that run `mingw32-make profile-zero-e2e`, the whole manifest -> ProgramImage
 -> AOT package -> production-runtime route; a host with PSPDEV rebuilds them
 itself.

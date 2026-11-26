@@ -11,9 +11,8 @@ from typing import Mapping, Sequence
 
 
 # The path-gated jobs. The Markdown lint and the main smoke are steps of the
-# always-required hygiene job, and the profile-zero fixture build is a step of the
-# always-required public-export job (.github/workflows/ci.yml), so their results
-# reach this aggregate through those two jobs.
+# always-required hygiene job (.github/workflows/ci.yml), so their results reach this
+# aggregate through it.
 _GATES = (
     ("python-tools", "PYTHON_RESULT", "RUN_PYTHON"),
     ("native-tools", "NATIVE_RESULT", "RUN_NATIVE"),
@@ -23,6 +22,13 @@ _GATES = (
     ("windows-installer", "INSTALLER_RESULT", "RUN_INSTALLER"),
 )
 
+# The guest fixtures job (guest_fixtures in .github/workflows/ci.yml) builds the programs the
+# Python suite and the Windows job download, so it is routed whenever one of those is: it
+# applies when any of these run flags is true (run_installer also starts the Windows job).
+# Before #2198 it was the profile_zero_fixture job, which this aggregate did not read: its
+# result reached it only through the gates that needed it.
+_FIXTURE_GATE = ("guest-fixtures", "GUEST_FIXTURES_RESULT", ("RUN_PYTHON", "RUN_WINDOWS", "RUN_INSTALLER"))
+
 # The run flags of the steps folded into hygiene. Their results arrive through
 # HYGIENE_RESULT, but each flag must still be an explicit boolean: a missing or
 # misnamed classifier output would otherwise skip the Markdown lint or the main
@@ -30,7 +36,7 @@ _GATES = (
 _FOLDED_STEP_FLAGS = ("RUN_MARKDOWN", "RUN_MAIN_SMOKE")
 
 _SUBSTANTIVE_GATES = frozenset(
-    {"python-tools", "native-tools", "android-build", "windows-runtime", "windows-installer"}
+    {"python-tools", "native-tools", "android-build", "windows-runtime", "windows-installer", "guest-fixtures"}
 )
 
 #: The reason a Draft pull request's run is never green. A Draft runs only the quick
@@ -117,7 +123,7 @@ def required_gate_passes(
     if not allow_substantive and event_name != _SUPPRESSION_EVENT:
         return False
 
-    for name, _result_key, _run_key in _GATES:
+    for name in (*(gate for gate, _result_key, _run_key in _GATES), _FIXTURE_GATE[0]):
         should_run = applicable.get(name, False)
         if not allow_substantive and name in _SUBSTANTIVE_GATES:
             should_run = False
@@ -142,6 +148,12 @@ def evaluate_environment(environment: Mapping[str, str]) -> bool:
         if parsed is None:
             return False
         applicable[name] = parsed
+    name, result_key, run_keys = _FIXTURE_GATE
+    results[name] = environment.get(result_key, "")
+    flags = [_parse_boolean(environment.get(run_key)) for run_key in run_keys]
+    if None in flags:
+        return False
+    applicable[name] = any(flags)
     allow_substantive = _parse_boolean(environment.get("ALLOW_SUBSTANTIVE"))
     if allow_substantive is None:
         return False

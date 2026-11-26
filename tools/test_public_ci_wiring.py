@@ -258,7 +258,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn("needs.classify.outputs.run_installer == 'true'", runtime)
         required = "\n".join(jobs["ci_required"])
         self.assertIn(
-            "needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime, windows_installer]",
+            "needs: [classify, hygiene, public_export, guest_fixtures, python_tools, native_tools, android_build, windows_runtime, windows_installer]",
             required,
         )
         self.assertIn("INSTALLER_RESULT: ${{ needs.windows_installer.result }}", required)
@@ -878,7 +878,7 @@ class PublicCiWiringTests(unittest.TestCase):
 
         required_start = ci.index("  ci_required:\n")
         required_job = ci[required_start:]
-        self.assertIn("needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime, windows_installer]", required_job)
+        self.assertIn("needs: [classify, hygiene, public_export, guest_fixtures, python_tools, native_tools, android_build, windows_runtime, windows_installer]", required_job)
         self.assertIn("PUBLIC_EXPORT_RESULT: ${{ needs.public_export.result }}", required_job)
         self.assertIn("NATIVE_RESULT: ${{ needs.native_tools.result }}", required_job)
         self.assertIn("RUN_NATIVE: ${{ needs.classify.outputs.run_native }}", required_job)
@@ -2289,7 +2289,7 @@ class VfpuFuzzShardTests(unittest.TestCase):
 
     def test_ci_required_aggregates_every_windows_part(self) -> None:
         required = "\n".join(_ci_job_blocks()["ci_required"])
-        self.assertIn("needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime, windows_installer]", required)
+        self.assertIn("needs: [classify, hygiene, public_export, guest_fixtures, python_tools, native_tools, android_build, windows_runtime, windows_installer]", required)
         self.assertIn("WINDOWS_RESULT: ${{ needs.windows_runtime.result }}", required)
         self.assertIn("RUN_WINDOWS: ${{ needs.classify.outputs.run_windows }}", required)
 
@@ -2399,7 +2399,9 @@ class PublicExportJobTests(unittest.TestCase):
 
     The all-files checks and the candidate export used to run serially in one job. Splitting
     them runs both in parallel. The split may move a command between jobs; it may never drop
-    one, run one twice, or change its command or its condition.
+    one, run one twice, or change its command or its condition. The same holds for the guest
+    fixture builds: steps of public_export from #2198, their own job (guest_fixtures) again,
+    so the gates that download them no longer wait for the export audit.
     """
 
     HYGIENE_STEPS = (
@@ -2414,6 +2416,24 @@ class PublicExportJobTests(unittest.TestCase):
         "Run Betterleaks synthetic canaries",
     )
     EXPORT_STEP = "Exercise public-export generation and candidate audit"
+    #: public_export's steps: its checkout and Python setup, then the export step, and nothing else.
+    EXPORT_JOB_STEPS = ("Check out repository", "Set up Python", EXPORT_STEP)
+    FIXTURE_JOB = "guest_fixtures"
+    #: The jobs that download a fixture artifact, and the artifact steps they run.
+    FIXTURE_CONSUMERS = {
+        "python_tools": ("Fetch the profile-zero fixture built from source",),
+        "windows_runtime": ("Fetch the profile-zero fixture built from source",
+                            "Fetch the homebrew fixtures built from source"),
+    }
+    #: The substantive jobs that needed public_export only to start after it.
+    ORDERED_ONLY = ("native_tools", "linux_gcc16", "c_coverage", "android_build")
+    #: The condition BUILD_PROFILE_ZERO carried in public_export: guest_fixtures' own, and its steps'.
+    FIXTURE_ROUTE = (
+        "needs.classify.outputs.allow_substantive == 'true' && "
+        "(needs.classify.outputs.run_python == 'true' || "
+        "needs.classify.outputs.run_windows == 'true' || "
+        "needs.classify.outputs.run_installer == 'true')"
+    )
 
     def setUp(self) -> None:
         self.blocks = _ci_job_blocks()
@@ -2439,7 +2459,8 @@ class PublicExportJobTests(unittest.TestCase):
         "Lint repository Markdown": "run: npx --yes markdownlint-cli2@0.24.1",
     }
     MARKDOWN_CONDITION = "if: ${{ !cancelled() && needs.classify.outputs.run_markdown == 'true' }}"
-    # The steps of the former profile_zero_fixture job, now after the export step.
+    # The steps of the former profile_zero_fixture job, in guest_fixtures after its checkout and
+    # Python setup.
     PROFILE_ZERO_STEPS = (
         "Install PSPDEV from the checked-in lock",
         "Build the profile-zero fixture and check its pinned digests",
@@ -2603,6 +2624,13 @@ class PublicExportJobTests(unittest.TestCase):
     def test_export_step_moved_out_of_hygiene_into_its_own_job(self) -> None:
         self.assertNotIn(self.EXPORT_STEP, self._step_names(self.blocks["hygiene"]))
         self.assertIn(self.EXPORT_STEP, self._step_names(self.blocks["public_export"]))
+        self.assertNotIn(self.EXPORT_STEP, self._step_names(self.blocks[self.FIXTURE_JOB]))
+        # Each fixture step is in exactly one of the two jobs of the split: guest_fixtures. (The
+        # native and C coverage jobs install PSPDEV with a step of the same name, as before.)
+        for name in self.PROFILE_ZERO_STEPS:
+            with self.subTest(step=name):
+                self.assertEqual([job for job in ("public_export", self.FIXTURE_JOB)
+                                  if name in self._step_names(self.blocks[job])], [self.FIXTURE_JOB])
 
     def test_export_job_keeps_the_candidate_audit_condition_and_command(self) -> None:
         export = "\n".join(_ci_step(self.blocks["public_export"], self.EXPORT_STEP) or [])
@@ -2633,30 +2661,63 @@ class PublicExportJobTests(unittest.TestCase):
         block = self.blocks["public_export"]
         self.assertIn("    if: ${{ always() && needs.classify.result == 'success' }}", block)
         self.assertIn("    needs: classify", block)
-        # Only the profile-zero steps, which carry the former profile_zero_fixture job's
-        # condition, may read a path output; the job and the export step read none.
+        # The job holds the export step and the setup it needs, and nothing else: no fixture
+        # step, and no env of its own that a step could gate on.
+        self.assertEqual(self._step_names(block), list(self.EXPORT_JOB_STEPS))
+        self.assertNotIn("    env:", block)
+        self.assertNotIn("BUILD_PROFILE_ZERO", "\n".join(block))
+        # Neither the job nor the export step reads a path output.
+        ungated = "\n".join(block)
+        for gate in ("run_python", "run_native", "run_windows", "run_installer", "run_markdown",
+                     "run_main_smoke", "docs_only", "allow_substantive"):
+            self.assertNotIn(gate, ungated, "public_export must not be path-gated on %s" % gate)
+        for name in self.EXPORT_JOB_STEPS[:2]:
+            with self.subTest(step=name):
+                self.assertEqual(self._conditions(block, name), [])
+        self.assertEqual(
+            self._conditions(block, self.EXPORT_STEP),
+            ["if: >-"],
+        )
+        # The merged job's limit was the two former jobs' 15 + 15; apart, each has its 15 again.
+        self.assertIn("    timeout-minutes: 15", block)
+
+    def test_guest_fixtures_run_under_the_condition_their_steps_had(self) -> None:
+        """The fixture job runs exactly when BUILD_PROFILE_ZERO held in public_export, and its steps
+        keep that condition, each command and their order."""
+        block = self.blocks[self.FIXTURE_JOB]
+        self.assertIn("    name: Guest fixtures built from source", block)
+        self.assertIn("    needs: [classify]", block)
+        self.assertEqual(_job_if(block), "always() && needs.classify.result == 'success' && " + self.FIXTURE_ROUTE)
         env_start = block.index("    env:")
         steps_start = block.index("    steps:")
         self.assertEqual(
             " ".join(line.strip() for line in block[env_start:steps_start]),
-            "env: BUILD_PROFILE_ZERO: >- ${{ needs.classify.outputs.allow_substantive == 'true' && "
-            "(needs.classify.outputs.run_python == 'true' || "
-            "needs.classify.outputs.run_windows == 'true' || "
-            "needs.classify.outputs.run_installer == 'true') }}",
+            "env: BUILD_PROFILE_ZERO: >- ${{ " + self.FIXTURE_ROUTE + " }}",
         )
-        ungated = "\n".join(block[:env_start] + block[steps_start:])
-        for gate in ("run_python", "run_native", "run_windows", "run_markdown", "run_main_smoke",
-                     "docs_only", "allow_substantive"):
-            self.assertNotIn(gate, ungated, "public_export must not be path-gated on %s" % gate)
+        self.assertIn("    timeout-minutes: 15", block)
+        self.assertEqual(self._step_names(block), ["Check out repository", "Set up Python", *self.PROFILE_ZERO_STEPS])
         for name in self._step_names(block):
             with self.subTest(step=name):
-                expected = [self.PROFILE_ZERO_CONDITION] if name in self.PROFILE_ZERO_STEPS else None
-                if expected is not None:
-                    self.assertEqual(self._conditions(block, name), expected)
-                else:
-                    self.assertNotIn(self.PROFILE_ZERO_CONDITION, self._conditions(block, name))
+                expected = [self.PROFILE_ZERO_CONDITION] if name in self.PROFILE_ZERO_STEPS else []
+                self.assertEqual(self._conditions(block, name), expected)
+        # The checkout and the Python setup are public_export's, with the same action pins and
+        # Python, but the default depth-1 checkout: full history is for the export's history audit.
+        export = self.blocks["public_export"]
+        for name in ("Check out repository", "Set up Python"):
+            with self.subTest(step=name):
+                uses = [line.strip() for line in _ci_step(block, name) or [] if line.strip().startswith("uses:")]
+                self.assertEqual(len(uses), 1)
+                self.assertEqual(uses, [line.strip() for line in _ci_step(export, name) or []
+                                        if line.strip().startswith("uses:")])
+        checkout = [line.strip() for line in _ci_step(block, "Check out repository") or [] if line.strip()]
+        self.assertEqual(checkout[-2:], ["with:", "persist-credentials: false"])
+        self.assertNotIn("fetch-depth: 0", "\n".join(block))
+        self.assertIn('          python-version: "3.15.2"', _ci_step(block, "Set up Python") or [])
+        # The same runner as public_export: the classifier's 26.04 choice.
+        self.assertIn(f"    runs-on: {SELF_HOSTED_RUNS_ON_2604}", block)
+        self.assertNotIn("security_publication", "\n".join(block))
 
-    def test_every_platform_gate_waits_for_the_export_result(self) -> None:
+    def test_platform_gates_wait_only_for_the_fixtures_they_download(self) -> None:
         # The main smoke runs only on main pushes and is not a substantive gate: it keeps
         # hygiene, as later steps of the hygiene job.
         hygiene = self.blocks["hygiene"]
@@ -2664,23 +2725,47 @@ class PublicExportJobTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertLess(_ci_step_index(hygiene, "Run Betterleaks synthetic canaries"),
                                 _ci_step_index(hygiene, name))
-        for job in ("python_tools", "native_tools", "windows_runtime"):
+        # A job that downloads a fixture artifact waits for the job that builds it and requires
+        # its success; one that needed public_export only to start after it waits for classify
+        # alone. Neither waits for hygiene or the export audit, whose results ci_required reads.
+        for job in (*self.FIXTURE_CONSUMERS, *self.ORDERED_ONLY):
             with self.subTest(job=job):
-                block = "\n".join(self.blocks[job])
-                self.assertRegex(block, r"(?m)^    needs: \[classify, public_export\]$")
-                needs_line = re.search(r"(?m)^    needs: (.+)$", block)
-                self.assertIsNotNone(needs_line, f"{job} declares no needs line")
-                self.assertNotIn("hygiene", _matched(needs_line).group(1))
+                lines = self.blocks[job]
+                block = "\n".join(lines)
+                consumer = job in self.FIXTURE_CONSUMERS
+                expected = "[classify, guest_fixtures]" if consumer else "[classify]"
+                self.assertRegex(block, rf"(?m)^    needs: {re.escape(expected)}$")
+                self.assertEqual(len(re.findall(r"(?m)^    needs:", block)), 1)
                 self.assertNotIn("needs.hygiene.result", block)
-                self.assertIn("needs.public_export.result == 'success'", block)
+                self.assertNotIn("needs.public_export", block)
+                self.assertEqual("needs.guest_fixtures.result == 'success'" in _job_if(lines), consumer)
+                self.assertEqual("needs.guest_fixtures" in block, consumer)
+                downloads = [name for name in self._step_names(lines)
+                             if "actions/download-artifact@" in "\n".join(_ci_step(lines, name) or [])
+                             and re.search(r"name: (profile-zero-fixture|homebrew-fixtures)$",
+                                           "\n".join(_ci_step(lines, name) or []), re.M)]
+                self.assertEqual(downloads, list(self.FIXTURE_CONSUMERS.get(job, ())))
+        # No other job names a fixture artifact but the one that uploads them, and only the
+        # aggregates wait for the audit.
+        for job, lines in self.blocks.items():
+            with self.subTest(job=job):
+                text = "\n".join(lines)
+                if job not in (*self.FIXTURE_CONSUMERS, self.FIXTURE_JOB):
+                    self.assertNotRegex(text, r"(?m)^ +name: (profile-zero-fixture|homebrew-fixtures)$")
+                if job not in ("ci_required", "ci_quick"):
+                    needs_line = re.search(r"(?m)^    needs: (.+)$", text)
+                    if needs_line:
+                        self.assertNotIn("public_export", needs_line.group(1))
+                        self.assertNotIn("hygiene", needs_line.group(1))
 
     def test_profile_zero_fixture_is_built_from_source_for_its_consumers(self) -> None:
         """#1100: the fixture is built and digest-checked in CI, never committed."""
-        block = self.blocks["public_export"]
+        block = self.blocks[self.FIXTURE_JOB]
         names = self._step_names(block)
-        # The fixture steps follow the export step, so the export audits the clean
-        # checkout, and keep the order the separate job ran them in.
-        self.assertEqual(names[names.index(self.EXPORT_STEP) + 1:], list(self.PROFILE_ZERO_STEPS))
+        # The fixture steps follow the job's checkout and Python setup and keep the order the
+        # separate job and then public_export ran them in. The export audits its own checkout
+        # in public_export, which no fixture build touches.
+        self.assertEqual(names[names.index("Set up Python") + 1:], list(self.PROFILE_ZERO_STEPS))
         fixture = "\n".join(block)
         self.assertIn("sha256sum --check --strict SHA256SUMS", fixture)
         self.assertIn("name: profile-zero-fixture", fixture)
@@ -2693,25 +2778,26 @@ class PublicExportJobTests(unittest.TestCase):
         app = "\n".join(_ci_step(block, "Build Nakagawa Font Copy") or [])
         self.assertIn("make --no-print-directory -C src/psp_companion "
                       'BUILD_DIR="$RUNNER_TEMP/fontcopy"', app)
-        # The merged job's limit is the sum of the two former jobs' limits.
-        self.assertIn("    timeout-minutes: 30", block)
+        # Apart again, each job has its former limit: 15 here, 15 in public_export.
+        self.assertIn("    timeout-minutes: 15", block)
+        self.assertIn("    timeout-minutes: 15", self.blocks["public_export"])
         for job in ("python_tools", "windows_runtime"):
             with self.subTest(job=job):
                 consumer = "\n".join(self.blocks[job])
-                self.assertIn("needs.public_export.result == 'success'", consumer)
+                self.assertIn("needs.guest_fixtures.result == 'success'", consumer)
                 self.assertIn("name: profile-zero-fixture", consumer)
                 self.assertIn("path: tests/fixtures/profile_zero/prebuilt", consumer)
 
     def test_homebrew_fixtures_are_built_from_source_for_the_windows_job(self) -> None:
         """#2143: the homebrew route tests run on Windows on programs this run built."""
-        build = "\n".join(_ci_step(self.blocks["public_export"],
+        build = "\n".join(_ci_step(self.blocks[self.FIXTURE_JOB],
                                    "Build the homebrew fixtures for the Windows job") or [])
         self.assertIn("for fixture in pspdev_phase5 homebrew_view; do", build)
         self.assertIn('if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then', build)
         self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$out/BUILT_FROM"', build)
         self.assertIn("sha256sum BUILT_FROM */EBOOT.PBP */main.c */Makefile > SHA256SUMS", build)
         self.assertIn("sha256sum --check --strict SHA256SUMS", build)
-        upload = "\n".join(_ci_step(self.blocks["public_export"], "Upload the homebrew fixtures") or [])
+        upload = "\n".join(_ci_step(self.blocks[self.FIXTURE_JOB], "Upload the homebrew fixtures") or [])
         self.assertIn("name: homebrew-fixtures", upload)
         self.assertIn("if-no-files-found: error", upload)
 
@@ -2750,9 +2836,13 @@ class PublicExportJobTests(unittest.TestCase):
 
     def test_ci_required_still_requires_hygiene_and_export(self) -> None:
         required = "\n".join(self.blocks["ci_required"])
-        self.assertIn("needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime, windows_installer]", required)
+        self.assertIn("needs: [classify, hygiene, public_export, guest_fixtures, python_tools, native_tools, android_build, windows_runtime, windows_installer]", required)
         self.assertIn("HYGIENE_RESULT: ${{ needs.hygiene.result }}", required)
         self.assertIn("PUBLIC_EXPORT_RESULT: ${{ needs.public_export.result }}", required)
+        self.assertIn("GUEST_FIXTURES_RESULT: ${{ needs.guest_fixtures.result }}", required)
+        aggregate = (ROOT / "tools" / "ci_required.py").read_text(encoding="utf-8")
+        self.assertIn('_FIXTURE_GATE = ("guest-fixtures", "GUEST_FIXTURES_RESULT", '
+                      '("RUN_PYTHON", "RUN_WINDOWS", "RUN_INSTALLER"))', aggregate)
 
 
 def _ci_step_with(block: list[str], needle: str) -> list[str] | None:
@@ -3279,7 +3369,7 @@ SELF_HOSTED_RUNS_ON_2604 = """${{ fromJSON(needs.classify.outputs.linux_runner_2
 #: The jobs that read each: every Linux job of CI except classify, which decides, and
 #: linux_gcc16, a container job that needs Docker on a hosted runner.
 SELF_HOSTED_JOBS = frozenset({"native_tools", "python_tools"})
-SELF_HOSTED_JOBS_2604 = frozenset({"hygiene", "public_export", "ci_required"})
+SELF_HOSTED_JOBS_2604 = frozenset({"hygiene", "public_export", "guest_fixtures", "ci_required"})
 #: Trusted CodeQL's analyses read the runner its prepare job chose (tools/ci_paths.py
 #: codeql_runner).
 CODEQL_RUNS_ON = """${{ fromJSON(needs.prepare.outputs.analyze_runner || '"ubuntu-26.04"') }}"""
@@ -4554,7 +4644,7 @@ class Gcc16CanaryWiringTests(unittest.TestCase):
         self.assertIn("      options: --init\n    permissions:", self.text)
 
     def test_runs_when_native_tools_does(self) -> None:
-        self.assertIn("    needs: [classify, public_export]", self.text)
+        self.assertIn("    needs: [classify]", self.text)
         self.assertIn("needs.classify.outputs.allow_substantive == 'true'", self.text)
         self.assertIn("needs.classify.outputs.run_native == 'true'", self.text)
 
@@ -4703,7 +4793,7 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         self.assertIn("NK_TEST_TIER:", python_tools)
         self.assertIn("github.event_name == 'schedule'", python_tools)
         self.assertIn("github.event_name == 'workflow_dispatch'", python_tools)
-        for job in ("classify", "hygiene", "windows_runtime"):
+        for job in ("classify", "hygiene", "guest_fixtures", "windows_runtime"):
             with self.subTest(job=job):
                 self.assertNotIn("github.event_name", "\n".join(blocks[job]))
         # ci_required names the event once, and not to select anything: it hands GitHub's own event name
@@ -4814,9 +4904,10 @@ class CiRunHarness(unittest.TestCase):
     QUICK = frozenset({"hygiene", "public_export"})
     LIGHT_ONLY = frozenset({"quick_checks", "ci_quick"})
     FULL_ONLY = frozenset({"ci_required"})
-    #: coverage_upload is routed with the jobs whose reports it uploads (python_tools, c_coverage).
+    #: coverage_upload is routed with the jobs whose reports it uploads (python_tools, c_coverage), and
+    #: guest_fixtures with the jobs that download its fixtures (python_tools, windows_runtime).
     HEAVY = frozenset({"python_tools", "native_tools", "linux_gcc16", "android_build", "windows_runtime",
-                       "windows_installer", "coverage_upload"})
+                       "windows_installer", "coverage_upload", "guest_fixtures"})
     #: Routed like a heavy job, but only on the nightly schedule and a manual run, so it never holds
     #: back a pull request's or a landing batch's verdict (c_coverage, docs/CI.md "Coverage").
     NIGHTLY = frozenset({"c_coverage"})
@@ -4826,6 +4917,7 @@ class CiRunHarness(unittest.TestCase):
     JOBS = QUICK | LIGHT_ONLY | FULL_ONLY | HEAVY | NIGHTLY
     RESULT_KEYS = {
         "hygiene": "HYGIENE_RESULT", "public_export": "PUBLIC_EXPORT_RESULT",
+        "guest_fixtures": "GUEST_FIXTURES_RESULT",
         "python_tools": "PYTHON_RESULT", "native_tools": "NATIVE_RESULT", "android_build": "ANDROID_RESULT",
         "windows_runtime": "WINDOWS_RESULT", "windows_installer": "INSTALLER_RESULT",
         "quick_checks": "QUICK_CHECKS_RESULT",
@@ -4922,7 +5014,7 @@ class CiRunHarness(unittest.TestCase):
         return {"action": action, "pull_request": {"number": 7, "draft": draft, "base": {"sha": "a" * 40}}}
 
     def _profile_zero(self, outputs: dict[str, str]) -> bool:
-        block = "\n".join(_workflow_job_blocks("ci.yml")["public_export"])
+        block = "\n".join(_workflow_job_blocks("ci.yml")["guest_fixtures"])
         expression = _matched(re.search(r"BUILD_PROFILE_ZERO: >-\s*\$\{\{(.*?)\}\}", block, re.S)).group(1)
         return _actions_eval(expression, {"needs": {"classify": {"outputs": outputs}}})
 
@@ -4933,7 +5025,8 @@ class WindowsRoutesFixtureTests(CiRunHarness):
     def test_the_fixtures_are_built_whenever_the_windows_routes_run(self) -> None:
         # Failing before: an installer-only change starts windows_runtime (run_installer) with
         # run_python and run_windows false, so public_export built neither the profile-zero nor
-        # the homebrew fixtures, and the routes and smoke parts' downloads failed.
+        # the homebrew fixtures, and the routes and smoke parts' downloads failed. The fixtures
+        # are now built by guest_fixtures: the job runs, and so do its steps.
         event = {"action": "synchronize", "pull_request": {"number": 7, "draft": False,
                                                            "base": {"sha": "a" * 40}}}
         cases = (["assets/installer/nakagawa.iss"], ["assets/upstream/innosetup.lock.json"],
@@ -4941,8 +5034,12 @@ class WindowsRoutesFixtureTests(CiRunHarness):
         for paths in cases:
             with self.subTest(paths=paths):
                 run = self._evaluate("pull_request", event, paths=paths)
-                if "windows_runtime" in run.ran:
+                if "windows_runtime" in run.ran or "python_tools" in run.ran:
+                    self.assertIn("guest_fixtures", run.ran)
                     self.assertTrue(self._profile_zero(run.outputs))
+                # The fixture job runs only for a job that downloads its artifacts.
+                if "guest_fixtures" in run.ran:
+                    self.assertTrue({"windows_runtime", "python_tools"} & run.ran)
         installer = self._evaluate("pull_request", event, paths=["assets/installer/nakagawa.iss"])
         self.assertIn("windows_runtime", installer.ran)
         self.assertEqual(installer.outputs["run_windows"], "false")
@@ -5186,6 +5283,49 @@ class TwoTierInvariantTests(CiRunHarness):
         required = "\n".join(_workflow_job_blocks("ci.yml")["ci_required"])
         self.assertIn("      TIER: ${{ needs.classify.outputs.tier }}", required)
         self.assertIn("      EVENT_NAME: ${{ github.event_name }}", required)
+
+    def test_ci_required_fails_unless_a_routed_fixture_job_succeeded(self) -> None:
+        """guest_fixtures in both tiers: on a full run that routes it, a failed, cancelled or skipped
+        fixture job fails CI required; skipped by its own condition it passes; on a light run it does
+        not run, and the quick aggregate does not read it."""
+        blocks = _workflow_job_blocks("ci.yml")
+        checked = 0
+        for paths_name, paths in self.PATH_SETS.items():
+            with self.subTest(paths=paths_name):
+                run = self._evaluate("pull_request", _tier_pull_request(), paths=paths)
+                self.assertEqual(run.outputs["tier"], "full")
+                required = self._environment(blocks["ci_required"], run.ran, run.outputs, "pull_request")
+                self.assertTrue(run.green)
+                if "guest_fixtures" not in run.routed:
+                    # Rightly skipped: no job that downloads a fixture is routed.
+                    self.assertNotIn("guest_fixtures", run.ran)
+                    self.assertFalse({"python_tools", "windows_runtime"} & run.ran)
+                    self.assertEqual(required["GUEST_FIXTURES_RESULT"], "skipped")
+                    continue
+                self.assertIn("guest_fixtures", run.ran)
+                self.assertEqual(required["GUEST_FIXTURES_RESULT"], "success")
+                for outcome in ("failure", "cancelled", "skipped"):
+                    with self.subTest(paths=paths_name, outcome=outcome):
+                        self.assertFalse(ci_required.evaluate_environment(dict(required,
+                                                                              GUEST_FIXTURES_RESULT=outcome)))
+                        checked += 1
+        self.assertGreaterEqual(checked, 3 * 3, "the path sets must route the fixture job more than once")
+        quiet = self._evaluate("pull_request", _tier_pull_request(), paths=self.PATH_SETS["docs only"])
+        self.assertNotIn("guest_fixtures", quiet.routed | quiet.ran)
+        self.assertTrue(quiet.green)
+        # A light run: the job is routed by the paths, skipped by the tier, and neither aggregate is
+        # fooled. CI quick checks passes without it; CI required would refuse the run.
+        light = self._evaluate("pull_request", _tier_pull_request(), switch="on")
+        self.assertEqual(light.outputs["tier"], "light")
+        self.assertIn("guest_fixtures", light.routed)
+        self.assertNotIn("guest_fixtures", light.ran)
+        self.assertTrue(light.quick_green)
+        self.assertFalse(light.aggregate)
+        self.assertNotIn("guest_fixtures", "\n".join(blocks["ci_quick"]))
+        # A push to main suppresses it with the other substantive jobs and stays green.
+        push = self._evaluate("push", {"before": "a" * 40}, ref="refs/heads/main")
+        self.assertNotIn("guest_fixtures", push.ran)
+        self.assertTrue(push.green)
 
     def test_a_light_run_of_a_change_that_routes_nothing_is_light_all_the_same(self) -> None:
         # Documentation only: no substantive job is routed, and still the run is light, CI required does
@@ -5988,6 +6128,7 @@ class MainRulesetClaimsTests(unittest.TestCase):
             re.findall(r"(?m)^      ([A-Z_]+_RESULT): \$\{\{ needs\.([a-z_]+)\.result \}\}$", block)
         )
         read = {result for _name, result, _run in ci_required._GATES} | {
+            ci_required._FIXTURE_GATE[1],
             "CLASSIFY_RESULT",
             "HYGIENE_RESULT",
             "PUBLIC_EXPORT_RESULT",
