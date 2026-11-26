@@ -1539,6 +1539,21 @@ static int sdl3vk_lifecycle_selftest(void) {
     const int steps = s_init_steps;
     const int errors = sdl3vk_validation_error_count();
     int ok = 1;
+    /* #2648: sdl3vk_uses_cpu reports the running device's own Vulkan type, read here from the
+     * device sdl3vk hands out, and no presenter that is not running reports a CPU device. */
+    {
+        Sdl3VkInfo vi;
+        VkPhysicalDeviceProperties pp;
+        memset(&pp, 0, sizeof pp);
+        const int have = sdl3vk_get_vk(&vi) && vi.physical;
+        if (have) vkGetPhysicalDeviceProperties((VkPhysicalDevice)vi.physical, &pp);
+        const bool cpu = have && pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+        if (!have || sdl3vk_uses_cpu() != cpu) {
+            fprintf(stderr, "lifecycle: sdl3vk_uses_cpu() is %d for device type %d\n",
+                    (int)sdl3vk_uses_cpu(), (int)pp.deviceType);
+            ok = 0;
+        }
+    }
     if (!s_validation_on) {
         fprintf(stderr, "lifecycle: SR_VULKAN_VALIDATION=1 did not reach sdl3vk_init; "
                         "the validation layer is off\n");
@@ -1569,6 +1584,12 @@ static int sdl3vk_lifecycle_selftest(void) {
         int inited = sdl3vk_init("Nakagawa GPU lifecycle selftest");
         s_init_fault_step = 0;
         int live = lifecycle_live_objects();
+        /* A device found before the injected failure is not the running presenter. */
+        if (sdl3vk_uses_cpu() || s_cpu_device) {
+            fprintf(stderr, "lifecycle: init step %d of %d failed and still reports a CPU "
+                            "device\n", step, steps);
+            ok = 0;
+        }
         if (inited || s_init_steps != step || live != 0) {
             fprintf(stderr, "lifecycle: init step %d of %d failed (%s) and left %d object(s) alive\n",
                     step, steps, inited || s_init_steps != step ? "not where injected" : "as injected",
