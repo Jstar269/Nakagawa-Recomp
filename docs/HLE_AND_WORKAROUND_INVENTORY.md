@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **720** (dedicated **673**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **650** handlers across **30** API families, covering **680** handler-associated NID registrations.
+Registered NIDs: **720** (dedicated **675**, fake_success **3**, controlled_unsupported **42**).
+Semantic handler census: **652** handlers across **30** API families, covering **682** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 421 | 434 |
+| `partial` | 423 | 436 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 211 | 215 |
@@ -73,7 +73,7 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 | `sceImpose` | 0 | 0 | 0 | 0 | 2 | 2 | 2 |
 | `sceIo` | 2 | 29 | 0 | 0 | 3 | 34 | 34 |
 | `sceKernel` | 3 | 149 | 0 | 0 | 39 | 191 | 209 |
-| `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
+| `sceMp3` | 0 | 2 | 0 | 0 | 20 | 22 | 22 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
 | `sceNet` | 0 | 48 | 0 | 0 | 13 | 61 | 61 |
@@ -89,7 +89,7 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 1 | 0 | 0 | 1 | 2 | 3 |
-| **Total** | **14** | **421** | **1** | **3** | **211** | **650** | **680** |
+| **Total** | **14** | **423** | **1** | **3** | **211** | **652** | **682** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1147,6 +1147,14 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 - **`h_WakeupThread`** (`sceKernel`): `sceKernelWakeupThread` (0xd59ead2f)
   - Limitation: the cited cells cover wakeup-count accumulation and a sleeping target; specific invalid-target errors, repeated wakeup order, and interactions with termination are not all established
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B3-01: wakeups accumulate while the target is not sleeping)
+- **`h_Mp3LowLevelDecode`** (`sceMp3`): `sceMp3LowLevelDecode` (0xe3ee2c81)
+  - Limitation: PPSSPP-derived, not PSP-measured. The bytes used are the decoder's (bytes before the sync plus the frame), not PPSSPP's FFmpeg packet size; a call that decodes no frame returns 0 with no PCM (JPCSP returns 0x80672001); bad pointers return -1, and the 4096 source bytes and 4608 PCM bytes must be mapped (runtime safety policy).
+  - Evidence: PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelDecode, one frame from at most 4096 source bytes into stereo s16, the bytes used and PCM bytes written, result 0
+  - Evidence: tests/native/hle_thread_selftest.c:test_mp3_low_level
+- **`h_Mp3LowLevelInit`** (`sceMp3`): `sceMp3LowLevelInit` (0x1b839b83)
+  - Limitation: PPSSPP-derived, not PSP-measured. Takes any handle number without sceMp3InitResource and ignores its second argument; JPCSP instead requires a reserved handle 0 or 1. A low-level context does not count against the two reserved handles, and the stream and format calls answer its number as an unused one.
+  - Evidence: PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelInit, a context under any caller-chosen handle number, replacing one already held there
+  - Evidence: tests/native/hle_thread_selftest.c:test_mp3_low_level
 - **`h_MpegAtracDecode`** (`sceMpeg`): `sceMpegAtracDecode` (0x800c44df)
   - Limitation: decodes the frame the last sceMpegGetAtracAu held with the project's ATRAC3+ bridge into 2048 stereo s16 samples (a mono stream duplicated); refuses with no held frame or an undecodable frame, with unmeasured error values; not measured on this project's PSP
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_atrac_au_decode
