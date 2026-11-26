@@ -159,15 +159,16 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelInit, a context under any caller-chosen handle number, replacing one already held there",
             "tests/native/hle_thread_selftest.c:test_mp3_low_level",
         ],
-        "limitation": "PPSSPP-derived, not PSP-measured. Takes any handle number without sceMp3InitResource and ignores its second argument; JPCSP instead requires a reserved handle 0 or 1. A low-level context does not count against the two reserved handles, and the stream and format calls answer its number as an unused one.",
+        "limitation": "PPSSPP-derived, not PSP-measured. Takes any handle number without sceMp3InitResource and ignores its second argument, as the #2640 checklist asks; JPCSP instead requires a reserved handle 0 or 1. A low-level context does not count against the two reserved handles, and the stream and format calls answer its number as an unused one.",
     },
     "h_Mp3LowLevelDecode": {
         "status": "partial",
         "evidence": [
             "PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelDecode, one frame from at most 4096 source bytes into stereo s16, the bytes used and PCM bytes written, result 0",
+            "PPSSPP bundled FFmpeg b87f7c6d522d (libavcodec 57.24.102) libavcodec/mpegaudiodec_template.c decode_frame: leading zero bytes plus one frame are the bytes used; JPCSP 00ac4d6daedd Mp3Decoder.java agrees",
             "tests/native/hle_thread_selftest.c:test_mp3_low_level",
         ],
-        "limitation": "PPSSPP-derived, not PSP-measured. The bytes used are the decoder's (bytes before the sync plus the frame), not PPSSPP's FFmpeg packet size; a call that decodes no frame returns 0 with no PCM (JPCSP returns 0x80672001); bad pointers return -1, and the 4096 source bytes and 4608 PCM bytes must be mapped (runtime safety policy).",
+        "limitation": "PPSSPP-derived, not PSP-measured. Bytes used are the leading zero bytes plus the frame, as PPSSPP's bundled FFmpeg and JPCSP both report (a PPSSPP build on libavcodec 57.48.101 or later reports the whole window). A non-header start, too few bytes or an ID3v1 tag returns 0 with no PCM as in PPSSPP, where JPCSP returns 0x80672001. A frame running past the 4096-byte window stops by name. A reserved handle without low-level Init decodes with its own decoder. Bad pointers return -1, and the 4096 source bytes and 4608 PCM bytes must be mapped (runtime safety policy).",
     },
     "h_ReferProfilerNull": {
         "status": "partial",

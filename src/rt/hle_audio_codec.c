@@ -2299,21 +2299,34 @@ static uint32_t h_Mp3GetMPEGVersion(CpuState *s) {
  *     context already held under that number (a reserved one included), ignores its second
  *     argument, and returns 0 after a 600 us delay.
  *   - Decode on a number with no context is INVALID_HANDLE (0x80671001); a bad argument pointer
- *     is -1; otherwise it decodes the first frame within 4096 source bytes into interleaved
- *     stereo s16 (a mono frame on both channels), writes the source bytes used and the PCM bytes
- *     (samples * 4), and returns 0, also when no frame came out.
+ *     is -1; otherwise it decodes 4096 source bytes into interleaved stereo s16 (a mono frame on
+ *     both channels), writes the source bytes used and the PCM bytes (samples * 4), and returns
+ *     0, also when no frame came out. A reserved handle with no low-level Init decodes with its
+ *     own decoder.
  *   - Release and sceMp3TermResource free low-level contexts; a reserve skips their numbers.
- * JPCSP 00ac4d6daedd89c0492093ae83fb0d3d819af414 (src/jpcsp/HLE/modules/sceMp3.java) agrees on
- * the stereo output, the two words written and the 0 result, and differs elsewhere: it takes only
- * a reserved handle 0 or 1, reads up to 10000 bytes, and returns 0x80672001 when the decoder fails.
- * Local differences, not measured: the source bytes used are the bytes the decoder took (any bytes
- * before the frame sync, then the frame), not the size of PPSSPP's FFmpeg packet (the whole
- * 4096-byte window); the 4096 source bytes and 4608 PCM bytes (the largest frame) must be mapped
- * guest memory before anything is read or written, where PPSSPP checks the first byte of each;
- * a low-level context does not count against the two reserved handles, and the stream and format
- * calls answer a low-level number as an unused one, where PPSSPP finds the context in its one map;
- * Decode is refused on a reserved handle that had no low-level Init (PPSSPP decodes with that
- * handle's decoder). */
+ * The per-call bytes come from the decoder PPSSPP ships with: its bundled FFmpeg (submodule at
+ * b87f7c6d522d, libavcodec 57.24.102, which takes the avcodec_decode_audio4 path of
+ * Core/HW/SimpleAudioDec.cpp FFmpegAudioDecoder::Decode), libavcodec/mpegaudiodec_template.c
+ * decode_frame: leading zero bytes are skipped; the frame that starts after them is decoded and
+ * the zeros plus that frame are the bytes used; fewer than 4 bytes left, or a non-zero start that
+ * is no valid header (an ID3v2 tag, a free-format frame), is a decoder failure (0 used, no PCM);
+ * an ID3v1 "TAG" start is discarded with the rest of the window after the zeros (no PCM); a frame
+ * that decodes to an error is consumed with no PCM. (A PPSSPP build against a system libavcodec
+ * of 57.48.101 or later reports the whole 4096-byte window instead; the bundled build is the
+ * reference here.)
+ * JPCSP 00ac4d6daedd89c0492093ae83fb0d3d819af414 (src/jpcsp/HLE/modules/sceMp3.java and
+ * media/codec/mp3/Mp3Decoder.java) agrees on the stereo output, on the bytes used for a frame after
+ * leading zeros, on decoding with a reserved handle's context and on the 0 result for a frame; it
+ * differs elsewhere: it takes only a reserved handle 0 or 1 (the caller-chosen number here follows
+ * PPSSPP, as #2640 asks), reads up to 10000 bytes, and returns 0x80672001 where PPSSPP's decoder
+ * fails or discards a tag. Where the two disagree this code follows PPSSPP's bundled build.
+ * Not modelled, a named stop: a frame that starts inside the window but ends past it (the
+ * reference decodes it truncated).
+ * Local differences, not measured: the 4096 source bytes and 4608 PCM bytes (the largest frame)
+ * must be mapped guest memory before anything is read or written, where PPSSPP checks the first
+ * byte of each (each refusal is noted once); a low-level context does not count against the two
+ * reserved handles, and the stream and format calls answer a low-level number as an unused one,
+ * where PPSSPP finds the context in its one map. */
 #define MP3_LOW_LEVEL_WINDOW 4096u
 #define MP3_LOW_LEVEL_PCM_MAX ((uint32_t)MP3_BRIDGE_MAX_PCM_VALUES * 2u)
 
@@ -2357,48 +2370,64 @@ static uint32_t h_Mp3LowLevelInit(CpuState *s) {
 }
 
 static uint32_t h_Mp3LowLevelDecode(CpuState *s) {
-    static int noted;
+    static int noted, bad_span_noted;
     static unsigned misses;
     uint32_t handle = A0, src = A1, usedAddr = A2, pcmAddr = A3, bytesAddr = stack_arg(s, 0);
     mp3_ll_note_first_use(&noted, "sceMp3LowLevelDecode");
     Mp3LowLevel *e = mp3_ll_find(handle);
-    if (!e) return SCE_MP3_ERROR_INVALID_HANDLE;
+    Mp3Bridge *dec = e ? e->dec : NULL;
+    if (!dec && handle < MP3_MAX_HANDLES && s_mp3[handle].used) dec = s_mp3[handle].dec;
+    if (!dec) return SCE_MP3_ERROR_INVALID_HANDLE;
     if (!src || !usedAddr || !pcmAddr || !bytesAddr ||
         !sr_guest_span_readable(src, MP3_LOW_LEVEL_WINDOW) || !sr_guest_span_writable(usedAddr, 4u) ||
-        !sr_guest_span_writable(pcmAddr, MP3_LOW_LEVEL_PCM_MAX) || !sr_guest_span_writable(bytesAddr, 4u))
+        !sr_guest_span_writable(pcmAddr, MP3_LOW_LEVEL_PCM_MAX) || !sr_guest_span_writable(bytesAddr, 4u)) {
+        if (!bad_span_noted) {
+            bad_span_noted = 1;
+            fprintf(stderr, "HLE: sceMp3LowLevelDecode handle 0x%x: an argument span is not mapped "
+                            "guest memory (src 0x%08x, used 0x%08x, pcm 0x%08x, bytes 0x%08x); "
+                            "returned -1 (PPSSPP-derived, not PSP-measured)\n",
+                    handle, src, usedAddr, pcmAddr, bytesAddr);
+        }
         return 0xffffffffu;
+    }
 
     uint8_t in[MP3_LOW_LEVEL_WINDOW];
     for (uint32_t i = 0; i < MP3_LOW_LEVEL_WINDOW; i++) in[i] = (uint8_t)MEM_R8(src + i);
+    /* libavcodec decode_frame, as PPSSPP's bundled FFmpeg runs it (see the block comment). */
+    uint32_t skipped = 0;
+    while (skipped < MP3_LOW_LEVEL_WINDOW && in[skipped] == 0u) skipped++;
+    const uint32_t left = MP3_LOW_LEVEL_WINDOW - skipped;
+    uint32_t used = 0, pcm_bytes = 0;
+    const char *why = NULL;
     int16_t pcm[MP3_BRIDGE_MAX_PCM_VALUES];
-    int consumed = 0, samples = 0;
-    int r = mp3_bridge_decode(e->dec, in, (int)MP3_LOW_LEVEL_WINDOW, pcm, &consumed, &samples, NULL);
-    if (r == MP3_BRIDGE_NO_FRAME) {
-        /* The bridge believes a sync only when the next header in the window continues the
-         * stream, so the last frame of the game's data, followed by anything else, is not found.
-         * Take the first header whose whole frame lies in the window as that frame. */
-        for (uint32_t off = 0; off + 4u <= MP3_LOW_LEVEL_WINDOW; off++) {
-            Mp3BridgeHeader h;
-            if (in[off] != 0xffu || mp3_bridge_parse_header(in + off, &h) != 0 ||
-                (uint32_t)h.frame_bytes > MP3_LOW_LEVEL_WINDOW - off)
-                continue;
-            int took = 0;
-            r = mp3_bridge_decode(e->dec, in + off, h.frame_bytes, pcm, &took, &samples, NULL);
-            consumed = (int)off + took;
-            break;
-        }
+    Mp3BridgeHeader h;
+    if (left < 4u) {
+        why = "no frame header after the leading zero bytes";
+    } else if (in[skipped] == 'T' && in[skipped + 1u] == 'A' && in[skipped + 2u] == 'G') {
+        used = left;
+        why = "an ID3v1 tag is discarded with the rest of the window";
+    } else if (mp3_bridge_parse_header(in + skipped, &h) != 0) {
+        why = "the bytes after the leading zeros are no frame header";
+    } else if ((uint32_t)h.frame_bytes > left) {
+        return hle_unmodelled_stop(hle_import_name(sr_last_nid),
+                                   "handle 0x%x: the %d-byte frame at window offset %u runs past "
+                                   "the 4096-byte window; the reference decodes it truncated, "
+                                   "which is not modelled (#2640)",
+                                   handle, h.frame_bytes, skipped);
+    } else {
+        int took = 0, samples = 0;
+        /* Exactly the frame: the bridge then decodes it without looking for a next header. */
+        int r = mp3_bridge_decode(dec, in + skipped, h.frame_bytes, pcm, &took, &samples, NULL);
+        if (r == MP3_BRIDGE_OK || r == MP3_BRIDGE_BAD_FRAME) used = skipped + (uint32_t)h.frame_bytes;
+        if (r == MP3_BRIDGE_OK) pcm_bytes = (uint32_t)samples * 4u;
+        else why = "the frame decoded to no samples";
     }
-    if (r != MP3_BRIDGE_OK) {
-        samples = 0;
-        if (++misses <= 8u)
-            fprintf(stderr, "MP3: sceMp3LowLevelDecode handle 0x%x decoded no frame from its "
-                            "4096-byte window (bridge result %d, %d bytes used)\n",
-                    handle, r, consumed);
-    }
-    uint32_t pcm_bytes = (uint32_t)samples * 4u;
+    if (why && ++misses <= 8u)
+        fprintf(stderr, "MP3: sceMp3LowLevelDecode handle 0x%x: %s (%u bytes used, no PCM)\n",
+                handle, why, used);
     /* Inside the PCM span validated above. */
     for (uint32_t i = 0; i < pcm_bytes / 2u; i++) MEM_W16(pcmAddr + i * 2u, (uint16_t)pcm[i]);
-    MEM_W32(usedAddr, (uint32_t)consumed);
+    MEM_W32(usedAddr, used);
     MEM_W32(bytesAddr, pcm_bytes);
     return 0;
 }
