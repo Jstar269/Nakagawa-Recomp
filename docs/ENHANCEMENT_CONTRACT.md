@@ -927,7 +927,9 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
   run's report as `added_delay_ms`. A new flip that arrives before B's present replaces it, counted in
   `presents.superseded`: one VBLANK of delay does not fit a frame that is on screen for one VBLANK (a title leaving
-  30 FPS), and holding each frame back instead would keep every later frame one VBLANK late.
+  30 FPS), and holding each frame back instead would keep every later frame one VBLANK late. The frame that
+  replaces it came one VBLANK after it, so it is not held either ("Only at 30" below): a title that leaves 30 FPS
+  gives up at most that one frame, the last one of its 30 FPS stretch.
 - **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
   paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
   cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
@@ -957,7 +959,13 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   frame as it comes, as without the feature. Fast forward keeps each frame it shows, so the first in-between after it
   is made of two frames shown one after the other. A frame still held or owed when fast forward starts is
   superseded by the first new frame (`presents.superseded`), which is shown as it comes. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
-  30 Hz after a second of agreement and leaves after half a second of disagreement.
+  30 Hz after a second of agreement and leaves after half a second of disagreement. While it still reads 30, a
+  frame flipped less than two VBLANKs after the frame before it is shown as it comes too, with no in-between
+  (`ace_det_holds` in `src/rt/ace.c`, #2341): held, it would be replaced by the next flip before its own present,
+  and a title that leaves 30 FPS would show only in-betweens until the detector left 30. This is judged frame by
+  frame and does not move the class, so the next frame that comes two VBLANKs after the one before it has its
+  in-between again. The cost is that one early frame inside a 30 FPS stretch (a hitch) is shown without an
+  in-between.
 - **Never off without saying so, and never more than it moved.** The setting's description says it smooths
   steady 30 FPS scenes only where it can follow the motion. With the speed readout on, its text ends with
   `SMOOTH n`, or with `SMOOTH OFF` for a second in which no in-between was shown: another frame rate, a PC that

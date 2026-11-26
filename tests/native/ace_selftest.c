@@ -1806,6 +1806,44 @@ static void cell_detector(void) {
         vc += 2;
         (void)ace_det_flip(&d, vc, 1);
         CHECK(d.stable == ACE_RATE_K2, "frames at the kept rate return to it: %s", ace_rate_name(d.stable));
+        CHECK(ace_det_holds(&d), "the first frame back at 30 Hz after a static stretch is held: %d", ace_det_holds(&d));
+    }
+    /* What smooth motion may hold (ace_det_holds, #2341): a frame at a stable 30 Hz that came at
+     * least two VBLANKs after the one before it. A frame that came sooner is not held although
+     * the class still reads 30, and the class does not move for it. */
+    {
+        ace_det_reset(&d);
+        vc = 1000;
+        CHECK(!ace_det_holds(&d) && !ace_det_holds(NULL), "no class, and no detector, holds no frame");
+        (void)det_run(&d, &vc, k2, 1, 400);
+        CHECK(d.stable == ACE_RATE_K2 && ace_det_holds(&d), "a steady 30 Hz frame is held: %s, %d",
+              ace_rate_name(d.stable), ace_det_holds(&d));
+        vc += 1;
+        int changed = ace_det_flip(&d, vc, 1);
+        CHECK(!changed && d.stable == ACE_RATE_K2 && !ace_det_holds(&d),
+              "a frame one VBLANK after the one before it is not held, at 30 Hz still: %s, %d",
+              ace_rate_name(d.stable), ace_det_holds(&d));
+        (void)ace_det_flip(&d, vc + 1u, 0);
+        CHECK(!ace_det_holds(&d), "a re-flip of that frame leaves it not held: %d", ace_det_holds(&d));
+        vc += 2;
+        changed = ace_det_flip(&d, vc, 1);
+        CHECK(!changed && d.stable == ACE_RATE_K2 && ace_det_holds(&d),
+              "the next frame, two VBLANKs later, is held again: %s, %d", ace_rate_name(d.stable),
+              ace_det_holds(&d));
+        (void)ace_det_flip(&d, vc, 1);
+        CHECK(d.stable == ACE_RATE_K2 && !ace_det_holds(&d), "a second new frame in one VBLANK is not held: %s, %d",
+              ace_rate_name(d.stable), ace_det_holds(&d));
+        vc += 3;
+        (void)ace_det_flip(&d, vc, 1);
+        CHECK(d.stable == ACE_RATE_K2 && ace_det_holds(&d), "a late 30 Hz frame is held: %s, %d",
+              ace_rate_name(d.stable), ace_det_holds(&d));
+        for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
+            ace_det_reset(&d);
+            vc = 1000;
+            (void)det_run(&d, &vc, rates[r].g, rates[r].n, 400);
+            CHECK(ace_det_holds(&d) == (rates[r].want == ACE_RATE_K2), "only a steady 30 Hz is held: %s, %d",
+                  ace_rate_name(rates[r].want), ace_det_holds(&d));
+        }
     }
 }
 
