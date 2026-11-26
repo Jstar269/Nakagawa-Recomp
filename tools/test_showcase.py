@@ -891,7 +891,7 @@ class AndroidDemoAuditTests(unittest.TestCase):
                     self.assertEqual(len(problems), 1, problems)
                     self.assertIn(self.REQUIRED, problems[0])
             # An arm64 library not named lib<game>.so is not an Android package library either.
-            odd = _arm64_library(directory, "demo")
+            odd = _arm64_library(directory, "odd")
             self.assertFalse(showcase.is_android_library(odd))
             self.assertEqual(len(showcase.audit_demo_root(self._folder(temp + "/odd", odd, "demo"))), 1)
 
