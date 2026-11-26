@@ -1866,6 +1866,7 @@ enum {
     LWMUTEX_GONE,            /* deleted before or while waiting */
     LWMUTEX_TIMEOUT,         /* contended timed wait expired */
     LWMUTEX_WAKE_RESULT,     /* the wait was ended with a result (ReleaseWaitThread) */
+    LWMUTEX_OVERFLOW,        /* a self-held recursive level would pass INT_MAX */
 };
 static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr,
                                    uint32_t *wake_out, int is_cb);
@@ -1902,6 +1903,12 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
              * TryLock and for a timed Lock alike. */
             if (!(MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE))
                 return LWMUTEX_NOT_RECURSIVE;
+            /* pspautotests tests/threads/lwmutex/lock.expected "Lock 1 => INT_MAX
+             * (recursive): Failed (800201CD)" and try.expected's "Failed (800201C4)" for
+             * the same cell: a level that would pass INT_MAX takes nothing and leaves the
+             * level unchanged. The bound sits where the count is added, so a level taken
+             * by a callback while LockLwMutexCB waited cannot wrap negative either. */
+            if ((int64_t)level + (int64_t)count > 0x7fffffffLL) return LWMUTEX_OVERFLOW;
             MEM_W32(wa + LWMUTEX_LOCK_LEVEL, (uint32_t)(level + count));
             return LWMUTEX_TAKEN;
         }
@@ -1983,16 +1990,6 @@ static uint32_t h_lwmutex_lock_common(CpuState *s, int is_cb) {
      * on a non-recursive mutex is ILLEGAL_COUNT and takes nothing, as TryLock_600. */
     if (!(MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) && count > 1)
         return 0x800201bdu;   /* ILLEGAL_COUNT */
-    /* lock.expected "Lock 1 => INT_MAX (recursive)" and "Lock INT_MAX => INT_MAX
-     * (recursive)": a self-held recursive level that would pass INT_MAX is 0x800201CD
-     * (LOCK_OVERFLOW) with the level unchanged, as TryLock_600 answers; the level never
-     * wraps negative, where no Unlock could release it. */
-    if ((MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) &&
-        sync_find(MEM_R32(wa + LWMUTEX_UID), SYNC_KIND_LWMUTEX) &&
-        MEM_R32(wa + LWMUTEX_LOCK_THREAD) == sched_current_uid()) {
-        const int level = (int)MEM_R32(wa + LWMUTEX_LOCK_LEVEL);
-        if (level > 0 && (int64_t)level + (int64_t)count > 0x7fffffffLL) return 0x800201cdu;
-    }
     uint32_t toptr = A2;
     if (toptr && !sr_guest_span_writable(toptr, 4)) return 0x80000103u;
     uint32_t woken = 0;
@@ -2002,6 +1999,10 @@ static uint32_t h_lwmutex_lock_common(CpuState *s, int is_cb) {
     case LWMUTEX_NOT_RECURSIVE: return SCE_KERNEL_ERROR_LWMUTEX_RECURSIVE_NOT_ALLOWED;
     case LWMUTEX_TIMEOUT: return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
     case LWMUTEX_WAKE_RESULT: return woken;
+    /* lock.expected "Lock 1 => INT_MAX (recursive)" and "Lock INT_MAX => INT_MAX
+     * (recursive)": 0x800201CD (LOCK_OVERFLOW), the level unchanged; it never wraps
+     * negative, where no Unlock could release it. */
+    case LWMUTEX_OVERFLOW: return 0x800201cdu;
     default: return 0x800201b5u;   /* WAIT_DELETE */
     }
 }

@@ -26942,6 +26942,18 @@ static void test_trylock600_cells(void) {
               "Lock overflow: the owner unlocks its INT_MAX level");
     expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock overflow: the mutex is free again");
     b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock overflow: delete");
+    /* The original sceKernelTryLockLwMutex export shares the acquisition loop: pspautotests
+     * tests/threads/lwmutex/try.expected (reference output) "Lock 1 => INT_MAX (recursive):
+     * Failed (800201C4)" and "Lock 1 => INT_MAX - 1 (recursive): OK". */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 1u), 0u, "TryLock overflow: create recursive held");
+    b1_expect(b1_call(NID_B1_TRYLOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0x800201c4u,
+              "TryLock 1 => INT_MAX (recursive) returns 800201C4");
+    expect(MEM_R32(wa) == 1u, "TryLock 1 => INT_MAX (recursive) leaves the level at 1");
+    b1_expect(b1_call(NID_B1_TRYLOCK_LWMUTEX, wa, 0x7ffffffeu, 0u, 0u), 0u,
+              "TryLock 1 => INT_MAX - 1 (recursive) succeeds");
+    expect(MEM_R32(wa) == 0x7fffffffu, "TryLock 1 => INT_MAX - 1 (recursive) reaches level INT_MAX");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0u, "TryLock overflow: unlock");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "TryLock overflow: delete");
     /* sceKernelLockLwMutex with count 0 or -1: pspautotests tests/threads/lwmutex/lock.expected
      * (reference output) "Lock 0 => 0: Failed (800201BD)" and "Lock 0 => -1: Failed (800201BD)",
      * for a non-recursive and a recursive mutex alike, with the mutex left free. */
@@ -28060,6 +28072,62 @@ static void test_lock_lwmutex_cb_runs_callbacks(void) {
            "LockLwMutexCB: the waiter takes the LwMutex after its callbacks");
     s_cur = (int)(w - s_tcb);
     (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+    s_cur = (int)(self - s_tcb);
+    (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+    (void)b1_call(NID_RV_DELETE_CALLBACK, cb, 0u, 0u, 0u);
+    rv_end(w);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
+}
+
+/* ---- LockLwMutexCB: a callback that takes the mutex cannot wrap the level -----------
+ * Issue #3063 review: the recursion bound must hold where the wait loop adds the count,
+ * not only at entry. The waiter calls LockLwMutexCB(INT_MAX) while another thread holds the
+ * recursive mutex, so the entry sees no self-held level. Its pending callback runs on the
+ * waiter's thread before the lock blocks: the holder unlocks and the callback locks once,
+ * so when the loop tries again the waiter holds level 1. lock.expected (reference output)
+ * "Lock 1 => INT_MAX (recursive): Failed (800201CD)" with the level unchanged is the answer
+ * for that state. MUTANT: drop the bound in the wait loop -- the level wraps to 0x80000000
+ * and the call returns 0. */
+static TCB *s_rv_lw_holder;
+static uint32_t s_rv_lw_cb_unlock, s_rv_lw_cb_lock;
+static unsigned s_rv_lw_cb_calls_take;
+static void rv_cb_take_lwmutex_fn(CpuState *cpu) {
+    const int waiter = s_cur;
+    s_cur = (int)(s_rv_lw_holder - s_tcb);
+    s_rv_lw_cb_unlock = b1_call(NID_B1_UNLOCK_LWMUTEX, B1_LW_WORKAREA, 1u, 0u, 0u);
+    s_cur = waiter;
+    s_rv_lw_cb_lock = b1_call(NID_B1_LOCK_LWMUTEX, B1_LW_WORKAREA, 1u, 0u, 0u);
+    s_rv_lw_cb_calls_take++;
+    cpu->r[2] = 0u;
+}
+static void test_lock_lwmutex_cb_overflow_after_callback(void) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    TCB *self = wsv_begin();
+    s_rv_lw_holder = self;
+    s_rv_lw_cb_calls_take = 0;
+    s_rv_lw_cb_unlock = s_rv_lw_cb_lock = 0xffffffffu;
+    sr_test_register_guest_fn(RV_CB_ENTRY, rv_cb_take_lwmutex_fn);
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 1u), 0u,
+              "LockLwMutexCB overflow: recursive LwMutex held by another thread");
+    RvCall c = { NID_RV_LOCK_LWMUTEX_CB, { wa, 0x7fffffffu, 0u, 0u }, 0u, 0 };
+    TCB *w = fixture_thread(0x1f7u, TH_READY, 40);
+    w->started = 1;
+    const uint32_t cb = rv_make_pending_callback(w);
+    w->coro = sr_coro_create(rv_call_body, &c, (size_t)1 << 20);
+    expect(w->coro != NULL, "LockLwMutexCB overflow: waiter coroutine created");
+    if (!w->coro) { sr_test_guest_fn_reset(); s_cur = -1; return; }
+    rv_resume(w);
+    expect(s_rv_lw_cb_calls_take == 1u && s_rv_lw_cb_unlock == 0u && s_rv_lw_cb_lock == 0u,
+           "LockLwMutexCB overflow: the callback ran, the holder unlocked and the callback locked once");
+    expect(c.returned && c.ret == 0x800201cdu,
+           "LockLwMutexCB overflow: the retried lock answers 800201CD after the callback took level 1");
+    expect(MEM_R32(wa) == 1u && MEM_R32(wa + 4u) == w->uid,
+           "LockLwMutexCB overflow: the refusal leaves the waiter's level 1 unchanged");
+    s_cur = (int)(w - s_tcb);
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+              "LockLwMutexCB overflow: one Unlock releases the level the callback took");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "LockLwMutexCB overflow: the mutex is free");
     s_cur = (int)(self - s_tcb);
     (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
     (void)b1_call(NID_RV_DELETE_CALLBACK, cb, 0u, 0u, 0u);
@@ -69912,6 +69980,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sema_timed_wait_writes_time_left();
     test_lwmutex_waiter_order();
     test_lock_lwmutex_cb_runs_callbacks();
+    test_lock_lwmutex_cb_overflow_after_callback();
     test_umd_cancel_wait_drive_stat();
     test_evf_cb_immediate();
     test_evf_cancel_outputs();
