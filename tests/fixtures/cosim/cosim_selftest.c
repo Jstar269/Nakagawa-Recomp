@@ -1161,6 +1161,17 @@ static int run_case(const CosimCase *test, const char *trace_dir) {
             expect_lane_word(test, lanes[i], "v0", lanes[i]->state.r[2], want_v0, &failed);
             expect_lane_word(test, lanes[i], "v1", lanes[i]->state.r[3], want_v1, &failed);
         }
+    } else if (strcmp(test->name, "eslot") == 0 || strcmp(test->name, "eslot_likely") == 0
+               || strcmp(test->name, "eslot_call") == 0) {
+        /* A body entered at a delay slot (generate.py _entry_slot_cell, #3163): the entry
+         * word runs as the entry, then once more as the transfer's slot, or not again when
+         * a branch-likely annuls it. One more run of it adds 1 to any of the three values. */
+        const uint32_t want_v0 = strcmp(test->name, "eslot") == 0 ? 0x122u
+            : strcmp(test->name, "eslot_likely") == 0 ? 0x121u : 0x132u;
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned i = 0u; i < 2u; i++) {
+            expect_lane_word(test, lanes[i], "v0", lanes[i]->state.r[2], want_v0, &failed);
+        }
     } else if (strcmp(test->name, "jtarget") == 0) {
         expect_lane_word(test, &aot, "v0", aot.state.r[2], COSIM_SCRATCH, &failed);
         expect_lane_word(test, &interp, "v0", interp.state.r[2], COSIM_SCRATCH, &failed);

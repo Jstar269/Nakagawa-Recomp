@@ -1241,12 +1241,18 @@ class PublicFixtureTest(unittest.TestCase):
     # address moves by four bytes. On that same input, main's codegen and this one differ only
     # in the three div lines' overflow branch, which now writes `s->hi=0u` for
     # `s->hi=0xFFFFFFFFu`.
+    # #3163 adds the entry-slot cells (`eslot`, `eslot_likely`, `eslot_call`); their entry calls
+    # and words move the other cells. On the old inputs main's codegen and this one write
+    # identical files. On the expanded inputs they differ only in the relocated PRX, in six
+    # lines: each cell's transfer ends in a `goto` to the word after the entry, and that word
+    # carries a label. The fixed-address executable's `jal`s are not relocated, so no body
+    # there is entered at a delay slot.
     # The two cosim digests change because ctc1 now drops FCR31 bits 18..22 as well as 25..31:
     # its four ctc1 lines read `& ~0xfe7c0000u` for `& ~0xfe000000u`, and nothing else in
     # either output differs.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "1aed7a142ab3fb35137af06dc8ef20abce63667f4e2e11ae718becc53f0d0351",
-        ("cosim", "exec"): "ac7a7ebc63b92829b03233fe855616066a419b47909ddcdc56fab5604804d4f0",
+        ("cosim", "prx"): "b3624d0784ff96b72134b7eeef879bfad5cee8fbd7f1cf803b6628e77e72cc77",
+        ("cosim", "exec"): "77333c8b4d2107966c68875b3017b0000a836ee5bfad330efb851ff9e62ce8a4",
         ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
         ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
         ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",
