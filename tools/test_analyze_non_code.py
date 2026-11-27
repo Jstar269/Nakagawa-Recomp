@@ -1237,12 +1237,16 @@ class PublicFixtureTest(unittest.TestCase):
     # the existing cells. On the old inputs, both codegens produce identical files.
     # On the expanded inputs, the only codegen difference is in the relocated PRX:
     # the new JAL keeps its link write and slot but has no synthetic callee at its link.
+    # #3031 adds an `mfhi v0` after the muldiv cell's INT_MIN / -1 div, so every later cosim
+    # address moves by four bytes. On that same input, main's codegen and this one differ only
+    # in the three div lines' overflow branch, which now writes `s->hi=0u` for
+    # `s->hi=0xFFFFFFFFu`.
     # Every digest changes because a jr/jalr latches its target with bits 1:0 clear, as the PSP
     # runs it (`_t = (s->r[N] & ~3u)`, codegen.emit_latched_target); nothing else in any output
     # differs. The cosim guest also gains the jrlow cells.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "73dff4be0b837917f9ff99c1278d89611aea86deefb6dd0ab6d5b17cd7c4f4ad",
-        ("cosim", "exec"): "2f5e936f75b32b85aec2d783107dfdf885cdee7a2052d6f17b5f9233719c0d72",
+        ("cosim", "prx"): "76be3ffa3860e8bda53a2e6eb68f25de0fa92cacd7ccd2fe42eb46ba8a4bfcf1",
+        ("cosim", "exec"): "6a43aa68578fcb4a5d1c952035a1b3bce02522f675f7583772bc07f45998f03d",
         ("display_smoke", "prx"): "9d003fad6b10ceb2246b75b9fd15a1f9da009f9da2769e69b4c117c9dfa2dce2",
         ("display_smoke", "exec"): "bf16654d5c6c04009194ebd52145c9392b773760e9e920fc7f08f1957d40201e",
         ("production_smoke", "prx"): "d7708c6c84d4e8bf47988cce66ebee1223435360883b268e49d2feac7333197d",
