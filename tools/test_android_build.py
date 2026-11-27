@@ -253,6 +253,50 @@ class AndroidAppContractTests(unittest.TestCase):
         self.assertLess(body.index("if (sensor == null) return;"),
                         body.index("super.enableSensor(sensortype, enabled);"))
 
+    def test_back_reaches_sdl_on_android_16_and_newer(self) -> None:
+        """On Android 16 and newer an app that targets API 36+ gets no KEYCODE_BACK and no
+        onBackPressed. With no back callback registered, the system finished the activity
+        itself, so Back ended a running title unsaved and never reached the launcher (#3220).
+        Both activities register a callback once SDL's library is loaded, and it sends SDL the
+        key. The manifest does not opt in on Android 13 to 15, so there the key still arrives
+        as before and is never sent twice."""
+        gradle = (ANDROID / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+        target = re.search(r"targetSdk = (\d+)", gradle)
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertGreaterEqual(int(target.group(1)), 36, "predictive back is the default from API 36")
+        manifest = (ANDROID / "app" / "src" / "main" / "AndroidManifest.xml").read_text(encoding="utf-8")
+        self.assertNotIn("enableOnBackInvokedCallback", manifest)
+        java = ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" / "nakagawa"
+        host = (java / "NakagawaHost.java").read_text(encoding="utf-8")
+        start = host.index("    static void sendBackToSdl(Activity activity) {\n")
+        body = host[start:host.index("\n    }\n", start)]
+        self.assertIn("if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return;", body)
+        self.assertIn("registerOnBackInvokedCallback(\n                OnBackInvokedDispatcher.PRIORITY_DEFAULT", body)
+        self.assertLess(body.index("SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_BACK);"),
+                        body.index("SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_BACK);"))
+        for name, call in (("LauncherActivity.java", "if (!mBrokenLibraries) NakagawaHost.sendBackToSdl(this);"),
+                           ("TitleActivity.java", "NakagawaHost.sendBackToSdl(this);")):
+            source = (java / name).read_text(encoding="utf-8")
+            created = source[source.index("    protected void onCreate(Bundle savedInstanceState) {"):]
+            created = created[:created.index("\n    }\n")]
+            self.assertLess(created.index("super.onCreate(savedInstanceState);"), created.index(call), name)
+        title = (java / "TitleActivity.java").read_text(encoding="utf-8")
+        broken = title[title.index("        if (mBrokenLibraries) {"):]
+        self.assertLess(broken.index("endProcess(EXIT_NOT_STARTED);\n            return;\n        }"),
+                        broken.index("NakagawaHost.sendBackToSdl(this);"))
+
+    def test_the_title_runtime_traps_the_system_back(self) -> None:
+        """A title runs in its own process with its own SDL. Untrapped, SDL's onBackPressed let
+        the system finish TitleActivity on Back (#3220): the runtime traps it before SDL starts,
+        and takes SDLK_AC_BACK as Esc (the pause selftest in sdl3vk_selftest.inc checks that)."""
+        sdl3vk = (ROOT / "src" / "rt" / "gpu_sdl3vk" / "sdl3vk.c").read_text(encoding="utf-8")
+        init = sdl3vk[sdl3vk.index("int sdl3vk_init(const char *title) {"):]
+        self.assertLess(init.index('SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");'),
+                        init.index("SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)"))
+        poll = sdl3vk[sdl3vk.index("static void poll_input_on_this_stack(void *arg) {"):]
+        self.assertLess(poll.index("back_key_as_escape(&ev);"), poll.index("if (s_claim_sink) {"))
+
     def test_the_launcher_keeps_its_own_rotated_log(self) -> None:
         """On Android the player's output reached only the system log, which some devices'
         firmware filters down to warnings: the launcher (no run log named) now also writes
