@@ -805,9 +805,21 @@ typedef struct {
     char memstick[1024];
     char display[256];  /* "SR_RESOLUTION_SCALE=1;SR_PRESENT_SCALING=sharp;..." (#2150) */
     char ace[256];      /* SR_ACE */
+    char logic_60[16];
+    char acceptance_frames[16];
     bool marker_present;
     bool valid;
 } RepeatLaunchReport;
+
+/* Copy a report value into its field, keeping the first cap - 1 bytes if it is longer. The cut is
+ * explicit (a %.*s precision), where a plain "%s" into a smaller field is a possible truncation
+ * the compiler rightly flags. */
+static void copy_report_value(char *dst, size_t cap, const char *value) {
+    snprintf(dst, cap, "%.*s", (int)(cap - 1u), value);
+}
+
+/* The file the factory-reset test plants in each folder to see it moved into the backup. */
+#define RESET_MARK_NAME "reset-mark.txt"
 
 static RepeatLaunchReport read_repeat_launch_report(const char *path) {
     RepeatLaunchReport report;
@@ -821,11 +833,15 @@ static RepeatLaunchReport read_repeat_launch_report(const char *path) {
             line[--length] = '\0';
         }
         if (strncmp(line, "SR_MEMSTICK=", 12) == 0) {
-            snprintf(report.memstick, sizeof(report.memstick), "%s", line + 12);
+            copy_report_value(report.memstick, sizeof(report.memstick), line + 12);
         } else if (strncmp(line, "DISPLAY=", 8) == 0) {
-            snprintf(report.display, sizeof(report.display), "%s", line + 8);
+            copy_report_value(report.display, sizeof(report.display), line + 8);
         } else if (strncmp(line, "ACE=", 4) == 0) {
-            snprintf(report.ace, sizeof(report.ace), "%s", line + 4);
+            copy_report_value(report.ace, sizeof(report.ace), line + 4);
+        } else if (strncmp(line, "LOGIC_60=", 9) == 0) {
+            copy_report_value(report.logic_60, sizeof(report.logic_60), line + 9);
+        } else if (strncmp(line, "ACCEPTANCE_FRAMES=", 18) == 0) {
+            copy_report_value(report.acceptance_frames, sizeof(report.acceptance_frames), line + 18);
         } else if (strcmp(line, "MARKER_PRESENT=1") == 0) {
             report.marker_present = true;
             report.valid = true;
@@ -1400,6 +1416,8 @@ static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
    options. */
 static const char *g_fixture_codegen_options_written = NULL;
 static const char *g_fixture_codegen_options_canonical = NULL;
+static const NkEnhancementDeclarationIdentity *g_fixture_primary_declaration = NULL;
+static const NkEnhancementDeclarationIdentity *g_fixture_hook_declaration = NULL;
 
 /* `folder_enhancement_id` names the package folder (NULL: the authentic
    packages/<disc_id>, else packages/<disc_id>-enhanced-<id>), and
@@ -1419,7 +1437,7 @@ static void write_runtime_package_fixture_variant(
     char aot_components_json[2048], native_components_json[2048], identity_json[2048];
     char aot_hash_input[2050], native_hash_input[2050], identity_hash_input[2050];
     char aot_digest[65], native_digest[65], modules_digest[65], identity_digest[65];
-    char codegen_options_json[512] = "{}";
+    char codegen_options_json[1024] = "{}";
     char codegen_options_digest[65] =
         "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356";
     char analyzer_sha256[65], codegen_sha256[65], runtime_source_digest[65];
@@ -1445,17 +1463,41 @@ static void write_runtime_package_fixture_variant(
             assert(timing_length < sizeof(timing_id));
             memcpy(timing_id, recorded_enhancement_id, timing_length);
             timing_id[timing_length] = '\0';
+            if (g_fixture_hook_declaration) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"code_hook_declaration_sha256_v1\":\"%s\",",
+                                 g_fixture_hook_declaration->fingerprint);
+            }
             if (plus) {
                 used += snprintf(codegen_options_json + used,
                                  sizeof(codegen_options_json) - (size_t)used,
                                  "\"code_hook_package_id\":\"%s\","
                                  "\"code_hook_package_sha256\":\"%064d\",", plus + 1, 0);
             }
+            if (g_fixture_hook_declaration && g_fixture_hook_declaration->symbol_map_sha256[0]) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"code_hook_symbol_map_sha256\":\"%s\",",
+                                 g_fixture_hook_declaration->symbol_map_sha256);
+            }
+            if (g_fixture_primary_declaration) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"enhancement_declaration_sha256_v1\":\"%s\",",
+                                 g_fixture_primary_declaration->fingerprint);
+            }
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
                              "\"enhancement_package_epoch\":\"aot-enhancement-package-v1\","
                              "\"enhancement_package_id\":\"%s\","
                              "\"enhancement_package_sha256\":\"%064d\"",
                              timing_id, 0);
+            if (g_fixture_primary_declaration && g_fixture_primary_declaration->symbol_map_sha256[0]) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 ",\"enhancement_symbol_map_sha256\":\"%s\"",
+                                 g_fixture_primary_declaration->symbol_map_sha256);
+            }
         }
         if (builder) {
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
@@ -1650,6 +1692,69 @@ static void write_runtime_package_fixture_variant(
     snprintf(completion_path, sizeof(completion_path), "%s%ccompletion-manifest.json",
              package_dir, nk_platform_path_separator());
     write_text_file(completion_path, completion_json);
+}
+
+static void write_ace_declaration_fixture(const char *root, const char *disc_id,
+                                          const char *title_id, const char *id,
+                                          bool hook, unsigned offset, bool formatted) {
+    char folder[NK_MAX_PATH];
+    char path[NK_MAX_PATH];
+    char key[10];
+    char text[640];
+    char sep = nk_platform_path_separator();
+    assert(nk_title_manifest_package_dir_name(disc_id, NULL, key, sizeof(key)));
+    for (size_t i = 0; key[i]; i++) key[i] = (char)tolower((unsigned char)key[i]);
+    int length = snprintf(folder, sizeof(folder), "%s%cenhancements", root, sep);
+    assert(length > 0 && (size_t)length < sizeof(folder));
+    assert(nk_platform_mkdir_p_private(folder));
+    length = snprintf(path, sizeof(path), "%s%c%s-%s.json", folder, sep, key, hook ? "cull" : "60hz");
+    assert(length > 0 && (size_t)length < sizeof(path));
+    const char *category = hook ? "guest_memory_code_hook" : "timing_frame_presentation";
+    if (formatted) {
+        static const char long_value[] = "1.25"
+            "0000000000" "0000000000" "0000000000" "0000000000"
+            "0000000000" "0000000000" "0000000000";
+        length = snprintf(text, sizeof(text),
+            "{\r\n \"sites\": [ {\"insn_offset\": %u, \"stock_values\": [%s]} ],\r\n"
+            " \"category\":\"%s\", \"target_title_id\": \"%s\", \"id\": \"%s\"\r\n}\r\n",
+            offset, long_value, category, title_id, id);
+    } else {
+        length = snprintf(text, sizeof(text),
+            "{\"id\":\"%s\",\"target_title_id\":\"%s\",\"category\":\"%s\","
+            "\"sites\":[{\"insn_offset\":%u,\"stock_values\":[1.25]}]}",
+            id, title_id, category, offset);
+    }
+    assert(length > 0 && (size_t)length < sizeof(text));
+    write_text_file(path, text);
+}
+
+static void write_runtime_package_fixture_for_ace(
+    const char *root, const char *disc_id, const char *title_id, const char *executable,
+    const char *source_media, const char *variant, bool hook_only
+) {
+    char primary_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    char path[NK_MAX_PATH];
+    NkEnhancementDeclarationIdentity primary, companion;
+    const char *plus = strchr(variant, '+');
+    size_t length = plus ? (size_t)(plus - variant) : strlen(variant);
+    assert(length < sizeof(primary_id));
+    memcpy(primary_id, variant, length);
+    primary_id[length] = '\0';
+    assert(nk_title_manifest_enhancement_declaration_path(
+        root, NULL, disc_id, hook_only, path, sizeof(path), NULL));
+    assert(nk_title_manifest_enhancement_declaration_identity(path, primary_id, title_id, true, &primary));
+    if (plus) {
+        assert(nk_title_manifest_enhancement_declaration_path(
+            root, NULL, disc_id, true, path, sizeof(path), NULL));
+        assert(nk_title_manifest_enhancement_declaration_identity(path, plus + 1, title_id, true, &companion));
+    }
+    g_fixture_primary_declaration = &primary;
+    g_fixture_hook_declaration = plus ? &companion : NULL;
+    write_runtime_package_fixture_variant(
+        root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION, executable, FIXTURE_SHA256,
+        NULL, source_media, 0, false, variant, variant);
+    g_fixture_primary_declaration = NULL;
+    g_fixture_hook_declaration = NULL;
 }
 
 static void write_runtime_package_fixture_with_options(
@@ -1896,7 +2001,11 @@ static int repeat_launch_child_mode(void) {
                                value ? value : "<unset>") >= 0;
         }
         const char *ace = getenv("SR_ACE");
-        ok = ok && fprintf(report, "\nACE=%s\n", ace ? ace : "<unset>") >= 0;
+        const char *logic_60 = getenv("SR_EXPERIMENTAL_60HZ");
+        const char *acceptance_frames = getenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES");
+        ok = ok && fprintf(report, "\nACE=%s\nLOGIC_60=%s\nACCEPTANCE_FRAMES=%s\n",
+                           ace ? ace : "<unset>", logic_60 ? logic_60 : "<unset>",
+                           acceptance_frames ? acceptance_frames : "<unset>") >= 0;
     }
     if (fclose(report) != 0) ok = 0;
     if (!ok) return 4;
@@ -1932,6 +2041,16 @@ static int repeat_launch_child_mode(void) {
         FILE *events = fopen(boot_event_path, "ab");
         if (!events) return 6;
         ok = fprintf(events, "BOOT_EVENT phase=boot reason=entry entry=%s\n", boot_entry) >= 0;
+        if (fclose(events) != 0) ok = 0;
+        if (!ok) return 6;
+    }
+    const char *window_ready = getenv("NK_REPEAT_LAUNCH_BOOT_PHASE");
+    if (window_ready && *window_ready && boot_event_path && *boot_event_path) {
+        /* One boot event of the runtime's own form, such as window_ready or
+           first_frame (src/rt/gui.c). */
+        FILE *events = fopen(boot_event_path, "ab");
+        if (!events) return 6;
+        ok = fprintf(events, "BOOT_EVENT phase=%s source=cpu\n", window_ready) >= 0;
         if (fclose(events) != 0) ok = 0;
         if (!ok) return 6;
     }
@@ -2058,6 +2177,104 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
     assert_session_released(&app->launch_session);
     assert(app->last_error.error_code[0] == '\0');
     assert(app->active_view != VIEW_ERROR);
+}
+
+/* #306: launch the repeat-launch child with `exit_code`, after it writes the
+ * BOOT_EVENT phase `boot_phase` (empty: none), let it exit, and settle the session
+ * 82 ms in, from no error and the Library. `hook` (may be NULL) runs between the
+ * monitor's live read of the session file and its exit check. */
+static void short_exit_run(PlayerApp *app, const char *exit_code, const char *boot_phase,
+                           int expected_code, uint64_t launch_tick,
+                           void (*hook)(PlayerApp *)) {
+    memset(&app->last_error, 0, sizeof(app->last_error));
+    app->active_view = VIEW_LIBRARY;
+    set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", exit_code);
+    set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", boot_phase);
+    assert(player_app_launch_game(app, 0));
+    assert(app->is_game_running);
+    app->launch_time_ms = launch_tick;
+    assert(nk_launch_wait(&app->launch_session, 10000) == expected_code);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+    g_player_state_test_after_live_read = hook;
+#else
+    assert(hook == NULL);
+#endif
+    assert(player_app_monitor_game_session(app, launch_tick + 82u));
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+    g_player_state_test_after_live_read = NULL;
+#endif
+    assert(!app->is_game_running);
+    assert_session_released(&app->launch_session);
+}
+
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+static void append_boot_event_to_session(PlayerApp *app, const char *line) {
+    assert(append_runtime_event(app->boot_event_file_path, line));
+}
+
+static void append_first_frame_after_live_read(PlayerApp *app) {
+    append_boot_event_to_session(app, "BOOT_EVENT phase=first_frame source=cpu\n");
+}
+
+static void append_window_ready_after_live_read(PlayerApp *app) {
+    append_boot_event_to_session(app, "BOOT_EVENT phase=window_ready backend=offscreen\n");
+}
+#endif /* NK_PLAYER_STATE_TEST_SEAMS */
+
+/* Rewrites the repeat-launch package with `source_record` as its runtime source
+ * commit record (#2875), in package.json and in its build report; NULL writes a
+ * package from before the record. */
+static void write_repeat_launch_package(const char *user_root, const char *disc_id,
+                                        const char *self_path, const char *source_media_json,
+                                        const char *source_record) {
+    char runtime_extra[512] = "";
+    char report_extra[512] = "";
+    if (source_record) {
+        snprintf(runtime_extra, sizeof(runtime_extra), ",\"source_commit\":%s", source_record);
+        snprintf(report_extra, sizeof(report_extra), ",\"runtime_source\":%s", source_record);
+    }
+    g_fixture_runtime_extra = runtime_extra;
+    g_fixture_report_extra = report_extra;
+    write_runtime_package_fixture_with_source_media(
+        user_root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+        "synthetic-allegrex-v1.exe", FIXTURE_SHA256, self_path, source_media_json);
+    g_fixture_runtime_extra = "";
+    g_fixture_report_extra = "";
+}
+
+/* Fills the library's package status for game 0 the way the launcher's status
+ * check does (player_package_status_thread_main and its completion in main.c). */
+static void repeat_launch_cache_from_status_check(PlayerApp *app, const char *user_root) {
+    NkRuntimePackageInfo info;
+    char reason[1024] = "";
+    char identity[65] = "";
+    NkRuntimePackageStatus status = player_runtime_package_status_check(
+        user_root, &app->games[0], NULL, &info, reason, sizeof(reason));
+    assert(status == NK_RUNTIME_PACKAGE_OK);
+    assert(nk_launch_runtime_package_cache_identity(user_root, &app->games[0], identity));
+    player_app_runtime_package_cache_store(app, 0, &app->games[0], true, identity, status,
+                                           true, 1u);
+    player_app_runtime_package_cache_set_runtime_source(app, 0, info.runtime_source_commit,
+                                                        info.runtime_source_origin,
+                                                        info.runtime_source_reason);
+}
+
+/* Lets the child exit with code 7 before 500 ms and copies the resulting card. */
+static void repeat_launch_copy_early_exit(PlayerApp *app, uint64_t launch_tick,
+                                          char *report, size_t report_size) {
+    app->launch_time_ms = launch_tick;
+    assert(nk_launch_wait(&app->launch_session, 10000) == 7);
+    assert(player_app_monitor_game_session(app, launch_tick + 100u));
+    assert(!app->is_game_running);
+    assert(strcmp(app->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+    assert(player_app_format_error_report(app, "test", report, report_size) > 0);
+}
+
+static void repeat_launch_exit_early(PlayerApp *app, uint64_t launch_tick, char *report,
+                                     size_t report_size) {
+    set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+    assert(player_app_launch_game(app, 0));
+    repeat_launch_copy_early_exit(app, launch_tick, report, report_size);
 }
 
 /* Catalog-epoch coherence probe (#670). Built only with the test seam macro,
@@ -2439,7 +2656,10 @@ static void test_report_this_game(void) {
 
         /* #2875: the report names the runtime source commit the package records, beside
            the player commit; an unknown one says why; a package without the record shows
-           no line, and a store for the same title keeps the line. */
+           no line, and a store for the same title keeps the line. A card that is not about
+           a launch, such as the check after a build, reads the library's stored status; a
+           stop card reads only what its own launch recorded (#2998), and this app launched
+           nothing. */
         {
             int subject = player_app_error_subject_index(app, &app->last_error);
             assert(subject == 0);
@@ -2451,7 +2671,20 @@ static void test_report_this_game(void) {
                 app, subject, "89abcdef0123456789abcdef0123456789abcdef", "install-record", "");
             assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
                                                       RP_HOME, user, report, sizeof(report)) > 0);
-            assert(strstr(report, "Package: ") != NULL);
+            assert(strstr(report, "Package: ") == NULL);
+            assert(strstr(report, "Runtime source: ") == NULL);
+            ErrorState stop_card = app->last_error;
+            snprintf(app->build_session.disc_id, sizeof(app->build_session.disc_id), "%s",
+                     app->games[subject].disc_id);
+            snprintf(app->build_session.iso_path, sizeof(app->build_session.iso_path), "%s",
+                     app->games[subject].iso_path);
+            player_app_set_package_revalidation_error(app, "synthetic check", NULL);
+            app->build_session.disc_id[0] = '\0';
+            app->build_session.iso_path[0] = '\0';
+            assert(player_app_error_subject_index(app, &app->last_error) == subject);
+            assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
+                                                      RP_HOME, user, report, sizeof(report)) > 0);
+            assert(strstr(report, "Package: ready, identity 0123456789ab\n") != NULL);
             assert(strstr(report, "Runtime source: 89abcdef0123456789abcdef0123456789abcdef"
                                   " (install record)\n") != NULL);
             player_app_runtime_package_cache_store(app, subject, &app->games[subject], true,
@@ -2480,6 +2713,7 @@ static void test_report_this_game(void) {
             assert(player_app_format_error_report_for(app, "v0.0.2-dev (commit 3efc890)",
                                                       RP_HOME, user, report, sizeof(report)) > 0);
             assert(strstr(report, "Runtime source: ") == NULL);
+            app->last_error = stop_card;
         }
 
         /* A crash with no boundary: no known issue, its exit code in the
@@ -3455,11 +3689,9 @@ static int player_state_package_builder_child(int argc, char **argv) {
             bool want_hook_only = hook_only && strcmp(hook_only, "1") == 0;
             bool want_cull = want_hook_only || strchr(enhancement_id, '+') != NULL;
             if (logic_60 == want_hook_only || cull != want_cull) return 97;
-            write_runtime_package_fixture_variant(
-                user_root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION, executable,
-                FIXTURE_SHA256, NULL,
-                source_media && source_media[0] ? source_media : NULL, 0, false,
-                enhancement_id, enhancement_id);
+            write_runtime_package_fixture_for_ace(
+                user_root, disc_id, title_id, executable,
+                source_media && source_media[0] ? source_media : NULL, enhancement_id, want_hook_only);
         } else if (source_media && source_media[0]) {
             write_runtime_package_fixture_with_source_media(
                 user_root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION,
@@ -4325,6 +4557,193 @@ static void test_skipped_showcase_logs_its_reason(void) {
     (void)nk_platform_remove_tree(exe_dir, NULL);
     free(app);
     printf("[PLAYER_STATE_TEST] a skipped showcase demo logs why PASS\n");
+}
+
+/* The library an Android demo package records (title_codegen_plan.py --target android names
+   the executable lib<game>.so and its image lib<game>_image.bin). */
+#define ANDROID_DEMO_LIBRARY "libshowcase-demo.so"
+#define ANDROID_DEMO_IMAGE "libshowcase-demo_image.bin"
+
+/* One showcase demo as an APK built with -Pnk.demos leaves it in the app's files folder after
+   the first-start unpack (#360): <base>demos/images/<disc>.iso and the complete Android package
+   <base>demos/packages/<disc>/ (package.json, completion-manifest.json, build-report.json, the
+   library and its image), with no per-user title-input identity, as the desktop demos have none.
+   `base` gets the folder (with its trailing separator), `package_dir` the package's. */
+static void write_android_demo_fixture(const char *case_name, const NkTitleEntry *title,
+                                       char *base, size_t base_size,
+                                       char *package_dir, size_t package_dir_size) {
+    char sep = nk_platform_path_separator();
+    char demos[NK_MAX_PATH + 64];
+    char images[NK_MAX_PATH + 96];
+    char path[NK_MAX_PATH + 192];
+    char renamed[NK_MAX_PATH + 192];
+    int written = snprintf(base, base_size, "%s%candroid_demo_fixture%c%s%c",
+                           SR_SELFTEST_BUILD_ROOT, sep, sep, case_name, sep);
+    assert(written > 0 && (size_t)written < base_size);
+    (void)nk_platform_remove_tree(base, NULL);
+    snprintf(demos, sizeof(demos), "%sdemos", base);
+    snprintf(images, sizeof(images), "%s%cimages", demos, sep);
+    assert(nk_platform_mkdir_p(images));
+    snprintf(path, sizeof(path), "%s%c%s.iso", images, sep, title->primary_disc_id);
+    write_file(path);
+
+    write_runtime_package_fixture_with_synthetic_title_identity(
+        demos, title->primary_disc_id, title->id, SR_CPUSTATE_ABI_VERSION,
+        ANDROID_DEMO_LIBRARY, FIXTURE_SHA256, NULL);
+    snprintf(path, sizeof(path), "%s%ctitle-input-identities%c%s%ctitle-input-identity.json",
+             demos, sep, sep, title->primary_disc_id, sep);
+    assert(remove(path) == 0);
+    written = snprintf(package_dir, package_dir_size, "%s%cpackages%c%s", demos, sep, sep,
+                       title->primary_disc_id);
+    assert(written > 0 && (size_t)written < package_dir_size);
+    /* The fixture writes the executable bytes as <title id>.exe; the package records them as
+       the library, so they move to its name, and the image beside them. */
+    snprintf(path, sizeof(path), "%s%c%s.exe", package_dir, sep, title->id);
+    snprintf(renamed, sizeof(renamed), "%s%c%s", package_dir, sep, ANDROID_DEMO_LIBRARY);
+    assert(rename(path, renamed) == 0);
+    snprintf(path, sizeof(path), "%s%c%s_image.bin", package_dir, sep, title->id);
+    snprintf(renamed, sizeof(renamed), "%s%c%s", package_dir, sep, ANDROID_DEMO_IMAGE);
+    assert(rename(path, renamed) == 0);
+}
+
+/* The developer-log line that says why `disc` was left out of the library, or NULL. */
+static const char *android_demo_skip_line(PlayerApp *app, const char *disc) {
+    for (size_t i = 0; i < player_dev_log_count(app); i++) {
+        const char *line = player_dev_log_line(app, i);
+        if (strncmp(line, "[showcase] ", 11) == 0 && strstr(line, disc) &&
+            strstr(line, "skipped: ")) return line;
+    }
+    return NULL;
+}
+
+static bool android_demo_listed(const PlayerApp *app, const char *disc) {
+    for (int i = 0; i < app->showcase_count; i++) {
+        if (strcmp(app->showcase_games[i].disc_id, disc) == 0) return true;
+    }
+    return false;
+}
+
+/* Runs the desktop showcase discovery on an Android-shaped demos folder that `damage` changed,
+   and requires the demo left out with a reason naming it and containing `expected`. */
+static void expect_android_demo_refused(const char *case_name, const NkTitleEntry *title,
+                                        const char *damage_file, const char *damage_bytes,
+                                        const char *expected) {
+    char base[NK_MAX_PATH];
+    char package_dir[NK_MAX_PATH + 128];
+    char path[NK_MAX_PATH + 256];
+    write_android_demo_fixture(case_name, title, base, sizeof(base),
+                               package_dir, sizeof(package_dir));
+    snprintf(path, sizeof(path), "%s%c%s", package_dir, nk_platform_path_separator(),
+             damage_file);
+    if (damage_bytes) {
+        write_text_file(path, damage_bytes);
+    } else {
+        assert(remove(path) == 0);
+    }
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    (void)player_app_discover_showcase(app, base);
+    assert(!android_demo_listed(app, title->primary_disc_id));
+    const char *line = android_demo_skip_line(app, title->primary_disc_id);
+    if (!line || !strstr(line, title->id) || !strstr(line, expected)) {
+        fprintf(stderr, "android demo %s: expected a skip naming %s and '%s', got: %s\n",
+                case_name, title->id, expected, line ? line : "(none)");
+    }
+    assert(line != NULL && strstr(line, title->id) != NULL && strstr(line, expected) != NULL);
+    for (int i = 0; i < app->game_count; i++) {
+        assert(strcmp(app->games[i].disc_id, title->primary_disc_id) != 0);
+    }
+    free(app);
+    (void)nk_platform_remove_tree(base, NULL);
+}
+
+/* #360: an APK built with -Pnk.demos bundles each showcase demo as a complete Android package
+   in the desktop demos layout, and the launcher lists it through the same discovery and the same
+   runtime-package validation as the desktop; Play names the package's own library. */
+static void test_android_demo_packages_use_the_desktop_discovery(void) {
+    const NkTitleEntry *title = NULL;
+    for (int i = 0; i < nk_title_catalog_count && !title; i++) {
+        const NkTitleEntry *entry = &nk_title_catalog_entries[i];
+        if (entry->id && strncmp(entry->id, "showcase-", 9) == 0 &&
+            entry->primary_disc_id && entry->display_name) title = entry;
+    }
+    assert(title != NULL);
+    char sep = nk_platform_path_separator();
+    char base[NK_MAX_PATH];
+    char package_dir[NK_MAX_PATH + 128];
+    char absolute[NK_MAX_PATH * 2];
+    char expected[sizeof(absolute) + 64];
+
+    /* Listed, and its launch names the validated library and image by full path, from the
+       files folder as the working directory with SDL's "./" base, as on a device. */
+    write_android_demo_fixture("listed", title, base, sizeof(base),
+                               package_dir, sizeof(package_dir));
+    assert(nk_platform_absolute_path(package_dir, absolute, sizeof(absolute)));
+    char saved_cwd[NK_MAX_PATH];
+    assert(nk_ps_getcwd(saved_cwd, sizeof(saved_cwd)) != NULL);
+    assert(nk_ps_chdir(base) == 0);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    char relative_base[3] = { '.', sep, '\0' };
+    assert(player_app_discover_showcase(app, relative_base));
+    assert(android_demo_listed(app, title->primary_disc_id));
+    const GameRecord *game = NULL;
+    for (int i = 0; i < app->game_count; i++) {
+        if (strcmp(app->games[i].disc_id, title->primary_disc_id) == 0) game = &app->games[i];
+    }
+    assert(game != NULL && game->is_prepared && game->is_showcase_package);
+    assert(strcmp(game->title_id, title->id) == 0);
+    assert(android_demo_skip_line(app, title->primary_disc_id) == NULL);
+    NkLaunchSession *session = (NkLaunchSession *)calloc(1, sizeof(NkLaunchSession));
+    assert(session != NULL);
+    NkResult prepared = nk_launch_prepare_session(session, game,
+                                                  player_app_package_root(app, game));
+    if (prepared != NK_OK) fprintf(stderr, "android demo launch: %s\n", session->last_error);
+    assert(prepared == NK_OK);
+    assert(session->package_launch && session->showcase_package);
+    snprintf(expected, sizeof(expected), "%s%c%s", absolute, sep, ANDROID_DEMO_LIBRARY);
+    /* What nk_platform_spawn_process hands TitleActivity as its library extra, and the
+       --image argument after it (nk_launch_start). */
+    assert(nk_platform_path_is_absolute(session->executable_path));
+    assert(strcmp(session->executable_path, expected) == 0);
+    snprintf(expected, sizeof(expected), "%s%c%s", absolute, sep, ANDROID_DEMO_IMAGE);
+    assert(strcmp(session->image_path, expected) == 0);
+    assert(strcmp(session->working_directory, absolute) == 0);
+    free(session);
+    free(app);
+    assert(nk_ps_chdir(saved_cwd) == 0);
+    (void)nk_platform_remove_tree(base, NULL);
+    printf("[PLAYER_STATE_TEST] an Android demo package is listed and names its own library PASS\n");
+
+    /* Each refused by name, never listed as playable: a library from another build (what an
+       update that kept an old package beside a new library would leave), no library at all, a
+       listed file missing (what an interrupted unpack leaves), and an unreadable record. */
+    expect_android_demo_refused("library-mismatch", title, ANDROID_DEMO_LIBRARY,
+                                "a library from another build", ANDROID_DEMO_LIBRARY);
+    expect_android_demo_refused("library-missing", title, ANDROID_DEMO_LIBRARY, NULL,
+                                ANDROID_DEMO_LIBRARY);
+    expect_android_demo_refused("image-missing", title, ANDROID_DEMO_IMAGE, NULL,
+                                ANDROID_DEMO_IMAGE);
+    expect_android_demo_refused("record-corrupt", title, "package.json", "{\"format\":",
+                                "skipped: package ");
+    printf("[PLAYER_STATE_TEST] a damaged Android demo package is refused by name PASS\n");
+
+    /* A launcher-only APK: no demos folder at all. Nothing is listed and no error is raised. */
+    snprintf(base, sizeof(base), "%s%candroid_demo_fixture%claunch-only%c",
+             SR_SELFTEST_BUILD_ROOT, sep, sep, sep);
+    (void)nk_platform_remove_tree(base, NULL);
+    assert(nk_platform_mkdir_p(base));
+    app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(!player_app_discover_showcase(app, base));
+    assert(app->showcase_count == 0 && app->game_count == 0);
+    assert(app->last_error.error_code[0] == '\0');
+    free(app);
+    (void)nk_platform_remove_tree(base, NULL);
+    printf("[PLAYER_STATE_TEST] a launcher-only APK lists no demo and raises no error PASS\n");
 }
 
 /* #1277: the main loop asks for the build outcome every frame. A failure card
@@ -5408,6 +5827,10 @@ static void test_package_build_lifecycle(const char *self_executable) {
                  user_root, sep, sep, rebuild_app->games[0].disc_id, sep);
         fixture_sha_file(stock_package, stock_hash_before);
         GameRecord stock_game = rebuild_app->games[0];
+        write_ace_declaration_fixture(user_root, stock_game.disc_id, stock_game.title_id,
+                                      "fixture-60hz", false, 0, false);
+        write_ace_declaration_fixture(user_root, stock_game.disc_id, stock_game.title_id,
+                                      "fixture-cull", true, 0, false);
         snprintf(rebuild_app->games[0].enhancement_package_id,
                  sizeof(rebuild_app->games[0].enhancement_package_id), "fixture-60hz");
         player_app_runtime_package_cache_invalidate(rebuild_app);
@@ -10760,6 +11183,52 @@ static void test_play_mode_settings(void) {
         assert_cull_build_matches_line(app, 2);
         assert(!player_app_title_cull_problem(app, 2)[0]);
         assert(!app->games[0].enhancement_package_id[0]);             /* no package: authentic */
+        /* Both manifests accept IDs of this size. Their joined ID fits exactly. */
+        const char timing_id[] = "timing-0123456789012345678901234";
+        const char cull_id[] = "cull-01234567890123456789012345";
+        char timing_file[820], declaration[256], joined[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+        snprintf(timing_file, sizeof(timing_file), "%s%cenhancements%ctest90003-60hz.json",
+                 root, sep, sep);
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s\",\"target_title_id\":\"fixture-title\"}", timing_id);
+        write_text_file(timing_file, declaration);
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s\",\"target_title_id\":\"fixture-title\","
+                 "\"category\":\"guest_memory_code_hook\"}", cull_id);
+        write_text_file(cull_file, declaration);
+        player_app_refresh_title_enhancements(app);
+        assert(snprintf(joined, sizeof(joined), "%s+%s", timing_id, cull_id) == 64);
+        const GameRecord *game = &app->games[2];
+        assert(strcmp(game->enhancement_package_id, joined) == 0 && !game->enhancement_hook_only);
+        player_app_runtime_package_cache_mark_pending(app, 2);
+        assert(player_app_runtime_package_check_pending(app, game));
+        GameRecord combined_game = *game;
+        player_app_runtime_package_cache_store(app, 2, &combined_game, true, "prior-identity",
+                                               NK_RUNTIME_PACKAGE_OK, true, 100);
+        assert(player_app_cached_game_has_runtime(app, game));
+        player_app_runtime_package_worker_start_failed_record(app, game, 100);
+        assert(player_app_runtime_package_worker_start_failed(app, game));
+
+        /* A single extra byte falls back to the timing build and misses the old key. */
+        snprintf(declaration, sizeof(declaration),
+                 "{\"id\":\"%s6\",\"target_title_id\":\"fixture-title\","
+                 "\"category\":\"guest_memory_code_hook\"}", cull_id);
+        write_text_file(cull_file, declaration);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[2].cull_available);
+        assert(strstr(player_app_title_cull_problem(app, 2), "too long together") != NULL);
+        assert(strcmp(game->enhancement_package_id, timing_id) == 0 && !game->enhancement_hook_only);
+        assert(!player_app_cached_game_has_runtime(app, game));
+        assert(!player_app_runtime_package_worker_start_failed(app, game));
+        player_app_runtime_package_cache_mark_explicit_retry(app, 2);
+        const PlayerRuntimePackageCacheEntry *cache = &app->runtime_package_cache[2];
+        assert(player_runtime_package_cache_entry_is_for(cache, game));
+        assert(cache->explicit_retry_pending && !cache->status_valid && !cache->identity_valid);
+        assert(!player_runtime_package_cache_entry_is_for(cache, &combined_game));
+        player_app_runtime_package_worker_start_failed_clear(app, &combined_game);
+        player_app_runtime_package_cache_invalidate(app);
+        write_text_file(timing_file,
+                        "{\"id\":\"fixture-60hz\",\"target_title_id\":\"fixture-title\"}");
         /* A culling package that cannot ride: not a code-hook package, another game's, the
            timing package's own id, or one whose joined name is too long. The timing build
            stays, and the reason is kept. */
@@ -13834,6 +14303,22 @@ static void test_play_mode_texpack_settings(void) {
         assert(!player_app_launch_begin(app, 0, work));
         assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
         assert(strcmp(app->last_error.title, "Texture pack not used") == 0);
+        /* #2998: the launch was refused before a child started, so Copy details names no
+           package, whatever the library has stored for the title. */
+        {
+            static char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+            player_app_runtime_package_cache_store(app, 0, &app->games[0], true,
+                                                   "0123456789abcdef0123456789abcdef"
+                                                   "0123456789abcdef0123456789abcdef",
+                                                   NK_RUNTIME_PACKAGE_OK, true, 1u);
+            player_app_runtime_package_cache_set_runtime_source(
+                app, 0, "89abcdef0123456789abcdef0123456789abcdef", "install-record", "");
+            assert(player_app_format_error_report(app, "test", report, sizeof(report)) > 0);
+            assert(strstr(report, "Disc ID: TEST95001\n") != NULL);
+            assert(strstr(report, "Package: ") == NULL);
+            assert(strstr(report, "Runtime source: ") == NULL);
+            memset(&app->runtime_package_cache[0], 0, sizeof(app->runtime_package_cache[0]));
+        }
         /* The card offers to play this run without the pack: that launch leaves the pack out of
            its copy of the settings (no folder, no texpack on the line), the stored choice stays,
            and the launch after it reads the pack again. */
@@ -14389,6 +14874,340 @@ static void test_enhanced_package_variants(void) {
         (void)test_rmdir(enhanced_dir);
     }
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
+}
+
+static void test_live_ace_declarations(void) {
+    static const char disc[] = "TEST00001";
+    static const char title[] = "synthetic-allegrex-v1";
+    static const char exe[] = "synthetic-allegrex-v1.exe";
+    static const char timing[] = "fixture-60hz";
+    static const char cull[] = "fixture-cull";
+    static const char combined[] = "fixture-60hz+fixture-cull";
+    NkLaunchEnhancementSources sources = {0};
+    assert(snprintf(sources.user_root, sizeof(sources.user_root), "%s/ace-declaration-check",
+                    native_test_get_root()) < (int)sizeof(sources.user_root));
+    const char *root = sources.user_root;
+    char assets[NK_MAX_PATH + 48];
+    snprintf(assets, sizeof(assets), "%s/tests/fixtures/profile_zero", root);
+    assert(nk_platform_mkdir_p_private(assets));
+
+    NkGameEntry stock = {0};
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc);
+    snprintf(stock.title_id, sizeof(stock.title_id), "%s", title);
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    assert(snprintf(stock.iso_path, sizeof(stock.iso_path), "%s/source.iso", root) <
+           (int)sizeof(stock.iso_path));
+    write_iso_with_fixture_eboot(stock.iso_path, NULL, 0u, 0u);
+    /* The source ISO member contains the same "fixture" bytes this helper hashes. */
+    char source_media[256];
+    int source_media_length = snprintf(source_media, sizeof(source_media),
+        "{\"executable\":{\"path\":\"PSP_GAME/SYSDIR/EBOOT.BIN\","
+        "\"sha256\":\"%s\"},\"modules\":[]}", FIXTURE_SHA256);
+    assert(source_media_length > 0 && (size_t)source_media_length < sizeof(source_media));
+    write_runtime_package_fixture_with_source_media(
+        root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL, source_media);
+
+    NkGameEntry game = stock;
+    snprintf(game.enhancement_package_id, sizeof(game.enhancement_package_id), "%s", timing);
+    write_ace_declaration_fixture(root, disc, title, timing, false, 0, false);
+    write_ace_declaration_fixture(root, disc, title, cull, true, 0, false);
+    char reason[1024];
+    /* Readiness must still refuse a live ISO with no recorded source media. */
+    write_runtime_package_fixture_variant(
+        root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL,
+        NULL, 0, false, timing, timing);
+    assert(nk_launch_validate_runtime_package(root, &game, NULL, reason, sizeof(reason)) ==
+           NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "Source media identity is unqualified") != NULL);
+
+    write_runtime_package_fixture_variant(
+        root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL,
+        source_media, 0, false, timing, timing);
+    NkRuntimePackageStatus status =
+        nk_launch_validate_runtime_package(root, &game, NULL, reason, sizeof(reason));
+    if (status != NK_RUNTIME_PACKAGE_OK)
+        fprintf(stderr, "Ace legacy fixture package validation failed: %s\n", reason);
+    assert(status == NK_RUNTIME_PACKAGE_OK);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, NULL, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "predates declaration identity checks") != NULL);
+
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, timing, false);
+    NkRuntimePackageInfo info;
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+    char package_path[NK_MAX_PATH + 32];
+    snprintf(package_path, sizeof(package_path), "%s/package.json", info.package_root);
+    char package_before[65], package_after[65], identity[65], after_identity[65];
+    fixture_sha_file(package_path, package_before);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(root, &game, &sources, identity));
+
+    assert(snprintf(sources.shipped_root, sizeof(sources.shipped_root), "%s/shipped", root) <
+           (int)sizeof(sources.shipped_root));
+    assert(nk_platform_mkdir_p_private(sources.shipped_root));
+    char user_declaration[NK_MAX_PATH], shipped_declaration[NK_MAX_PATH + 32];
+    assert(nk_title_manifest_enhancement_declaration_path(
+        root, NULL, disc, false, user_declaration, sizeof(user_declaration), NULL));
+    snprintf(shipped_declaration, sizeof(shipped_declaration), "%s/test00001-60hz.json",
+             sources.shipped_root);
+    assert(rename(user_declaration, shipped_declaration) == 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+
+    /* A formatting-only user copy wins over an identical shipped declaration.
+       Its 74-byte token is the same numeric value the builder saw. */
+    write_ace_declaration_fixture(root, disc, title, timing, false, 0, true);
+    PlayerTitleEnhancement selection;
+    assert(player_read_title_enhancement(root, sources.shipped_root, &game, &selection));
+    assert(selection.available && !selection.shipped && strcmp(selection.package_id, timing) == 0);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(
+        root, &game, &sources, after_identity));
+    assert(strcmp(after_identity, identity) == 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+    assert(info.validation_cache_hit);
+    NkLaunchSession prepared;
+    NkResult result = nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources);
+    if (result != NK_OK) fprintf(stderr, "Ace prepare failed: %s\n", prepared.last_error);
+    assert(result == NK_OK && prepared.package_launch);
+    /* The package fixture is intentionally not a native program. A spawn error
+       here shows the equivalent spelling passed the final validation first. */
+    assert(nk_launch_start(&prepared) == NK_ERROR_PROCESS_SPAWN);
+    assert(!prepared.is_running);
+
+    write_ace_declaration_fixture(root, disc, title, timing, false, 4, false);
+    fixture_sha_file(package_path, package_after);
+    assert(strcmp(package_before, package_after) == 0);
+    assert(nk_launch_validate_runtime_package(root, &game, &info, reason, sizeof(reason)) ==
+           NK_RUNTIME_PACKAGE_OK && info.validation_cache_hit);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(
+        root, &game, &sources, after_identity));
+    assert(strcmp(after_identity, identity) != 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace declaration changed") && !info.executable_path[0]);
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace declaration changed") && !prepared.is_running);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &stock, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, timing, false);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+
+    static const char map_a[] = "{\"synth_fn\":\"0x08804000\"}";
+    static const char map_b[] = "{\"synth_fn\":\"0x08804004\"}";
+    char sidecar[NK_MAX_PATH + 64];
+    snprintf(sidecar, sizeof(sidecar), "%s/enhancements/test00001-60hz.symbols.json", root);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(root, &game, &sources, identity));
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_a);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(root, &game, &sources, after_identity));
+    assert(strcmp(identity, after_identity) != 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace symbol map changed"));
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace symbol map changed") && !prepared.is_running);
+
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, timing, false);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_b);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace symbol map changed") && !prepared.is_running);
+    assert(remove(sidecar) == 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace symbol map changed"));
+
+    /* An explicit build-time map has its own digest. An unused adjacent map
+       must not make that package stale, even after the launch was prepared. */
+    NkEnhancementDeclarationIdentity explicit_declaration;
+    assert(nk_title_manifest_enhancement_declaration_identity(
+        user_declaration, timing, title, false, &explicit_declaration));
+    char explicit_options[640], map_option[128] = "";
+    for (int has_digest = 0; has_digest <= 1; has_digest++) {
+        if (has_digest)
+            snprintf(map_option, sizeof(map_option),
+                     "\"enhancement_explicit_symbol_map_sha256\":\"%s\",", FIXTURE_SHA256);
+        int length = snprintf(explicit_options, sizeof(explicit_options),
+            "{\"enhancement_declaration_sha256_v1\":\"%s\","
+            "\"enhancement_explicit_symbol_map\":true,%s"
+            "\"enhancement_package_epoch\":\"aot-enhancement-package-v1\","
+            "\"enhancement_package_id\":\"%s\",\"enhancement_package_sha256\":\"%064d\"}",
+            explicit_declaration.fingerprint, map_option, timing, 0);
+        assert(length > 0 && (size_t)length < sizeof(explicit_options));
+        g_fixture_codegen_options_written = explicit_options;
+        g_fixture_codegen_options_canonical = explicit_options;
+        write_runtime_package_fixture_variant(
+            root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL,
+            source_media, 0, false, timing, timing);
+        g_fixture_codegen_options_written = NULL;
+        g_fixture_codegen_options_canonical = NULL;
+        status = nk_launch_validate_runtime_package_for_launch(
+            root, &game, &sources, &info, reason, sizeof(reason));
+        assert(status == (has_digest ? NK_RUNTIME_PACKAGE_OK : NK_RUNTIME_PACKAGE_STALE));
+    }
+    write_text_file(sidecar, map_a);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_b);
+    assert(nk_launch_start(&prepared) == NK_ERROR_PROCESS_SPAWN);
+    assert(!prepared.is_running);
+    assert(remove(sidecar) == 0);
+
+    snprintf(game.enhancement_package_id, sizeof(game.enhancement_package_id), "%s", combined);
+    snprintf(sidecar, sizeof(sidecar), "%s/enhancements/test00001-cull.symbols.json", root);
+    write_text_file(sidecar, map_a);
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, combined, false);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_b);
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace symbol map changed") && !prepared.is_running);
+    write_text_file(sidecar, map_a);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_ace_declaration_fixture(root, disc, title, cull, true, 4, false);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace declaration changed"));
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace declaration changed") && !prepared.is_running);
+    assert(nk_platform_remove_tree(root, NULL));
+    printf("[PLAYER_STATE_TEST] live Ace declarations: warm reuse, long numeric spelling, "
+           "legacy rebuild, timing/hook and symbol changes blocked before spawn, "
+           "Authentic and rebuild accepted PASS\n");
+}
+
+static void test_acceptance_launch_uses_stock_package(const char *self_executable) {
+    const char sep = nk_platform_path_separator();
+    const char *disc_id = "TEST00001";
+    const char *title_id = "synthetic-allegrex-v1";
+    const char *timing_id = "fixture-60hz";
+    const char *executable = "synthetic-allegrex-v1.exe";
+    char root[NK_MAX_PATH], iso[NK_MAX_PATH], report_path[NK_MAX_PATH];
+    char declaration_dir[NK_MAX_PATH + 32];
+    char declaration[NK_MAX_PATH + 64], data_root[NK_MAX_PATH + 64];
+    static const char timing_declaration[] =
+        "{\"id\":\"fixture-60hz\",\"target_title_id\":\"synthetic-allegrex-v1\"}";
+    const char *scratch = native_test_get_root();
+    snprintf(root, sizeof(root), "%s%cacceptance-runtime", scratch, sep);
+    snprintf(iso, sizeof(iso), "%s%cacceptance.iso", scratch, sep);
+    snprintf(declaration_dir, sizeof(declaration_dir), "%s%cenhancements", root, sep);
+    snprintf(declaration, sizeof(declaration), "%s%ctest00001-60hz.json", declaration_dir, sep);
+    snprintf(data_root, sizeof(data_root), "%s%ctests%cfixtures%cprofile_zero", root, sep, sep, sep);
+    snprintf(report_path, sizeof(report_path), "%s%cacceptance-report.txt", scratch, sep);
+    assert(nk_platform_mkdir_p(declaration_dir) && nk_platform_mkdir_p(data_root));
+    write_text_file(declaration, timing_declaration);
+    write_iso_with_fixture_eboot(iso, NULL, 0u, 0u);
+
+    char media[256];
+    snprintf(media, sizeof(media),
+             "{\"executable\":{\"path\":\"PSP_GAME/SYSDIR/EBOOT.BIN\","
+             "\"sha256\":\"%s\"},\"modules\":[]}", FIXTURE_SHA256);
+    write_runtime_package_fixture_with_source_media(root, disc_id, title_id,
+        SR_CPUSTATE_ABI_VERSION, executable, FIXTURE_SHA256, self_executable, media);
+    /* The Ace package records the identity of the declaration it was built from, as a
+       current builder does; a package without one is refused as predating the check. */
+    NkEnhancementDeclarationIdentity timing_identity;
+    assert(nk_title_manifest_enhancement_declaration_identity(declaration, timing_id, title_id,
+                                                              true, &timing_identity));
+    g_fixture_primary_declaration = &timing_identity;
+    write_runtime_package_fixture_variant(root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION,
+        executable, FIXTURE_SHA256, self_executable, media, 0, false, timing_id, timing_id);
+    g_fixture_primary_declaration = NULL;
+
+    PlayerApp *app = calloc(1, sizeof(*app));
+    assert(app);
+    player_app_settings_init_default(&app->settings);
+    nk_library_init(&app->library);
+    NkGameEntry entry = {0};
+    snprintf(entry.disc_id, sizeof(entry.disc_id), "%s", disc_id);
+    snprintf(entry.title_id, sizeof(entry.title_id), "%s", title_id);
+    snprintf(entry.title_name, sizeof(entry.title_name), "Synthetic acceptance");
+    snprintf(entry.iso_path, sizeof(entry.iso_path), "%s", iso);
+    snprintf(entry.selected_executable, sizeof(entry.selected_executable), "EBOOT.BIN");
+    entry.status = NK_STATUS_IDENTIFIED;
+    assert(nk_library_add_or_update(&app->library, &entry) == NK_OK);
+    player_app_sync_library(app);
+    assert(app->game_count == 1);
+    player_app_set_runtime_root(app, root);
+    player_app_refresh_title_enhancements(app);
+    assert(app->title_enhancements[0].available);
+    app->launch_headless = true;
+    native_test_set_env("NK_REPEAT_LAUNCH_REPORT_FILE", report_path);
+    native_test_set_env("SR_EXPERIMENTAL_60HZ", "9");
+    native_test_set_env("SR_ACE", "invalid-inherited-ace");
+
+    /* Ordinary Authentic, ordinary Ace, checkpoint while Ace is saved, and
+       another ordinary Ace run through the unchanged selection. */
+    static const struct {
+        bool saved_timing;
+        uint32_t frames;
+        bool timing;
+        bool missing_declaration;
+    } cases[] = {
+        {false, 0, false, false}, {true, 0, true, false}, {true, 3, false, false},
+        {true, 0, true, false}, {true, 3, false, true},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (i == 1) player_app_set_title_60hz(app, 0, true);
+        if (cases[i].missing_declaration) {
+            assert(remove(declaration) == 0);
+            player_app_refresh_title_enhancements(app);
+            assert(player_app_title_60hz_blocked(app, 0));
+            assert(!player_app_launch_game(app, 0));
+            assert(strcmp(app->last_error.error_code, "ENHANCEMENT_UNAVAILABLE") == 0);
+        }
+        app->headless_accept_presented_frames = cases[i].frames;
+        assert(player_app_launch_game(app, 0));
+        assert(app->launch_session.package_launch && app->is_game_running);
+        assert(strcmp(app->launch_session.enhancement_package_id,
+                      cases[i].timing ? timing_id : "") == 0);
+        char expected_executable[128];
+        snprintf(expected_executable, sizeof(expected_executable), "%cpackages%c%s%s%s%c%s",
+                 sep, sep, disc_id, cases[i].timing ? "-enhanced-" : "",
+                 cases[i].timing ? timing_id : "", sep, executable);
+        const char *chosen_executable = app->launch_session.executable_path;
+        size_t path_length = strlen(chosen_executable);
+        size_t expected_length = strlen(expected_executable);
+        assert(path_length >= expected_length &&
+               strcmp(chosen_executable + path_length - expected_length, expected_executable) == 0);
+        assert(app->running_play_mode == (cases[i].timing ? PLAYER_PLAY_ACE : PLAYER_PLAY_AUTHENTIC));
+        assert(nk_launch_wait(&app->launch_session, 10000) == 0);
+        RepeatLaunchReport report = read_repeat_launch_report(report_path);
+        assert(report.valid && remove(report_path) == 0);
+        assert(strcmp(report.logic_60, cases[i].timing ? "1" : "0") == 0);
+        assert(strcmp(report.acceptance_frames, cases[i].frames ? "3" : "<unset>") == 0);
+        assert(cases[i].timing ? strncmp(report.ace, "v1;tier=ace;", 12) == 0
+                               : strcmp(report.ace, "off") == 0);
+        assert(player_app_title_60hz_saved(app, disc_id) == cases[i].saved_timing);
+        assert(strcmp(app->games[0].enhancement_package_id,
+                      cases[i].saved_timing && !cases[i].missing_declaration ? timing_id : "") == 0);
+        app->launch_time_ms = 1000u;
+        assert(player_app_monitor_game_session(app, 1600u));
+        assert(!app->is_game_running);
+    }
+
+    /* The valid timing package must never answer a missing stock package. */
+    write_text_file(declaration, timing_declaration);
+    player_app_refresh_title_enhancements(app);
+    assert(strcmp(app->games[0].enhancement_package_id, timing_id) == 0);
+    char stock_manifest[NK_MAX_PATH + 64];
+    snprintf(stock_manifest, sizeof(stock_manifest), "%s%cpackages%c%s%cpackage.json",
+             root, sep, sep, disc_id, sep);
+    assert(remove(stock_manifest) == 0);
+    app->headless_accept_presented_frames = 3;
+    assert(!player_app_launch_game(app, 0));
+    assert(strcmp(app->last_error.error_code, "RUNTIME_PACKAGE_NOT_READY") == 0);
+    assert(nk_platform_path_missing(report_path) && !app->is_game_running);
+    assert(player_app_title_60hz_saved(app, disc_id));
+
+    native_test_set_env("NK_REPEAT_LAUNCH_REPORT_FILE", NULL);
+    native_test_set_env("SR_EXPERIMENTAL_60HZ", NULL);
+    native_test_set_env("SR_ACE", NULL);
+    free(app);
+    printf("[PLAYER_STATE_TEST] acceptance selects the stock runtime package PASS\n");
 }
 
 /* A package's cache digests are taken over canonical JSON (sorted keys at every
@@ -15695,7 +16514,86 @@ static void test_achievement_badge_cache(void) {
            "files go PASS\n");
 }
 
+/* #2744, first half: the storage for one shared Memory Stick is in the tree, and no launch uses
+   it. A package launch with no SR_MEMSTICK still gets <saves>/<DISC_ID>, the folder the Saves
+   page works on (Back up, Restore, Add a save, Open folder, Remove), whatever the layout record
+   says, and preparing a launch makes none of the shared layout. This fails when the launch root
+   moves to the shared stick before the Saves page does. */
+static void assert_package_launch_root_is_the_saves_page_folder(const GameRecord *game,
+                                                                 const char *runtime_root) {
+    static const char *const cases[] = {"no layout record", "a MOVING record",
+                                        "a READY record and its stick"};
+    const char sep = nk_platform_path_separator();
+    char saves[NK_MAX_PATH], expected[NK_MAX_PATH + MAX_DISC_ID_LEN + 2];
+    NkMemstickPaths paths;
+    bool had_memstick_env;
+    char *old_memstick_env = capture_environment_value("SR_MEMSTICK", &had_memstick_env);
+    set_environment_value("SR_MEMSTICK", "");
+    assert(game && game->disc_id[0]);
+    assert(nk_platform_get_path(NK_PATH_SAVES, saves, sizeof(saves)));
+    assert(native_test_path_within(saves, native_test_get_root()));
+    assert(nk_memstick_layout_paths(saves, &paths));
+    snprintf(expected, sizeof(expected), "%s%c%s", saves, sep, game->disc_id);
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.stick));
+
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (i != 0u) {
+            NkMemstickLayout layout;
+            assert(nk_memstick_layout_init(&layout, i == 1u ? NK_MEMSTICK_STATE_MOVING
+                                                            : NK_MEMSTICK_STATE_READY, "test"));
+            assert(nk_memstick_layout_write(saves, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+            nk_memstick_layout_free(&layout);
+            if (i == 2u) assert(nk_platform_mkdir_p(paths.stick));
+        }
+        NkLaunchSession session;
+        NkResult prepared = nk_launch_prepare_session(&session, game, runtime_root);
+        if (prepared != NK_OK) {
+            fprintf(stderr, "default launch root, %s: prepare failed: %s\n", cases[i],
+                    session.last_error);
+        }
+        assert(prepared == NK_OK && session.package_launch);
+
+        /* The Saves page's folder is <saves>/<DISC_ID>, and the launch root is that folder. */
+        char folder[NK_MAX_PATH], folder_real[NK_MAX_PATH], launch_real[NK_MAX_PATH];
+        assert(player_app_save_folder(game, folder, sizeof(folder)));
+        assert(strcmp(folder, expected) == 0);
+        /* Preparing the launch made its root; a folder that does not exist is compared as named. */
+        if (!nk_platform_real_path(folder, folder_real, sizeof(folder_real))) {
+            snprintf(folder_real, sizeof(folder_real), "%s", folder);
+        }
+        if (!nk_platform_real_path(session.memstick_root, launch_real, sizeof(launch_real))) {
+            snprintf(launch_real, sizeof(launch_real), "%s", session.memstick_root);
+        }
+        if (strcmp(launch_real, folder_real) != 0) {
+            fprintf(stderr, "default launch root, %s: the launch uses %s, the Saves page %s\n",
+                    cases[i], launch_real, folder_real);
+        }
+        assert(strcmp(launch_real, folder_real) == 0);
+        nk_launch_stop(&session);
+
+        /* Preparing a launch makes nothing of the shared layout. */
+        if (i == 0u) {
+            assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.stick));
+        }
+        assert(nk_platform_path_missing(paths.staging) &&
+               nk_platform_path_missing(paths.migration) &&
+               nk_platform_path_missing(paths.kept_copies) &&
+               nk_platform_path_missing(paths.lock) && nk_platform_path_missing(paths.claims));
+    }
+
+    /* Leave the profile as it was found: later cases start with no layout record. */
+    assert(nk_remove_utf8(paths.record) == 0);
+    assert(nk_platform_remove_empty_dir(paths.stick));
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.record_temp) &&
+           nk_platform_path_missing(paths.stick));
+    restore_environment_value("SR_MEMSTICK", old_memstick_env, had_memstick_env);
+    free(old_memstick_env);
+    printf("[PLAYER_STATE_TEST] a package launch's default root is the Saves page's "
+           "<saves>/<DISC_ID>, with no layout record, MOVING and READY PASS\n");
+}
+
 int main(int argc, char **argv) {
+    const bool ace_declarations_only = argc == 2 && strcmp(argv[1], "--ace-declarations") == 0;
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
     }
@@ -15745,7 +16643,7 @@ int main(int argc, char **argv) {
     /* Copies of this binary stand in for the bundled python and child modes above. Any other
      * arguments are a mode this binary does not have: name them and stop, instead of running
      * the whole suite again inside a child (which would start its own children). */
-    if (argc > 1) {
+    if (argc > 1 && !ace_declarations_only) {
         fprintf(stderr, "test_player_state: no mode takes these arguments:");
         for (int i = 1; i < argc; i++) fprintf(stderr, " [%s]", argv[i]);
         fprintf(stderr, "\n");
@@ -15784,6 +16682,10 @@ int main(int argc, char **argv) {
     }
     native_test_assert_cache_root_isolated();
     native_test_assert_config_root_isolated();
+    if (ace_declarations_only) {
+        test_live_ace_declarations();
+        return 0;
+    }
 
     test_versioned_user_data();
     test_psn_package_imports_as_its_iso();
@@ -15824,12 +16726,15 @@ int main(int argc, char **argv) {
     test_platform_cards_name_this_platform();
     test_windows_block_cards_name_the_block();
     test_skipped_showcase_logs_its_reason();
+    test_android_demo_packages_use_the_desktop_discovery();
     test_build_outcome_is_shown_once_per_session();
     test_display_path_hides_profile_folder();
     test_report_this_game();
     test_license_folder_request();
     test_library_card_status_text();
     test_enhanced_package_variants();
+    test_live_ace_declarations();
+    test_acceptance_launch_uses_stock_package(self_executable);
     test_package_cache_digest_ignores_key_order();
     test_package_case_sibling_is_outside();
     test_play_mode_settings();
@@ -20318,7 +21223,7 @@ int main(int argc, char **argv) {
                                                           sizeof(reason)) ==
                        NK_RUNTIME_PACKAGE_OK);
                 NkRuntimePackageInfo long_info;
-                assert(player_runtime_package_status_check(long_root, &game, &long_info, reason,
+                assert(player_runtime_package_status_check(long_root, &game, NULL, &long_info, reason,
                                                            sizeof(reason)) ==
                        NK_RUNTIME_PACKAGE_INCOMPATIBLE);
                 assert(strstr(reason, "Package paths exceed the player path limit.") != NULL);
@@ -20745,6 +21650,9 @@ int main(int argc, char **argv) {
     (void)run_log_contains;
     (void)append_runtime_event;
     (void)repeat_launch_and_settle;
+    (void)write_repeat_launch_package;
+    (void)repeat_launch_cache_from_status_check;
+    (void)repeat_launch_exit_early;
     (void)dev_log_count;
     (void)write_sparse_event_file;
 #else
@@ -20859,6 +21767,9 @@ int main(int argc, char **argv) {
         memstick1[0] = '\0';
         char slot_sentinel[NK_MAX_PATH + 64];
         slot_sentinel[0] = '\0';
+
+        /* Before anything here makes a save folder: the default root itself (#2744). */
+        assert_package_launch_root_is_the_saves_page_folder(&rep->games[0], user_root);
 
         /* The per-disc save slot is created here, inside this run's temporary
            root, as the pre-existing state the repeat contract starts from. A
@@ -21118,6 +22029,180 @@ int main(int argc, char **argv) {
         /* Recovery after the premature exit. */
         set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
         repeat_launch_and_settle(rep, 0, 6000, 6500, memstick1);
+
+        /* #306: inside 500 ms a clean exit 0 is a short successful run only after
+           the runtime's first frame. window_ready alone (written before guest code
+           runs), no report, and a non-zero exit all stay RUNTIME_PREMATURE_EXIT.
+           Every case starts from no error and the Library, so none can pass on
+           what an earlier case left behind. */
+        short_exit_run(rep, "0", "first_frame", 0, 7000u, NULL);
+        assert(rep->last_error.error_code[0] == '\0');
+        assert(rep->active_view != VIEW_ERROR);
+        assert(!rep->child_first_frame);
+        /* Right after the success above, so a flag left by it would show here. */
+        short_exit_run(rep, "0", "", 0, 7200u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+        short_exit_run(rep, "0", "window_ready", 0, 7400u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+        short_exit_run(rep, "7", "first_frame", 7, 7600u, NULL);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+        assert(rep->active_view == VIEW_ERROR);
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+        /* The child writes nothing; the first frame lands in the session file
+           between the tick's live read and its exit check, so only the final
+           drain can see it. */
+        short_exit_run(rep, "0", "", 0, 7800u, append_first_frame_after_live_read);
+        assert(rep->last_error.error_code[0] == '\0');
+        assert(rep->active_view != VIEW_ERROR);
+        /* The same seam appending only window_ready is still a premature exit. */
+        short_exit_run(rep, "0", "", 0, 8000u, append_window_ready_after_live_read);
+        assert(strcmp(rep->last_error.error_code, "RUNTIME_PREMATURE_EXIT") == 0);
+#endif /* NK_PLAYER_STATE_TEST_SEAMS */
+        set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+        set_environment_value("NK_REPEAT_LAUNCH_BOOT_PHASE", "");
+        memset(&rep->last_error, 0, sizeof(rep->last_error));
+        rep->active_view = VIEW_LIBRARY;
+
+        /* #2998: Copy details for a run that started and exited early names the package
+           that run validated and spawned, never the library's current status for the
+           title: package B with an empty status, B with package A's status still stored,
+           a package from before the source record, an explicit unknown origin, and a
+           launch refused before a child starts. */
+        {
+            static const char record_a[] =
+                "{\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+                "\"origin\":\"install-record\",\"reason\":null}";
+            static const char record_b[] =
+                "{\"commit\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+                "\"origin\":\"git\",\"reason\":null}";
+            static const char record_unknown[] =
+                "{\"commit\":null,\"origin\":\"unknown\","
+                "\"reason\":\"the source tree has no install record and no git metadata\"}";
+            static char report_text[PLAYER_ERROR_DETAILS_MAX + 4096];
+            char identity_a[65], identity_run[65], expected[96];
+            char completion_path[1100];
+            snprintf(completion_path, sizeof(completion_path),
+                     "%s%cpackages%c%s%c" NK_AOT_COMPLETION_MANIFEST, user_root, sep,
+                     sep, disc_id, sep);
+
+            /* A rebuild keeps the executable and image paths. Split the core
+               calls the launch worker uses to replace A with B at that boundary. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_a);
+            fixture_sha_file(completion_path, identity_a);
+            PlayerLaunchWork *work = (PlayerLaunchWork *)malloc(sizeof(*work));
+            assert(work != NULL);
+            assert(player_app_launch_begin(rep, 0, work));
+            assert(nk_launch_prepare_session(&work->session, &work->game, user_root) == NK_OK);
+            snprintf(work->session.boot_event_file_path,
+                     sizeof(work->session.boot_event_file_path), "%s", work->boot_event_file_path);
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_b);
+            fixture_sha_file(completion_path, identity_run);
+            assert(strncmp(identity_a, identity_run, 12) != 0);
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "7");
+            work->result = nk_launch_start(&work->session);
+            assert(work->result == NK_OK);
+            assert(player_app_launch_finish(rep, work));
+            free(work);
+            repeat_launch_copy_early_exit(rep, 6400, report_text, sizeof(report_text));
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+            NkRuntimePackageInfo cached_b;
+            assert(nk_launch_validate_runtime_package(user_root, &rep->games[0], &cached_b,
+                                                       NULL, 0) == NK_RUNTIME_PACKAGE_OK);
+            assert(cached_b.validation_cache_hit);
+            assert(strcmp(cached_b.completion_digest, identity_run) == 0);
+
+            /* Copy the same card after the library validates a rebuilt A. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_a);
+            fixture_sha_file(completion_path, identity_a);
+            repeat_launch_cache_from_status_check(rep, user_root);
+            assert(rep->runtime_package_cache[0].identity_valid);
+            assert(strstr(rep->runtime_package_cache[0].runtime_source, "aaaaaaaaaa") != NULL);
+            assert(strncmp(rep->runtime_package_cache[0].package_identity, identity_run, 12) != 0);
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* B with no status stored: the run's own identity and source. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_b);
+            fixture_sha_file(completion_path, identity_run);
+            assert(strcmp(identity_run, identity_a) != 0);
+            memset(&rep->runtime_package_cache[0], 0, sizeof(rep->runtime_package_cache[0]));
+            repeat_launch_exit_early(rep, 6600, report_text, sizeof(report_text));
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+
+            /* B launched while A's status is still stored: nothing of A. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_a);
+            repeat_launch_cache_from_status_check(rep, user_root);
+            fixture_sha_file(completion_path, identity_a);
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_b);
+            fixture_sha_file(completion_path, identity_run);
+            repeat_launch_exit_early(rep, 6800, report_text, sizeof(report_text));
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                       " (git checkout)\n") != NULL);
+            snprintf(expected, sizeof(expected), "%.12s", identity_a);
+            assert(strstr(report_text, expected) == NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* A package from before the record, A's status still stored: no source line. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json, NULL);
+            fixture_sha_file(completion_path, identity_run);
+            repeat_launch_exit_early(rep, 7000, report_text, sizeof(report_text));
+            snprintf(expected, sizeof(expected), "Package: ready, identity %.12s\n",
+                     identity_run);
+            assert(strstr(report_text, expected) != NULL);
+            assert(strstr(report_text, "Runtime source: ") == NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* An explicit unknown origin keeps the package's own reason. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        record_unknown);
+            repeat_launch_exit_early(rep, 7200, report_text, sizeof(report_text));
+            assert(strstr(report_text, "Runtime source: unknown (the source tree has no install "
+                                       "record and no git metadata)\n") != NULL);
+            assert(strstr(report_text, "aaaaaaaaaa") == NULL);
+
+            /* A launch refused before a child starts names no package: neither the run
+               before it nor the stored status. */
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json,
+                                        "{\"commit\":\"0123456789abcdef\",\"origin\":\"git\","
+                                        "\"reason\":null}");
+            assert(!player_app_launch_game(rep, 0));
+            assert(!rep->is_game_running);
+            assert(strcmp(rep->last_error.error_code, "RUNTIME_PACKAGE_NOT_READY") == 0);
+            assert(player_app_format_error_report(rep, "test", report_text,
+                                                  sizeof(report_text)) > 0);
+            assert(strstr(report_text, "Package: ") == NULL);
+            assert(strstr(report_text, "Runtime source: ") == NULL);
+
+            write_repeat_launch_package(user_root, disc_id, self_path, source_media_json, NULL);
+            memset(&rep->runtime_package_cache[0], 0, sizeof(rep->runtime_package_cache[0]));
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+            repeat_launch_and_settle(rep, 0, 7400, 7900, memstick1);
+            printf("PASS: Copy details names the package the early-exit run spawned (#2998)\n");
+        }
 
         /* Failure C: a longer-lived child exiting non-zero is classified as
            RUNTIME_ERROR_EXIT. */
@@ -21647,14 +22732,15 @@ int main(int argc, char **argv) {
            hidden for the rest of the session, and the next launch reads its own path. */
         {
             static const struct {
-                bool vulkan_started, gpu_ge_started;
+                bool vulkan_started, gpu_ge_started, vulkan_cpu;
                 NkRenderFallback fallback;
                 const char *names;
             } forced[] = {
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
-                {true, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
-                {true, true, NK_RENDER_FALLBACK_NONE, NULL},
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
+                {true, false, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
+                {true, true, true, NK_RENDER_FALLBACK_VULKAN_CPU, "Vulkan is running on the CPU"},
+                {true, true, false, NK_RENDER_FALLBACK_NONE, NULL},
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
             };
             bool render_ok = true;
             for (size_t f = 0; f < sizeof(forced) / sizeof(forced[0]); ++f) {
@@ -21665,7 +22751,8 @@ int main(int argc, char **argv) {
                 char line[160];
                 char timed[192];
                 NkRenderPath path = nk_render_path_from_init(true, forced[f].vulkan_started,
-                                                             true, forced[f].gpu_ge_started);
+                                                             true, forced[f].gpu_ge_started,
+                                                             forced[f].vulkan_cpu);
                 set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
                 bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
                                 rep->boot_event_file_path[0] != '\0';
@@ -21696,7 +22783,8 @@ int main(int argc, char **argv) {
                             shown && heading == want_heading && text == want_text &&
                             strcmp(heading, "Drawn in software") == 0 &&
                             strstr(text, forced[f].names) != NULL &&
-                            strstr(text, "Internal resolution setting has no effect") != NULL;
+                            (strstr(text, "Internal resolution setting has no effect") != NULL) ==
+                                (forced[f].fallback != NK_RENDER_FALLBACK_VULKAN_CPU);
                         /* Another game's page has no notice for this launch. */
                         render_ok = render_ok && rep->game_count > 1 &&
                             !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
@@ -21746,8 +22834,8 @@ int main(int argc, char **argv) {
             char words[384];
             bool effects_ok = true;
             int failed_pass = -1;
-            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
-            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false);
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true, false);
+            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false, false);
             assert(rep->game_count > 1);
             assert(player_render_effects_text(0x1FFu, words, sizeof(words)) &&
                    strcmp(words, all_effects) == 0);
@@ -21861,7 +22949,7 @@ int main(int argc, char **argv) {
             const char *disc = rep->games[0].disc_id;
             const char *heading, *text;
             char line[256], event[300], old_events[NK_MAX_PATH];
-            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true, false);
             const NkRenderFallbackEvent points = {
                 NK_RENDER_EFFECT_POINT, 360u, 5000u, 20000u, 0u, 200u
             };
@@ -22420,7 +23508,7 @@ int main(int argc, char **argv) {
         snprintf(cache_state->games[0].title_id,
                  sizeof(cache_state->games[0].title_id), "cache-title-a");
         snprintf(cache_state->games[0].selected_executable,
-                 sizeof(cache_state->games[0].selected_executable), "EBOOT.BIN");
+                 sizeof(cache_state->games[0].selected_executable), "MAXLENGTH15.BIN");
         GameRecord cache_game = cache_state->games[0];
 
         player_app_runtime_package_cache_mark_pending(cache_state, 0);
@@ -22567,11 +23655,13 @@ int main(int argc, char **argv) {
         static const NkPathType types[] = {
             NK_PATH_CONFIG, NK_PATH_DATA, NK_PATH_CACHE, NK_PATH_SAVES
         };
+        /* Each folder is a NUL-terminated path of fewer than NK_MAX_PATH bytes; the %.*s precisions
+         * below say so to the compiler, which only sees the whole two-dimensional array. */
         char dirs[4][NK_MAX_PATH];
         char marks[4][NK_MAX_PATH + 32];
         for (size_t i = 0; i < 4u; ++i) {
             assert(nk_platform_get_path(types[i], dirs[i], sizeof(dirs[i])));
-            snprintf(marks[i], sizeof(marks[i]), "%s%creset-mark.txt", dirs[i], sep);
+            snprintf(marks[i], sizeof(marks[i]), "%.*s%c" RESET_MARK_NAME, NK_MAX_PATH - 1, dirs[i], sep);
             write_text_file(marks[i], "user data\n");
         }
         char logs_dir[NK_MAX_PATH];
@@ -22677,7 +23767,8 @@ int main(int argc, char **argv) {
             assert(nk_platform_dir_exists(moved));
         }
         for (size_t i = 0; i < 4u; ++i) {
-            char moved_mark[NK_MAX_PATH + 96];
+            /* backed-up folder + its tail + the mark name, each bounded below */
+            char moved_mark[2 * NK_MAX_PATH + 64];
             const char *name = strrchr(marks[i], sep) + 1;
             assert(!nk_platform_file_exists(marks[i]));
             /* The mark is in the backup of the outermost folder holding it. */
@@ -22685,8 +23776,9 @@ int main(int argc, char **argv) {
             for (size_t j = 0; j < folder_count && !found; ++j) {
                 size_t n = strlen(folders[j]);
                 if (strncmp(dirs[i], folders[j], n) != 0) continue;
-                snprintf(moved_mark, sizeof(moved_mark), "%s-backup-20261029-010205%s%c%s",
-                         folders[j], dirs[i] + n, sep, name);
+                snprintf(moved_mark, sizeof(moved_mark), "%.*s-backup-20261029-010205%.*s%c%.*s",
+                         NK_MAX_PATH - 1, folders[j], NK_MAX_PATH - 1, dirs[i] + n, sep,
+                         (int)(sizeof(RESET_MARK_NAME) - 1u), name);
                 found = nk_platform_file_exists(moved_mark);
             }
             assert(found);

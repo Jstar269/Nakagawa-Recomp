@@ -489,8 +489,8 @@ pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the c
 one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not in the disc list, which doesn't
 mean bad, only not shown to be retail, and its disc ID isn't one the list names), then a PICTURE card when the last run of this game fell back to a
 slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
-`paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
-game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
+`paper` paragraph explaining what happened and what may help. If Vulkan selects a CPU device, the card says so,
+including when the Vulkan GE renderer starts successfully. A small Hide button, never the default focus, hides
 that fallback's notice for the rest of the session; then, when the game starts in Authentic and at least one of the
 18 PSP fonts is a stand-in or a replacement font, a FONTS card: one `BODY_S` `paper` sentence ("Text uses stand-in
 fonts. For the original look, get the fonts from your PSP.") and two 44 px secondary buttons, never the default focus: GET
@@ -572,7 +572,7 @@ its `PARAM.SFO` inside a `SAVEDATA` folder, and it is copied into the game's `PS
 already there asks "A save named *name* is already here. Replace it?" with CANCEL (first focus) and REPLACE
 (`DANGER`). Back answers a question with Cancel; with no question up, Back closes the card.
 
-Every change backs the saves up first. A restore checks the whole backup before it touches anything, writes it into
+Restore and Add a save back the saves up first. A restore checks the whole backup before it touches anything, writes it into
 a new folder beside the save folder, and only then renames the save folder to `<folder>-backup-<date>` and puts the
 new one in its place; any failure before that swap leaves the saves as they were, and a failed swap puts the old
 folder back. A failure shows the error card ("Your saves were not backed up", "Your saves were not restored" or "The
@@ -582,6 +582,14 @@ runs." The save folder is `<saves>/<DISC_ID>`, the game's Memory Stick; backups 
 `<user data>/titles/<DISC_ID>/save-backups`, named `<DISC_ID>-saves-<date>-<time>.zip` with a `-before-restore`,
 `-before-add` or `-before-remove` ending for the automatic ones. Nothing is uploaded and nothing is deleted
 automatically. Prompt bar: MOVE, SELECT, BACK.
+
+With a ready shared Memory Stick (#2744), the title's Saves card offers BRING IN for a
+new or changed save found in that title's legacy folder. The question names the whole
+save folder and focuses CANCEL first. If the shared stick already holds a different
+save of that name, its progress stays active and the older version goes to Kept copies.
+An interrupted copy can be confirmed again. Bring In leaves the older player's folder
+in place. This action requires a ready stick. First migration and the switch to shared
+storage for ordinary launches are separate.
 
 ### Add to Steam (built)
 

@@ -315,6 +315,22 @@ Many PSP titles run a 30 Hz game-logic loop by waiting two VBLANK intervals per 
 2. **Off at run time unless opted in.** Every rewritten site is emitted twice: the stock statement and its rewrite. The rewrite runs only when the process starts with `SR_EXPERIMENTAL_60HZ=1`; any other value runs the stock statements, so a package build with the toggle off executes the authentic instruction stream. The player sets it per title: "60 FPS game logic" on the title page, shown only for a title with a usable enhancement package, is off by default and saved as the list `enhancement_60hz_discs` in the player's settings file (no other key turns it on). A title with it on launches its enhanced package with `SR_EXPERIMENTAL_60HZ=1`; with it off, the player launches the authentic `packages/<disc_id>` with `SR_EXPERIMENTAL_60HZ=0`, even when an enhanced package exists. Started with `--experimental-60hz`, the player turns it on for every title that has an enhancement package and does not resolve to Authentic (section 10.5), for that session only; the flag is never written to the settings file.
 3. **No faster guest clock.** System time, RTC and audio sample clocks are untouched. Only the sites the package lists change.
 
+The build snapshots the selected declaration before computing its package key and generating code.
+An enhanced package records a versioned source fingerprint alongside its validated declaration
+digest. The player selects the current user or shipped declaration for that title and checks the
+fingerprint when it checks library readiness and again before starting the runtime. A combined
+timing and culling package checks both. JSON whitespace, member order, and equivalent string escapes
+leave the fingerprint unchanged, including equivalent spellings of JSON real numbers within the
+player's declaration size limit. A declaration with the same ID and different contents requires
+a rebuild. The build also snapshots and records the byte digest of any adjacent symbol map it
+uses. Adding, removing or changing that map requires a rebuild. Published declarations resolve
+against their own site map. An explicit guest symbol map takes precedence over adjacent files for
+private declarations. The builder snapshots its bytes and records their digest in the enhanced AOT
+key. The installed package records that build input by digest, and launch continues to check the
+selected declaration files without reading unused adjacent maps. An older enhanced package that
+lacks the declaration identity needs one rebuild to record it.
+Authentic packages have no declaration fingerprint requirement.
+
 ### 9.2. Site Transforms
 
 Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, the SHA-256 `stock_digest` of the stock little-endian instruction word, and a `transform`. `plan_site_rewrite()` in `tools/enhancement_package.py` gives each (transform, instruction) pair exactly one rewrite, chosen from the transform and the instruction encoding alone; a pair without one refuses the whole package. A site is one word, or two words (`word_count: 2`) that build a float constant: `lui rt, hi` followed by `ori rt, rt, lo` of the same register. A pair takes one of the scaling transforms below, applied to the whole 32-bit value and rounded to nearest, and both words are rewritten (`plan_float_pair_rewrite()`).
@@ -394,6 +410,20 @@ A gated statement (a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_store` site, an
 3. **Correct under frame drops.** The count advances once per update however many display VBLANKs that update takes, so gated statements keep alternating when an update overruns a VBLANK or a stock two-VBLANK wait still runs. `tools/test_enhancement_package.py` compiles the generated gate and runs updates of one to three VBLANKs to check it.
 4. **Slowdown is reported.** An update that takes longer than one VBLANK of host time is followed by the title's own wait for the next VBLANK, so the logic runs below 60 updates per second while every per-update step stays halved: the game plays slower than the original. The generated start-up hands `nk_enhancement_updates` to the runtime (`sr_enhancement_register_updates()`), which compares it once a second. Logic that runs but stays under 57 updates per second for three seconds in a row is logged as `ENHANCEMENT_LOGIC_SLOWED` and shown in the game window as a red `60 FPS logic: <n>/s - SLOWED` line, with or without the F3 HUD. A second with no update at all (a load or a pause) clears the count.
 5. **Why it is declared, not inferred.** A `vblank_wait_2_to_1` site is the compare inside a title's wait loop, which can run several times in one update, so it does not mark where an update begins. The package names the boundary explicitly.
+
+**Checklist: replays.** A title's own replay (a race or a match re-run from recorded input) is checked before a package that gates its logic is released:
+
+- The count is the run's, not the replay's. `nk_enhancement_updates` is a variable of the generated host code, not guest memory, and the attract loop, the menus and the loads before a replay advance it too. A plain gate (`gate_30hz`, `gate_30hz_hold`, `gate_30hz_store`, and the unit steps and countdowns whose rewrite is a gate) follows its parity: a replay that starts after an odd number of updates runs the gated statements on the other half of its updates than a recording that started after an even number, so the state they build from the same input differs, and the replay can drift from what was recorded. The site's evidence shows that the title's recordings and replays start on the same parity, or that the replayed logic does not depend on the phase of its gates; otherwise its sites are moved to a transform that phases itself.
+- A `gate_30hz_alt` site phases itself on re-entry: after at least one update in which it was not reached, it makes the stock call first, whatever the parity of the count. A `gate_30hz_phase` site counts its own state's time (section 9.2), so a state entered for the replay starts at an even phase.
+- `SR_RECORD` and `SR_REPLAY` replay a whole run from a fresh start, so the count starts at zero in both. A recording and its replay are made with the same package and the same `SR_EXPERIMENTAL_60HZ` value.
+- `TestReplayAtOddUpdateCount` in `tools/test_enhancement_package.py` compiles the generated gate, boundary count and `gate_30hz_alt` statement and starts a replay after odd and even numbers of updates.
+
+**Checklist: logic rates above 60 Hz.** This section declares one rate: one logic update per VBLANK, twice the stock rate. A proposal for more updates per second (for a display above 60 Hz) is a new package format, not a new package, and answers each of these first:
+
+- Every transform of section 9.2 scales by a ratio of two (`count_x2`, `step_x0.5`, $\sqrt{m}$, $\kappa$ and $q$ from a two-update image), and a gate runs one update in two (the parity of the count). Another ratio needs its own transforms and a gate that runs one update in $N$.
+- `vblank_wait_2_to_1` makes the title wait one VBLANK per update; more than one update per VBLANK needs a new pacing rule.
+- Item 4's slowdown threshold (57 updates per second) is written for 60, and so is the HUD line.
+- Smooth motion (section 10.6) presents in-between pictures and changes no logic, so it is not a way to a higher logic rate.
 
 This package format is opt-in; whether a package is experimental is section 9.10.
 
@@ -927,7 +957,14 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
   run's report as `added_delay_ms`. A new flip that arrives before B's present replaces it, counted in
   `presents.superseded`: one VBLANK of delay does not fit a frame that is on screen for one VBLANK (a title leaving
-  30 FPS), and holding each frame back instead would keep every later frame one VBLANK late.
+  30 FPS), and holding each frame back instead would keep every later frame one VBLANK late. The frame that
+  replaces it came one VBLANK after it. The first such frame is held in its turn, because one early frame can be a
+  hitch; the second in a row runs ahead of 30 FPS and is not held ("Only at 30" below). So a title that goes from
+  30 FPS to a flip on every VBLANK gives up two frames, the last of its 30 FPS stretch and the first of the new
+  pace, where it gave up every frame until the detector left 30 before issue #2341 (33 frames in
+  `gui-present-selftest`'s run). A title that leaves 30 FPS for an uneven pace is not helped: with intervals of one
+  and two VBLANKs, each frame that came two VBLANKs after the one before it is still held and then replaced, until
+  the detector leaves 30 about 0.6 seconds later (37 VBLANKs and 13 frames in `gui-present-selftest`'s run).
 - **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
   paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
   cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
@@ -957,7 +994,18 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   frame as it comes, as without the feature. Fast forward keeps each frame it shows, so the first in-between after it
   is made of two frames shown one after the other. A frame still held or owed when fast forward starts is
   superseded by the first new frame (`presents.superseded`), which is shown as it comes. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
-  30 Hz after a second of agreement and leaves after half a second of disagreement.
+  30 Hz after a second of agreement and leaves after half a second of disagreement. While it still reads 30, a frame
+  that runs ahead of 30 FPS is shown as it comes too, with no in-between (issue #2341, `ace_det_holds` in
+  `src/rt/ace.c`). A frame runs ahead when it is the second in a row to be flipped less than two VBLANKs after the
+  frame before it. Held, it would be replaced by the next flip before its own present, and a title that goes to a
+  flip on every VBLANK would show only in-betweens until the detector left 30. One short interval alone is a hitch,
+  and its frame is held like any other: the catch-up of a late frame, an early frame that a late one follows, or a
+  frame one VBLANK after the first frame that follows a static picture. So a title whose intervals alternate three
+  VBLANKs and one, or repeat two, one and three, keeps an in-between for every frame for as long as that lasts. This
+  is judged frame by frame and does not move the class, so the next frame that comes two VBLANKs after the one
+  before it has its in-between again. The cost: the first frame of a move to a flip on every VBLANK cannot be told
+  from an early hitch until the next flip comes, so it is held and then replaced, and such a move gives up two
+  frames where not holding it would give up one.
 - **Never off without saying so, and never more than it moved.** The setting's description says it smooths
   steady 30 FPS scenes only where it can follow the motion. With the speed readout on, its text ends with
   `SMOOTH n`, or with `SMOOTH OFF` for a second in which no in-between was shown: another frame rate, a PC that
@@ -1061,7 +1109,8 @@ the Vulkan picture), `src/rt/gui.c` (the setting, the wing width and the softwar
   wings. The PSP's 480x272 is 30:17, about 16:9; a 16:9 window widens it by under 4 pixels, so 16:9 has none. One canvas
   holds both wings in a 512-column image, the GE's widest framebuffer, so the Vulkan canvas shares every target's size,
   viewport and readback. That caps a wing at 256 pixels, a picture of 992x272 (about 32.8:9); a wider window (three
-  screens) gets the widest Fill and black beyond it.
+  screens) gets the widest Fill and black beyond it. The canvas is the host's own: the wings never use columns 480-511
+  of the guest's 512-wide framebuffer, where a title may keep its palettes in the stride padding beside its picture.
 - **Off is the default.** With no wing width set, no canvas exists and no wing is drawn or submitted, and the window
   shows the frame alone, fitted as before. What Off still costs is a test per primitive in `src/rt/ge.c` (`s_wide_d`),
   tests of an always-NULL pointer in the software rasterizer's pixel accessors (`s_wing`) and the Vulkan backend's
@@ -1094,12 +1143,25 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 `settings.json` keeps the library's choice in `"enhanced"` and a sparse `"title_play"` map, every value by name:
 
 ```json
-"enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
-            "load": "off", "twin": "off", "mips": "off"},
-"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
-"texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+{
+  "enhanced": {
+    "default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on",
+    "wide": "off", "smooth": "off", "sas": "off", "tess": "off", "cull": "off",
+    "upscale": "off", "stick": "off", "load": "off", "twin": "off", "ssaa": "off",
+    "mips": "off", "texpack": "off", "pad": "off", "shadow": "off", "peak": "off",
+    "texscale": "off", "smart2d": "off"
+  },
+  "title_play": {
+    "ULUS10000": {"mode": "ace", "af": "8", "texpack": "on"},
+    "ULES00000": {"mode": "library", "logic_60": "off"}
+  },
+  "texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
+}
 ```
+
+Here the library defaults to Enhanced with texture replacement off. `ULUS10000` enables its chosen pack with
+`"texpack": "on"`, while `ULES00000` inherits the library's texture pack setting. Authentic keeps texture
+replacement off even when a folder is saved.
 
 `"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
 256 of them; choosing one more is refused with a message. A member that is not a disc ID and a folder string is
@@ -1587,10 +1649,23 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   until its content has held still for 300 presents (a font cache that has finished typing, a streaming slot that
   settled); then it is dumped again. A texture skipped as a movie picture or for its changing address is looked at
   again once that no longer holds, so a texture the game loads where a movie played is not lost. A file already in
-  the folder is never written again or replaced:
+  the folder is never written again or replaced, with one exception below:
   each PNG (compressed with fixed-Huffman deflate, `sr_png_encode_rgba`) is written to a temporary file and moved
   into place only while no file has the name (`sr_file_publish_new_tagged`, `nk_rename_noreplace_utf8`), so an image
-  the player enlarges in place is kept even when it is saved during the dump. Every file call is the platform layer's
+  the player enlarges in place is kept even when it is saved during the dump. The exception is a mip level's file
+  the dump wrote itself: a level from 1 up is named for level 0's content, not its own, so the game can change
+  the level under the same name. When a later dump finds such a file holding another level than the one drawn,
+  a worker replaces it (written whole to a temp file and renamed over it), counted in `written=`, under the file
+  limit and the budget of disk bytes a new file has (the check's own reads and decodes are host memory beyond
+  that budget), but only when
+  the file is the dump's own: a PNG at the level's size whose bytes are what the dump's encoder makes of its
+  pixels. Any other file at the name (an enlarged image, or one another program saved, at any size) is the
+  player's and is kept as it is, counted in `already_there=`, as is a file that already holds the level drawn.
+  A replacement that cannot be made (the temp file cannot be written, or the host refuses the rename, as Windows
+  does over a file the player marked read-only or holds open) removes its temp file and keeps the old file,
+  counted in `already_there=` and said once a stretch in a `TEX_DUMP: note:` line; it does not stop the dump.
+  Level 0's file is named for its own content, so it is never outdated. The check and the rename are not one
+  step: a file the player saves at that name in between is replaced. Every file call is the platform layer's
   wide-path one, so a user data folder under a user name that is not ASCII works. Nothing the guest can observe
   changes: each texture is decoded from guest memory, on the guest thread, into a buffer of its own, and written to
   disk, never to guest memory; files are written only inside the folder. The encode and the write run on the
@@ -1633,7 +1708,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   calls `sr_texdump_exit_finish` beside its video recording's finish (`SR_EXIT_AT_VBLANK`, `SR_WATCHDOG_EXIT`, the
   `SR_FBDUMP` capture exit and its no-framebuffer stop, an unsupported import, an unregistered NID, a guest fault,
   a failed route check, a refused `SR_SAMPLE_SPEC`, the libfont start-up stop, an enhancement data mismatch, and a
-  failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). An end reached on a
+  failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). One `_Exit` finishes
+  neither: the verify harness's `--hard-exit` (`src/rt/verify_harness.c`, a verify build's own test program), which
+  links no renderer, display or player, so no dump or recording can run there. An end reached on a
   thread other than the one that draws does not wait and says what it leaves. A crash, or an `abort()`, finishes
   nothing: what was queued is lost and a temp file can be left. The PNG encoder's CRC table is constant, so the
   workers share no state while they encode.
@@ -1732,7 +1809,15 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   is written on its next draw. Its `dump-exit` cell holds 20 levels with the workers and calls what the exit at
   `SR_EXIT_AT_VBLANK` calls: every level is written whole by both workers at once, each file's CRCs right, and no
   temp file is left. Its `dump-stuck` cell holds both workers with jobs that do not finish: the end gives up after
-  its bounded wait and counts the levels it left. `hle-thread-selftest` runs two real stops in a child process, an
+  its bounded wait and counts the levels it left. Its `dump-thread` cell ends the run on another thread with
+  nothing being written, and `dump-thread-busy` with a level held by the workers: that end neither waits nor
+  takes the job back, counts the level as left and leaves the dump's state alone, and the drawing thread's own end
+  then lets the file land. Its `dump-redump` cell dumps a mip-mapped texture, changes level 1 only and dumps
+  again: level 1's file is replaced and level 0's left byte for byte; drawn unchanged, both are left and counted
+  as there; the player's level 1 enlarged 2 times (in noise, and in one flat colour the dump's own encoder wrote,
+  small enough that only the size check keeps it), and one at the level's size that another program saved, are
+  each kept byte for byte; and an outdated file of the dump's own whose rename the host refuses (a test seam in
+  the rename's place) is kept, said once, and the dump goes on with nothing counted as failed. `hle-thread-selftest` runs two real stops in a child process, an
   unregistered NID (status 7) and `SR_WATCHDOG_EXIT` (status 1), with a probe in the dump's place, and requires
   that each reaches `sr_texdump_exit_finish` before the process ends. `tex-scale-selftest` checks the work jobs
   themselves: each runs once, on a worker thread, never the submitter's, and knows it is on one; held jobs stay
@@ -2498,13 +2583,13 @@ The runtime says over the picture when it draws the game a slower way than the r
 shows in Authentic mode too and that the user can dismiss it. It is not an enhancement and no play mode turns it on
 or off: it is a host-window fact, and it changes no guest byte, no capture and no recording (section 10.2).
 
-- **When.** Only for the two start-up fallbacks the `render_path` boot event names
-  ([`docs/DEBUGGING.md`](DEBUGGING.md#performance-issues)): `gdi_presenter` (SDL3/Vulkan did not start, so the
-  Windows GDI window shows a software-drawn picture) and `software_ge` (the GPU renderer was asked for and did not
-  start). A path that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is no fallback and shows nothing. The
-  notice has the heading the player's game page uses for the same fact, "Drawn in software", one sentence that says
-  what did not start, that the game may run slower and that updating the graphics driver may help, and the way to
-  hide it.
+- **When.** The start-up fallback is named in the `render_path` boot event
+  ([debugging guide](DEBUGGING.md#performance-issues)). `gdi_presenter` means SDL3/Vulkan did not start and the
+  Windows GDI window shows a software-drawn picture. `software_ge` means the requested Vulkan GE renderer did
+  not start. `vulkan_cpu` means the Vulkan presenter selected a CPU device and takes precedence over
+  `software_ge`. An explicitly selected GDI or software GE path alone does not trigger the notice.
+  The notice shares the player's "Drawn in software" heading and explains why the game may run slower and
+  how to hide the notice.
 - **Not in the window.** An effect the GPU renderer hands to the software rasterizer while the game runs (a
   `render_fallback` event) is named on the game's page in the player, not over the picture: the in-game UI is made
   at start so that no present pays for it, an authentic run with nothing to say at start makes none, and the notice

@@ -35,7 +35,9 @@ from functools import lru_cache
 import re
 from typing import Any, cast
 
-from .protocol import ProtocolError, SequenceReport, StreamSpec, TestResult, parse_output, parse_sequence
+from .protocol import (GE_SOLID_TRIANGLE_CASE, GE_SOLID_TRIANGLE_TEST, ProtocolError,
+                       SequenceReport, StreamSpec, TestResult, ge_solid_triangle_input_words,
+                       parse_output, parse_sequence)
 
 
 def _observable(report: SequenceReport, case: str, field: str) -> int | None:
@@ -3188,6 +3190,43 @@ _register_campaign_probe(
     "ge-rtt", "PSP-GE-RTT-001", {case: (10 if case.endswith("-draw") else 16) for case in GE_RTT_CASES},
 )
 
+_register_campaign_probe(
+    GE_SOLID_TRIANGLE_CASE, GE_SOLID_TRIANGLE_TEST,
+    ((f"{GE_SOLID_TRIANGLE_CASE}-input", 16), (f"{GE_SOLID_TRIANGLE_CASE}-guard", 4),
+     (f"{GE_SOLID_TRIANGLE_CASE}-draw", 4), (f"{GE_SOLID_TRIANGLE_CASE}-restore", 2),
+     *((f"{GE_SOLID_TRIANGLE_CASE}-r{row}", 16) for row in range(16))),
+)
+
+
+def ge_solid_triangle_readback(sequence: SequenceReport) -> bytes:
+    """Check the exact command case and reconstruct its 1 KiB raw rectangle."""
+    if sequence.spec.test_id != GE_SOLID_TRIANGLE_TEST or not sequence.complete or not sequence.all_passed:
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: need the complete passing pixel stream")
+
+    def record(suffix: str, count: int, expected_result: int = 0) -> tuple[int, ...]:
+        record_id = f"{GE_SOLID_TRIANGLE_CASE}-{suffix}"
+        values = dict(sequence.results[record_id].values)
+        result = int(values["result"], 0)
+        words = tuple(int(values[f"out{i}"], 0) for i in range(count))
+        if result != expected_result or any(not 0 <= word <= 0xffffffff for word in words):
+            raise ProtocolError(f"{record_id}: invalid result or packed word")
+        return words
+
+    if record("input", 16) != ge_solid_triangle_input_words():
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: declaration or GE prestate digest differs")
+    if record("guard", 4) != (480, 272, 0x200000, 2):
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: scanout guard was not satisfied")
+    qid, list_state, draw_state, initial_nonzero = record("draw", 4)
+    if initial_nonzero != 0:
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: initial framebuffer was not zero")
+    if qid >= 0x80000000 or list_state != 0 or draw_state != 0:
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: list and GE must be done")
+    if record("restore", 2) != (0, 0):
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: VRAM or GE context restoration failed")
+    return b"".join(word.to_bytes(4, "little")
+                    for row in range(16) for word in record(f"r{row}", 16, row))
+
+
 # The #343 GE pixel corpus (tests/fixtures/psp_oracle/ge_corpus.json, `probe_runs`) carries the measured
 # results of these three probes. Per probe: its test id, its cells in stream order, and the record
 # suffixes the corpus keeps for each cell. A `-draw` record holds the GE wait outcome and timings and
@@ -3579,6 +3618,8 @@ def parse_campaign_probe_output(
         raise ProtocolError(f"unknown campaign probe {campaign_case!r}") from exc
     sequence = parse_sequence(text, spec, require_complete=require_complete)
     _validate_scalar_shape(sequence, counts)
+    if campaign_case == GE_SOLID_TRIANGLE_CASE and require_complete:
+        ge_solid_triangle_readback(sequence)
     if campaign_case in HLE_MACHINERY_STATUS_CASES:
         for record in sequence.results.values():
             if record.status not in ("PASS", "SKIP"):

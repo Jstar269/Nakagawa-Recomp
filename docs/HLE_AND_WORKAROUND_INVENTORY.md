@@ -46,16 +46,16 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **718** (dedicated **671**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **648** handlers across **30** API families, covering **678** handler-associated NID registrations.
+Registered NIDs: **720** (dedicated **675**, fake_success **3**, controlled_unsupported **42**).
+Semantic handler census: **652** handlers across **30** API families, covering **682** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 406 | 418 |
+| `partial` | 425 | 438 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 224 | 229 |
+| `unreviewed` | 209 | 213 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -71,25 +71,25 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 | `sceGe` | 2 | 11 | 0 | 0 | 1 | 14 | 14 |
 | `sceHprm` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceImpose` | 0 | 0 | 0 | 0 | 2 | 2 | 2 |
-| `sceIo` | 2 | 28 | 0 | 0 | 4 | 34 | 34 |
-| `sceKernel` | 3 | 146 | 0 | 0 | 42 | 191 | 209 |
-| `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
+| `sceIo` | 2 | 29 | 0 | 0 | 3 | 34 | 34 |
+| `sceKernel` | 3 | 149 | 0 | 0 | 39 | 191 | 209 |
+| `sceMp3` | 0 | 2 | 0 | 0 | 20 | 22 | 22 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
-| `sceNet` | 0 | 46 | 0 | 0 | 13 | 59 | 59 |
+| `sceNet` | 0 | 48 | 0 | 0 | 13 | 61 | 61 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `scePower` | 0 | 19 | 0 | 0 | 0 | 19 | 24 |
 | `scePsmf` | 0 | 4 | 0 | 0 | 14 | 18 | 18 |
 | `sceReg` | 0 | 15 | 0 | 0 | 0 | 15 | 15 |
 | `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
-| `sceSas` | 0 | 0 | 0 | 1 | 27 | 28 | 32 |
+| `sceSas` | 0 | 5 | 0 | 1 | 22 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
-| `sceUtility` | 0 | 20 | 0 | 0 | 17 | 37 | 37 |
+| `sceUtility` | 0 | 25 | 0 | 0 | 12 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
-| `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **406** | **1** | **3** | **224** | **648** | **678** |
+| `sceWlan` | 0 | 1 | 0 | 0 | 1 | 2 | 3 |
+| **Total** | **14** | **425** | **1** | **3** | **209** | **652** | **682** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -484,6 +484,11 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Limitation: only the Memory Stick host leg is held to the recorded shape; the PSP's ctime/atime/mtime are written as zero, the ms0 volume root (0x80010016 on a PSP) and the disc, data-archive and flash0 legs have no recorded stat cell, and the SceIoStat pointer is not validated (#341)
   - Evidence: PSPAutotests tests/io/stat/stat.expected (1a9e6c31, recorded on a PSP): an ms0 file reports mode 0x21ff attr 0x0020 and its size, a directory mode 0x11ff attr 0x0010, bytes [0..63] are written and st_private is left untouched
   - Evidence: tests/native/hle_thread_selftest.c:test_ms0_unified_namespace
+- **`h_IoIoctl`** (`sceIo`): `sceIoIoctl` (0x63632449)
+  - Limitation: this status covers the sceIoIoctl cells of PSP-HLE-IO-SEEK-001 only: on a probe-owned 16-byte Memory Stick file opened read-write, the seek 0x01010005 (a 16-byte record: the offset, a reserved word of 0, SEEK_SET; no output) to -1, 8, 16 and 32 from a position of 0, and the queries 0x01020004, 0x01020003, 0x01020006 and 0x01020007 (no input, an 8-byte output) from a position of 8 and 0x01030008 (no input, a 4-byte output) from a position of 0, each return 0x80020325 and change neither the position, the output nor the file; on disc0:/UMD_DATA.BIN opened read-only, from a position of 8, the same seek to -1 and to the size + 1 returns 0x80010005 and to the size returns 0, and the position query 0x01020004 with an 8-byte output returns 0 and writes only the low out word; PSP-HLE-IO-SEEK-001 recorded that on one PSP-3000 (system software 6.6.0 as reported by pspver) in one acceptance-eligible launch in the XMB context (boot 156, the probe built from 59520eb0, 2026-11-08), and the selftest makes the same calls through sr_syscall (test_io_memory_stick_cells_through_syscall for the Memory Stick file, a synthetic 2048-byte disc file for disc0:); the record publishes neither the low out word's value nor the position after a disc0: seek, so the selftest's positions are runtime checks; the selftest also runs Memory Stick offsets and buffer sizes the probe did not, which the runtime refuses the same way, unmeasured; every other command (the PGD and DRM commands among them, PPSSPP-derived), any other whence, input or buffer size, other devices and files, and the position after a successful Memory Stick seek are not measured by this record and not reviewed here; sceIoIoctlAsync is a separate handler (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*, io-seek-umd-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall
+  - Evidence: tests/native/hle_thread_selftest.c:test_io_ioctl_disc0_seek_range_and_position
 - **`h_IoIoctlAsync`** (`sceIo`): `sceIoIoctlAsync` (0xe95a012b)
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP ioctl timing and callback ordering remain unmeasured; the Memory Stick file commands PSP-HLE-IO-SEEK-001 measured through sceIoIoctl (0x01010005, 0x01020003, 0x01020004, 0x01020006, 0x01020007, 0x01030008) are not measured asynchronously; the request reaches the same driver, so its completion follows sceIoIoctl's rule: the measured form completes with 0x80020325 and changes nothing, and other forms of those commands complete at IO_MS_FILE_IOCTL (0x80010086)
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
@@ -717,6 +722,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Limitation: guest RAM is one coherent array, so the post-maintenance words the cells check are met, but the pre-maintenance contrast words (an uncached read before writeback, a stale cached read before invalidate) are not reproduced; a title that reads stale data through the cached alias is outside this model
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-CACHE-001: cache-alias-init, cache-writeback-contrast, cache-inval-contrast)
   - Evidence: tests/native/hle_thread_selftest.c:test_dcache_maintenance_notifies_renderer
+- **`h_DcacheWritebackAll`** (`sceKernel`): `sceKernelDcacheWritebackAll` (0x79d1c3fa)
+  - Limitation: this status covers the PSP-CACHE-001 cache-wball cell only: after 0xDEADBEEF is stored through the cached address of the second word of a 64-byte-aligned buffer, sceKernelDcacheWritebackAll() returns to its caller and the same word read through the uncached alias (the address with 0x40000000 set) is 0xDEADBEEF; PSP-CACHE-001 recorded that on one PSP-3000 (system software 6.61, ARK-5.1.0) in the 2026-10-10 campaign launch of f6ccfb33 and again in the acceptance-eligible 2026-10-15 requalification launch of f2d6c91a, and the selftest makes the same store, call and read through sr_syscall; the probe discards the call's return value, so the 0 the runtime returns is not measured; guest RAM is one coherent array here, so the alias reads the stored word whatever this call does, and the only handler behaviour the selftest can check is that the call comes back without a named stop; the renderer notice the handler sends, lines other than the probe's, and data the cache would have held stale are not measured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-CACHE-001: cache-wball)
+  - Evidence: tests/native/hle_thread_selftest.c:test_dcache_writeback_all_cached_store_reaches_the_uncached_alias
 - **`h_DelayThread`** (`sceKernel`): `sceKernelDelayThread` (0xceadeb47)
   - Limitation: a zero delay returning 0 without yielding to an equal-priority ready thread or dispatching a pending callback is measured; nonzero delays block for the modeled microsecond duration, whose rounding and wake latency are not measured (#325)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-002: delay-thread-zero)
@@ -840,6 +849,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_threadman_id_list_cells
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tmid-9-list and tmid-10-list, an empty list returns 0 with a count of 0 and no slot written)
   - Evidence: tests/native/hle_thread_selftest.c:test_threadman_id_list
+- **`h_GetTlsAddr`** (`sceKernel`): `sceKernelGetTlsAddr` (0xfa835cde)
+  - Limitation: this status covers the PSP-SAFE-SCALAR-001 TLS cells only: for a pool of four 0x100-byte blocks in partition 2 with NULL options, created without attribute 0x4000 and (twice) with it, a thread's first call returns a 0x100-aligned block and its second call the same address; the main thread's block lies 0x100 above the low bracket's head in the pool without the attribute, 0x400 below the high bracket's head in the first pool with it, and 0x800 below that head (0x400 below the first pool's block) in the second; a second thread's block is 0x100 above the main thread's in the pool without the attribute and in the first pool with it; and after the main thread's calls the status of each of the first two pools reads 3 of 4 blocks free; PSP-SAFE-SCALAR-001 recorded that on one PSP-3000 (system software 6.61, operator-declared) in one acceptance-eligible launch in the XMB context (boot 221, the probe built from 86279e852, 2026-11-17), and the selftest replays the same calls through sr_syscall in both partition layouts; the record stores distances and low bytes, never an address, and it does not measure the block's contents (the runtime zero-fills a block it hands out), an unknown or deleted pool, a call when every block is held (the runtime returns NULL and names it on stderr, #339; no wait for a block is modelled), another pool shape or partition, a third thread, or a call from interrupt context; those are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tls-addr-normal, tls-status-normal, tls-addr-high, tls-status-high, tls-addr-high-2, tls-thread)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_tls_20261117
 - **`h_GetVTimerBase`** (`sceKernel`): `sceKernelGetVTimerBase` (0xb3a59970)
   - Limitation: returns the same base as ReferVTimerStatus, measured equal while running and 0 once stopped (PSP-HLE-VTIMER-002); the value, guest time at the most recent Start, is consistent with that run's system-clock reads, not measured exactly; NULL out-pointer returns ILLEGAL_ADDR as a runtime safety choice after PSP-3000 hung on ReferSystemStatus(NULL) (PSP-HLE-NULL-OUT-001), not as a measured VTimer result; deleted-UID code is unmeasured and reused by analogy; no game relies on the NULL output (#325)
 - **`h_GetVTimerTime`** (`sceKernel`): `sceKernelGetVTimerTime` (0x034a921f)
@@ -986,6 +999,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_rotate_ready_queue_selection_order
   - Evidence: tests/native/hle_thread_selftest.c:test_rotate_equal_priority_yields_to_peers
   - Evidence: tests/native/sched_selftest.c:test_rotate_ready_queue_moves_head_behind_peers
+- **`h_SelfStopUnloadModule`** (`sceKernel`): `sceKernelSelfStopUnloadModule` (0xd675ebb8)
+  - Limitation: only (0, 0, NULL) and (1, 0, NULL) from a started helper's own thread are reproduced: module_stop runs once with length zero and a null pointer, the caller does not resume, and address lookup returns 0x8002012e after unload. For (0, 4, argp past RAM) the PSP ran module_stop with a substituted pointer and unloaded; the runtime refuses the span with 0x80000103 and preserves the module (#2397). Other first-argument and argument-block forms, a call from the module_start thread, sibling threads, no stop entry and a nonzero module_stop return remain unmeasured (#341)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-SELFSTOP-001: self-stop-arg0, self-stop-arg1)
+  - Evidence: tests/native/hle_thread_selftest.c:test_self_stop_unload_measured_forms
 - **`h_SendMbx`** (`sceKernel`): `sceKernelSendMbx` (0xe9b3061e)
   - Limitation: invalid-message-pointer error class unmeasured; interrupt-context placement unmeasured (#339, #341)
 - **`h_SendMsgPipe`** (`sceKernel`): `sceKernelSendMsgPipe` (0x876dbfad)
@@ -1051,9 +1068,14 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_suspended_waiter_keeps_wait_semantics
   - Evidence: tests/native/sched_selftest.c:test_suspended_wait_still_completes
 - **`h_SysClock2USec`** (`sceKernel`): `sceKernelSysClock2USec` (0xba6b92e2)
-  - Limitation: uses the runtime's microsecond system-clock representation and splits it into low/high outputs; hardware conversion and error-precedence cells are not measured
+  - Limitation: PPSSPP-derived, not PSP-measured. Splits the unsigned 64-bit clock bit pattern into 32-bit seconds and remaining microseconds. Both output spans are required by the runtime safety policy. Null, alias, signed-input and error behavior on PSP remain unmeasured.
+  - Evidence: PPSSPP 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 Core/HLE/sceKernelTime.cpp sceKernelSysClock2USec, unsigned split with 32-bit outputs
+  - Evidence: tests/native/hle_thread_selftest.c:test_kernel_import_sweep_sysclock_conversion
 - **`h_SysClock2USecWide`** (`sceKernel`): `sceKernelSysClock2USecWide` (0xe1619d7c)
-  - Limitation: takes the 64-bit clock as the $a0/$a1 pair and writes its low/high words through $a2/$a3 on the same microsecond representation as h_SysClock2USec; invalid-output-pointer error code and hardware conversion are not measured
+  - Limitation: PSP-KERNEL-MISC-001 measures only by-value 1234567890 us with valid outputs. It returns 0 and writes seconds 1234 and remaining microseconds 567890. Other clock arithmetic is PPSSPP-derived, not PSP-measured. Required output spans and ordered alias writes are runtime policy. Null, alias, signed-input and error behavior on PSP remain unmeasured.
+  - Evidence: PSP-KERNEL-MISC-001 sysclock-wide, public confirmation in PR #3078: by-value 1234567890 us returned 0 and wrote 1234 and 567890 to valid outputs
+  - Evidence: PPSSPP 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 Core/HLE/sceKernelTime.cpp sceKernelSysClock2USecWide, unsigned arithmetic outside the measured value
+  - Evidence: tests/native/hle_thread_selftest.c:test_unregistered_batch_sysclock_wide
 - **`h_TerminateDeleteThread`** (`sceKernel`): `sceKernelTerminateDeleteThread` (0x383f7bcc)
   - Limitation: as sceKernelTerminateThread; the release of the thread's stack partition is not observed by any cell (#341)
   - Evidence: PSPAutotests tests/threads/threads/terminate.expected (sceKernelTerminateDeleteThread: created, ready, finished, suspended and waiting threads 0; 0 and the current thread 0x80020197; the id answers 0x80020198 afterwards)
@@ -1125,6 +1147,15 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 - **`h_WakeupThread`** (`sceKernel`): `sceKernelWakeupThread` (0xd59ead2f)
   - Limitation: the cited cells cover wakeup-count accumulation and a sleeping target; specific invalid-target errors, repeated wakeup order, and interactions with termination are not all established
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B3-01: wakeups accumulate while the target is not sleeping)
+- **`h_Mp3LowLevelDecode`** (`sceMp3`): `sceMp3LowLevelDecode` (0xe3ee2c81)
+  - Limitation: PPSSPP-derived, not PSP-measured. Bytes used are the leading zero bytes plus the frame, as PPSSPP's bundled FFmpeg and JPCSP both report (a PPSSPP build on libavcodec 57.48.101 or later reports the whole window). A non-header start, too few bytes or an ID3v1 tag returns 0 with no PCM as in PPSSPP, where JPCSP returns 0x80672001. A frame running past the 4096-byte window stops by name. A reserved handle without low-level Init decodes with its own decoder. Bad pointers return -1, and the 4096 source bytes and 4608 PCM bytes must be mapped (runtime safety policy).
+  - Evidence: PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelDecode, one frame from at most 4096 source bytes into stereo s16, the bytes used and PCM bytes written, result 0
+  - Evidence: PPSSPP bundled FFmpeg b87f7c6d522d (libavcodec 57.24.102) libavcodec/mpegaudiodec_template.c decode_frame: leading zero bytes plus one frame are the bytes used; JPCSP 00ac4d6daedd Mp3Decoder.java agrees
+  - Evidence: tests/native/hle_thread_selftest.c:test_mp3_low_level
+- **`h_Mp3LowLevelInit`** (`sceMp3`): `sceMp3LowLevelInit` (0x1b839b83)
+  - Limitation: PPSSPP-derived, not PSP-measured. Takes any handle number without sceMp3InitResource and ignores its second argument, as the #2640 checklist asks; JPCSP instead requires a reserved handle 0 or 1. A low-level context does not count against the two reserved handles, and the stream and format calls answer its number as an unused one.
+  - Evidence: PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelInit, a context under any caller-chosen handle number, replacing one already held there
+  - Evidence: tests/native/hle_thread_selftest.c:test_mp3_low_level
 - **`h_MpegAtracDecode`** (`sceMpeg`): `sceMpegAtracDecode` (0x800c44df)
   - Limitation: decodes the frame the last sceMpegGetAtracAu held with the project's ATRAC3+ bridge into 2048 stereo s16 samples (a mono stream duplicated); refuses with no held frame or an undecodable frame, with unmeasured error values; not measured on this project's PSP
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_atrac_au_decode
@@ -1362,13 +1393,22 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network
   - Evidence: PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): fresh sceNetInetInit returns 0 after utility module and core Net setup
 - **`h_NetInetTerm`** (`sceNet`): `sceNetInetTerm` (0xa9ed66b9)
-  - Limitation: clears active Inet state before core Net teardown; early or repeated Term stops by name; LoadExec clears Inet with the process's core Net and module state
+  - Limitation: clears active Inet state before core Net teardown; early or repeated Term and Term while Resolver is active stop by name; LoadExec clears Inet with the process's core Net and module state
   - Evidence: tests/native/hle_thread_selftest.c:test_net_inet_lifecycle_without_network
   - Evidence: PSPAutotests tests/net/adhoc/apctlinit and tests/net/inet/apscan (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected captures): active sceNetInetTerm returns 0 before core Net Term and module unload
 - **`h_NetInit`** (`sceNet`): `sceNetInit` (0x39af39a6)
   - Limitation: the library's state and its pool (from the user partition) only: no network stack, no socket and no host network API; the SceNetCallout and SceNetNetintr threads are not created; the PSP results were recorded with the WLAN switch on, and with the console profile's switch off sceNetInit still returns 0 (UNMEASURED; PPSSPP does not consult the switch either); the pool-size and priority codes, the pool's placement and the Init failure codes follow PPSSPP (a behaviour reference, UNMEASURED); a second Init without Term starts over with one pool, but checks its arguments before releasing the first pool, unlike PPSSPP (the PSP's order is UNMEASURED); a pool size whose 256-byte rounding passes 4 GB is refused with NO_MEMORY; core re-Init while Inet is active stops by name
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
   - Evidence: PSPAutotests tests/net (70e72391, recorded on a PSP): sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0 in every net test with no access point connected, and again after sceNetTerm (net/adhoc/socketids)
+- **`h_NetResolverInit`** (`sceNet`): `sceNetResolverInit` (0xf3370e61)
+  - Limitation: tracks only lifecycle in the disconnected Inet stack with WLAN on; first Init without prior object operations is PPSSPP-derived and logs once; unsupported ordering stops by name; resolver objects, DNS and host transport remain outside the handler
+  - Evidence: tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network
+  - Evidence: PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): after normal Net/Inet setup, AP Term and a preceding resolver Create/lookup/Stop/Delete, first Init returns 0 and duplicate Init returns 0x80000020
+  - Evidence: PPSSPP Core/HLE/sceNetResolver.cpp:sceNetResolverInit (cdf563b85c42c275ec2835a0883f48d63a9c9406): Init consults only the initialized flag; equivalence of Init without prior resolver object operations is reference-derived
+- **`h_NetResolverTerm`** (`sceNet`): `sceNetResolverTerm` (0x6138194a)
+  - Limitation: clears active Resolver and permits repeated Term in the same disconnected Inet lifetime with WLAN on; Term without successful Init in this lifetime stops by name; LoadExec resets the lifecycle state
+  - Evidence: tests/native/hle_thread_selftest.c:test_net_resolver_lifecycle_without_network
+  - Evidence: PSPAutotests tests/net/inet/offline (e37443a681c6a4d562f32b6b48e1f4e36cd69c97, source and expected capture): first and repeated Resolver Term return 0 after Init and deletion of the resolver objects
 - **`h_NetTerm`** (`sceNet`): `sceNetTerm` (0x281928a9)
   - Limitation: frees the pool and clears the library state; sceNetTerm before sceNetInit returns 0 as PPSSPP does (UNMEASURED); core Term while Inet is active stops by name
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
@@ -1568,6 +1608,29 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)
   - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
+- **`h_SasCoreWithMix`** (`sceSas`): `__sceSasCoreWithMix` (0x50a14dfc)
+  - Limitation: this status covers the measured cells only: PSP-SAS-003 is one acceptance-eligible launch on a PSP-3000 (system software 6.61, game context) of the probe built from 3872796c, 204 cells and the done record all PASS, and it calls __sceSasCoreWithMix once per cell on a core of grain 256 initialised fresh, over caller PCM (i - 256) * 97 in shorts 0..511; the selftest replays those calls and asserts the published words in the three windows the probe reads: with no voice keyed, (0x1000, 0x1000) returns 0 and leaves the buffer unchanged, (0x800, 0x800) returns 0 and halves it (0x9f00 becomes 0xcf80), and (0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return 0x80420018 and leave it untouched (sas-mix-w-zero-neg-calls, sas-mix-w-over-calls, sas-mix-w-extreme-calls); with voice 0 keyed at 0x1000, (0, 0) returns 0 and leaves the voice alone (0x06fe) and (0x1000, 0x1000) adds it to the caller's PCM (0x9f61 + 0x06fe = 0xa65f); in raw output mode (1), (0x1000, 0x1000) returns 0x80000004 and leaves the buffer untouched (sas-mix-w-raw-unity-calls); the handler accepted every gain and mixed in raw mode until #2807; it now refuses a gain below 0 or above 0x1000 on either side, then raw mode, and reports the first refusal of each kind in a process by name; the record measures that rule only in part, since of its four bounds a cell isolates only the right side's lower one (sas-mix-w-zero-neg-calls), the over and extreme cells being out of range on both sides, and its one raw-mode cell uses good gains; the rest of the rule follows a capture of 2026-11-26 on the same console that is CAPTURED, not measured, and no manifest record (one boot, one run of a probe extension that is not in the public tree; docs/HARDWARE_ORACLE.md, PSP-SAS-003 extension capture 2026-11-26), which test_sas_core_with_mix_capture_20261126_cells and test_sas_core_with_mix_capture_20261126_voice_advance replay by argument: each bound alone is refused with 0x80420018 ((-1, 0x1000), (0x1000, -1), (0x1001, 0x1000), (0x1000, 0x1001) and six more pairs with one bad side), the gain check answers before the raw-mode check (in raw mode (0x2000, 0x3000) and (0, -0x1000) return 0x80420018, and (0x800, 0x800) and (0, 0) return 0x80000004), raw mode set through the SetOutputmode export is refused like raw mode set at init, a refused call of either kind leaves voices that are playing where they were while an accepted one advances them one grain, and each side's sample becomes the floor of the sample times the gain over 4096, odd samples included; unmeasured and not captured: the order of the gain and raw-mode checks against the core, address and dispatch checks, the XMB context and other consoles; they are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_withmix_cells
+- **`h_SasSetADSR`** (`sceSas`): `__sceSasSetADSR` (0x019b25eb)
+  - Limitation: this status covers the measured cells only: in PSP-SAS-002 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 06a6c942c) __sceSasSetADSR with mask 0xf on voice 0 before KeyOn returns 0 for the table baseline (attack 0x00400000, decay 0x00100000, sustain 0x00004000, release 0x00040000) in all 32 rows of sas-adsr-m00-calls..sas-adsr-m31-calls, and for the rates of the expatk and expatk-g64 runs (0x00020000, 0x00100000, 0, 0x00040000) and of the bound and bound-half runs (0x00400000, 0x00100000, 0, 0x00100000); the selftest replays those calls and asserts those words, and in the bound runs the rates act as linear steps: the attack reaches the top within one grain and the decay holds 0x30000000 from grain 2 to grain 15; the refusals (a mask above 0xf, a negative rate) and other masks are unmeasured, and the absolute heights after KeyOn are not claimed, since the one the record publishes (expatk, 0x00a76d9d) moves with the key-on delay this runtime does not model (#1296); they are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
+- **`h_SasSetADSRmode`** (`sceSas`): `__sceSasSetADSRmode` (0x9ec3676a)
+  - Limitation: this status covers the measured cells only: PSP-SAS-002 is one acceptance-eligible launch on a PSP-3000 (system software 6.61, game context) of the probe built from 06a6c942c, 696 records all PASS, and it calls __sceSasSetADSRmode on voice 0 of one core before KeyOn, in its 32-row table after the baseline curves 0/1/1/1 (sas-adsr-m00-calls..sas-adsr-m31-calls and their heights) and in the expatk, expatk-g64, bound and bound-half runs; the selftest replays those calls and asserts the measured words: 0 for attack curves 0, 2 and 4, decay and release curves 1, 3 and 5 and sustain curves 0 to 5 under mask 0xf and under each single-phase mask, 0x80420013 for attack 1, 3 or 5, decay or release 0, 2 or 4, sustain 6 and all four at 5, the baseline's heights after every refusal, mask 1 returning 0 without checking the curves it leaves out, the top bit ignored (0, and the heights of the same curve without it), and a release-only mask leaving the heights before KeyOff alone; the absolute height a curve gives is not claimed: the exponent attack reads 0x00a76d9d at grain 0 of the expatk run on the PSP and 0x00bf40cd here, which is this runtime's curve after 256 steps instead of 224, because the runtime has no key-on delay (#1296); masks above 0xf, a bad core or voice index, other voices and calls while a voice sounds are unmeasured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
+- **`h_SasSetSL`** (`sceSas`): `__sceSasSetSL` (0x5f9529f6)
+  - Limitation: this status covers the measured cells only: in PSP-SAS-002 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 06a6c942c) __sceSasSetSL on voice 0 before KeyOn returns 0 for the level 0x20000000 (all 32 rows of sas-adsr-m00-calls..sas-adsr-m31-calls and the expatk runs), 0x30000000 (bound) and 0x30080000 (bound-half); the selftest replays those calls and asserts those words, and that in both bound runs a linear decay of 0x00100000 per step from the top stops at 0x30000000, so a linear decay ends at the first step at or below the level and keeps that height (sas_envelope.h ended it only below the level and held 0x2ff00000 until #2807); the exponential and DIRECT decays keep PPSSPP's rule of ending only below the level, because no PSP row measures them at the level; other levels, the refusal of a negative level or one above 0x40000000, and the level's effect under the other decay curves are unmeasured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
+- **`h_SasSetVolume`** (`sceSas`): `__sceSasSetVolume` (0x440ca7d8)
+  - Limitation: this status covers the measured cells only: in PSP-SAS-003 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 3872796c) __sceSasSetVolume sets voice 0 of a fresh core of grain 256, which plays a flat VAG held at the envelope's top, and the probe reads the grain after four warm-up grains; the selftest replays those calls and asserts the published words: with no volume set after the core's init every plane peaks at 0x06fe (output mode 0 and raw mode 1), 0 on all four sides is silent, 0x800 gives 0x037f, (0, 0, 0x1000, 0x1000) in raw mode leaves the dry planes 0 and the send planes at 0x06fe, -0x1000 on any side returns 0 and plays that side inverted, +0x1001 and -0x1001 on any side return 0x80420018 and keep the previous volume (0x800, so 0x037f on every plane), and a second init of the core after it restores 0x06fe; the handler already answered all of these, so #2807 changes no code here; the inverted value is not claimed: the PSP plays 0xf901 and this runtime 0xf902, because its mixer (__sceSasCore, unreviewed) applies the envelope to the sample before the volume; other volumes, the core and voice-index refusals, a call on a sounding voice, the XMB context and other consoles are unmeasured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_volume_cells
 - **`h_UmdActivate`** (`sceUmd`): `sceUmdActivate` (0xc6183d47)
   - Limitation: the callback argument follows PPSSPP (0x22 when no compiled SDK version is set, 0x32 otherwise) and is host-selftested, not hardware measured; the activation result and argument checks are not hardware measured either
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_unregister_callback
@@ -1615,6 +1678,14 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Limitation: as sceUmdWaitDriveStat; the timeout rounding follows the recorded buckets, not a measured rule (#341)
   - Evidence: PSPAutotests tests/umd/api/api.expected (as sceUmdWaitDriveStat; a timeout of 0 waits until cancelled; timeouts of 5 to 200 us end after about 250 us with 0x800201A8)
   - Evidence: tests/native/hle_thread_selftest.c:test_wc_umd_wait_drive_stat
+- **`h_DlgGetStatus`** (`sceUtility`): `sceUtilitySavedataGetStatus` (0x8874dbe0)
+  - Limitation: this savedata GetStatus covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its four calls in the sequence (the first call, and the calls after Update(1), after the first ShutdownStart and after the second) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-savedata)
+  - Evidence: tests/native/hle_thread_selftest.c:test_savedata_calls_with_no_dialog_started
+- **`h_DlgShutdown`** (`sceUtility`): `sceUtilitySavedataShutdownStart` (0x9790b33c)
+  - Limitation: this savedata ShutdownStart covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its two calls in the sequence (after the second GetStatus, and again after the third) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-savedata)
+  - Evidence: tests/native/hle_thread_selftest.c:test_savedata_calls_with_no_dialog_started
 - **`h_GamedataDialogShutdown`** (`sceUtility`): `sceUtilityGamedataInstallShutdownStart` (0x32e32dcb)
   - Limitation: this gamedata install ShutdownStart covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its two calls in the sequence (after the second GetStatus, and again after the third) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-gamedata)
@@ -1645,10 +1716,18 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_sequence
   - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_abort_without_update
   - Evidence: PSPAutotests tests/utility/msgdialog/abort.expected (2ed7c9c5, recorded on a PSP): the return codes and status sequence before init, during init, while visible, after the next Update and through shutdown
-- **`h_MsgDialogStatus`** (`sceUtility`): `sceUtilityMsgDialogGetStatus` (0x9a1c91d7)
-  - Limitation: this status covers one cell only: with no InitStart of any utility dialog in the process, GetStatus returns 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so the statuses the handler returns then (INIT 1, RUNNING 2, FINISHED 3, SHUTDOWN 4 and NONE 0 after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this status; the record's Update(1) and ShutdownStart results and the other dialog kinds (savedata, netconf, gamedata install, game sharing, the OSK) belong to separate handlers and are not reviewed here (#2807)
+- **`h_MsgDialogShutdown`** (`sceUtility`): `sceUtilityMsgDialogShutdownStart` (0x67af3428)
+  - Limitation: this message dialog ShutdownStart covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its two calls in the sequence (after the second GetStatus, and again after the third) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)
-  - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_status_with_no_dialog_started
+  - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_calls_with_no_dialog_started
+- **`h_MsgDialogStatus`** (`sceUtility`): `sceUtilityMsgDialogGetStatus` (0x9a1c91d7)
+  - Limitation: this message dialog GetStatus covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its four calls in the sequence (the first call, and the calls after Update(1), after the first ShutdownStart and after the second) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)
+  - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_calls_with_no_dialog_started
+- **`h_MsgDialogUpdate`** (`sceUtility`): `sceUtilityMsgDialogUpdate` (0x95fc253b)
+  - Limitation: this message dialog Update covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its one call in the sequence, Update(1) after the first GetStatus, returns 0x80110005 (WRONG_TYPE); an Update with any other argument is not in the record; PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-msgdialog)
+  - Evidence: tests/native/hle_thread_selftest.c:test_msg_dialog_calls_with_no_dialog_started
 - **`h_NetDialogShutdown`** (`sceUtility`): `sceUtilityNetconfShutdownStart` (0xf88155f6)
   - Limitation: this netconf ShutdownStart covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its two calls in the sequence (after the second GetStatus, and again after the third) each return 0x80110005 (WRONG_TYPE); PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-netconf)
@@ -1666,6 +1745,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
   - Evidence: #363 (PSP-3000 measurements, comments 6330742629 and 6331070692): WRONG_TYPE 0x80110005 before a keyboard starts; 0 in VISIBLE for speed 0 and 1; INVALID_STATUS 0x80110001 in INIT, QUIT and NONE after use
   - Evidence: tests/native/hle_thread_selftest.c:test_osk_update_and_shutdown_init_states
   - Evidence: tests/native/hle_thread_selftest.c:test_utility_dialog_frame_driven_status
+- **`h_SavedataUpdate`** (`sceUtility`): `sceUtilitySavedataUpdate` (0xd4b95ffb)
+  - Limitation: this savedata Update covers one measured sequence only: with no InitStart of any utility dialog in the process, GetStatus, Update(1), GetStatus, ShutdownStart, GetStatus, ShutdownStart and GetStatus are called in that order and its one call in the sequence, Update(1) after the first GetStatus, returns 0x80110005 (WRONG_TYPE); an Update with any other argument is not in the record; PSP-HLE-UTILITY-NONE-001 recorded that on one PSP-3000 (system software 6.61) in one launch from the XMB context (boot 115), and the selftest reaches the state by a synthetic reset, not a fresh process; the record measures nothing after an InitStart, so every result the handler returns then (in the INIT, RUNNING, FINISHED and SHUTDOWN states and at NONE after use) and their timing are unmeasured by it and not reviewed here; it does not measure the game context either, in which the runtime starts its programs, or the answer once another dialog kind holds the slot, so both are unmeasured for this handler; the sequence's other calls belong to separate handlers, reviewed on the same cell for their own calls only (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-UTILITY-NONE-001: utility-none-savedata)
+  - Evidence: tests/native/hle_thread_selftest.c:test_savedata_calls_with_no_dialog_started
 - **`h_ScreenshotStatus`** (`sceUtility`): `sceUtilityScreenshotGetStatus` (0xd81957b7)
   - Limitation: always WRONG_TYPE: the runtime has no screenshot dialog, and its InitStart import is not registered
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
@@ -1738,6 +1821,10 @@ Semantic handler census: **648** handlers across **30** API families, covering *
 - **`h_VideocodecStop`** (`sceVideocodec`): `sceVideocodecStop` (0xa2f0564e)
   - Limitation: before any decode returns 0x806201FE and changes nothing (synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet; type 0); after a decode drops the host decoder and returns 0 (JPCSP, synthetic pending W-LLE-1); whether the PSP drains pending pictures is not measured
   - Evidence: tests/native/videocodec_selftest.c:test_teardown
+- **`h_WlanOn`** (`sceWlan`): `sceWlanDevIsPowerOn` (0x93440b11), `sceWlanGetSwitchState` (0xd7763699)
+  - Limitation: this status covers the PSP-KERNEL-SEM-001 wlan-state cell only: sceWlanGetSwitchState (0xd7763699) and then sceWlanDevIsPowerOn (0x93440b11), the two NIDs this handler serves, each called with no argument, return 1 with the console's WLAN switch on; PSP-KERNEL-SEM-001 recorded that on one PSP-3000 (system software 6.61, ARK-5.1.0) in one acceptance-eligible launch in the game context (boot 84, the probe built from 0c3cf0da, 2026-10-31), and the selftest makes the same two calls in that order through sr_syscall with the default console profile, whose switch is on; the answer with the switch off, which the runtime takes for both calls from the console profile's wlan_switch setting, a switch moved during a run, the power state while a WLAN or network library is running, and the XMB context are not measured by the record and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: wlan-state)
+  - Evidence: tests/native/hle_thread_selftest.c:test_wlan_state_with_the_switch_on
 
 #### Compatibility Handlers (Named Limitations)
 

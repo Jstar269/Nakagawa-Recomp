@@ -207,7 +207,7 @@ directory, so it does not apply to the data root.
 | `title` | Manifest `id`, display name, kind, raw manifest SHA-256, and protected-semantics digest. |
 | `inputs` | SHA-256 for the manifest, executable ELF, selected PRXs with load addresses, and optional PSP header. Absolute input paths are omitted. |
 | `title_input_identity` | Versioned exact local inputs: manifest/profile and schema, DISC_ID/region/DISC_VERSION, selected PARAM.SFO facts, ISO container facts (format, volume ID, size, PVD sector and sector size; the other keys `inspect_iso` reports, such as the `format_warnings` notes and the `source_format` of a compressed image, are not part of the record), decrypted main executable name/hash, required guest PRX names/hashes, raw selected executable and required module hashes from their ISO members, and optional PSP-header hash/magic. Retail hashes remain only in per-user package data. |
-| `runtime` | `CpuState` ABI version and header hash, resolved guest run entry, runtime contract, bindings, and required bindings. Packages built since [issue #2875](https://github.com/Jstar269/nakagawa-recomp/issues/2875) add `source_commit`, the runtime source commit (`{"commit", "origin", "reason"}`): from the install record `tools/stage_install.py` wrote beside an installed `source/` tree (`install-record`), else the checkout's `HEAD` (`git`), else `null` with origin `unknown` and the reason, never a guess. The player accepts packages without it; a malformed record is INCOMPATIBLE. A game's problem report names it on a `Runtime source:` line beside the player's commit. |
+| `runtime` | `CpuState` ABI version and header hash, resolved guest run entry, runtime contract, bindings, and required bindings. Packages built since [issue #2875](https://github.com/Jstar269/nakagawa-recomp/issues/2875) add `source_commit`, the runtime source commit (`{"commit", "origin", "reason"}`): from the install record `tools/stage_install.py` wrote beside an installed `source/` tree (`install-record`), else the checkout's `HEAD` (`git`), else `null` with origin `unknown` and the reason, never a guess. The player accepts packages without it; a malformed record is INCOMPATIBLE. A game's problem report names it on a `Runtime source:` line beside the player's commit; for a game that stopped, the report's `Package:` and `Runtime source:` lines show the SHA-256 prefix of the completion manifest and the source commit record from final validation, saved when the child starts ([issue #2998](https://github.com/Jstar269/nakagawa-recomp/issues/2998)). |
 | `executable` | Relative native executable path and hash plus the guest ELF entry address. |
 | `generated_objects` | Empty in v3 runtime packages. V2 packages retain their sorted object paths and hashes. Compiled objects stay in the bounded object cache; generated C stays in the AOT-stage cache for compatible rebuilds. |
 | `required_local_assets` | Manifest title-data/resource roots, selected or optional guest PRXs, and host SDL3/SDL3_ttf/Vulkan runtime requirements. These are references; title assets are not copied into the package. |
@@ -384,6 +384,15 @@ maps the previous epoch to the current epoch as compatible. Unknown or missing
 compatibility is never treated as compatible. The decision record names every
 changed component (`aot:executable_sha256`, `native:compiler_identity`, and so
 on) for the CLI, player preflight, and Doctor.
+
+The enhanced build records the selected Ace declaration source fingerprint in codegen options as
+`enhancement_declaration_sha256_v1`, with `code_hook_declaration_sha256_v1` when it also uses a companion hook
+declaration. These fingerprints cover the parsed source objects before the builder adds defaults.
+The encoding sorts object keys, retains array order, and hashes decoded UTF-8 and typed numeric
+values. The existing adjacent symbol-map digests accompany the fingerprints when code generation
+uses those files. The launcher reads the current inputs after package validation, including on an integrity-cache hit. The library status key includes the live values,
+and the launch session checks them again before spawning. An enhanced package with a missing or
+mismatched fingerprint is stale and can be rebuilt from the library.
 
 The private cache root is `<user data>/cache/packages/<DISC_ID>/`, never the
 repository. Runtime packages are written to a content-addressed entry below that

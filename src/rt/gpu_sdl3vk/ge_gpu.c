@@ -5881,15 +5881,19 @@ static void tex_repl_shutdown(void) {
  * disk. Skipped and counted: render targets sampled as textures and movie pictures
  * (sr_video_frame_recent), which are frames, not loaded textures, and textures with no pack
  * identity. Files are compressed PNGs (sr_png_encode_rgba) published without ever replacing a
- * file (sr_file_publish_new_tagged), so an image the player is enlarging in place is kept.
+ * file (sr_file_publish_new_tagged), so an image the player is enlarging in place is kept. The one
+ * exception is a mip level's file the dump wrote itself that holds an outdated level: a mip
+ * level's file is named for level 0's content, so it is checked and replaced
+ * (tex_dump_refresh_level); any file the player made or changed is still kept.
  *
  * Threads: the guest thread decides (skips, names, bounds) and decodes each level from guest
  * memory into a host buffer of the job's own; the encode and the write run on the texture
  * scaler's workers as work jobs (tex_scale.h, nk_tex_scale_submit_work), so the guest thread never
  * waits for either. Their results are taken back on the guest thread (tex_dump_collect: at each
  * look, at each present, and when the row is read) and only then counted. A job reads only its
- * own buffer and path and writes only its own file. A level is offered to the workers only when
- * nk_tex_scale_can_submit_work says the queue has room; when it has none the level is not
+ * own buffer and path and writes only its own file (and reads that file, for a mip level's
+ * check). A level is offered to the workers only when nk_tex_scale_can_submit_work says the
+ * queue has room; when it has none the level is not
  * dropped: it is counted (queue_full), said once a stretch, and the texture is looked at again
  * on its next draw. A file that is being written is not offered twice.
  *
@@ -5943,6 +5947,8 @@ typedef struct TexDumpJob {
     uint64_t bound;                /* sr_png_encode_bound: the budget it holds until taken back */
     unsigned long tag;             /* unique among the jobs: its temp file names */
     int put;                       /* SR_PUBLISH_* (SR_PUBLISH_FAILED also when the encode failed) */
+    int refresh;                   /* a mip level whose file is there: tex_dump_refresh_level */
+    int stale_kept;                /* its outdated file could not be replaced and is kept */
     size_t len;                    /* the PNG's bytes */
     char path[SR_TEXDUMP_DIR_MAX + 64u];
 } TexDumpJob;
@@ -5959,6 +5965,7 @@ typedef struct {
     unsigned long long churn_addrs;   /* addresses no longer dumped in this stretch */
     int on;
     int queue_noted;               /* the queue_full note was said in this stretch */
+    int stale_noted;               /* the stale_kept note was said in this stretch */
     TexDumpStop stop;
     unsigned long tag;             /* the last job's tag */
     unsigned inflight;             /* jobs in flight[] */
@@ -5986,7 +5993,71 @@ static void tex_dump_halt(TexDumpStop why) {
     tex_dump_line(line);
 }
 
-/* A worker: encode one level and publish it, never over a file that is there. Touches only `ctx`. */
+/* A worker, for a mip level (level 1 up) whose file is in the folder already: `png` (`len` bytes)
+ * is the level as drawn now. A level's file is named for level 0's content, not its own, so the
+ * game can change a level under the same name, and the file then holds an outdated level. It is
+ * replaced only when it is the dump's own: a PNG at the level's size that, decoded and encoded
+ * again, gives its own bytes back, as every file the dump wrote does (sr_png_encode_rgba is
+ * deterministic). Any other file at the name is the player's (an enlarged image, or one another
+ * program saved, at any size) and is kept as it is, as a file already there is. Returns
+ * SR_PUBLISH_EXISTS when the file is kept (up to date, or not the dump's), SR_PUBLISH_WRITTEN when
+ * it was replaced. The replacement is written whole to a temp file of its own and renamed over the
+ * file, so the file is never seen half written. A replacement that cannot be made (the temp file
+ * cannot be written, or the host refuses the rename, as Win32 does over a file the player marked
+ * read-only or holds open) removes its temp file and keeps the old file, as it was before the
+ * dump looked: SR_PUBLISH_EXISTS with `stale_kept` set, said once a stretch, never a stop of the
+ * dump. A file the player saves between the check and the rename is replaced: the check and the
+ * move are not one step. Touches only `j` and the file. */
+static int s_dump_refuse_replace;   /* the selftest's stand-in for a rename the host refuses */
+static int tex_dump_refresh_level(TexDumpJob *j, const uint8_t *png, size_t len) {
+    FILE *fp = nk_fopen_utf8(j->path, "rb");
+    if (!fp) return sr_file_publish_new_tagged(j->path, png, len, j->tag);   /* gone since the look: new again */
+    /* Read one byte more than the dump can write for this size: a longer file is not the dump's. */
+    const size_t cap = (size_t)j->bound + 1u;
+    uint8_t *old = (uint8_t *)malloc(cap);
+    const size_t n = old ? fread(old, 1, cap, fp) : 0u;
+    fclose(fp);
+    int put = SR_PUBLISH_EXISTS;
+    uint32_t *px = NULL;
+    uint8_t *again = NULL;
+    size_t again_len = 0;
+    int w = 0, h = 0;
+    char why[96];
+    if (!old) {
+        put = SR_PUBLISH_FAILED;
+    } else if ((n == len && memcmp(old, png, len) == 0) || n > (size_t)j->bound) {
+        put = SR_PUBLISH_EXISTS;   /* up to date, or larger than the dump writes: kept */
+    } else if (nk_texrepl_decode_png(old, n, 0, &px, &w, &h, why, sizeof(why)) && (uint32_t)w == j->w &&
+               (uint32_t)h == j->h && sr_png_encode_rgba(px, j->w, j->h, &again, &again_len) && again_len == n &&
+               memcmp(again, old, n) == 0) {
+        /* The dump's own file, holding another level than the one drawn now: replaced. */
+        char tmp[sizeof(j->path) + 48u];
+        FILE *out = NULL;
+        put = SR_PUBLISH_EXISTS;
+        j->stale_kept = 1;
+        if (snprintf(tmp, sizeof(tmp), "%s.tmp%lu.t%lu.r", j->path, nk_platform_process_id(), j->tag) <
+            (int)sizeof(tmp))
+            out = nk_fopen_utf8(tmp, "wbx");   /* only where no file is, as the publish's temp files are */
+        if (out) {
+            int ok = fwrite(png, 1, len, out) == len;
+            if (fflush(out) != 0) ok = 0;
+            if (fclose(out) != 0) ok = 0;
+            if (ok && !s_dump_refuse_replace && nk_rename_utf8(tmp, j->path) == 0) {
+                put = SR_PUBLISH_WRITTEN;
+                j->stale_kept = 0;
+            } else {
+                nk_remove_utf8(tmp);
+            }
+        }
+    }
+    free(again);
+    free(px);
+    free(old);
+    return put;
+}
+
+/* A worker: encode one level and publish it, never over a file that is there, except a mip
+ * level's outdated file the dump wrote itself (tex_dump_refresh_level). Touches only `ctx`. */
 static void tex_dump_job_run(void *ctx) {
     TexDumpJob *j = (TexDumpJob *)ctx;
     uint8_t *png = NULL;
@@ -5995,7 +6066,7 @@ static void tex_dump_job_run(void *ctx) {
     j->len = 0;
     if (sr_png_encode_rgba(j->rgba, j->w, j->h, &png, &len) && len <= j->bound) {
         j->len = len;
-        j->put = sr_file_publish_new_tagged(j->path, png, len, j->tag);
+        j->put = j->refresh ? tex_dump_refresh_level(j, png, len) : sr_file_publish_new_tagged(j->path, png, len, j->tag);
     }
     free(png);
     free(j->rgba);
@@ -6019,7 +6090,12 @@ static void tex_dump_collect(void) {
             s_dump.written++;
             s_dump.written_bytes += j->len;
         } else if (j->put == SR_PUBLISH_EXISTS) {
-            s_dump.present++;   /* made by someone else since the check: kept as it is */
+            s_dump.present++;   /* made by someone else since the check, or a mip level's file kept: as it is */
+            if (j->stale_kept && !s_dump.stale_noted) {
+                s_dump.stale_noted = 1;
+                fprintf(stderr, "TEX_DUMP: note: an outdated mip level file the dump wrote could not be replaced "
+                                "(read-only or in use); it is kept as it is (already_there= counts it)\n");
+            }
         } else {
             s_dump.failed++;
             if (s_dump.stop == TEX_DUMP_GOING) tex_dump_halt(TEX_DUMP_STOP_WRITE);
@@ -6166,6 +6242,7 @@ int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
     s_dump.starts++;
     s_dump.churn_addrs = 0;
     s_dump.queue_noted = 0;
+    s_dump.stale_noted = 0;
     memset(s_dump.churn, 0, sizeof(s_dump.churn));
     if (s_dump.stop == TEX_DUMP_STOP_WRITE) s_dump.stop = TEX_DUMP_GOING;   /* the budget and file limit stay spent */
     s_dump.on = 1;
@@ -6322,8 +6399,13 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
             tex_dump_halt(TEX_DUMP_STOP_WRITE);
             return;
         }
-        if (nk_platform_file_exists(path)) { s_dump.present++; continue; }
-        if (tex_dump_in_flight(path)) continue;   /* being written: counted when taken back */
+        if (tex_dump_in_flight(path)) continue;   /* being written or checked: counted when taken back */
+        /* Level 0's file is named for its own content, so one there already holds it: kept and
+         * counted. A mip level's is named for level 0's content, so it can hold an outdated level:
+         * a worker checks it (tex_dump_refresh_level), under the same file limit and disk budget
+         * as a new file. */
+        const int refresh = nk_platform_file_exists(path);
+        if (refresh && level == 0u) { s_dump.present++; continue; }
         int lw = e->w >> level, lh = e->h >> level;
         if (lw < 1) lw = 1;
         if (lh < 1) lh = 1;
@@ -6360,7 +6442,7 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
             }
             return;
         }
-        if (!churn_checked) {
+        if (!churn_checked && !refresh) {   /* a level already in the folder is not new content */
             churn_checked = 1;
             if (tex_dump_churning(id.addr)) {
                 e->dump_retry = 1u;   /* looked at again once the address holds still */
@@ -6386,6 +6468,7 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
         job->w = (uint32_t)lw;
         job->h = (uint32_t)lh;
         job->bound = bound;
+        job->refresh = refresh;
         job->tag = ++s_dump.tag;
         if ((size_t)n >= sizeof(job->path)) {   /* the folder is under SR_TEXDUMP_DIR_MAX: not expected */
             free(job);

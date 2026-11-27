@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager, nullcontext
 import os
 import hashlib
 import itertools
@@ -19,7 +20,7 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Sequence
+from typing import Iterator, Sequence
 from urllib.parse import parse_qs, quote, urlsplit
 import zipfile
 import zlib
@@ -1497,6 +1498,21 @@ def update_report(stdout: str) -> tuple[list[dict[str, str]], list[str]]:
     return steps, requests
 
 
+@contextmanager
+def hold_test_stick_lock(path: Path) -> Iterator[None]:
+    """Hold the same OS lock the player uses, on its synthetic root."""
+    with path.open("r+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
 class NativePlayerUiTests(unittest.TestCase):
     # The executable runs from a sandbox folder under build/, where none of the folders
     # beside it holds tools/nk_cli.py, and the working folder is never searched
@@ -1544,10 +1560,13 @@ class NativePlayerUiTests(unittest.TestCase):
         screenshot_path: Path | None = None,
         cover_cache: dict[str, bytes] | None = None,
         save_backups: dict[str, tuple[str, ...]] | None = None,
+        save_fixture: dict[str, bytes] | None = None,
+        hold_stick_lock: bool = False,
         expect_failure: bool = False,
         runtime_root_arg: str | None = None,
         library_unwritable: bool = False,
         config_files: dict[str, str] | None = None,
+        cheat_db_seed: bytes | None = None,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -1563,6 +1582,10 @@ class NativePlayerUiTests(unittest.TestCase):
             # a disc list the user imported (nk_disc_verify.h).
             data_folder = (localappdata / "Nakagawa" / "data" if os.name == "nt"
                            else userprofile / "data" / "Nakagawa" / "data")
+            cheat_db = data_folder / "cheats" / "cheat.db"
+            if cheat_db_seed is not None:
+                cheat_db.parent.mkdir(parents=True)
+                cheat_db.write_bytes(cheat_db_seed)
             if library_unwritable:
                 # library.json loads (there is none) but is never written: its temporary
                 # file's name is taken by a folder that is not empty (nk_library_save).
@@ -1861,19 +1884,28 @@ class NativePlayerUiTests(unittest.TestCase):
             dedicated = scratch / "dedicated-data-root"
             if dedicated_data_root:
                 args.append(f"--user-data-root={dedicated}")
+            saves = dedicated / "saves"
+            if save_fixture is not None:
+                if not dedicated_data_root:
+                    raise ValueError("A save fixture needs an explicit synthetic data root")
+                for name, data in save_fixture.items():
+                    path = saves / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
 
             effective_timeout = compute_effective_timeout(event_script, timeout)
 
             started = time.perf_counter()
-            completed = subprocess.run(
-                args,
-                cwd=ROOT,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-                check=False,
-            )
+            with hold_test_stick_lock(saves / ".nakagawa-stick.lock") if hold_stick_lock else nullcontext():
+                completed = subprocess.run(
+                    args,
+                    cwd=ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                    check=False,
+                )
             wall_seconds = time.perf_counter() - started
             if os.environ.get(PLAYER_UI_ECHO_ENV) == "1":
                 sys.stderr.write(completed.stdout)
@@ -1948,7 +1980,10 @@ class NativePlayerUiTests(unittest.TestCase):
                 "library": persisted_library,
                 "default_profile_files": default_profile_files(),
                 "data_folder_files": files_under(data_folder),
+                "cheat_db_bytes": cheat_db.read_bytes() if cheat_db.is_file() else None,
                 "dedicated_files": files_under(dedicated),
+                "save_fixture": ({name: (saves / name).read_bytes() for name in files_under(saves)}
+                                 if save_fixture is not None else None),
                 "downloaded_tool_marker_exists": (
                     tool_marker.is_file() if tool_marker is not None else None
                 ),
@@ -3068,6 +3103,77 @@ class NativePlayerUiTests(unittest.TestCase):
                          f"the card stays: {shown}")
         self.assertEqual(shown[asked + 2][0], title,
                          f"the next Back closes the card to the title page: {shown}")
+
+    @staticmethod
+    def ready_stick_bring_in_fixture() -> dict[str, bytes]:
+        unit = "PSP/SAVEDATA/TEST00005_SLOT"
+        return {
+            "nakagawa-saves.json": json.dumps({
+                "schema_version": 1, "layout": "shared-memory-stick", "stick": "Memory Stick",
+                "state": "ready", "written_by": "0.1.0-dev", "sources": [],
+            }).encode("utf-8"),
+            f"TEST00005/{unit}/DATA.BIN": b"older edit",
+            f"TEST00005/{unit}/PARAM.SFO": b"old metadata",
+            f"Memory Stick/{unit}/DATA.BIN": b"shared edit",
+            f"Memory Stick/{unit}/PARAM.SFO": b"shared metadata",
+            f"Kept copies/TEST00005/{unit}/DATA.BIN": b"earlier kept",
+        }
+
+    def test_next_ui_bring_in_cancel_preserves_ready_stick(self) -> None:
+        """The real Saves route offers Bring In and defaults its question to Cancel."""
+        fixture = self.ready_stick_bring_in_fixture()
+        for activate, back in (("KEY_RETURN", "KEY_ESCAPE"), ("PAD_SOUTH", "PAD_EAST")):
+            with self.subTest(activate=activate):
+                run = self.next_ui_run(
+                    "library",
+                    ("WAIT_MS=200", activate, "WAIT_MS=200", activate, "WAIT_MS=200",
+                     activate, "WAIT_MS=200", back, "WAIT_MS=200"),
+                    dedicated_data_root=True, save_fixture=fixture,
+                )
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                states = [(int(frame["next_route"]), int(frame["next_focus"])) for frame in frames
+                          if frame["selected_disc"] == "TEST00005"]
+                saves, bring_in, cancel = 8, 0x4429, 0x4426
+                self.assertIn((saves, bring_in), states, run["stdout"])
+                self.assertIn((saves, cancel), states, run["stdout"])
+                self.assertEqual(states[-1], (saves, bring_in), run["stdout"])
+                self.assertEqual(run["save_fixture"], fixture)
+
+    def test_next_ui_bring_in_confirm_keeps_legacy_whole_and_refuses_busy_stick(self) -> None:
+        """Confirm is the write boundary and the real interprocess lock applies there."""
+        fixture = self.ready_stick_bring_in_fixture()
+        fixture[".nakagawa-stick.lock"] = b""
+        for held, activate, right in ((True, "KEY_RETURN", "KEY_RIGHT"),
+                                       (False, "PAD_SOUTH", "PAD_DPAD_RIGHT")):
+            with self.subTest(held=held):
+                run = self.next_ui_run(
+                    "library",
+                    ("WAIT_MS=200", activate, "WAIT_MS=200", activate, "WAIT_MS=200",
+                     activate, "WAIT_MS=200", right, "WAIT_MS=200", activate, "WAIT_MS=200"),
+                    dedicated_data_root=True, save_fixture=fixture, hold_stick_lock=held,
+                )
+                observed = run["save_fixture"]
+                assert isinstance(observed, dict)
+                if held:
+                    self.assertIn("SAVES_BRING_IN STICK_IN_USE", run["stderr"])
+                    self.assertEqual(observed, fixture)
+                    continue
+                self.assertIn("SAVES_BRING_IN BRING_IN_OK", run["stderr"])
+                self.assertIn("Kept the older version of TEST00005_SLOT in Kept copies.", run["stderr"])
+                for name, data in fixture.items():
+                    self.assertEqual(observed[name], data)
+                journal = ".nakagawa-migration/bring-in/test00005/"
+                intent = f"{journal}intent.json"
+                receipts = [name for name in observed if name.startswith(journal) and name != intent]
+                self.assertEqual(len(receipts), 1)
+                self.assertEqual(observed[intent], observed[receipts[0]])
+                generation = Path(receipts[0]).stem
+                retained = f"Kept copies/TEST00005/Bring In/{generation}/PSP/SAVEDATA/TEST00005_SLOT"
+                self.assertEqual(observed[f"{retained}/DATA.BIN"], b"older edit")
+                self.assertEqual(observed[f"{retained}/PARAM.SFO"], b"old metadata")
+                self.assertEqual(set(observed) - set(fixture),
+                                 {intent, receipts[0], f"{retained}/DATA.BIN", f"{retained}/PARAM.SFO"})
 
     def test_next_ui_settings_tab_opens_by_mouse_keyboard_and_controller(self) -> None:
         """#1281: Settings has a visible SETTINGS tab, and the menu prompt opens it."""
@@ -5480,6 +5586,104 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(saved, dict)
         self.assertIs(saved.get("cheats"), True)
         self.assertIs(saved.get("download_cover_art"), False)
+
+    def test_next_ui_cheat_database_two_step_consent(self) -> None:
+        """Settings lists the source on click one. Cancellation starts no DB request, even
+        with a fresh destination. Only the confirmation writes the pinned file."""
+        host = "raw.githubusercontent.com"
+        source_url = f"https://{host}/Jstar269/nakagawa-recomp/main/assets/cheat_db_sources.json"
+        digest = "1" * 40
+        database_url = f"https://{host}/test/fixture/{digest}/cheat.db"
+        contents = b"_S TEST-00001\n_G Synthetic\n_C0 Off\n_L 0x20001000 0x00000001\n"
+        sentinel = b"previous database"
+        entry = {
+            "id": "fixture", "name": "Fixture database", "maintainer": "Fixture maintainer",
+            "licence": "No licence stated", "homepage": "https://example.invalid/fixture",
+            "commit": digest, "url": database_url, "size": len(contents),
+            "sha256": hashlib.sha256(contents).hexdigest(),
+        }
+        listing = {"format": "nakagawa-cheat-db-sources", "schema_version": 1, "sources": [entry]}
+        with tempfile.TemporaryDirectory(prefix=".cheat-db-", dir=ROOT) as tmp:
+            folder = Path(tmp)
+            (folder / "sources.json").write_text(json.dumps(listing), encoding="utf-8")
+            (folder / "database.db").write_bytes(contents)
+            env = {
+                "NK_UI_TEST_CHEAT_DB_LIST": str(folder / "sources.json"),
+                "NK_UI_TEST_CHEAT_DB_FILE": str(folder / "database.db"),
+                "NK_UI_TEST_CHEAT_DB_URL": database_url,
+            }
+            # Developer, Nickname, Online play, Cover art, Cheats, the Windows
+            # Achievements switch (disabled on other hosts), then Cheat database.
+            open_page = (
+                ("WAIT_LAID_OUT=5000",) + ("KEY_DOWN",) * (6 if os.name == "nt" else 5)
+                + ("KEY_RETURN", "WAIT_VIEW=cheat_db,5000", "WAIT_LAID_OUT=5000")
+            )
+            first_click = ("KEY_RETURN", "WAIT_VIEW=cheat_db_confirm,5000", "WAIT_LAID_OUT=5000")
+            return_to_page = ("WAIT_VIEW=cheat_db,5000", "WAIT_LAID_OUT=5000")
+
+            def request_urls(run: dict[str, object]) -> list[str]:
+                rows = re.findall(r"cheat_db_get url=(\S+) allow=(\S+) user_agent=(\S+)",
+                                  str(run["stdout"]))
+                for _, allowed, agent in rows:
+                    self.assertEqual(allowed, host)
+                    self.assertEqual(agent, "NakagawaRecomp/CheatDatabase")
+                files = run["data_folder_files"]
+                assert isinstance(files, list)
+                self.assertFalse(any(str(name).startswith("cheats/cheat.db")
+                                     and str(name).endswith(".part") for name in files), files)
+                return [url for url, _, _ in rows]
+
+            idle = self.next_ui_run("online-settings", open_page, env_extra=env)
+            self.assertEqual(request_urls(idle), [])
+            self.assertIsNone(idle["cheat_db_bytes"])
+            cancelled = self.next_ui_run(
+                "online-settings", open_page + first_click + ("KEY_RETURN",) + return_to_page,
+                env_extra=env,
+            )
+            self.assertEqual(request_urls(cancelled), [source_url])
+            self.assertIsNone(cancelled["cheat_db_bytes"])
+            reopened = self.next_ui_run(
+                "online-settings",
+                open_page + first_click + ("KEY_ESCAPE",) + return_to_page
+                + first_click + ("KEY_ESCAPE",) + return_to_page,
+                env_extra=env,
+            )
+            self.assertEqual(request_urls(reopened), [source_url, source_url])
+            self.assertIsNone(reopened["cheat_db_bytes"])
+            waiting = self.next_ui_run("online-settings", open_page + first_click,
+                                       env_extra=env, cheat_db_seed=sentinel)
+            self.assertEqual(request_urls(waiting), [source_url])
+            self.assertEqual(waiting["cheat_db_bytes"], sentinel)
+            confirmed = self.next_ui_run(
+                "online-settings", open_page + first_click + ("KEY_UP", "KEY_RETURN") + return_to_page,
+                env_extra=env, cheat_db_seed=sentinel,
+            )
+            self.assertEqual(request_urls(confirmed), [source_url, database_url])
+            self.assertEqual(confirmed["cheat_db_bytes"], contents)
+
+            # After an explicit confirmation, Back dismisses progress while
+            # the accepted download continues. Hold the fake response until Back.
+            backed = self.next_ui_run(
+                "online-settings", open_page + first_click + (
+                    "KEY_UP", "KEY_RETURN", "WAIT_VIEW=cheat_db_busy,5000",
+                    "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_VIEW=online_settings,5000",
+                ),
+                env_extra={**env, "NK_UI_TEST_CHEAT_DB_WAIT_FOR_BACK": "1"},
+                cheat_db_seed=sentinel, wait_background=True,
+            )
+            self.assertEqual(request_urls(backed), [source_url, database_url])
+            self.assertEqual(backed["cheat_db_bytes"], contents)
+
+            from_disk = self.next_ui_run(
+                "online-settings", open_page + (
+                    "PAD_DPAD_DOWN", "PAD_SOUTH", f"PICK_FILE={folder / 'database.db'}",
+                    "WAIT_VIEW=cheat_db_confirm,5000", "WAIT_LAID_OUT=5000",
+                    "PAD_DPAD_UP", "PAD_SOUTH",
+                ) + return_to_page,
+                env_extra=env,
+            )
+            self.assertEqual(request_urls(from_disk), [])
+            self.assertEqual(from_disk["cheat_db_bytes"], contents)
 
     # The next UI's controller page (player_ui_nk.h), as the frame line prints it.
     CONTROLLER_FOCUS = {
@@ -9472,6 +9676,50 @@ class FirstRunRouteTests(unittest.TestCase):
                       authentic.stdout + authentic.stderr)
         self.assertNotEqual(authentic.returncode, 3, authentic.stdout + authentic.stderr)
 
+    def test_headless_acceptance_preflights_stock_with_ace_saved(self) -> None:
+        with tempfile.TemporaryDirectory(prefix=".acceptance-stock-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            iso = scratch / "display.iso"
+            eboot = build_plain_mips_elf()
+            create_test_iso_with_executables(iso, eboot, disc_id="TEST00006",
+                                             title="Synthetic Display Smoke")
+            user_root = scratch / "user-data"
+            (user_root / "config").mkdir(parents=True)
+            settings = user_root / "config" / "settings.json"
+            settings.write_text(json.dumps({
+                "schema_version": 2, "enhanced": {"default": "authentic"},
+                "title_play": {"TEST00006": {"mode": "ace"}},
+            }), encoding="utf-8")
+            saved_settings = settings.read_bytes()
+            runtime_root = scratch / "runtime"
+            enhancements = runtime_root / "enhancements"
+            enhancements.mkdir(parents=True)
+            (enhancements / "test00006-60hz.json").write_text(json.dumps({
+                "id": "fixture-60hz", "target_title_id": "display-smoke-v1",
+            }), encoding="utf-8")
+            synthetic_ready_package(runtime_root, eboot)
+            args = ["--empty", f"--user-data-root={user_root}", "--headless-launch"]
+            checkpoint = "--headless-accept-presented-frames=1"
+
+            # The package has the correct stock metadata and a non-runnable executable.
+            # The worker must prepare the session and try it before the route fails.
+            for route in ([f"--iso={iso}", "--launch-now"], ["--launch-index=0"]):
+                with self.subTest(route=route):
+                    completed = self.run_route(scratch, [*args, *route, checkpoint])
+                    output = completed.stdout + completed.stderr
+                    self.assertIn("Preparing launch session for TEST00006", output)
+                    self.assertIn("Spawning runtime:", output)
+                    self.assertIn("display-smoke-v1.exe", output)
+                    self.assertNotEqual(completed.returncode, 0, output)
+                    self.assertNotIn("HEADLESS_ACCEPTANCE status=PASS", output)
+                    self.assertEqual(settings.read_bytes(), saved_settings)
+
+            # A fresh process reloads the saved Ace setting and still needs the timing package.
+            ordinary = self.run_route(scratch, [*args, "--launch-index=0"])
+            output = ordinary.stdout + ordinary.stderr
+            self.assertEqual(ordinary.returncode, 3, output)
+            self.assertNotIn("Preparing launch session", output)
+
     def test_launch_index_on_an_empty_library_fails_with_a_clear_message(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".first-run-empty-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -9811,9 +10059,13 @@ class PlayerUiStringSourceTests(unittest.TestCase):
     """Keep launcher copy in the English catalog, including text built before draw calls."""
 
     SOURCES = ("src/player/ui", "src/ui")
+    # The in-game overlay's pages (#2953) resolve the same catalog through the shared UI core.
+    OVERLAY_SOURCES = ("src/rt/overlay",)
     # These files provide data or backend diagnostics rather than composing screen text.
     # Still check their text-sink calls. New files get the full check by default.
     SINK_ONLY = frozenset({
+        # The overlay host's errors are stderr diagnostics for gui.c, never drawn on a page.
+        "src/rt/overlay/overlay_host.c",
         "src/player/ui/love_all_credits.c",
         "src/player/ui/player_ui_art.c",
         "src/player/ui/player_ui_at3.c",
@@ -9865,6 +10117,13 @@ class PlayerUiStringSourceTests(unittest.TestCase):
         '"display-smoke-v1"', '"synthetic-allegrex-v1"', '"pspdev-phase5-v1"',
         '"synthetic-title2-v1"', '"showcase-scene-v1"', '"showcase-breakout-v1"',
         '"UCUS98701"', '"UCUS-98701"', '"PAC-MAN Championship Edition"',
+    })
+    OVERLAY_KEY_NAMES = frozenset({
+        '"up"', '"down"', '"left"', '"right"', '"lshift"', '"rshift"',
+        '"lctrl"', '"rctrl"', '"lalt"', '"ralt"',
+    })
+    OVERLAY_GE_FORMATS = frozenset({
+        '"CLUT4"', '"CLUT8"', '"CLUT16"', '"CLUT32"', '"DXT1"', '"DXT3"', '"DXT5"', '"DEPTH16"',
     })
     # These strings are protocol names, paths, units or proper names. Keep the
     # source/call context with each exception to catch the same word in copy.
@@ -9970,6 +10229,14 @@ class PlayerUiStringSourceTests(unittest.TestCase):
             return re.fullmatch(r'"input-prompts/[a-z0-9_]+\.png"', token) is not None
         if path == "src/ui/nk_ui_theme.c":
             return re.fullmatch(r'"assets/fonts/ui/[\w/-]+\.ttf"', token) is not None
+        if path == "src/rt/overlay/overlay_controls.c":
+            # Input-profile key names looked up by nk_host_key_from_name, never shown.
+            return (token in cls.OVERLAY_KEY_NAMES
+                    and re.search(r"\bk_(?:arrows|shift|ctrl|alt)\[\]\s*=\s*\{", before) is not None)
+        if path == "src/rt/overlay/overlay_dev.c":
+            # The GE's texture format mnemonics and a hexadecimal guest address, shown verbatim.
+            return ((token in cls.OVERLAY_GE_FORMATS and re.fullmatch(r'\s*(?:"\w+",\s*)*', before) is not None)
+                    or token == '"0x%08X"')
         return False
 
     @classmethod
@@ -10028,6 +10295,47 @@ class PlayerUiStringSourceTests(unittest.TestCase):
                     continue
                 problems.extend(self.problems(relative, path.read_text(encoding="utf-8")))
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_overlay_strings_come_from_the_catalog(self) -> None:
+        """#2953: the in-game overlay's pages take their copy from the catalog too."""
+        problems = []
+        scanned = 0
+        for directory in self.OVERLAY_SOURCES:
+            for path in sorted((ROOT / directory).rglob("*")):
+                if path.suffix not in {".c", ".h", ".inc"}:
+                    continue
+                scanned += 1
+                problems.extend(self.problems(path.relative_to(ROOT).as_posix(),
+                                              path.read_text(encoding="utf-8")))
+        self.assertGreater(scanned, 0, "no overlay sources found")
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_guard_finds_overlay_copy_and_keeps_its_data(self) -> None:
+        source = (
+            'static const char *const k_arrows[] = {"up", "down", "left", "right"};\n'
+            'static const NkUiPromptItem prompts[] = {{NK_UI_PROMPT_ACT_BACK, "Back"}};\n'
+            'key_group(keys, taken, count, k_arrows, 4u, "Arrow keys", words, list);\n'
+            'nk_ui_button(ui, NK_OVERLAY_ID_RESUME, NK_UI_STR(OVERLAY_BUTTON_RESUME), 0u);\n'
+        )
+        problems = self.problems("src/rt/overlay/overlay_controls.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["2", "3"])
+        # Key names are data only in the controls file's key tables.
+        self.assertEqual(len(self.problems("src/rt/overlay/overlay_pause.c", source)), 6)
+        source = (
+            'static const char *const names[] = {\n'
+            '    "5650", "CLUT4", "DXT1",\n'
+            '};\n'
+            '(void)snprintf(text, sizeof(text), "0x%08X", (unsigned)w->addr);\n'
+            'return "UNKNOWN";\n'
+            'nk_ui_text(ui, DEV_ID_EMPTY, "CLUT4", &empty);\n'
+        )
+        problems = self.problems("src/rt/overlay/overlay_dev.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["5", "6"])
+        # The host's diagnostics stay literal, but a string drawn there still needs the catalog.
+        host = ('host_error(error, error_size, "out of memory");\n'
+                'nk_ui_text(ui, id, "Raw overlay copy", &style);\n')
+        self.assertEqual([p.split(":")[1] for p in self.problems("src/rt/overlay/overlay_host.c", host)],
+                         ["2"])
 
     def test_guard_finds_direct_descriptor_and_formatted_copy(self) -> None:
         source = (

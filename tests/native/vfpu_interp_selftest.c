@@ -33,6 +33,8 @@
 //   * vrndi.s steps the random unit by the PSP-HLE-ISSUES-001 rule in the
 //     generated code and the interpreter alike, and the vrnd forms and prefixes
 //     without a recorded rule fail closed;
+//   * mtvc to the S/T/D prefixes and RCX0-7 stores the words a PSP reads back
+//     (pspautotests prefix_ctrl and vrnd), in both lanes;
 //   * vh2f.s/.p, vuc2i.s, vsocp.s/.p, vwbn.s and vrndf1.s/vrndf2.s return the
 //     PSP-VFPU-FORMS-001 words in both lanes, and their unmeasured widths and
 //     prefixes fail closed;
@@ -202,9 +204,12 @@ static int check_cop2_control_transfers(void) {
         s.r[5] = value;
         CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + i)) == SR_VFPU_COMPUTE,
               "mtvc accepts every VFPU control register");
-        /* VFPU_CC (3) keeps only bits 0..5; see check_vfpu_cc_write_mask. */
-        CHECK(s.vfpuCtrl[i] == (i == 3 ? (value & 0x3fu) : value),
-              "mtvc writes the selected VFPU control register");
+        /* The bits each register keeps: check_vfpu_cc_write_mask (VFPU_CC) and
+         * check_mtvc_control_write_masks (prefixes, RCX0-7) hold the recorded rows. */
+        const uint32_t stored = i <= 1 ? (value & 0xfffffu) : i == 2 ? (value & 0xfffu)
+                                : i == 3 ? (value & 0x3fu) : i < 8 ? value
+                                : (value & 0xfffffu) | 0x3f800000u;
+        CHECK(s.vfpuCtrl[i] == stored, "mtvc writes the selected VFPU control register");
     }
 
     setup_state(&s);
@@ -2389,6 +2394,69 @@ static int check_vcmp_denormal_operands(void) {
     return bad;
 }
 
+/* Runs vcmp.q C000, C010 with condition cond on lanes s and t in both lanes; nonzero on a miss. */
+static int vcmp_q_cc_matches(int cond, const uint32_t s[4], const uint32_t t[4], uint32_t want,
+                             const char *what) {
+    char name[32];
+    snprintf(name, sizeof(name), "vcmp-q-c%02d-measured", cond);
+    const int c = find_overlap_diff_case(name);
+    CHECK(c >= 0, "vcmp word is in the overlap-diff header");
+    if (c < 0) return 1;
+    CpuState aot, interp;
+    setup_identity_compute(&aot);
+    for (int i = 0; i < 4; i++) { aot.vi[i] = s[i]; aot.vi[4 + i] = t[i]; }
+    interp = aot;
+    overlap_diff_run_codegen(&aot, c);
+    const int kind = sr_vfpu_interp(&interp, overlap_diff_cases[c].w);
+    g_checks++;
+    if (kind == SR_VFPU_STATE && aot.vfpuCtrl[3] == want && interp.vfpuCtrl[3] == want) return 0;
+    g_failures++;
+    fprintf(stderr, "FAIL: vcmp.q %s cond %d s=%08x,%08x,%08x,%08x want=0x%02x aot=0x%02x interp=0x%02x kind=%d\n",
+            what, cond, s[0], s[1], s[2], s[3], want, aot.vfpuCtrl[3], interp.vfpuCtrl[3], kind);
+    return 1;
+}
+
+/* vcmp.q with NaN and infinity lanes. pspautotests e37443a6 tests/cpu/vfpu/specials.expected
+ * (recorded on a PSP), lines 2-5: s = (NaN, -NaN, +inf, -inf), NaN being 0x7fbfffff as that file
+ * prints its inputs, against t = (1, NaN, 0, -inf), four NaNs, (+den, 0, -0, -den) and s itself;
+ * all 16 conditions. glibc's isinf() returns -1 for -inf, and the shifted -1 set every CC bit above
+ * its lane, so EI read 0x3c for the recorded 0x1c. The EI and NI rows below put -inf in lane 0 or
+ * lane 1 of (1, 1, 1, 1); their words follow the measured CC rule of PSP-VFPU-CCCMOV-001 (lane j at
+ * bit j, bit 4 the OR and bit 5 the AND of the lanes) and are derived, not recorded. */
+static int check_vcmp_special_operands(void) {
+    static const uint32_t s[4] = {0x7fbfffffu, 0xffbfffffu, 0x7f800000u, 0xff800000u};
+    static const struct {
+        uint32_t t[4];
+        uint8_t cc[16];
+    } recorded[] = {
+        {{0x3f800000u, 0x7fbfffffu, 0x00000000u, 0xff800000u},
+         {0x00, 0x18, 0x00, 0x18, 0x3f, 0x17, 0x1c, 0x14, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+        {{0x7fbfffffu, 0x7fbfffffu, 0x7fbfffffu, 0x7fbfffffu},
+         {0x00, 0x00, 0x00, 0x00, 0x3f, 0x3f, 0x00, 0x00, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+        {{0x000116c2u, 0x00000000u, 0x80000000u, 0x800116c2u},
+         {0x00, 0x00, 0x18, 0x18, 0x3f, 0x3f, 0x14, 0x14, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+        {{0x7fbfffffu, 0xffbfffffu, 0x7f800000u, 0xff800000u},
+         {0x00, 0x1c, 0x00, 0x1c, 0x3f, 0x13, 0x1c, 0x00, 0x00, 0x13, 0x1c, 0x3f, 0x3f, 0x1c, 0x13, 0x00}},
+    };
+    static const struct {
+        uint32_t s[4];
+        uint8_t ei, ni;
+    } derived[] = {
+        {{0xff800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, 0x11, 0x1e},
+        {{0x3f800000u, 0xff800000u, 0x3f800000u, 0x3f800000u}, 0x12, 0x1d},
+    };
+    static const uint32_t ones[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+    int bad = 0;
+    for (unsigned r = 0; r < sizeof(recorded) / sizeof(recorded[0]); r++)
+        for (int cond = 0; cond < 16; cond++)
+            bad |= vcmp_q_cc_matches(cond, s, recorded[r].t, recorded[r].cc[cond], "specials.expected");
+    for (unsigned r = 0; r < sizeof(derived) / sizeof(derived[0]); r++) {
+        bad |= vcmp_q_cc_matches(10, derived[r].s, ones, derived[r].ei, "CC rule");
+        bad |= vcmp_q_cc_matches(14, derived[r].s, ones, derived[r].ni, "CC rule");
+    }
+    return bad;
+}
+
 /* PSP-VFPU-BASICARITH-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith):
  * vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over
  * 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q for every form but vdiv,
@@ -3113,6 +3181,150 @@ static int check_vrndi_rule_cells(void) {
         const int kind = sr_vfpu_interp(&s, refused[r].w);
         CHECKB(bad, kind == SR_VFPU_OTHER && memcmp(&s, &before, sizeof(s)) == 0,
                "unmeasured vrnd form or prefix fails closed with no state change");
+    }
+    return bad;
+}
+
+/* Run the generated C body for the transfer, or the same word in the production interpreter. */
+static int run_vfpu_control_transfer(CpuState *s, int aot, const char *name, uint32_t word) {
+    if (!aot) return sr_vfpu_interp(s, word) == SR_VFPU_COMPUTE;
+    const int c = find_overlap_diff_case(name);
+    if (c < 0 || overlap_diff_cases[c].w != word) return 0;
+    overlap_diff_run_codegen(s, c);
+    return 1;
+}
+
+static int mtvc_in_lane(CpuState *s, int aot, int ctrl, uint32_t value) {
+    char name[24];
+    snprintf(name, sizeof(name), "mtvc-ctrl-%d", 128 + ctrl);
+    s->r[5] = value;
+    return run_vfpu_control_transfer(s, aot, name, cop2_transfer(7, 5, 128 + ctrl));
+}
+
+static int mfvc_in_lane(CpuState *s, int aot, int ctrl, uint32_t *value) {
+    char name[24];
+    snprintf(name, sizeof(name), "mfvc-ctrl-%d", 128 + ctrl);
+    s->r[6] = 0xa5a5a5a5u;
+    if (!run_vfpu_control_transfer(s, aot, name, cop2_transfer(3, 6, 128 + ctrl))) return 0;
+    *value = s->r[6];
+    return 1;
+}
+
+static int check_mtvc_control_write_masks(void) {
+    /* pspautotests e37443a6 tests/cpu/vfpu/prefix_ctrl.expected (recorded on a PSP), the rows
+     * after "written with mtvc": S, T and D prefixes written with mtvc and read back with mfvc.
+     * S and T keep bits 0-19 (0xffffffff reads 000fffff, 0xfff00000 reads 0) and D bits 0-11
+     * (0xffffffff reads 00000fff, 0xffffff00 reads 00000f00). */
+    static const struct { uint32_t wrote[3], reads[3]; } prefix_rows[] = {
+        {{0x000f00b1u, 0x0000f40du, 0x00000055u}, {0x000f00b1u, 0x0000f40du, 0x00000055u}},
+        {{0xffffffffu, 0xffffffffu, 0xffffffffu}, {0x000fffffu, 0x000fffffu, 0x00000fffu}},
+        {{0xfff00000u, 0xfff00000u, 0xffffff00u}, {0x00000000u, 0x00000000u, 0x00000f00u}},
+        {{0x000000e4u, 0x000000e4u, 0x00000000u}, {0x000000e4u, 0x000000e4u, 0x00000000u}},
+        {{0x00000000u, 0x00000000u, 0x00000000u}, {0x00000000u, 0x00000000u, 0x00000000u}},
+    };
+    /* pspautotests e37443a6 tests/cpu/vfpu/vrnd.expected (recorded on a PSP), "state written
+     * directly": RCX0-7 written with mtvc, read back with mfvc, then the first vrndi.s draw
+     * and RCX0-7 after it. Each register keeps bits 0-19 and reads 0x3f8 in bits 20-31
+     * (0x00000001 reads 3f800001, 0xffffffff reads 3f8fffff, 0x12345678 reads 3f845678), and
+     * the carry nibbles in bits 16-19 feed the step. */
+    static const struct { uint32_t wrote[8], reads[8], draw, after[8]; } rcx_rows[] = {
+        {{0x00000001u, 0x00000002u, 0x00000004u, 0x00000008u, 0u, 0u, 0u, 0u},
+         {0x3f800001u, 0x3f800002u, 0x3f800004u, 0x3f800008u, 0x3f800000u, 0x3f800000u,
+          0x3f800000u, 0x3f800000u},
+         0x00094e24u,
+         {0x3f800dceu, 0x3f804042u, 0x3f800008u, 0x3f800014u, 0x3f800001u, 0x3f800008u,
+          0x3f800000u, 0x3f800000u}},
+        {{0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
+          0xffffffffu, 0xffffffffu},
+         {0x3f8fffffu, 0x3f8fffffu, 0x3f8fffffu, 0x3f8fffffu, 0x3f8fffffu, 0x3f8fffffu,
+          0x3f8fffffu, 0x3f8fffffu},
+         0x0002d24fu,
+         {0x3f82f234u, 0x3f80e01fu, 0x3f80ffffu, 0x3f80fffcu, 0x3f80fffeu, 0x3f800003u,
+          0x3f80ffffu, 0x3f80ffffu}},
+        {{0x3f80abcdu, 0x3f810000u, 0x3f82ffffu, 0x3f830001u, 0x3f840002u, 0x3f850003u,
+          0x3f860004u, 0x3f870005u},
+         {0x3f80abcdu, 0x3f810000u, 0x3f82ffffu, 0x3f830001u, 0x3f840002u, 0x3f850003u,
+          0x3f860004u, 0x3f870005u},
+         0xa7725e5cu,
+         {0x3f80fc2au, 0x3f803021u, 0x3f800001u, 0x3f803211u, 0x3f80d0a9u, 0x3f806065u,
+          0x3f800005u, 0x3f807663u}},
+        {{0x12345678u, 0x9abcdef0u, 0x0f0f0f0fu, 0xf0f0f0f0u, 0x00ff00ffu, 0xff00ff00u,
+          0x55aa55aau, 0xaa55aa55u},
+         {0x3f845678u, 0x3f8cdef0u, 0x3f8f0f0fu, 0x3f80f0f0u, 0x3f8f00ffu, 0x3f80ff00u,
+          0x3f8a55aau, 0x3f85aa55u},
+         0x9dc4964bu,
+         {0x3f815619u, 0x3f803f7fu, 0x3f80f0f0u, 0x3f8000b3u, 0x3f801a54u, 0x3f807f0bu,
+          0x3f80aa55u, 0x3f800465u}},
+    };
+    /* Existing behavior controls: VFPU_CC keeps its mask and $132-$135 keep the full word. */
+    static const uint32_t control_reads[] = {0x00000039u, 0x123456f9u, 0x123456f9u,
+                                             0x123456f9u, 0x123456f9u};
+    static const char *const lane_names[2] = {"interpreter", "generated code"};
+    const int vrndi = find_overlap_diff_case("vrndi-s-issues");
+    int bad = 0;
+    for (int aot = 0; aot < 2; aot++) {
+        for (size_t r = 0; r < sizeof(prefix_rows) / sizeof(prefix_rows[0]); r++) {
+            CpuState s;
+            setup_identity_compute(&s);
+            int ok = 1;
+            for (int k = 0; k < 3; k++) ok &= mtvc_in_lane(&s, aot, k, prefix_rows[r].wrote[k]);
+            uint32_t readback[3] = {0};
+            for (int k = 0; k < 3; k++)
+                ok &= mfvc_in_lane(&s, aot, k, &readback[k]) && readback[k] == prefix_rows[r].reads[k];
+            if (!ok)
+                fprintf(stderr, "mtvc/mfvc prefixes %s row %zu: wrote %08x,%08x,%08x read %08x,%08x,%08x\n",
+                        lane_names[aot], r, prefix_rows[r].wrote[0], prefix_rows[r].wrote[1],
+                        prefix_rows[r].wrote[2], readback[0], readback[1], readback[2]);
+            CHECKB(bad, ok, "mtvc to the S/T/D prefixes keeps the bits the PSP reads back");
+        }
+        for (size_t r = 0; r < sizeof(rcx_rows) / sizeof(rcx_rows[0]); r++) {
+            CpuState s;
+            setup_identity_compute(&s);
+            sr_vfpu_thread_ctrl_init(&s);
+            int ok = 1;
+            for (int k = 0; k < 8; k++) ok &= mtvc_in_lane(&s, aot, 8 + k, rcx_rows[r].wrote[k]);
+            uint32_t readback[8] = {0};
+            for (int k = 0; k < 8; k++)
+                ok &= mfvc_in_lane(&s, aot, 8 + k, &readback[k]) && readback[k] == rcx_rows[r].reads[k];
+            if (!ok)
+                fprintf(stderr, "mtvc/mfvc RCX %s row %zu: RCX0 wrote %08x read %08x\n", lane_names[aot],
+                        r, rcx_rows[r].wrote[0], readback[0]);
+            CHECKB(bad, ok, "mtvc to RCX0-7 keeps bits 0-19 and reads 0x3f8 above them");
+            if (aot) {
+                CHECKB(bad, vrndi >= 0, "vrndi.s word is in the overlap-diff header (AOT emits it)");
+                if (vrndi >= 0) overlap_diff_run_codegen(&s, vrndi);
+            } else {
+                CHECKB(bad, sr_vfpu_interp(&s, 0xd0210000u) == SR_VFPU_COMPUTE,
+                       "vrndi.s after an RCX write executes");
+            }
+            ok = s.vi[0] == rcx_rows[r].draw;
+            for (int k = 0; k < 8; k++) {
+                readback[k] = 0u;
+                ok &= mfvc_in_lane(&s, aot, 8 + k, &readback[k]) && readback[k] == rcx_rows[r].after[k];
+            }
+            if (!ok)
+                fprintf(stderr, "vrndi.s after mtvc RCX %s row %zu: drew %08x RCX0 %08x\n",
+                        lane_names[aot], r, s.vi[0], readback[0]);
+            CHECKB(bad, ok, "vrndi.s after an RCX write draws the PSP word and leaves its RCX0-7");
+        }
+
+        CpuState control;
+        setup_identity_compute(&control);
+        uint32_t readback = 0u;
+        for (int k = 3; k < 8; k++) {
+            const int wrote = mtvc_in_lane(&control, aot, k, 0x123456f9u);
+            const int read = mfvc_in_lane(&control, aot, k, &readback);
+            CHECKB(bad, wrote && read && readback == control_reads[k - 3],
+                   "mtvc/mfvc preserves existing behavior of VFPU_CC and controls $132-$135");
+        }
+        const int wrote_zero = run_vfpu_control_transfer(&control, aot, "mtvc-zero-rcx0",
+                                                          cop2_transfer(7, 0, 136));
+        const int read_rcx0 = mfvc_in_lane(&control, aot, 8, &readback);
+        CHECKB(bad, wrote_zero && read_rcx0 && readback == 0x3f800000u,
+               "mtvc from $zero installs RCX0's fixed upper bits");
+        const int read_zero = run_vfpu_control_transfer(&control, aot, "mfvc-zero-rcx0",
+                                                         cop2_transfer(3, 0, 136));
+        CHECKB(bad, read_zero && control.r[0] == 0u, "mfvc into $zero ignores the destination write");
     }
     return bad;
 }
@@ -4031,10 +4243,12 @@ int main(void) {
     bad |= check_vocp_vcrs_measured();
     bad |= check_vfim_measured();
     bad |= check_vrndi_rule_cells();
+    bad |= check_mtvc_control_write_masks();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();
     bad |= check_vfpu_cc_write_mask();
     bad |= check_vcmp_denormal_operands();
+    bad |= check_vcmp_special_operands();
     bad |= check_quad_memops();
     bad |= check_quad_wb_measured();
     bad |= check_vcrs_widths();

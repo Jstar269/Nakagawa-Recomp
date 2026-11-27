@@ -415,6 +415,19 @@ MUTANTS: tuple[Mutant, ...] = (
         )],
         target="generator",
     ),
+    # A branch onto the delay slot of a call whose link is another entry (#3128): the
+    # labelled copy of the slot loses the continuation into that entry, so the body
+    # returns to its caller after it. Cell `cslot_call` must diverge.
+    Mutant(
+        "codegen-walk-labelled-slot-loses-entry",
+        "GENERATOR: a branch onto a call's delay slot before another entry returns instead of entering it",
+        [(
+            "        elif pc in seen and continuations.get(pc - 4) == pc + 4:\n",
+            "        elif False and pc in seen and continuations.get(pc - 4) == pc + 4:\n",
+            1,
+        )],
+        target="generator",
+    ),
     # The body walk's straight-line ends (#1730). Each kill is a guest-visible
     # divergence in a cell, never a build failure.
     Mutant(
@@ -438,6 +451,26 @@ MUTANTS: tuple[Mutant, ...] = (
             ("                and in_ranges(label + 4, ranges)):\n",
              "                and False):\n", 1),
         ],
+        target="generator",
+    ),
+    # A body entered at a delay slot (#3163): the eslot cells must diverge.
+    Mutant(
+        "codegen-entry-slot-runs-again",
+        "GENERATOR: a transfer whose delay slot is the body's entry falls into the entry label",
+        [(
+            # The pre-fix order: the skips are planned first, then the entry label joins.
+            "    if entry_label:\n"
+            "        labels = set(labels) | {start}\n"
+            "    dup_slot_skips = _dup_slot_skips(elf, insns, labels)\n"
+            "    if dup_slot_skips:\n"
+            "        labels = set(labels) | set(dup_slot_skips.values())\n",
+            "    dup_slot_skips = _dup_slot_skips(elf, insns, labels)\n"
+            "    if dup_slot_skips:\n"
+            "        labels = set(labels) | set(dup_slot_skips.values())\n"
+            "    if entry_label:\n"
+            "        labels = set(labels) | {start}\n",
+            1,
+        )],
         target="generator",
     ),
     Mutant(
@@ -475,6 +508,28 @@ MUTANTS: tuple[Mutant, ...] = (
         [(
             "        const uint32_t canonical_qnan = 0x7fc00000u;",
             "        const uint32_t canonical_qnan = 0xffc00000u;",
+            1,
+        )],
+        target="fp-convert",
+    ),
+    Mutant(
+        "fpu-wrong-invalid-op-nan",
+        "FPU: return the x86 default NaN for an invalid add.s, sub.s or div.s",
+        [(
+            "#define SR_FPU_INVALID_OP_NAN_BITS 0x7fc00000u",
+            "#define SR_FPU_INVALID_OP_NAN_BITS 0xffc00000u",
+            1,
+        )],
+        target="fp-convert",
+    ),
+    Mutant(
+        "fpu-nan-operand-ft-first",
+        "FPU: return ft's NaN when both operands are NaNs",
+        [(
+            "    const uint32_t bits = sr_fpu_bits_are_nan(a_bits) ? a_bits | 0x00400000u\n"
+            "                        : sr_fpu_bits_are_nan(b_bits) ? b_bits | 0x00400000u\n",
+            "    const uint32_t bits = sr_fpu_bits_are_nan(b_bits) ? b_bits | 0x00400000u\n"
+            "                        : sr_fpu_bits_are_nan(a_bits) ? a_bits | 0x00400000u\n",
             1,
         )],
         target="fp-convert",
@@ -563,6 +618,22 @@ MUTANTS: tuple[Mutant, ...] = (
             "    _emit_slot_exit(ctx, out, addr, \"slot already ran inline (or was annulled)\")\n",
             "    if addr in ctx.dup_slot_skips:\n"
             "        out.append(f\"    goto L_{ctx.dup_slot_skips[addr]:08x}; /* slot already ran inline (or was annulled); skip its labelled duplicate */\")\n",
+            1,
+        )],
+        target="split-generator",
+    ),
+    Mutant(
+        # The call form keeps its continuation, so the chain gets through `cslot_call`'s own
+        # body. It ends after `cslot_branch`'s labelled slot, whose conditional stops at the
+        # next entry only when split: the first report is in the chain's case (`cslot_call`,
+        # 9 traced instructions against the interpreter's 12).
+        "split-labelled-branch-slot-loses-entry",
+        "SPLIT GENERATOR: a branch onto a conditional branch's delay slot before another entry "
+        "does not continue into it",
+        [(
+            "        elif pc in seen and continuations.get(pc - 4) == pc + 4:\n",
+            "        elif (pc in seen and continuations.get(pc - 4) == pc + 4\n"
+            "              and ((read32(elf, pc - 4) or 0) >> 26) == 3):\n",
             1,
         )],
         target="split-generator",

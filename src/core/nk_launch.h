@@ -153,6 +153,11 @@ typedef enum {
 } NkLaunchDataRootStatus;
 
 typedef struct {
+    char user_root[NK_MAX_PATH];
+    char shipped_root[NK_MAX_PATH];
+} NkLaunchEnhancementSources;
+
+typedef struct {
     char executable_path[NK_MAX_PATH];
     char image_path[NK_MAX_PATH];
     /* Promoted staging payload, when the library entry came from the setup
@@ -170,6 +175,7 @@ typedef struct {
        root, or the per-user data directory when none was named). It holds the runtime package
        and sets the asset root; it is not where fonts live. */
     char package_root[NK_MAX_PATH];
+    NkLaunchEnhancementSources enhancement_sources;
     /* The per-user data directory (the platform's, honouring --user-data-root). It is the one
        font root: the launcher looks for <this>/fonts/v2, and the runtime reads the same cache
        through SR_USER_DATA_ROOT. Filled by nk_launch_prepare_session, whatever package root
@@ -202,6 +208,12 @@ typedef struct {
     /* NkGameEntry.enhancement_hook_only: no timing package in the build. */
     bool enhancement_hook_only;
     bool package_launch;
+    /* The final validation's completion digest and runtime source record (#2998),
+       saved after a package child starts. Empty until a package has spawned. */
+    char package_identity[65];
+    char runtime_source_commit[41];
+    char runtime_source_origin[16];
+    char runtime_source_reason[128];
     bool experimental_package;
     bool showcase_package;
     bool staged_executable_checked;
@@ -255,6 +267,17 @@ NkRuntimePackageStatus nk_launch_validate_runtime_package(
     size_t reason_size
 );
 
+/* Also bind an enhanced package to both of the currently selected source
+ * declarations. Call this for launch readiness and before spawning. */
+NkRuntimePackageStatus nk_launch_validate_runtime_package_for_launch(
+    const char *user_data_root,
+    const NkGameEntry *game,
+    const NkLaunchEnhancementSources *sources,
+    NkRuntimePackageInfo *out_info,
+    char *reason,
+    size_t reason_size
+);
+
 /* Resolve the manifest-declared host-data folder using the same prepared,
  * runtime-root, and extracted-ISO locations as launch-session preparation. */
 NkLaunchDataRootStatus nk_launch_game_data_root_status(
@@ -270,6 +293,14 @@ NkLaunchDataRootStatus nk_launch_game_data_root_status(
 bool nk_launch_runtime_package_cache_identity(
     const char *user_data_root,
     const NkGameEntry *game,
+    char out_identity[65]
+);
+
+/* The player's library status memo also follows the live declaration(s). */
+bool nk_launch_runtime_package_cache_identity_for_launch(
+    const char *user_data_root,
+    const NkGameEntry *game,
+    const NkLaunchEnhancementSources *sources,
     char out_identity[65]
 );
 
@@ -300,6 +331,15 @@ NkResult nk_launch_prepare_session(
     NkLaunchSession *session,
     const NkGameEntry *game,
     const char *repo_or_install_root
+);
+
+/* Enhanced launches supply the same roots that were used to select the
+ * declaration. Preparation copies these for the independent pre-spawn check. */
+NkResult nk_launch_prepare_session_with_declarations(
+    NkLaunchSession *session,
+    const NkGameEntry *game,
+    const char *repo_or_install_root,
+    const NkLaunchEnhancementSources *sources
 );
 
 /* Whether the runtime in a package's executable reads the cheats switch (#2639): false for a

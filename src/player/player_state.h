@@ -9,6 +9,7 @@
 #include "nk_iso.h"
 #include "nk_disc_expand.h"
 #include "nk_library.h"
+#include "nk_memstick_layout.h"
 #include "nk_disc_verify.h"
 #include "nk_launch.h"
 #include "nk_steam_shortcuts.h"
@@ -22,6 +23,7 @@
 #include "discord_presence.h"
 #include "cover_art.h"
 #include "adhoc_servers.h"
+#include "cheat_db.h"
 #include "setup_staging.h"
 #include "nk_title_manifest.h"
 #include "generated/nk_title_catalog.h"
@@ -158,7 +160,10 @@ typedef enum {
     VIEW_ONLINE_PLAY_SERVERS,   /* Settings > Online play: the server picker */
     VIEW_ACHIEVEMENTS_CARD,     /* Settings > Online and developer: RetroAchievements' consent
                                    card (#1316) */
-    VIEW_ACHIEVEMENTS_SIGN_IN   /* RetroAchievements' sign-in form (#1316); the last value */
+    VIEW_ACHIEVEMENTS_SIGN_IN,  /* RetroAchievements' sign-in form (#1316) */
+    VIEW_CHEAT_DB,
+    VIEW_CHEAT_DB_CONFIRM,
+    VIEW_CHEAT_DB_BUSY          /* Last value; the UI harness's view mask has 32 bits. */
 } PlayerView;
 
 typedef enum {
@@ -691,6 +696,15 @@ typedef struct {
     char stop_boundary[96];
     int stop_exit_code;
     bool stop_has_exit_code;
+    /* The card is about one launch of its game (#2998): the run stopped
+       (player_app_set_game_stop_error) or the launch refused its texture pack
+       before a child started. Copy details then names only the package that
+       launch spawned, as the launch session recorded it, and never the library's
+       stored status for the title, which can describe another build. Both lines
+       are "" when no package was spawned. */
+    bool about_launch;
+    char launch_package[96];  /* the report's Package line: "ready, identity <12 hex>" */
+    char launch_runtime_source[192];  /* as PlayerRuntimePackageCacheEntry.runtime_source */
 } ErrorState;
 
 typedef enum {
@@ -1060,6 +1074,17 @@ typedef enum {
 
 struct PlayerApp {
     PlayerView active_view;
+    struct {
+        NkCheatDbSource source;
+        char import_path[NK_MAX_PATH];
+        char destination[NK_MAX_PATH];
+        char status[256];
+        bool replace;
+        bool download_available;
+        bool picking;
+        bool busy;
+        bool fetching_sources;
+    } cheat_db;
     GameRecord games[MAX_LIBRARY_GAMES];
     PlayerRuntimePackageCacheEntry runtime_package_cache[MAX_LIBRARY_GAMES];
     PlayerRuntimePackageWorkerFailure runtime_package_worker_failures[MAX_LIBRARY_GAMES];
@@ -1196,6 +1221,7 @@ struct PlayerApp {
     /* The Fonts & System step requests the host folder dialog for PSP font import through
        this flag; the event loop in main.c opens it. */
     bool request_font_folder_picker;
+    bool request_cheat_db_picker;
     /* Saves > Add a save (#1883) asks for the host folder dialog for games[saves_pick_index];
        main.c opens it, and the folder picked waits in saves_picked (saves_pick_ready) until
        the Saves dialog takes it. A cancelled dialog leaves nothing. */
@@ -1322,6 +1348,10 @@ struct PlayerApp {
     int window_height;
     bool enable_focus_handoff;
     bool child_window_ready;
+    /* The runtime reported its first frame (BOOT_EVENT phase=first_frame) for the
+       running launch. Decides whether a short clean exit ran the game (#306);
+       child_window_ready, set earlier by window_ready, drives the start watch. */
+    bool child_first_frame;
     /* Start watch for the running launch (#1290): the first running check was
        logged, the child wrote its first boot event, and the "still no boot
        event" developer-log note was written. Cleared by each launch. */
@@ -1539,6 +1569,13 @@ typedef enum {
     PLAYER_SAVES_FAILED     /* error says what, in plain words */
 } PlayerSavesResult;
 
+#if defined(NK_PLAYER_STATE_TEST_SEAMS)
+/* Test seam (player-state test build only): called in player_app_monitor_game_session
+   after its live read of the session file and before it checks whether the child
+   still runs, so a test can append what a child wrote between those two points. */
+extern void (*g_player_state_test_after_live_read)(PlayerApp *app);
+#endif
+
 #if defined(NK_SAVES_TEST_SEAMS)
 /* Test seam (player-state test build only): the nth rename the saves code makes from now
    fails, as a rename refused by the system would; 0 turns it off. */
@@ -1556,6 +1593,11 @@ bool player_app_save_backup_folder(const GameRecord *game, char *out, size_t out
 /* Why the title's saves can't be changed now, or NULL: a disc ID that can't name a folder,
  * or a game that starts or runs (it has the folder open). */
 const char *player_app_saves_blocker(const PlayerApp *app, int game_index);
+/* A read-only offer and a confirmed write for the selected title on a READY stick. */
+NkMemstickCollisionResult player_app_bring_in_offer(const PlayerApp *app, int game_index,
+                                                    NkMemstickPlanUnit *offer);
+NkMemstickCollisionResult player_app_bring_in(const PlayerApp *app, int game_index,
+                                              const NkMemstickPlanUnit *offer);
 /* The current local time as a backup stamp, YYYYMMDD-HHMMSS. */
 void player_app_save_stamp_now(char *out, size_t out_size);
 /* Writes a backup of the title's save folder, named with `stamp`, and reads it back whole
@@ -1839,10 +1881,10 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
 /* The library's package status check: validates with an info struct, so the runtime
  * source commit is read back and a package whose paths the player cannot hold is
  * INCOMPATIBLE here, not first at launch. */
-NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
-                                                           const GameRecord *game,
-                                                           NkRuntimePackageInfo *info,
-                                                           char *reason, size_t reason_size);
+NkRuntimePackageStatus player_runtime_package_status_check(
+    const char *user_data_root, const GameRecord *game,
+    const NkLaunchEnhancementSources *sources, NkRuntimePackageInfo *info,
+    char *reason, size_t reason_size);
 /* Records the runtime source commit the validated package records (#2875) for the entry
  * stored at game_index: commit and origin as NkRuntimePackageInfo holds them. Called
  * only after a validation ran; an empty origin (a package from before the record)
@@ -2060,6 +2102,7 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
  * (<source>/assets/enhancements, the tree package_builder_find_cli finds
  * tools/nk_cli.py in). False when there is no source tree. */
 bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size);
+void player_app_enhancement_sources(const PlayerApp *app, NkLaunchEnhancementSources *out);
 /* Re-reads every title's enhancement package and sets each GameRecord's
  * enhancement_package_id. player_app_sync_library calls it. */
 void player_app_refresh_title_enhancements(PlayerApp *app);
@@ -2312,6 +2355,9 @@ bool player_app_should_attempt_window_handoff(bool interactive_window,
 void player_app_next_boot_event_path(char *out, size_t out_size);
 
 /* Process launch integration */
+/* Select the runtime for this launch without changing the library or its saved play mode. */
+void player_app_select_launch_game(const PlayerApp *app, const GameRecord *game,
+                                   GameRecord *launch_game);
 bool player_app_launch_game(PlayerApp *app, int game_index);
 void player_app_stop_game(PlayerApp *app);
 void player_app_stop_stalled_game(PlayerApp *app);
@@ -2376,6 +2422,7 @@ typedef struct {
     GameRecord game;
     char package_root[MAX_PATH_LEN];
     bool has_package_root;
+    NkLaunchEnhancementSources enhancement_sources;
     PlayerSettings settings;
     bool launch_headless;
     uint32_t headless_accept_presented_frames;
@@ -2431,8 +2478,11 @@ NkResult player_app_apply_input_profile_to_session(PlayerApp *app, const GameRec
 /* Advance the running-game session state machine one tick at `now_ms`.
  *
  * Returns true when this tick observed the child's exit and finalized the
- * session. A child that exits before 500 ms of wall time is reported through
- * the structured RUNTIME_PREMATURE_EXIT error; a later non-zero exit becomes
+ * session. A child that exits before 500 ms of wall time, with a non-zero
+ * code or before it presented its first frame (BOOT_EVENT phase=first_frame),
+ * is reported through the structured RUNTIME_PREMATURE_EXIT error (a clean
+ * exit 0 after the first frame is a short successful run, #306); a later
+ * non-zero exit becomes
  * RUNTIME_ERROR_EXIT. A child still running PLAYER_GAME_START_TIMEOUT_MS
  * after launch without having written a single boot event never started: the
  * tick stops it, reports RUNTIME_START_TIMEOUT and returns true (#1290).

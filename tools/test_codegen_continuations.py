@@ -479,6 +479,41 @@ class ContinuationFlowTests(unittest.TestCase):
         self.assertNotIn("s->r[29] = _sp_entry; /* synthetic boundary", text)
         self.assertIn("goto _sr_cont_00001010;", text)
 
+    def test_labelled_call_slot_continues_into_the_foreign_entry(self):
+        # A branch lands on the delay slot of a jal whose link is another entry. On that
+        # path the slot runs as an ordinary word and control goes on into the entry, as it
+        # does after the call: the labelled copy must not fall off the body as a return.
+        elf = FakeElf(
+            {
+                0x1000: beq(4, 0, 0x1000, 0x100C),   # into the jal's delay slot
+                0x1004: 0x00000000,
+                0x1008: jal(0x2000),
+                0x100C: 0x24050001,  # addiu a1, zero, 1 (delay slot and label)
+                0x1010: 0x00041823,  # foreign adjacent entry
+                0x1014: 0x03E00008,
+                0x1018: 0x00000000,
+                0x2000: 0x03E00008,
+                0x2004: 0x00000000,
+            }
+        )
+        known = {0x1000, 0x1010, 0x2000}
+        insns, labels, continuations = codegen.function_flow(
+            elf, 0x1000, [(0x1000, 0x2008)], known)
+        self.assertNotIn(0x1010, insns)
+        self.assertIn(0x100C, labels)
+        self.assertEqual(continuations, {0x1008: 0x1010, 0x100C: 0x1010})
+
+        text = "\n".join(codegen.emit_function(elf, 0x1000, [(0x1000, 0x2008)], known))
+        label = text.index("  L_0000100c: ;")
+        self.assertTrue(
+            text[label:].startswith(
+                "  L_0000100c: ;\n"
+                "    sr_begin(s, 0x0000100cu, 0x24050001u); s->r[5] = (0u + 0x00000001u); "
+                "sr_end(s, 0u, 0);\n"
+                "    goto _sr_cont_00001010;\n"),
+            text[label:],
+        )
+
     def test_stack_census_keeps_synthetic_boundary_annotation(self):
         elf = FakeElf(
             {
@@ -685,6 +720,40 @@ class EntrySplitTests(unittest.TestCase):
         self.assertIn("sr_tail_record(s, 0x00001020u, f_00001020, _sp_entry, 1u); return; }", text)
         self.assertEqual(text.count("0x0000100cu"), 1, text)
         self.assertIn("goto _sr_cont_00001010;", text)
+
+    def test_labelled_branch_slot_continues_into_the_next_entry(self):
+        # 0x1000 lands on the delay slot of the branch at 0x100C, whose not-taken edge is
+        # the entry 0x1014. After the slot that path goes on into 0x1014 too, never into
+        # the code at 0x1040 that the address order puts after the labelled copy.
+        elf = FakeElf({
+            0x1000: beq(4, 0, 0x1000, 0x1010),        # into the slot at 0x1010
+            0x1004: 0x00000000,
+            0x1008: 0x00000000,
+            0x100C: bne(2, 0, 0x100C, 0x1040),
+            0x1010: 0x24420004,                       # addiu v0, v0, 4 (slot and label)
+            0x1014: 0x24420008,                       # entry: addiu v0, v0, 8
+            0x1018: 0x03E00008,
+            0x101C: 0x00000000,
+            0x1040: 0x24030007,                       # addiu v1, zero, 7
+            0x1044: 0x03E00008,
+            0x1048: 0x00000000,
+        })
+        ranges, known = [(0x1000, 0x1050)], {0x1000, 0x1014}
+        with region_split_threshold(0) as options:
+            _, labels, continuations = codegen.function_flow(
+                elf, 0x1000, ranges, known, options=options)
+            text = "\n".join(codegen.emit_function(elf, 0x1000, ranges, known, options=options))
+        self.assertEqual(labels, {0x1010, 0x1040})
+        self.assertEqual(continuations, {0x100C: 0x1014, 0x1010: 0x1014})
+        label = text.index("  L_00001010: ;")
+        self.assertTrue(
+            text[label:].startswith(
+                "  L_00001010: ;\n"
+                "    sr_begin(s, 0x00001010u, 0x24420004u); s->r[2] = (s->r[2] + 0x00000004u); "
+                "sr_end(s, 0u, 0);\n"
+                "    goto _sr_cont_00001014;\n"),
+            text[label:],
+        )
 
     def test_branch_to_its_own_start_stays_a_loop_edge(self):
         insns, labels, continuations = self.flow(self.elf(), 0x1010)
@@ -1001,6 +1070,91 @@ class StraightLineEndTests(unittest.TestCase):
                 insns, _labels, _continuations = self.flow(words, start=base)
                 self.assertEqual(insns, reachable(words, base))
                 self.emit(words, start=base)                       # the slot check holds
+
+
+def first_word_after(text, label):
+    """The guest PC of the first word the C runs when the block before ``label`` falls through.
+
+    That block's last line either jumps to a label or runs on into ``label``; either way the
+    next ``sr_begin`` from there names the word.
+    """
+    lines = text.splitlines()
+    at = lines.index(f"  L_{label:08x}: ;")
+    jump = re.match(r"goto L_([0-9a-f]{8});", lines[at - 1].strip())
+    if jump:
+        at = lines.index(f"  L_{jump.group(1)}: ;")
+    for line in lines[at:]:
+        begin = re.search(r"sr_begin\(s, 0x([0-9a-f]{8})u,", line)
+        if begin:
+            return int(begin.group(1), 16)
+    return None
+
+
+class EntryOnDelaySlotTests(unittest.TestCase):
+    """#3163: a body entered at the delay slot of a transfer it loops back to.
+
+    The entry word at 0x1004 is the body's first word and, on every later pass, the delay
+    slot of the transfer at 0x1000. That transfer runs the slot inline (or annuls it), so
+    its fall-through goes on at 0x1008: falling into the entry label runs the slot again.
+    """
+
+    RANGES = [(0x1000, 0x101C), (0x2000, 0x2008)]
+    #: Every transfer that can fall through past its delay slot.
+    OWNERS = (
+        ("bne", bne(4, 0, 0x1000, 0x1014)),
+        ("beql", beql(4, 0, 0x1000, 0x1014)),
+        ("jal", jal(0x2000)),
+        ("jalr", jalr(31, 25)),
+        ("bgezal", regimm(0x11, 4, 0x1000, 0x2000)),
+    )
+
+    @staticmethod
+    def words(owner):
+        return {0x1000: owner,
+                0x1004: addiu(2, 2, 1),                 # the entry, and the owner's delay slot
+                0x1008: addiu(5, 5, -1),
+                0x100C: bne(5, 0, 0x100C, 0x1000),      # back to the owner
+                0x1010: NOP,
+                0x1014: JR_RA, 0x1018: NOP,
+                0x2000: JR_RA, 0x2004: NOP}
+
+    def emit(self, words, start, threshold=None):
+        known = {start, 0x2000}
+        with region_split_threshold(threshold) as options:
+            return "\n".join(codegen.emit_function(
+                FakeElf(words), start, self.RANGES, known, options=options))
+
+    def test_fall_through_past_the_owner_goes_on_after_the_entry_word(self):
+        for name, owner in self.OWNERS:
+            for threshold in (None, 0):
+                with self.subTest(owner=name, threshold=threshold):
+                    text = self.emit(self.words(owner), 0x1004, threshold)
+                    self.assertIn("    goto L_00001004;\n  L_00001000: ;", text)
+                    self.assertEqual(first_word_after(text, 0x1004), 0x1008)
+                    self.assertIn("  L_00001008: ;", text)
+                    # The entry still starts at its own word, and the slot is still emitted
+                    # once inline at the owner and once under the entry label.
+                    entry = text.index("  L_00001004: ;")
+                    self.assertTrue(text[entry:].startswith(
+                        "  L_00001004: ;\n    sr_begin(s, 0x00001004u, 0x24420001u);"))
+                    self.assertEqual(text.count("sr_begin(s, 0x00001004u, 0x24420001u);"), 2)
+
+    def test_the_same_words_entered_at_the_owner_plan_no_skip(self):
+        # Entered at 0x1000 the slot has no label: there is no copy to skip, as before.
+        for name, owner in self.OWNERS:
+            with self.subTest(owner=name):
+                text = self.emit(self.words(owner), 0x1000)
+                self.assertNotIn("skip its labelled duplicate", text)
+                self.assertNotIn("L_00001008", text)
+                self.assertEqual(text.count("sr_begin(s, 0x00001004u, 0x24420001u);"), 1)
+
+    def test_an_entry_on_the_slot_of_jr_or_j_plans_no_skip(self):
+        # `jr` and `j` leave after their slot, so nothing falls into the entry label.
+        for name, owner in (("jr", JR_T9), ("j", j(0x1014))):
+            with self.subTest(owner=name):
+                text = self.emit(self.words(owner), 0x1004)
+                self.assertNotIn("skip its labelled duplicate", text)
+                self.assertNotIn("L_00001008", text)
 
 
 class StateResumeTests(unittest.TestCase):

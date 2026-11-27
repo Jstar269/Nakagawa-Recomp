@@ -7,6 +7,8 @@
  * TitleActivity runs in its own app process (":title") and calls nk_android_title_main() with the
  * argv the launcher built, exactly what a desktop child process gets. This file adds what the
  * desktop gets from the operating system for free:
+ *   - the launcher's environment, which TitleActivity sets from Java, in this library's own C
+ *     library (nk_platform_android_import_environment);
  *   - the pid, in NK_ANDROID_PID_FILE, so the launcher can follow a process that is not its child;
  *   - the exit status, in NK_ANDROID_EXIT_FILE, from a return out of main() or from exit(),
  *     _exit() or _Exit() anywhere in the runtime (the library is linked with --wrap for those);
@@ -33,6 +35,14 @@
  */
 
 #include "nk_platform.h"
+
+#if defined(__ANDROID__)
+#include <SDL3/SDL_system.h>   /* SDL_GetAndroidJNIEnv */
+#else
+/* This file is also built on Linux, without SDL, by its host test (tools/test_android_build.py),
+   whose harness supplies this. */
+void *SDL_GetAndroidJNIEnv(void);
+#endif
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -130,6 +140,13 @@ __attribute__((noreturn)) void __wrap__Exit(int status) {
 }
 
 __attribute__((visibility("default"))) int nk_android_title_main(int argc, char **argv) {
+    /* First: TitleActivity set the launcher's variables (the pid, exit and boot-event files, the
+       app folder) with Os.setenv, which an arm64 library under ARM translation does not see. A
+       library the APK ships by name took them in its JNI_OnLoad; one SDL dlopen()s by path (a
+       package in the files folder) has no JNI_OnLoad, so they are applied here, on SDL's Java
+       thread, before anything reads them. A failure is logged by name (NK_ENV_IMPORT_FAILED);
+       the launcher then still reports the missing pid and boot event. */
+    (void)nk_platform_android_import_environment(SDL_GetAndroidJNIEnv());
     write_number_file("NK_ANDROID_PID_FILE", (long)getpid());
     (void)nk_platform_host_startup("nakagawa-title");
     __wrap_exit(main(argc, argv));

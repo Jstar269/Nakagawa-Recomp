@@ -315,8 +315,11 @@ returns through its callee's `jr $ra` instead.
 | `bjoin` | words after a `b` (`beq $zero, $zero`) that only a later backward branch reaches, beside a not-taken `beq` whose fall-through is the rest of the cell |
 | `bslot` / `jslot` | a branch into the delay slot of `b` / `j`: the slot runs as an ordinary word and the guest continues after it |
 | `bself` | `b` to its own delay slot: the slot runs twice |
+| `eslot` / `eslot_likely` | a body entered (by `jal`) at the delay slot of a `bne` / `bnel` it loops back to: the entry word runs as the entry, then as the not-taken branch's slot, or not again when annulled |
+| `eslot_call` | the same entry on the delay slot of a `jal`: the entry word runs as the entry, then as the call's slot, and not again when leaf A returns |
 | `link` / `linkr` | `jal` and `jalr` link semantics with a conventional `$ra`-preserving frame |
 | `jrslot` / `jrtail` | a computed call and a computed tail call whose delay slots rewrite the target register |
+| `cslot_call` / `cslot_branch` / `cslot_dst` | a branch onto the delay slot of a `jal`, and of a conditional branch, whose next word is another entry: the slot runs once as an ordinary word and the guest goes on into that entry (the conditional form stops at the entry only in the split lane) |
 | `hilo` | `HI`/`LO` through signed and unsigned multiply (they differ in the high word only) |
 | `llsc` | `ll`/`sc` and the link bit: an unlinked `sc` fails, a linked one stores and reports 1, `sc` leaves the link set, `ll $zero` links, an atomic-increment retry loop, and `sc` whose `rt` is its own base |
 | `fpu` | scalar FPU over the #120 helper path, re-run under all four FCR31 rounding modes and with FS set |
@@ -364,7 +367,7 @@ There is no scalar FPU madd/msub implementation to claim: the similarly named
 instructions in the fixture are integer HI/LO `madd`/`msub`.
 
 The 38-value corpus is the Cartesian product of both operands, four FCR31 rounding
-modes and FS clear/set: 11,552 contexts and 901,056 exact result checks per run.
+modes and FS clear/set: 11,552 contexts and 912,608 exact result checks per run.
 It includes signed zero, both infinities, quiet/signaling NaNs, both subnormal
 edges, the inexact subnormal-to-minimum-normal tie, conversion limits,
 directed-rounding ties, maximum finite values and the repository's PSP rounding
@@ -379,6 +382,14 @@ guessed or counted as a pass. `sqrt.s` of a non-NaN operand is checked under all
 four rounding modes, a negative operand other than -0 giving `0x7fc00000`: the
 pspautotests `tests/cpu/fpu/roundmode.expected` words at `e37443a6`, recorded on a
 PSP, include `sqrt.s` under each mode (#3030).
+
+The NaN words in pspautotests `tests/cpu/fpu/fpu_nan.expected` and `roundmode.expected`
+at `e37443a6`, recorded on a PSP, are checked: `0x7fc00000` for an invalid `add.s`,
+`sub.s`, `mul.s` or `div.s` under every rounding mode; for those and `sqrt.s`, the
+first NaN operand with its quiet bit set, for a quiet NaN of either sign or a positive
+signaling NaN in `fs` and a quiet NaN in `ft`; and `0x7fffffff` from each conversion of
+a positive signaling NaN. A signaling NaN in `ft` and a negative signaling NaN stay
+`EXPECTED_UNKNOWN`.
 
 ### A constraint the fixture had to obey
 
@@ -429,9 +440,10 @@ and the default `build/` trees are left untouched.
 Mutating both sides matters. A differential proven against one lane is half
 proven, so one mutant restores the **generator** to its pre-fix
 computed-transfer emission order — the exact production defect this fixture was
-built to find — and `jrslot`/`jrtail` must both diverge. Four additional
+built to find — and `jrslot`/`jrtail` must both diverge. Further
 `fp-convert` mutants break nearest-even ties, positive conversion saturation,
-infinity-times-zero canonicalization and the unordered `C.cond` predicate.
+infinity-times-zero canonicalization, the invalid-operation NaN word, the choice of
+the first NaN operand and the unordered `C.cond` predicate.
 The branch-likely and Allegrex bit-operation cells carry their own interpreter
 mutants (an unannulled slot, an inverted `bc1` sense, an inverted `movn`, an
 off-by-one `ext` size, an `ins` that ORs instead of replacing, a `seb` that does not
@@ -442,6 +454,9 @@ successor, and one drops the continuation after a delay slot that a branch lands
 with the emitter's own refusal removed so the kill is a divergence, not a build failure.
 The campaign counts any divergence as a kill; the first it reports for these is in
 `bjoin` (its not-taken `beq`) and in `bslot` respectively, the cells built for them.
+One generator mutant plans the skips over labelled delay slots before the body's own entry
+label exists (#3163), so a transfer whose slot is the entry falls into the entry label and
+runs the slot once more; `eslot`, `eslot_likely` and `eslot_call` must diverge.
 Making `beql $zero, $zero` a terminator too would be an equivalent mutant (its slot
 and target are the same either way when taken) and is not claimed.
 
@@ -456,6 +471,14 @@ changes no register and no byte of memory: only the yield-point count and the se
 The rule that a point's label sits at function scope has no mutant: the fixture has no body it
 would change, so `StateResumeTests` in `tools/test_codegen_continuations.py` pins it on constructed
 bodies.
+
+Two generator mutants take the continuation away from a delay slot that a branch lands on when
+the next word is another entry (#3128). The first does it for every transfer and runs in the
+ordinary lane, where `cslot_call` must diverge: the body returns to its caller after the slot
+instead of entering the next cell. The second keeps the call form right and runs in the lane with
+every body split, where `cslot_branch`'s body must diverge; the campaign reports it first in the
+chain that starts in `cslot_call`, which then stops after 9 traced instructions of the
+interpreter's 12.
 
 Two interpreter guards are not killed by this gate, and each is layering rather than a
 hole:

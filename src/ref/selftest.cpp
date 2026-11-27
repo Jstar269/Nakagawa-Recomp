@@ -128,6 +128,44 @@ void TestMulDiv() {
 	Check("divu hi (mfhi)", s.r[T7], 2);
 }
 
+// div and divu where C's / and % are undefined or MIPS leaves the result unpredictable: a zero
+// divisor and INT_MIN / -1 (#3031). Every row is a line of pspautotests
+// tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7, recorded on a PSP. HI and LO are seeded so a
+// result the instruction failed to write is not mistaken for 0.
+void TestDivPspEdgeCases() {
+	const uint32_t base = 0x08900000;
+	struct Row { const char *what; uint32_t funct, a, b, lo, hi; };
+	const Row rows[] = {
+		{"div 80000000 / -1", 0x1A, 0x80000000u, 0xFFFFFFFFu, 0x80000000u, 0x00000000u},
+		{"div 00000000 / 0", 0x1A, 0x00000000u, 0x00000000u, 0xFFFFFFFFu, 0x00000000u},
+		{"div ffffffff / 0", 0x1A, 0xFFFFFFFFu, 0x00000000u, 0x00000001u, 0xFFFFFFFFu},
+		{"div 80000000 / 0", 0x1A, 0x80000000u, 0x00000000u, 0x00000001u, 0x80000000u},
+		{"div 80000000 / -7", 0x1A, 0x80000000u, 0xFFFFFFF9u, 0x12492492u, 0xFFFFFFFEu},
+		{"divu 80000000 / ffffffff", 0x1B, 0x80000000u, 0xFFFFFFFFu, 0x00000000u, 0x80000000u},
+		{"divu 00000001 / 0", 0x1B, 0x00000001u, 0x00000000u, 0x0000FFFFu, 0x00000001u},
+		{"divu ffffffff / 0", 0x1B, 0xFFFFFFFFu, 0x00000000u, 0xFFFFFFFFu, 0xFFFFFFFFu},
+	};
+	for (const Row &row : rows) {
+		std::vector<uint32_t> p = {
+			I(0x0F, 0, T0, (uint16_t)(row.a >> 16)),     // lui   t0, a.hi
+			I(0x0D, T0, T0, (uint16_t)row.a),            // ori   t0, t0, a.lo
+			I(0x0F, 0, T1, (uint16_t)(row.b >> 16)),     // lui   t1, b.hi
+			I(0x0D, T1, T1, (uint16_t)row.b),            // ori   t1, t1, b.lo
+			I(0x0F, 0, T2, 0xA5A5),                      // lui   t2, 0xA5A5
+			R(T2, 0, 0, 0, 0x11),                        // mthi  t2
+			R(T2, 0, 0, 0, 0x13),                        // mtlo  t2
+			R(T0, T1, 0, 0, row.funct),                  // div / divu t0, t1
+			SYSCALL,
+		};
+		ref::CpuState s = RunProgram(p, base);
+		char what[64];
+		std::snprintf(what, sizeof what, "%s lo", row.what);
+		Check(what, s.lo, row.lo);
+		std::snprintf(what, sizeof what, "%s hi", row.what);
+		Check(what, s.hi, row.hi);
+	}
+}
+
 void TestMemory() {
 	const uint32_t base = 0x08900000;
 	std::vector<uint32_t> p = {
@@ -1259,6 +1297,7 @@ int main() {
 #endif
 	TestArithmetic();
 	TestMulDiv();
+	TestDivPspEdgeCases();
 	TestMemory();
 	TestUnalignedWordAccess();
 	TestMisalignedAccessFaults();

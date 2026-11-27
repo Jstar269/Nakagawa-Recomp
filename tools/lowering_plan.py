@@ -306,11 +306,12 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         hit = sorted(insns & hst_emission_sites(cg))
         if hit:
             raise Unsupported(f"title-profile special site 0x{hit[0]:08x}")
-    # The same points emit_function asserts, from the same labels (before the planned skip
-    # targets and the entry label join them); the runtime-module and variable-import cases
+    # The same points emit_function asserts, from the same labels and entry (before the
+    # planned skip targets join them); the runtime-module and variable-import cases
     # that carry none in C were refused above.
     sv_checks = {addr: tuple(checks) for addr, checks in cg.sv_points(
-        elf, insns, labels, hst_profile=profile == "hst", options=options).items()}
+        elf, insns, labels, hst_profile=profile == "hst", options=options,
+        entry=start).items()}
 
     def word(addr):
         return space.instruction_word(addr, cg.read32(elf, addr), options=options)
@@ -334,6 +335,12 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         else:
             decoded[addr] = decode_op(addr, w, stale_detect=options.stale_detect)
 
+    # An entry above the body's lowest address is a label (the body starts by branching to
+    # it), and it counts when the skips below are planned (#3163).
+    labels = set(labels)
+    entry_label = start != min(insns)
+    if entry_label:
+        labels.add(start)
     # A delay slot that is itself a branch target runs inline at its transfer and again
     # under its own label; fall-through past the transfer skips the labelled copy.
     dup_slot_skips = {}
@@ -346,10 +353,7 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
             continue
         if addr + 4 in labels and addr + 8 in insns:
             dup_slot_skips[addr] = addr + 8
-    labels = set(labels) | set(dup_slot_skips.values())
-    entry_label = start != min(insns)
-    if entry_label:
-        labels.add(start)
+    labels |= set(dup_slot_skips.values())
 
     plan = FunctionPlan(PLAN_VERSION, start, symbol(start), resumable, start in resume_owners,
                         entry_label, sv_checks=sv_checks)

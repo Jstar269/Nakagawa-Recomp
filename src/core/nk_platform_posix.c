@@ -31,6 +31,7 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
@@ -140,6 +141,16 @@ bool nk_platform_path_missing(const char *path) {
     if (!path || !*path) return false;
     if (lstat(path, &st) == 0) return false;
     return errno == ENOENT || errno == ENOTDIR;
+}
+
+bool nk_platform_available_disk_bytes(const char *path, uint64_t *available) {
+    struct statvfs volume;
+    if (!path || !available || statvfs(path, &volume) != 0) return false;
+    uint64_t block = volume.f_frsize ? volume.f_frsize : volume.f_bsize;
+    if (!block) return false;
+    uint64_t count = (uint64_t)volume.f_bavail;
+    *available = count > UINT64_MAX / block ? UINT64_MAX : count * block;
+    return true;
 }
 
 static bool tree_size_posix(const char *path, uint64_t *bytes) {
@@ -1640,16 +1651,27 @@ static unsigned s_android_launch_serial;
 /* The activity's environment (NakagawaHost.nativeEnvironment), applied to this library's own
    libc. Java's Os.setenv already did so for the process's libc; this matters where native code
    runs on a different one (an arm64 library under ARM translation on an x86 device). */
-static void android_import_environment(JNIEnv *env) {
+static bool android_import_environment(JNIEnv *env) {
     jclass host = (*env)->FindClass(env, "io/github/jstar269/nakagawa/NakagawaHost");
     if (!host) {
         (*env)->ExceptionClear(env);
-        return;
+        __android_log_print(ANDROID_LOG_ERROR, "nakagawa",
+                            "NK_ENV_IMPORT_FAILED: class NakagawaHost not found; the activity's "
+                            "variables are not applied to this library");
+        return false;
     }
     jmethodID get = (*env)->GetStaticMethodID(env, host, "nativeEnvironment", "()[Ljava/lang/String;");
     jobjectArray entries = get ? (jobjectArray)(*env)->CallStaticObjectMethod(env, host, get) : NULL;
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    jsize count = entries ? (*env)->GetArrayLength(env, entries) : 0;
+    if (!entries) {
+        __android_log_print(ANDROID_LOG_ERROR, "nakagawa",
+                            "NK_ENV_IMPORT_FAILED: NakagawaHost.nativeEnvironment() gave no list; "
+                            "the activity's variables are not applied to this library");
+        (*env)->DeleteLocalRef(env, host);
+        return false;
+    }
+    bool applied = true;
+    jsize count = (*env)->GetArrayLength(env, entries);
     for (jsize i = 0; i < count; i++) {
         /* No JNI call may follow one that left an exception pending: each is cleared here,
            and the entry it concerns is named in the log as not applied. */
@@ -1657,6 +1679,7 @@ static void android_import_environment(JNIEnv *env) {
         if ((*env)->ExceptionCheck(env)) {
             (*env)->ExceptionClear(env);
             __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            applied = false;
             continue;
         }
         const char *text = entry ? (*env)->GetStringUTFChars(env, entry, NULL) : NULL;
@@ -1664,6 +1687,7 @@ static void android_import_environment(JNIEnv *env) {
             (*env)->ExceptionClear(env);
             __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
             (*env)->DeleteLocalRef(env, entry);
+            applied = false;
             continue;
         }
         const char *eq = text ? strchr(text, '=') : NULL;
@@ -1671,13 +1695,27 @@ static void android_import_environment(JNIEnv *env) {
             char name[256];
             memcpy(name, text, (size_t)(eq - text));
             name[eq - text] = '\0';
-            (void)setenv(name, eq + 1, 1);
+            if (setenv(name, eq + 1, 1) != 0) {
+                __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+                applied = false;
+            }
         }
         if (text) (*env)->ReleaseStringUTFChars(env, entry, text);
         if (entry) (*env)->DeleteLocalRef(env, entry);
     }
-    if (entries) (*env)->DeleteLocalRef(env, entries);
+    (*env)->DeleteLocalRef(env, entries);
     (*env)->DeleteLocalRef(env, host);
+    return applied;
+}
+
+bool nk_platform_android_import_environment(void *jni_env) {
+    if (!jni_env) {
+        __android_log_print(ANDROID_LOG_ERROR, "nakagawa",
+                            "NK_ENV_IMPORT_FAILED: no JNI environment on this thread; the activity's "
+                            "variables are not applied to this library");
+        return false;
+    }
+    return android_import_environment((JNIEnv *)jni_env);
 }
 
 /* LauncherActivity.nativeImportEnvironment, on SDL's thread just before the player's main():
@@ -1688,7 +1726,7 @@ JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeI
 JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
     JNIEnv *env, jclass cls) {
     (void)cls;
-    android_import_environment(env);
+    (void)android_import_environment(env);
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
@@ -1696,7 +1734,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env = NULL;
     s_android_vm = vm;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK || !env) return JNI_VERSION_1_6;
-    android_import_environment(env);
+    (void)android_import_environment(env);
     jclass cls = (*env)->FindClass(env, "io/github/jstar269/nakagawa/LauncherActivity");
     if (!cls) {
         (*env)->ExceptionClear(env);
@@ -2041,6 +2079,11 @@ void nk_platform_host_shutdown(void) {
     }
 }
 #else
+bool nk_platform_android_import_environment(void *jni_env) {
+    (void)jni_env;
+    return true;
+}
+
 bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
@@ -2093,8 +2136,10 @@ NkHostKind nk_platform_host_kind(void) {
 #endif
 }
 
-bool nk_platform_linux_steam_find_root(char *root, size_t root_cap) {
-    char home[NK_MAX_PATH], first_root[NK_MAX_PATH] = "";
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap,
+                                      bool (*has_accounts)(const char *)) {
+    char home[NK_MAX_PATH];
+    unsigned best_rank = 0u;
     static const char *const suffixes[] = {"/.local/share/Steam", "/.steam/steam"};
     if (!root || root_cap == 0u) return false;
     root[0] = '\0';
@@ -2103,20 +2148,21 @@ bool nk_platform_linux_steam_find_root(char *root, size_t root_cap) {
     for (size_t i = 0u; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
         char candidate[NK_MAX_PATH], userdata[NK_MAX_PATH];
         int n = snprintf(candidate, sizeof(candidate), "%s%s", home, suffixes[i]);
-        if (n < 0 || (size_t)n >= sizeof(candidate) || !nk_platform_dir_exists(candidate)) continue;
-        if (first_root[0] == '\0') memcpy(first_root, candidate, (size_t)n + 1u);
+        if (n < 0 || (size_t)n >= sizeof(candidate) || (size_t)n >= root_cap ||
+            !nk_platform_dir_exists(candidate)) continue;
+        size_t candidate_length = (size_t)n;
+        unsigned rank = 1u;
         n = snprintf(userdata, sizeof(userdata), "%s/userdata", candidate);
-        if (n < 0 || (size_t)n >= sizeof(userdata) || !nk_platform_dir_exists(userdata)) continue;
-        n = snprintf(root, root_cap, "%s", candidate);
-        if (n >= 0 && (size_t)n < root_cap) return true;
-        root[0] = '\0';
+        if (n >= 0 && (size_t)n < sizeof(userdata) && nk_platform_dir_exists(userdata)) {
+            rank = has_accounts(candidate) ? 3u : 2u;
+        }
+        if (rank > best_rank) {
+            memcpy(root, candidate, candidate_length + 1u);
+            best_rank = rank;
+            if (rank == 3u) break;
+        }
     }
-    if (first_root[0] != '\0') {
-        int n = snprintf(root, root_cap, "%s", first_root);
-        if (n >= 0 && (size_t)n < root_cap) return true;
-    }
-    root[0] = '\0';
-    return false;
+    return best_rank != 0u;
 }
 
 bool nk_platform_linux_steam_client_running(void) {

@@ -1161,9 +1161,29 @@ static int run_case(const CosimCase *test, const char *trace_dir) {
             expect_lane_word(test, lanes[i], "v0", lanes[i]->state.r[2], want_v0, &failed);
             expect_lane_word(test, lanes[i], "v1", lanes[i]->state.r[3], want_v1, &failed);
         }
+    } else if (strcmp(test->name, "eslot") == 0 || strcmp(test->name, "eslot_likely") == 0
+               || strcmp(test->name, "eslot_call") == 0) {
+        /* A body entered at a delay slot (generate.py _entry_slot_cell, #3163): the entry
+         * word runs as the entry, then once more as the transfer's slot, or not again when
+         * a branch-likely annuls it. One more run of it adds 1 to any of the three values. */
+        const uint32_t want_v0 = strcmp(test->name, "eslot") == 0 ? 0x122u
+            : strcmp(test->name, "eslot_likely") == 0 ? 0x121u : 0x132u;
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned i = 0u; i < 2u; i++) {
+            expect_lane_word(test, lanes[i], "v0", lanes[i]->state.r[2], want_v0, &failed);
+        }
     } else if (strcmp(test->name, "jtarget") == 0) {
         expect_lane_word(test, &aot, "v0", aot.state.r[2], COSIM_SCRATCH, &failed);
         expect_lane_word(test, &interp, "v0", interp.state.r[2], COSIM_SCRATCH, &failed);
+    } else if (strcmp(test->name, "cslot_call") == 0) {
+        /* A branch onto a delay slot before another entry (generate.py, #3128): each
+         * labelled slot runs once and the guest goes on through cslot_branch into
+         * cslot_dst, whose return slot sets $v1. */
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned i = 0u; i < 2u; i++) {
+            expect_lane_word(test, lanes[i], "v0", lanes[i]->state.r[2], 0x1131u, &failed);
+            expect_lane_word(test, lanes[i], "v1", lanes[i]->state.r[3], 0x5Cu, &failed);
+        }
     } else if (strcmp(test->name, "branch_likely") == 0) {
         static const unsigned annulled_gprs[] = {10u, 11u, 12u, 13u, 14u, 15u, 24u, 25u, 16u};
         const CosimLane *lanes[2] = {&aot, &interp};
@@ -1206,6 +1226,23 @@ static int run_case(const CosimCase *test, const char *trace_dir) {
                 expect_lane_word(test, lane, field,
                                  lane_window_word(lane, COSIM_SCRATCH + 4u * i), 0xC100u + i,
                                  &failed);
+            }
+        }
+    } else if (strcmp(test->name, "muldiv") == 0) {
+        /* The two lanes share no division code, but both could carry the same wrong value.
+         * The zero-divisor and INT_MIN / -1 rows are PSP-measured (pspautotests
+         * tests/cpu/cpu_alu/cpu_div.expected at 257cfb5ad7; #3031). */
+        static const struct { unsigned reg; uint32_t value; const char *name; } expected[] = {
+            {10u, 0xfffffffdu, "div -7 / 2 lo"}, {11u, 0xffffffffu, "div -7 / 2 hi"},
+            {12u, 0x00000001u, "div -7 / 0 lo"}, {13u, 0xfffffff9u, "div -7 / 0 hi"},
+            {14u, 0x7ffffffcu, "divu 0xfffffff9 / 2 lo"}, {15u, 0x0000ffffu, "divu 2 / 0 lo"},
+            {5u, 0x80000000u, "div INT_MIN / -1 lo"}, {2u, 0x00000000u, "div INT_MIN / -1 hi"},
+        };
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned li = 0u; li < 2u; li++) {
+            for (unsigned i = 0u; i < sizeof expected / sizeof expected[0]; i++) {
+                expect_lane_word(test, lanes[li], expected[i].name,
+                                 lanes[li]->state.r[expected[i].reg], expected[i].value, &failed);
             }
         }
     } else if (strcmp(test->name, "bitops") == 0) {

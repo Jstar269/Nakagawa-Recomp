@@ -9,6 +9,12 @@ supported, it stops and names the missing piece. This page lists those stopping 
 Every row below uses one of these words, except Hot Shots Tennis, which shows its rating from the player. Hot Shots Tennis and the two showcase demos are rated from the player's own record (`src/player/ui/player_ui_nk.c`), not from their status word (see below).
 A row claims only what its recorded evidence shows, and no other document can raise it.
 
+A row added or changed from now on names the source its evidence ran on: a commit on `main` (its SHA, as the
+*Wipeout Pure* row does) or the pull request whose head was run, with that head's SHA. A local branch, an unpushed
+commit or a tree with uncommitted changes is not a source anyone else can check out, so a run of one is not cited
+here. A date alone ("a 2026-11-06 build") does not name a source; older rows that use one keep it until the title is
+run again.
+
 The player doesn't show these words. Each game's page in the player shows a rating instead: **Perfect**,
 **Playable**, **In-game**, **Menu**, **Title screen** or **Won't boot**, with a plain sentence on what to expect
 ([#1297](https://github.com/Jstar269/nakagawa-recomp/issues/1297)). A status word describes the project's own test
@@ -136,6 +142,32 @@ missing, and stays **Untested** unless someone has seen it start (see [Status wo
 Hot Shots Tennis runs with 0 title-specific compatibility patches today, as `python tools/compat_overrides.py --debt-census` counts them: the census counts only the entries marked as temporary compatibility patches, it lists none of them as active, and each run's log still names every one that fired in its `COMPAT_PATCH_REPORT` lines. Under the Hot Shots Tennis profile (`--profile=hst`) the code generator no longer puts any hand-written body in place of the game's own functions: the table of such bodies (`HST_CUSTOM_STUBS` in `tools/codegen_hst_stubs.py`) holds 0, down from 8. The four allocator bridges are gone: the game's own `_malloc_r` (`0x00010738`), `_free_r` (`0x0000f538`), `_memalign_r` (`0x000101c4`) and `_realloc_r` (`0x00013524`) run as written and keep their block headers in the game's memory, where they used to be handed to a heap the runtime owned. The four native copy and fill bodies are gone: the game's own routines at `0x00011090`, `0x000110dc`, `0x000114c0` and `0x000114a8` run as written, where the generator used to put the host's `memmove` and `memset`.
 
 That does not mean the profile names no title address. It still lists three entry roles for the analyzer (`HST_ENTRY_ROLES` in `tools/compat_overrides.py`), down from nine: each marks an address inside a function as a point the game can resume at and names the function that owns it, and the code there is translated from the game's own instructions. The other six marked small functions that the game reaches only through a pointer as callable. They are gone because the analyzer finds such a function from the game's code on its own; a private analysis of the title with the nine roles turned off found all six that way and none of the three resume points, so those three stay until there is evidence about whether the game reaches them while it runs. That list and the rest of the retirement work are tracked in [#363](https://github.com/Jstar269/nakagawa-recomp/issues/363). This is the live count; the release notes keep the count each release shipped with.
+
+## Release performance baselines
+
+Starting with v0.1.0, this section holds the frame rates and frame delivery times measured on
+each release candidate. The [first candidate measurements](https://github.com/Jstar269/Nakagawa-Recomp/issues/2750)
+are pending.
+
+| Game | Timed gameplay window |
+| --- | --- |
+| Hot Shots Tennis: Get a Grip (USA) | From the first controllable serve of a fixed exhibition to the settled score after the third point. |
+| LittleBigPlanet (USA, disc version 2.00) | From first control in Walkabout to its level-completion scoreboard. |
+
+Record Authentic and each Ace timing package under test separately. Each result identifies the
+release and commit, disc revision, route, mode and timing package, CPU, GPU, OS and driver,
+display refresh rate, resolution, VSync and other presentation settings. Include host load,
+cache condition and the number of accepted runs.
+
+Report game FPS as measured by [framebuffer flips](DEBUGGING.md#sr_perf-subsystem-attribution).
+The counter counts the first guest framebuffer presented and each later present with a changed
+guest framebuffer address. A repeated address adds no flip, so draws that reuse one buffer can
+go uncounted. For each run, divide the number of flips in the window by the wall-clock seconds
+between its guarded start and end. Include the start and exclude the end. Use only intervals
+between successive flips with both endpoints inside the window. Report the range of per-run FPS
+and each run's median and 95th-percentile interval in milliseconds. For the median, average the
+middle pair when the count is even. For p95, sort the intervals and use rank
+`ceil(0.95 × count)`, starting at one.
 
 ## Whole library
 

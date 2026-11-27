@@ -5440,7 +5440,8 @@ static int vertex_cache_enabled(void) {
         const char *disable = getenv("SR_GE_VERTEX_CACHE_DISABLE");
         s_vertex_cache_on = !(disable && disable[0] && strcmp(disable, "0") != 0);
     }
-    return s_vertex_cache_on;
+    return s_vertex_cache_on &&
+           !(sr_perf_windows_enabled && sr_perf_window_skips_vertex_cache());
 }
 
 void ge_vertex_cache_reload_env(void) {
@@ -5456,6 +5457,7 @@ static void vertex_cache_begin_draw(int repeats) {
         s_vertex_cache_epoch = 1u;
     }
 #endif
+    if (repeats && sr_perf_windows_enabled) sr_perf_window_note_ge_draw();
     if (!vertex_cache_enabled() || !repeats) {
         s_vertex_cache_draw = 0;
         return;
@@ -6246,12 +6248,13 @@ static void cull_sweep(void) {   /* drop the entries whose words the title has s
     for (uint32_t i = 0; i < GE_CULL_SEEN; i++) {
         const GeCullSeen *e = &s_cull_seen[i];
         if (e->addr == 0u) continue;
-        /* The words are read through a direct host pointer, so the 64-byte span the entry passed
-         * when it was made is checked again here. An entry whose span is not readable guest
-         * memory decides no later call and is dropped with the overwritten ones. */
+        /* The 64-byte span the entry passed when it was made is checked again here. An entry
+         * whose span is not readable guest memory decides no later call and is dropped with the
+         * overwritten ones. The words are read as a CPU load reads them: a matrix in VRAM the GPU
+         * has drawn over since holds the GPU's words, collected first (#2302). */
         if (!sr_guest_span_readable(e->addr, 64u)) continue;
         uint32_t now[4];
-        for (uint32_t k = 0; k < 4u; k++) memcpy(&now[k], SR_HOST(e->addr + 16u * k), sizeof now[k]);
+        for (uint32_t k = 0; k < 4u; k++) (void)sr_guest_copy_in(&now[k], e->addr + 16u * k, sizeof now[k]);
         if (memcmp(now, e->row, sizeof now) == 0) keep[n++] = *e;
     }
     if (n == s_cull_live) return;   /* every entry still decides a call: nothing to drop */
@@ -6276,8 +6279,11 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
             }
             continue;
         }
-        uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
-        for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
+        /* The x output row of a column-major matrix: elements 0, 4, 8 and 12. The words are read
+         * and stored as CPU loads and stores move them, so a matrix in VRAM the GPU has drawn over
+         * is read as the GPU left it and the renderer hears of the store (#2302). */
+        uint32_t row[4];
+        for (uint32_t k = 0; k < 4u; k++) (void)sr_guest_copy_in(&row[k], m + 16u * k, sizeof row[k]);
         uint32_t slot = cull_find(m);
         if ((slot == GE_CULL_SEEN || s_cull_seen[slot].addr == 0u) && s_cull_live >= GE_CULL_SWEEP_AT &&
             !swept) {
@@ -6302,7 +6308,7 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
             memcpy(&v, &row[k], sizeof v);
             v *= inv;
             memcpy(&row[k], &v, sizeof v);
-            memcpy(SR_HOST(m + 16u * k), &row[k], sizeof row[k]);
+            (void)sr_guest_copy_out(m + 16u * k, &row[k], sizeof row[k]);
         }
         if (s_cull_seen[slot].addr == 0u) s_cull_live++;
         s_cull_seen[slot].addr = m;

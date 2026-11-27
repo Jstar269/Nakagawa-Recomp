@@ -230,6 +230,66 @@ python tools/perf_attribution.py --diff a.json a.log b.json b.log --format json
 The tool's docstring defines flips, re-presents, vblanks per new frame, implied fps and the
 `cpu_ms`, `ge_cpu_ms` and `aot_ms` shares. Those cost shares overlap and must not be added together.
 
+### Route load windows and same-run A/B (#2574)
+
+Use the existing state-gated route to choose one-based step-completion ordinals. Each window
+starts after its first step completes and ends after its last step completes. Choose a
+checkpoint that proves load entry or accepted input and one that proves readiness. An
+explicit `END` completes the run and cannot serve as an endpoint. Keep the
+same scene, route cadence and guest work in both arms. A window may contain zero presents.
+
+Set `SR_PERF_JSON` and a fresh `SR_PERF_RUN_ID` of at most 64 ASCII letters, digits,
+underscores or hyphens. Set `SR_PERF_WINDOWS` to ordered, disjoint pairs such as
+`2-5,7-9,11-13,15-17`. The route must finish with `ROUTE_OK`. The recorder writes cumulative
+`PERF_LOAD` edge records. The attribution report subtracts them to show wall nanoseconds,
+guest microseconds, VBlanks, ISO reads/bytes/time, VFS reads/time, present submissions,
+guest idle time and audio output frames for each window. UMD time sums the guest elapsed
+time of completed successful waitable synchronous reads, including reads that began before
+the window. Concurrent guest threads can run during that time. The column includes neither
+async requests nor a read still in flight when the endpoint occurs.
+
+For a single-process A/B, set `SR_PERF_AB=ge.vertex_cache` and leave
+`SR_GE_VERTEX_CACHE_DISABLE` unset. Select the software GE and configure pairs of equivalent
+route windows. A uses the rollback path and bypasses the cache. B uses the optimized path.
+Both arms count eligible draws. B must also report actual cache hits. The override is scoped
+to the chosen windows, and the cache's epoch still changes at every draw. Outside the windows
+the ordinary setting applies. Give every new speed path a rollback variable and a named A/B
+actuator before using it for performance claims.
+
+Run the attribution tool's strict mode on a finished capture:
+
+```powershell
+python tools/perf_attribution.py --perf run.json --stderr run.log `
+    --benchmark-evidence evidence.json --benchmark-runtime runtime.exe --benchmark-route planned.route
+```
+
+The local evidence JSON carries `run_id`, `operator_source_commit` (the full commit the
+operator built from), `exit_code`, `timed_out`, and `windows` as a list of the planned ordinal
+pairs. The runtime hashes the route bytes it parsed. The file supplied with
+`--benchmark-route` must match that hash. Include
+a `launch` object with `mode` (`direct` or `launcher`) and the actual `runtime_pid`.
+The runtime records its process ID and whole-file SHA-256 in stderr and the summary. The
+candidate passed with `--benchmark-runtime` must match that hash. The source commit
+remains the operator's build record. For a launcher run, also
+record the child's observed parent PID as `observed_parent_pid` and the SHA-256 of that
+observed process image as `observed_parent_sha256` in `launch`, and pass the expected parent
+with `--benchmark-launcher`. Obtain the parent observation while the runtime is alive,
+and use the distinct launcher executable.
+Record the observed `cpu`, `gpu`, `os`, `renderer` (use `software` for the vertex-cache arm),
+`vsync`, and `cache_state`. Supply a `host_observation` object with `state` (`idle`,
+`busy`, or `unknown`), a short `basis` describing the operator's evidence about concurrent
+work, and `begin_wall_ns` and `end_wall_ns` relative to the perf run start. Its interval
+must cover both endpoints of every measured window. The tool validates the evidence fields,
+compares the observed step pairs and run identity, and rejects incomplete exits, missed or
+malformed records, pauses within windows, mixed clock modes, busy or unverified host
+windows and inactive or unequal A/B work. For a load-only run explicitly testing Automatic loading, set
+`load_treatment` to `automatic` in the evidence. Both endpoints must be at normal pace and
+each intervening clock acceleration must match a complete observed `AUTO_LOAD` interval.
+An Automatic run that never activates the feature supplies no speed comparison.
+Quiet-host evidence here is an operator observation. The runtime's guest idle
+counter measures guest scheduling. Keep the evidence JSON and raw captures local for owned
+titles. Compare repeated matched windows before claiming a speed difference.
+
 ### Measured overhead of the perf counters (#282)
 
 Two switches exist. `SR_PERF=1` turns the counters and one-second telemetry on at run time, and
@@ -1743,7 +1803,7 @@ committed.
 | ---------- | ------------- |
 | `SR_FONTLOG=1` | Log font operations: each slot's source, and the guest's reads of the generated `/DATA/FONT` registry subtree (the keys it asks for, the categories it opens, and each font index served) |
 | `SR_MPEGLOG=1` | Log mpeg operations. The PSMF media producer also logs one bounded counter line per reporting interval: bytes read, packs, PES packets, per-track PES and access-unit counts, access units that carried no presentation time, resync bytes, both compressed-queue depths, EOF state and failure offset, the disposition census of both tracks (submitted, decoded, delivered, warm-up-held, eos-drained, rejected — plus audio format rejects `arejf` and mono upmixes `aupm`), decoder-error counts, the pipeline presentation clocks (`vpts`/`apts`), the guest-facing presentation points at the getters (`vts`/`ats`), the A/V separation between those comparable points (`avgap`, `vts-ats`), the time of the last submitted access unit minus the last `displaypts` (`vlead`: the pipeline distance inside the output ring when the decoder returns pictures in submit order, and off from it by up to the stream's reorder depth in picture steps when the decoder reorders), displaced ring times (`vlost`), the last `displaypts` (the time of the delivered picture's own access unit as the decoder reports it, or the oldest submitted time when the decoder reports none), and the drain flags — enough to classify every decoded picture and locate the first boundary that stops a movie without attaching a debugger |
-| `SR_MPEGAV=1` | Measure the A/V offset where a viewer perceives it, not at the getters (issue #279); `SR_MPEGLOG` also turns it on. Diagnostics only: nothing in the guest changes. Each decoded picture the guest receives (`scePsmfPlayerGetVideoData`, or `sceMpegAvcCsc` writing a `sceMpegAvcDecodeYCbCr` picture) and each audio block (`scePsmfPlayerGetAudioData`) is remembered in a 32-entry ring per stream with its guest byte range, 90 kHz pts and delivery time. The first later `sceDisplaySetFrameBuf` flip (immediate, or applied at VBLANK) whose frame overlaps a picture's range is its presentation, at that guest time; the first `sceAudioOutput*` submit overlapping a block is its play time, taken as the guest time of the submit plus the host queue lead ahead of it (`sr_audio_queued` before the push, 44.1 kHz frames), and `-1` (no host queue) is reported as not measured, never as a lead of zero. A stream's offset is play time minus pts in microseconds; the A/V offset is the video offset minus the audio offset, averaged per 5 s window of guest time. A `PSMF_AV_PRESENT:` line is printed per window (`win`, `end_us`, sample counts `vn`/`an`, `voff_us`, `aoff_us`, `av_us`; `na` where a stream had no measured sample), and `PSMF_AV_PRESENT_FINAL:` at `scePsmfPlayerDelete` and at process exit with the totals: `vdel`/`adel` delivered, `vmatch`/`amatch` matched, `vunmeas`/`aunmeas` matched without a measurable time, `vsuper`/`asuper` overwritten before they were presented or played, `vevict`/`aevict` pushed out of the ring, `vnospan`/`anospan` with no usable byte range, `vpend`/`apend` still waiting at the report (delivered = the sum of those six), `vbnd`/`abnd` presents or submits seen and `vhit`/`ahit` those that matched something, delivery-to-present latency (`vlat_mean_us`, `vlat_max_us`, and `alat_*`), and `av_min_us`, `av_max_us`, `av_mean_us` over the windows with both streams, `av_first_us`, `av_last_us` and `drift_us` (last window minus first, needs two). Each window line also gives `alead_us`, the mean host queue lead its matched audio blocks met, and `av_submit_us`, the A/V offset with that lead left out: video at the flip against audio at the guest's `sceAudioOutput*` submit, two boundaries a PSP has too. The summary gives `alead_mean_us`, `alead_max_us` and `av_submit_mean_us`. `av_us` is `av_submit_us` minus the lead, so an `av_us` that is all lead comes from our output stage, not from the guest's timing. Reading a run: a flat `av_us` across windows is no drift; a falling or rising `av_us` is one stream running slow against the other. `vmatch=0` with many `vsuper` means the title copies or composites the movie before presenting it, so the picture cannot be matched by address and the video side is not measured, not in sync. `sceMpegAtracDecode` writes no PCM, so no audio is delivered through it |
+| `SR_MPEGAV=1` | Measure the A/V offset where a viewer perceives it, not at the getters (issue #279); `SR_MPEGLOG` also turns it on. Diagnostics only: nothing in the guest changes. Each decoded picture the guest receives (`scePsmfPlayerGetVideoData`, or `sceMpegAvcCsc` writing a `sceMpegAvcDecodeYCbCr` picture) and each audio block (`scePsmfPlayerGetAudioData`, or `sceMpegAtracDecode` decoding into the guest's buffer) is remembered in a 32-entry ring per stream with its guest byte range, 90 kHz pts and delivery time. The first later `sceDisplaySetFrameBuf` flip (immediate, or applied at VBLANK) whose frame overlaps a picture's range is its presentation, at that guest time; the first `sceAudioOutput*` submit overlapping a block is its play time, taken as the guest time of the submit plus the host queue lead ahead of it (`sr_audio_queued` before the push, 44.1 kHz frames), and `-1` (no host queue) is reported as not measured, never as a lead of zero. A stream's offset is play time minus pts in microseconds; the A/V offset is the video offset minus the audio offset, averaged per 5 s window of guest time. A `PSMF_AV_PRESENT:` line is printed per window (`win`, `end_us`, sample counts `vn`/`an`, `voff_us`, `aoff_us`, `av_us`; `na` where a stream had no measured sample), and `PSMF_AV_PRESENT_FINAL:` at `scePsmfPlayerDelete` and at process exit with the totals: `vdel`/`adel` delivered, `vmatch`/`amatch` matched, `vunmeas`/`aunmeas` matched without a measurable time, `vsuper`/`asuper` overwritten before they were presented or played, `vevict`/`aevict` pushed out of the ring, `vnospan`/`anospan` with no usable byte range, `vpend`/`apend` still waiting at the report (delivered = the sum of those six), `vbnd`/`abnd` presents or submits seen and `vhit`/`ahit` those that matched something, delivery-to-present latency (`vlat_mean_us`, `vlat_max_us`, and `alat_*`), and `av_min_us`, `av_max_us`, `av_mean_us` over the windows with both streams, `av_first_us`, `av_last_us` and `drift_us` (last window minus first, needs two). Each window line also gives `alead_us`, the mean host queue lead its matched audio blocks met, and `av_submit_us`, the A/V offset with that lead left out: video at the flip against audio at the guest's `sceAudioOutput*` submit, two boundaries a PSP has too. The summary gives `alead_mean_us`, `alead_max_us` and `av_submit_mean_us`. `av_us` is `av_submit_us` minus the lead, so an `av_us` that is all lead comes from our output stage, not from the guest's timing. Reading a run: a flat `av_us` across windows is no drift; a falling or rising `av_us` is one stream running slow against the other. `vmatch=0` with many `vsuper` means the title copies or composites the movie before presenting it, so the picture cannot be matched by address and the video side is not measured, not in sync. An `sceMpegAtracDecode` block that the title copies into its own output buffer before playing it is matched by its bytes instead of its address; `acontent` counts those matches |
 | `SR_DLGLOG=1` | Log dialog operations |
 | `SR_CBLOG=1` | Log callback operations |
 | `SR_SYSLOG=1` | Log system calls |
@@ -1848,9 +1908,23 @@ PC, starting address, value, width in bytes, and most recently delivered vblank:
 $env:SR_WATCH = '0x08800000:4'
 ```
 
-Output uses `SR_WATCH: pc=... addr=... val=... width=... vblank=...`. A vblank value of zero
-means no vblank has been delivered yet. The watch is inert when unset; the shared store helpers
-take only a predicted-false flag check in that case.
+Output uses `SR_WATCH: pc=... addr=... val=... width=... vblank=... ra=... sp=... thread=... old=...`.
+A vblank value of zero means no vblank has been delivered yet. The fields after `vblank` were
+appended for #2809, so a filter written for the shorter line still matches its prefix:
+
+- `ra` and `sp` are `$ra` (`r[31]`) and `$sp` (`r[29]`) of the running thread's register file at
+  the store, or `none` when no register file is current. A store inside a promoted run of a
+  `--promote-registers` build sees the values written back at the start of that run, and an
+  HLE host store names the thread that made the call.
+- `thread` is the running thread's UID, `0x00000000` when no thread is current.
+- `old` is the bytes the store replaced, read just before it in the same layout as `val`. A
+  VRAM store reads them through the CPU read-prepare path, as a guest load would; that read
+  happens only for a store the armed range covers, and it can make the renderer read VRAM back
+  where the store alone would not, so a watch over VRAM changes GPU synchronization.
+
+The watch is inert when unset. With it unset, a store takes the inline fast path or, in a slow
+store helper, one predicted-false flag check; an armed store goes whole to one cold out-of-line
+helper.
 
 ### Sampling guest state per vblank
 
@@ -2319,15 +2393,12 @@ mingw32-make --no-print-directory form-sweep-selftest
 - **Deeper run.** `mingw32-make --no-print-directory form-sweep-deep` runs every instance of every
   form with 2048 states each.
 
-Two choices keep the comparison honest. When two named float registers hold NaNs with different
-payloads the harness makes them equal and counts it on stderr: an arithmetic result then carries
-whichever payload the host compiler's operand order picks inside the shared helper
-(`src/rt/fp_convert.h`), the translated body and the reference are built with different flags,
-and the PSP's own pick is unmeasured. And the reference's results come from `src/ref`, which
-shares the `sr_fpu_*` helpers with generated code for the float arithmetic: for those forms the
-sweep checks the translation around the helper (operand and destination handling, aliasing,
-rounding-mode plumbing), not the helper's arithmetic, which `fp_convert_selftest` and the cosim
-FPU reference cover.
+The reference's results come from `src/ref`, which shares the `sr_fpu_*` helpers with generated
+code for the float arithmetic: for those forms the sweep checks the translation around the helper
+(operand and destination handling, aliasing, rounding-mode plumbing), not the helper's arithmetic,
+which `fp_convert_selftest` and the cosim FPU reference cover. Two NaN operands with different
+payloads are compared as drawn: the helper picks the result NaN from the operand bits, so the
+translated body and the reference agree whatever flags each is built with.
 
 ## Naming generated functions from a symbol map
 
@@ -2674,11 +2745,13 @@ retail title is private: keep it out of the repository and every upload.
 2. Use specific categories: `SR_DEBUG=0x02` for HLE tracing only
 3. Set `SR_WATCHDOG_EXIT=N` to abort after N vblanks without a newly presented frame; the firing is a NO-NEW-FLIP observation, so classify it with the display counters, thread dump, and MPEG/PSMF activity the watchdog prints, not the threshold alone
 4. Check how the picture is drawn: before `window_ready`, the runtime writes one
-   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge>`
+   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge|vulkan_cpu>`
    line from what `gui_init` asked for and what started (`nk_render_path_from_init` in
    `src/core/nk_shared_helpers.c`, #2151). `gdi_presenter` means SDL3/Vulkan did not start and the GDI window shows a
-   software-drawn picture; `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed. A path
-   that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
+   software-drawn picture. `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed.
+   `vulkan_cpu` means the selected Vulkan device runs on the CPU, regardless of the GE renderer in use. The
+   `ge` field still records which GE renderer started. An explicitly selected GDI or software GE path alone
+   gives `fallback=none`. The native player names a fallback
    on the game's page, with Hide for the rest of its session. The game window names it too, over the picture, in
    every play mode (the [render notice](ENHANCEMENT_CONTRACT.md#1024-the-render-notice)): a chip at the bottom left
    that any pause hides for the rest of the run, or, in the GDI window, a band of text that F1 hides. Such a run

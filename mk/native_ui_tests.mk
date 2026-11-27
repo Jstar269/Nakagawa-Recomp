@@ -25,7 +25,7 @@ native-core-objects-player:
 
 # Test-binary recipes, shared by the standalone *-test-bin targets and native-core-tests.
 define PLAYER_STATE_TEST_BIN_CMD
-$(CC) -std=c99 -Wall -Wextra -DNK_TITLE_MANIFEST_TEST_SEAMS -DNK_SAVES_TEST_SEAMS -Isrc/core -Isrc/core/generated -Isrc/rt -Isrc/player -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+$(CC) -std=c99 -Wall -Wextra -DNK_TITLE_MANIFEST_TEST_SEAMS -DNK_SAVES_TEST_SEAMS -DNK_PLAYER_STATE_TEST_SEAMS -Isrc/core -Isrc/core/generated -Isrc/rt -Isrc/player -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 	$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/player/input_settings.c src/player/player_state.c src/player/discord_presence.c src/player/cover_art.c src/player/iso_reader.c src/player/package_builder.c src/player/setup_staging.c \
 	tests/native/native_test_isolation.c tests/native/test_player_state.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_player_state$(EXE_EXT)
 endef
@@ -635,6 +635,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(BUILD_ROOT_RUN)/test_cover_art$(EXE_EXT)
 	$(call ADHOC_SERVERS_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_adhoc_servers$(EXE_EXT)
+	$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) src/player/package_builder.c src/player/cheat_db.c \
+		tests/native/native_test_isolation.c tests/native/test_cheat_db.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_cheat_db$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_cheat_db$(EXE_EXT)
 	$(call DISCORD_PRESENCE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_discord_presence$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) \

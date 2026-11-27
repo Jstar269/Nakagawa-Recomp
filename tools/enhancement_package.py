@@ -408,14 +408,25 @@ def check_not_address_literal(value: Any, path: str, role: str) -> str:
     return value
 
 
-def load_package(path: Path | str) -> dict[str, Any]:
+def _unique_package_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise EnhancementPackageError(f"Duplicate declaration key: {key!r}")
+        result[key] = value
+    return result
+
+
+def load_package(path: Path | str, *, reject_duplicate_keys: bool = False) -> dict[str, Any]:
     """Load an enhancement package JSON file."""
     package_path = Path(path)
     if not package_path.is_file():
         raise EnhancementPackageError(f"Package file not found: {package_path}")
     try:
         with package_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json.load(f, object_pairs_hook=(
+                _unique_package_members if reject_duplicate_keys else None
+            ))
     except json.JSONDecodeError as exc:
         raise EnhancementPackageError(f"Failed to parse JSON in {package_path}: {exc}") from exc
     if not isinstance(data, dict):

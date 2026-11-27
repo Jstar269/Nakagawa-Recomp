@@ -11,6 +11,7 @@
    per closed telemetry interval. Both pages only read what the model gives them. */
 
 #include "nk_overlay.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 
 #include <stdio.h>
@@ -121,16 +122,16 @@ const char *nk_overlay_vram_format_name(uint32_t format) {
         "5650", "5551", "4444", "8888", "CLUT4", "CLUT8", "CLUT16",
         "CLUT32", "DXT1", "DXT3", "DXT5", "DEPTH16"
     };
-    return format < sizeof(names) / sizeof(names[0]) ? names[format] : "UNKNOWN";
+    return format < sizeof(names) / sizeof(names[0]) ? names[format] : NK_UI_STR(OVERLAY_VRAM_FORMAT_UNKNOWN);
 }
 
 static const char *source_name(int source) {
     switch (source) {
-    case NK_OVERLAY_VRAM_DISPLAY: return "Display framebuffer";
-    case NK_OVERLAY_VRAM_DRAW: return "Draw framebuffer";
-    case NK_OVERLAY_VRAM_DEPTH: return "Depth buffer";
-    case NK_OVERLAY_VRAM_TEXTURE: return "Bound texture";
-    default: return "Custom window";
+    case NK_OVERLAY_VRAM_DISPLAY: return NK_UI_STR(OVERLAY_VRAM_SOURCE_DISPLAY);
+    case NK_OVERLAY_VRAM_DRAW: return NK_UI_STR(OVERLAY_VRAM_SOURCE_DRAW);
+    case NK_OVERLAY_VRAM_DEPTH: return NK_UI_STR(OVERLAY_VRAM_SOURCE_DEPTH);
+    case NK_OVERLAY_VRAM_TEXTURE: return NK_UI_STR(OVERLAY_VRAM_SOURCE_TEXTURE);
+    default: return NK_UI_STR(OVERLAY_VRAM_SOURCE_CUSTOM);
     }
 }
 
@@ -278,16 +279,16 @@ static void vram_picture(NkUi *ui, const NkOverlayVram *vram, float width) {
         /* One line, so the box centres it (a wrapping run would fill the box's width). */
         NkUiTextStyle empty = nk_ui_type(NK_UI_TYPE_CAPTION, theme->dim);
         empty.wrap = false;
-        nk_ui_text(ui, DEV_ID_EMPTY, "Nothing to show", &empty);
+        nk_ui_text(ui, DEV_ID_EMPTY, NK_UI_STR(OVERLAY_VRAM_EMPTY), &empty);
     }
     nk_ui_end_container(ui);
 }
 
 NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"},
-        {NK_UI_PROMPT_ACT_CONFIRM, "Change"},
-        {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(OVERLAY_PROMPT_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(OVERLAY_PROMPT_CHANGE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(OVERLAY_PROMPT_BACK)}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
     const NkOverlayVram *vram = model->vram;
@@ -327,8 +328,8 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
     picture = inner - DEV_COLUMN_W - NK_UI_SPACE_6;
     if (picture > DEV_PICTURE_W) picture = DEV_PICTURE_W;
     if (picture < 240.0f) picture = 240.0f;
-    nk_ui_eyebrow(ui, DEV_ID_EYEBROW, "Game paused \xC2\xB7 Developer");
-    nk_ui_text_role(ui, DEV_ID_TITLE, "VRAM viewer", NK_UI_TYPE_TITLE, theme->paper);
+    nk_ui_eyebrow(ui, DEV_ID_EYEBROW, NK_UI_STR(OVERLAY_DEV_EYEBROW));
+    nk_ui_text_role(ui, DEV_ID_TITLE, NK_UI_STR(OVERLAY_VRAM_TITLE), NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiLayout body = nk_overlay_layout(NK_UI_LAYOUT_ROW, nk_overlay_grow(), nk_overlay_fit(),
                                             NK_UI_SPACE_6);
@@ -341,17 +342,18 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
                 if (captures) {
                     const NkOverlayVramCapture *taken = view_capture(vram, view->capture);
                     if (taken != NULL) {
-                        (void)snprintf(text, sizeof(text), "VBLANK %u", (unsigned)taken->vblank);
+                        (void)snprintf(text, sizeof(text), NK_UI_STR(OVERLAY_VRAM_CAPTURE_VBLANK),
+                                       (unsigned)taken->vblank);
                     } else {
-                        (void)snprintf(text, sizeof(text), "Live");
+                        (void)snprintf(text, sizeof(text), NK_UI_STR(OVERLAY_VRAM_CAPTURE_LIVE));
                     }
-                    change = value_row(ui, NK_OVERLAY_ID_VRAM_CAPTURE, 4u, "Capture", text);
+                    change = value_row(ui, NK_OVERLAY_ID_VRAM_CAPTURE, 4u, NK_UI_STR(OVERLAY_VRAM_CAPTURE), text);
                     if (change != 0) {
                         step_capture(view, vram, change);
                         moved = true;
                     }
                 }
-                change = value_row(ui, NK_OVERLAY_ID_VRAM_SOURCE, 0u, "Source",
+                change = value_row(ui, NK_OVERLAY_ID_VRAM_SOURCE, 0u, NK_UI_STR(OVERLAY_VRAM_SOURCE),
                                    source_name(view->source));
                 if (change != 0) {
                     /* From a moved window either way goes back to the first named source. */
@@ -361,14 +363,14 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
                     moved = choose_source(view, vram, to) || moved;
                 }
                 (void)snprintf(text, sizeof(text), "0x%08X", (unsigned)w->addr);
-                change = value_row(ui, NK_OVERLAY_ID_VRAM_ADDRESS, 1u, "Address", text);
+                change = value_row(ui, NK_OVERLAY_ID_VRAM_ADDRESS, 1u, NK_UI_STR(OVERLAY_VRAM_ADDRESS), text);
                 if (change != 0) {
                     make_custom(view);
                     nk_overlay_vram_step(w, change);
                     moved = true;
                 }
-                (void)snprintf(text, sizeof(text), "%u px", (unsigned)w->stride);
-                change = value_row(ui, NK_OVERLAY_ID_VRAM_STRIDE, 2u, "Stride", text);
+                (void)snprintf(text, sizeof(text), NK_UI_STR(OVERLAY_VRAM_STRIDE_VALUE), (unsigned)w->stride);
+                change = value_row(ui, NK_OVERLAY_ID_VRAM_STRIDE, 2u, NK_UI_STR(OVERLAY_VRAM_STRIDE), text);
                 if (change != 0) {
                     uint32_t step = NK_OVERLAY_VRAM_STRIDE_STEP;
                     make_custom(view);
@@ -384,7 +386,7 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
                     nk_overlay_vram_clamp(w);
                     moved = true;
                 }
-                change = value_row(ui, NK_OVERLAY_ID_VRAM_FORMAT, 3u, "Format",
+                change = value_row(ui, NK_OVERLAY_ID_VRAM_FORMAT, 3u, NK_UI_STR(OVERLAY_VRAM_FORMAT),
                                    nk_overlay_vram_format_name(w->format));
                 if (change != 0) {
                     size_t at;
@@ -401,11 +403,11 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
                                                           nk_overlay_fit(), NK_UI_SPACE_1);
                     detail.padding_left = detail.padding_right = NK_UI_SPACE_3;
                     if (nk_ui_begin_container(ui, DEV_ID_DETAIL, &detail, NULL)) {
-                        (void)snprintf(text, sizeof(text), "%u \xC3\x97 %u px%s", (unsigned)w->width,
+                        (void)snprintf(text, sizeof(text), NK_UI_STR(OVERLAY_VRAM_SIZE), (unsigned)w->width,
                                        (unsigned)w->height,
                                        view->source == NK_OVERLAY_VRAM_TEXTURE &&
                                                source_swizzled(vram, view->capture)
-                                           ? ", swizzled" : "");
+                                           ? NK_UI_STR(OVERLAY_VRAM_SWIZZLED) : "");
                         nk_ui_text_role(ui, DEV_ID_INFO, nk_ui_frame_text(ui, text), NK_UI_TYPE_DATA,
                                         theme->muted);
                         if (vram != NULL && vram->note != NULL && vram->note[0] != '\0') {
@@ -426,12 +428,10 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
         foot.wrap = true;
         nk_ui_text(ui, DEV_ID_FOOT,
                    view->capture > 0
-                       ? "Read-only. VRAM as it was captured at that VBLANK, read back from the "
-                         "capture's file; nothing is written to it."
-                       : "Read-only. The paused game's memory as the guest would read it; "
-                         "nothing is written to it.", &foot);
+                       ? NK_UI_STR(OVERLAY_VRAM_FOOT_CAPTURE)
+                       : NK_UI_STR(OVERLAY_VRAM_FOOT_LIVE), &foot);
     }
-    if (nk_ui_button(ui, NK_OVERLAY_ID_VRAM_BACK, "Back", 0u) ||
+    if (nk_ui_button(ui, NK_OVERLAY_ID_VRAM_BACK, NK_UI_STR(OVERLAY_BUTTON_BACK), 0u) ||
         nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
         nk_overlay_go(state, NK_OVERLAY_SCREEN_MENU, NK_OVERLAY_ID_VRAM);
     }
@@ -482,8 +482,8 @@ static void profile_bar(NkUi *ui, size_t index, const float *parts) {
 NkOverlayAction nk_overlay_page_profile(NkUi *ui, NkOverlayState *state,
                                         const NkOverlayModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(OVERLAY_PROMPT_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(OVERLAY_PROMPT_BACK)}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
     const NkOverlayProfile *profile = model->profile;
@@ -495,10 +495,10 @@ NkOverlayAction nk_overlay_page_profile(NkUi *ui, NkOverlayState *state,
     if (bars > NK_OVERLAY_PROFILE_BARS) bars = NK_OVERLAY_PROFILE_BARS;
     inner = nk_overlay_page_begin(ui, model, 760.0f);
     if (inner <= 0.0f) return result;
-    nk_ui_eyebrow(ui, PROFILE_ID_EYEBROW, "Game paused \xC2\xB7 Developer");
-    nk_ui_text_role(ui, PROFILE_ID_TITLE, "Profile", NK_UI_TYPE_TITLE, theme->paper);
+    nk_ui_eyebrow(ui, PROFILE_ID_EYEBROW, NK_UI_STR(OVERLAY_DEV_EYEBROW));
+    nk_ui_text_role(ui, PROFILE_ID_TITLE, NK_UI_STR(OVERLAY_PROFILE_TITLE), NK_UI_TYPE_TITLE, theme->paper);
     if (rows == 0u) {
-        nk_ui_text_role(ui, PROFILE_ID_EMPTY, "No interval has closed yet.", NK_UI_TYPE_BODY,
+        nk_ui_text_role(ui, PROFILE_ID_EMPTY, NK_UI_STR(OVERLAY_PROFILE_EMPTY), NK_UI_TYPE_BODY,
                         theme->muted);
     } else {
         NkUiLayout table = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
@@ -539,7 +539,7 @@ NkOverlayAction nk_overlay_page_profile(NkUi *ui, NkOverlayState *state,
             nk_ui_end_container(ui);
         }
         nk_ui_text_role(ui, PROFILE_ID_LEGEND,
-                        "One bar per second, newest right: cpu, ge wait, present, idle",
+                        NK_UI_STR(OVERLAY_PROFILE_LEGEND),
                         NK_UI_TYPE_CAPTION, theme->muted);
     }
     if (profile != NULL && profile->note != NULL && profile->note[0] != '\0') {
@@ -547,7 +547,7 @@ NkOverlayAction nk_overlay_page_profile(NkUi *ui, NkOverlayState *state,
         note.wrap = true;
         nk_ui_text(ui, PROFILE_ID_NOTE, profile->note, &note);
     }
-    if (nk_ui_button(ui, NK_OVERLAY_ID_PROFILE_BACK, "Back", 0u) ||
+    if (nk_ui_button(ui, NK_OVERLAY_ID_PROFILE_BACK, NK_UI_STR(OVERLAY_BUTTON_BACK), 0u) ||
         nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
         nk_overlay_go(state, NK_OVERLAY_SCREEN_MENU, NK_OVERLAY_ID_PROFILE);
     }

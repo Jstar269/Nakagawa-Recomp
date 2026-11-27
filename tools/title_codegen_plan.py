@@ -410,11 +410,13 @@ def _make_build_targets(*, native_only: bool, aot_stage: bool = False) -> tuple[
 
 
 def _make_build_command(
-    make_executable: str, target: str, *, jobs: int, dry_run: bool = False
+    make_executable: str, target: str, *, jobs: int, dry_run: bool = False,
+    make_overrides: tuple[str, ...] = (),
 ) -> list[str]:
     command = [make_executable, "--no-print-directory", f"-j{jobs}"]
     if dry_run:
         command.append("-n")
+    command.extend(make_overrides)
     command.append(target)
     return command
 
@@ -719,15 +721,16 @@ def _run_compile_phase(
     library_cache: Any = None,
     cwd: Path = ROOT,
     plan: PackageBuildPlan | None = None,
+    make_overrides: tuple[str, ...] = (),
 ) -> int:
     """Run ``make compile``, reusing cached objects and counting the ones it compiles."""
     from nk_core import package_cache
 
-    command = _make_build_command(make_executable, "compile", jobs=jobs)
+    command = _make_build_command(make_executable, "compile", jobs=jobs, make_overrides=make_overrides)
     if object_cache is not None:
         # Generated headers first, so every object can be keyed before Make compiles it.
         prepared = subprocess.run(
-            _make_build_command(make_executable, "compile-inputs", jobs=jobs),
+            _make_build_command(make_executable, "compile-inputs", jobs=jobs, make_overrides=make_overrides),
             cwd=cwd,
             env=env,
             check=False,
@@ -735,7 +738,7 @@ def _run_compile_phase(
         if prepared.returncode != 0:
             return prepared.returncode
     planned = subprocess.run(
-        _make_build_command(make_executable, "compile", jobs=jobs, dry_run=True),
+        _make_build_command(make_executable, "compile", jobs=jobs, dry_run=True, make_overrides=make_overrides),
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -1306,15 +1309,16 @@ def _require_file(path: Path, label: str) -> None:
         raise PackageRouteError("PACKAGE_INPUT_MISSING", f"{label} is not a file")
 
 
-def _stage_for_make(path: Path, stage_dir: Path, label: str) -> Path:
+def _stage_for_make(path: Path, stage_dir: Path, label: str, *, snapshot: bool = False) -> Path:
     """Return a Make-safe path to the same bytes.
 
     User inputs commonly live under paths with spaces (for example a Windows
     profile directory). The Make recipes cannot quote them, so such an input
     is copied into the untracked package directory instead of being refused.
     Content hashes are unchanged, so the package contract stays deterministic.
+    A snapshot also protects inputs used by both the cache key and the build.
     """
-    if not _make_unsafe(path.as_posix()):
+    if not snapshot and not _make_unsafe(path.as_posix()):
         return path
     _require_file(path, label)
     name = re.sub(r"[^A-Za-z0-9._-]", "_", path.name) or "input"
@@ -1322,6 +1326,24 @@ def _stage_for_make(path: Path, stage_dir: Path, label: str) -> Path:
     stage_dir.mkdir(parents=True, exist_ok=True)
     staged = stage_dir / f"{prefix}_{name}"
     shutil.copyfile(path, staged)
+    return staged
+
+
+def _stage_ace_declaration(
+    path: Path, stage_dir: Path, label: str, *, read_symbol_map: bool = True
+) -> Path:
+    path = _absolute_path(path, label, make_safe=False)
+    staged = _stage_for_make(path, stage_dir, label, snapshot=True)
+    sidecar = path.with_suffix(".symbols.json")
+    if read_symbol_map and sidecar.is_file():
+        import enhancement_package
+
+        try:
+            source = enhancement_package.load_package(staged, reject_duplicate_keys=True)
+        except (OSError, ValueError) as exc:
+            raise PackageRouteError("PACKAGE_INVALID_ENHANCEMENT", str(exc)) from exc
+        if not enhancement_package.is_published_package(source):
+            shutil.copyfile(sidecar, staged.with_suffix(".symbols.json"))
     return staged
 
 
@@ -1689,6 +1711,7 @@ def _required_local_assets(
     selected_optional: set[str],
     module_hashes: dict[str, str],
     output_dir: Path,
+    target: str = "host",
 ) -> list[dict[str, Any]]:
     filesystem = manifest["filesystem"]
     assets: list[dict[str, Any]] = []
@@ -1727,7 +1750,9 @@ def _required_local_assets(
             asset["sha256"] = module_hashes[module["name"]]
         assets.append(asset)
 
-    if os.name == "nt":
+    # The libraries the built program loads: an Android package's library loads SDL3 and the
+    # Vulkan loader as a Linux program does, whatever host built it.
+    if os.name == "nt" and target == "host":
         assets.extend((
             {
                 "kind": "host-runtime-library",
@@ -1799,6 +1824,7 @@ def _cache_codegen_options(
     funcs_per_chunk: int,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
+    staged_symbol_map: Path | None = None,
 ) -> dict[str, Any]:
     from nk_core import package_cache
 
@@ -1828,7 +1854,10 @@ def _cache_codegen_options(
         env_for_enh["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
     if code_hook_package_path is not None:
         env_for_enh["ENHANCEMENT_CODE_HOOK_PACKAGE"] = str(code_hook_package_path)
-    options.update(package_cache.enhancement_package_options(env_for_enh))
+    enhancement = package_cache.enhancement_package_options(env_for_enh, staged_symbol_map=staged_symbol_map)
+    if "enhancement_explicit_symbol_map" in enhancement:
+        options["codegen_user_args"] = package_cache.package_codegen_user_args(env_for_enh)
+    options.update(enhancement)
     # Named only for the LLVM IR backend (#330), so C-backend keys are unchanged.
     options.update(package_cache.llvm_backend_options(os.environ, repository_root=ROOT))
     return options
@@ -2057,6 +2086,7 @@ def _cache_key_for_build(
     compiler_name: str,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
+    staged_symbol_map: Path | None = None,
 ) -> tuple[PackageCacheKey, dict[str, Any], dict[str, str]]:
     # Imported lazily: planning (--manager-plan) must not depend on the package cache.
     if TYPE_CHECKING:
@@ -2070,6 +2100,7 @@ def _cache_key_for_build(
         funcs_per_chunk=funcs_per_chunk,
         enhancement_package_path=enhancement_package_path,
         code_hook_package_path=code_hook_package_path,
+        staged_symbol_map=staged_symbol_map,
     )
     tool_digests = {
         "planner": package_cache.sha256_file(ROOT / "tools" / "title_codegen_plan.py"),
@@ -2150,6 +2181,15 @@ def package_executable_name(game_name: str, target: str) -> str:
     if target == "android":
         return f"lib{game_name}.so"
     return f"{game_name}{'.exe' if os.name == 'nt' else ''}"
+
+
+def package_image_name(executable_name: str) -> str:
+    """The runtime image's name in a package: ``<executable stem>_image.bin``, the file every
+    package reader looks for beside the executable (``validate_package_cache`` in
+    tools/nk_core/package_cache.py, ``nk_title_manifest_validate_aot_package`` in
+    src/core/nk_title_manifest.c). For the Android library ``lib<game>.so`` that is
+    ``lib<game>_image.bin``, not the ``<game>_image.bin`` Make writes."""
+    return f"{Path(executable_name).stem}_image.bin"
 
 
 def build_package(
@@ -2270,6 +2310,9 @@ def build_package(
     else:
         build_workspace = output_dir
 
+    ace_stage_dir: Path | None = None
+    staged_symbol_map: Path | None = None
+    user_codegen_args = os.environ.get("CODEGEN_USER_ARGS", "")
     try:
         stage_dir = build_workspace / "staged-inputs"
         manifest_path = _absolute_path(manifest_path, "manifest path", make_safe=False)
@@ -2285,33 +2328,28 @@ def build_package(
         if psp_header is not None:
             psp_header = _stage_for_make(psp_header, stage_dir, "PSP header")
         if enhancement_package_path is not None:
-            enhancement_package_path = _absolute_path(
-                enhancement_package_path, "enhancement-package", make_safe=False
-            )
-            _require_file(enhancement_package_path, "enhancement package")
-            sidecar_src = enhancement_package_path.with_suffix(".symbols.json")
-            enhancement_package_path = _stage_for_make(
-                enhancement_package_path, stage_dir, "enhancement package"
-            )
-            if sidecar_src.is_file() and enhancement_package_path.parent == stage_dir:
-                shutil.copyfile(
-                    sidecar_src, enhancement_package_path.with_suffix(".symbols.json")
+            try:
+                explicit_symbol_map = package_cache.explicit_symbol_map_path(os.environ)
+            except package_cache.PackageCacheError as exc:
+                raise PackageRouteError("PACKAGE_INVALID_ENHANCEMENT", str(exc)) from exc
+            # The working package can be reused. Its previous sidecars must not
+            # become inputs to this build, and promotion must not copy these inputs.
+            build_workspace.parent.mkdir(parents=True, exist_ok=True)
+            ace_stage_dir = Path(tempfile.mkdtemp(prefix=".ace-", dir=build_workspace.parent))
+            if explicit_symbol_map is not None:
+                staged_symbol_map = _stage_for_make(
+                    explicit_symbol_map, ace_stage_dir, "explicit symbol map", snapshot=True,
                 )
-        if code_hook_package_path is not None:
-            # Staged the same way, under a name of its own so it never overwrites the first.
-            code_hook_package_path = _absolute_path(
-                code_hook_package_path, "code-hook-package", make_safe=False
+                user_codegen_args = package_cache.package_codegen_user_args(os.environ)
+            enhancement_package_path = _stage_ace_declaration(
+                enhancement_package_path, ace_stage_dir, "enhancement package",
+                read_symbol_map=explicit_symbol_map is None,
             )
-            _require_file(code_hook_package_path, "code-hook package")
-            hook_sidecar = code_hook_package_path.with_suffix(".symbols.json")
-            if _make_unsafe(code_hook_package_path.as_posix()):
-                staged_hook = stage_dir / "code-hook" / (
-                    re.sub(r"[^A-Za-z0-9._-]", "_", code_hook_package_path.name) or "input")
-                staged_hook.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(code_hook_package_path, staged_hook)
-                if hook_sidecar.is_file():
-                    shutil.copyfile(hook_sidecar, staged_hook.with_suffix(".symbols.json"))
-                code_hook_package_path = staged_hook
+            if code_hook_package_path is not None:
+                code_hook_package_path = _stage_ace_declaration(
+                    code_hook_package_path, ace_stage_dir, "code-hook package",
+                    read_symbol_map=explicit_symbol_map is None,
+                )
         if module_dir is not None and _make_unsafe(module_dir.as_posix()):
             staged_modules = stage_dir / "modules"
             for module in _selected_guest_modules(normalized, selected_optional):
@@ -2487,6 +2525,7 @@ def build_package(
                 compiler_name=cc_name,
                 enhancement_package_path=enhancement_package_path,
                 code_hook_package_path=code_hook_package_path,
+                staged_symbol_map=staged_symbol_map,
             )
         except package_cache.PackageCacheError as exc:
             raise PackageRouteError("PACKAGE_INVALID_ENHANCEMENT", str(exc)) from exc
@@ -2551,7 +2590,7 @@ def build_package(
                 if plan["codegen_profile"] != "none"
                 else ""
             ),
-            "CODEGEN_USER_ARGS": os.environ.get("CODEGEN_USER_ARGS", ""),
+            "CODEGEN_USER_ARGS": user_codegen_args,
             "LINK_MAP": link_map.as_posix(),
             "PUBLIC_SAFE": "1",
             "NK_AOT_PREGENERATED": "1" if pregenerated else "0",
@@ -2577,6 +2616,15 @@ def build_package(
         library_cache = _object_cache_from_environment(
             build_environment, package_cache.SHARED_LIBRARY_CACHE_DIR_ENV
         )
+        make_overrides: tuple[str, ...] = ()
+        if staged_symbol_map is not None:
+            snapshot = staged_symbol_map.as_posix()
+            # Use the final argument string after the package has added its own options.
+            # The final codegen option and Make's prerequisite name the same snapshot.
+            codegen_args = f"{build_environment['CODEGEN_USER_ARGS']} --symbol-map={snapshot}".strip()
+            build_environment["CODEGEN_USER_ARGS"] = codegen_args
+            build_environment["SYMBOL_MAP"] = snapshot
+            make_overrides = (f"SYMBOL_MAP={snapshot}", f"CODEGEN_USER_ARGS={codegen_args}")
         for make_target in _make_build_targets(native_only=pregenerated, aot_stage=aot_stage):
             jobs = build_jobs
             job_plan = jobs_plan
@@ -2594,7 +2642,9 @@ def build_package(
                 if jobs != build_jobs or job_plan.memory_short:
                     print(f"PACKAGE_BUILD_JOBS: {jobs} for compile, largest unit {largest} bytes "
                           f"({job_plan.reason}; limit: {job_plan.limit})", flush=True)
-            command = _make_build_command(make_executable, make_target, jobs=jobs)
+            command = _make_build_command(
+                make_executable, make_target, jobs=jobs, make_overrides=make_overrides,
+            )
             try:
                 if make_target == "compile" and (progress_file is not None or object_cache is not None):
                     returncode = _run_compile_phase(
@@ -2606,6 +2656,7 @@ def build_package(
                         library_cache=library_cache,
                         build_dir=build_workspace.as_posix(),
                         plan=job_plan,
+                        make_overrides=make_overrides,
                     )
                 else:
                     returncode = subprocess.run(
@@ -2646,6 +2697,10 @@ def build_package(
             raise PackageRouteError(
                 "PACKAGE_BUILD_INCOMPLETE", "missing build outputs: " + ", ".join(missing_outputs)
             )
+        packaged_image = build_workspace / package_image_name(executable_name)
+        if packaged_image != image_path:
+            # An Android package: its readers find the image as lib<game>_image.bin.
+            os.replace(image_path, packaged_image)
 
         entry_symbols = re.findall(
             r"(?m)^\s*void\s+([fr])_[0-9a-fA-F]+\s*\(",
@@ -2673,7 +2728,7 @@ def build_package(
         executable_sha256 = _sha256_file(compiled_executable)
         module_hashes = {row["name"]: row["sha256"] for row in input_hashes["modules"]}
         required_assets = _required_local_assets(
-            normalized, selected_optional, module_hashes, build_workspace
+            normalized, selected_optional, module_hashes, build_workspace, target
         )
         runtime_header_hash = _sha256_file(ROOT / "src" / "rt" / "recomp.h")
         tools = {
@@ -2800,6 +2855,8 @@ def build_package(
             _promote_package(build_workspace, output_dir)
         return package
     finally:
+        if ace_stage_dir is not None:
+            shutil.rmtree(ace_stage_dir, ignore_errors=True)
         if build_workspace != output_dir and build_workspace.exists():
             shutil.rmtree(build_workspace, ignore_errors=True)
 

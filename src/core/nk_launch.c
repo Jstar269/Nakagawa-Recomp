@@ -124,7 +124,8 @@ bool nk_launch_runtime_reads_cheats(const char *executable_path) {
 
 /* The cheat file a launch with cheats on names (#2639): the one the session names, else
    <user_data_root>/cheats/<DISC>.ini with the disc ID as the package folders spell it
-   (ULUS12345). False, with `out_path` empty, when the session names none and has no per-user
+   (ULUS12345), or, when that file does not exist, <user_data_root>/cheats/cheat.db if that
+   does. False, with `out_path` empty, when the session names none and has no per-user
    data directory or no PSP disc ID, or the path does not fit; the runtime then says that no
    file is named and applies nothing. */
 static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, size_t out_size) {
@@ -142,6 +143,19 @@ static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, s
         }
         written = snprintf(out_path, out_size, "%s%ccheats%c%s.ini", session->user_data_root, sep,
                            sep, disc);
+        /* No file of the title's own, but a cheat database (cheats/cheat.db, which Settings
+           downloads or imports; src/player/cheat_db.h): the runtime reads this disc's _S
+           section of it. The title's own file always wins. */
+        if (written >= 0 && (size_t)written < out_size && !nk_platform_file_exists(out_path)) {
+            char database[NK_MAX_PATH];
+            int db_written = snprintf(database, sizeof(database), "%s%ccheats%ccheat.db",
+                                      session->user_data_root, sep, sep);
+            if (db_written > 0 && (size_t)db_written < sizeof(database) &&
+                (size_t)db_written < out_size && nk_platform_file_exists(database)) {
+                memcpy(out_path, database, (size_t)db_written + 1u);
+                written = db_written;
+            }
+        }
     }
     if (written < 0 || (size_t)written >= out_size) {
         out_path[0] = '\0';
@@ -554,10 +568,9 @@ static bool find_candidate_executable(
                 if (rel[k] == '/') rel[k] = sep;
             }
             int w = snprintf(cand, sizeof(cand), "%s%c%s", root, sep, rel);
-            if (w > 0 && (size_t)w < sizeof(cand) &&
-                nk_platform_file_exists(cand)) {
-                if ((size_t)w >= max_len) return false;
-                snprintf(out_path, max_len, "%s", cand);
+            if (w <= 0 || (size_t)w >= sizeof(cand) || (size_t)w >= max_len) continue;
+            if (nk_platform_file_exists(cand)) {
+                memcpy(out_path, cand, (size_t)w + 1u);
                 return true;
             }
         }
@@ -1117,6 +1130,88 @@ NkRuntimePackageStatus nk_launch_validate_runtime_package(
         reason, reason_size);
 }
 
+typedef struct {
+    NkEnhancementDeclarationIdentity primary;
+    NkEnhancementDeclarationIdentity companion;
+} LaunchDeclarationIdentities;
+
+static bool launch_declaration_identity(
+    const NkGameEntry *game, const NkLaunchEnhancementSources *sources,
+    bool code_hook, const char *id, bool read_symbol_map, NkEnhancementDeclarationIdentity *out
+) {
+    char path[NK_MAX_PATH];
+    return sources &&
+           nk_title_manifest_enhancement_declaration_path(
+               sources->user_root, sources->shipped_root, game->disc_id,
+               code_hook, path, sizeof(path), NULL) &&
+           nk_title_manifest_enhancement_declaration_identity(
+               path, id, game->title_id, read_symbol_map, out);
+}
+
+static bool launch_declaration_identities(
+    const NkGameEntry *game, const NkLaunchEnhancementSources *sources,
+    bool read_symbol_map, LaunchDeclarationIdentities *out
+) {
+    memset(out, 0, sizeof(*out));
+    const char *variant = game->enhancement_package_id;
+    if (!nk_title_manifest_enhancement_variant_valid(variant)) return false;
+    const char *plus = strchr(variant, '+');
+    if (!plus) {
+        return launch_declaration_identity(
+            game, sources, game->enhancement_hook_only, variant, read_symbol_map, &out->primary);
+    }
+    char primary[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    size_t length = (size_t)(plus - variant);
+    memcpy(primary, variant, length);
+    primary[length] = '\0';
+    return launch_declaration_identity(game, sources, false, primary, read_symbol_map, &out->primary) &&
+           launch_declaration_identity(game, sources, true, plus + 1, read_symbol_map, &out->companion);
+}
+
+NkRuntimePackageStatus nk_launch_validate_runtime_package_for_launch(
+    const char *user_data_root,
+    const NkGameEntry *game,
+    const NkLaunchEnhancementSources *sources,
+    NkRuntimePackageInfo *out_info,
+    char *reason,
+    size_t reason_size
+) {
+    NkRuntimePackageInfo checked = {0};
+    NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
+        user_data_root, game, &checked, reason, reason_size);
+    if (status == NK_RUNTIME_PACKAGE_OK && game->enhancement_package_id[0]) {
+        const char *failure = NULL;
+        LaunchDeclarationIdentities current;
+        if (!checked.enhancement_declaration.fingerprint[0] ||
+            (strchr(game->enhancement_package_id, '+') &&
+             !checked.code_hook_declaration.fingerprint[0])) {
+            failure = "The enhanced runtime package predates declaration identity checks. "
+                      "Rebuild it from the library.";
+        } else if (!launch_declaration_identities(
+                       game, sources, !checked.enhancement_explicit_symbol_map, &current)) {
+            failure = "The selected Ace declaration or symbol map is unavailable or invalid. "
+                      "Check the inputs before rebuilding the enhanced package.";
+        } else if (strcmp(checked.enhancement_declaration.fingerprint, current.primary.fingerprint) != 0 ||
+                   strcmp(checked.code_hook_declaration.fingerprint, current.companion.fingerprint) != 0) {
+            failure = "The selected Ace declaration changed. Rebuild the enhanced package "
+                      "from the library.";
+        } else if (strcmp(checked.enhancement_declaration.symbol_map_sha256,
+                          current.primary.symbol_map_sha256) != 0 ||
+                   strcmp(checked.code_hook_declaration.symbol_map_sha256,
+                          current.companion.symbol_map_sha256) != 0) {
+            failure = "The selected Ace symbol map changed. Rebuild the enhanced package "
+                      "from the library.";
+        }
+        if (failure) {
+            launch_error(reason, reason_size, failure);
+            memset(&checked, 0, sizeof(checked));
+            status = NK_RUNTIME_PACKAGE_STALE;
+        }
+    }
+    if (out_info) *out_info = checked;
+    return status;
+}
+
 bool nk_launch_runtime_package_cache_identity(
     const char *user_data_root,
     const NkGameEntry *game,
@@ -1138,13 +1233,53 @@ bool nk_launch_runtime_package_cache_identity(
         SR_CPUSTATE_ABI_VERSION, out_identity);
 }
 
+bool nk_launch_runtime_package_cache_identity_for_launch(
+    const char *user_data_root,
+    const NkGameEntry *game,
+    const NkLaunchEnhancementSources *sources,
+    char out_identity[65]
+) {
+    bool valid = nk_launch_runtime_package_cache_identity(user_data_root, game, out_identity);
+    if (!valid || !game->enhancement_package_id[0]) return valid;
+
+    LaunchDeclarationIdentities current;
+    if (!launch_declaration_identities(game, sources, true, &current)) {
+        out_identity[0] = '\0';
+        return false;
+    }
+    NkSha256 hash;
+    nk_sha256_init(&hash);
+    nk_sha256_update(&hash, (const uint8_t *)out_identity, 64);
+    nk_sha256_update(&hash, (const uint8_t *)&current, sizeof(current));
+    uint8_t digest[32];
+    nk_sha256_finish(&hash, digest);
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        out_identity[i * 2] = hex[digest[i] >> 4];
+        out_identity[i * 2 + 1] = hex[digest[i] & 0x0f];
+    }
+    out_identity[64] = '\0';
+    return true;
+}
+
 NkResult nk_launch_prepare_session(
     NkLaunchSession *session,
     const NkGameEntry *game,
     const char *repo_or_install_root
 ) {
+    return nk_launch_prepare_session_with_declarations(
+        session, game, repo_or_install_root, NULL);
+}
+
+NkResult nk_launch_prepare_session_with_declarations(
+    NkLaunchSession *session,
+    const NkGameEntry *game,
+    const char *repo_or_install_root,
+    const NkLaunchEnhancementSources *sources
+) {
     if (!session || !game) return NK_ERROR_GENERIC;
     memset(session, 0, sizeof(*session));
+    if (sources && game->enhancement_package_id[0]) session->enhancement_sources = *sources;
 
     bool use_boot_executable = game->boot_executable[0] != '\0';
     const char *boot_executable = use_boot_executable
@@ -1218,8 +1353,8 @@ NkResult nk_launch_prepare_session(
 
     NkRuntimePackageInfo package_info;
     char package_error[1024] = "";
-    NkRuntimePackageStatus package_status = nk_launch_validate_runtime_package(
-        root, game, &package_info, package_error, sizeof(package_error));
+    NkRuntimePackageStatus package_status = nk_launch_validate_runtime_package_for_launch(
+        root, game, sources, &package_info, package_error, sizeof(package_error));
     bool package_valid = package_status == NK_RUNTIME_PACKAGE_OK;
     if (package_valid) {
         session->package_launch = true;
@@ -1562,9 +1697,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
 
     /* Revalidate the package and current source media immediately before spawn
        so changed executable/module revisions fail closed. */
+    NkRuntimePackageInfo current;
     if (session->package_launch) {
         NkGameEntry identity;
-        NkRuntimePackageInfo current;
         char gate_error[1024] = "";
         memset(&identity, 0, sizeof(identity));
         snprintf(identity.disc_id, sizeof(identity.disc_id), "%s", session->disc_id);
@@ -1577,9 +1712,10 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         identity.is_showcase_package = session->showcase_package;
         snprintf(identity.enhancement_package_id, sizeof(identity.enhancement_package_id),
                  "%s", session->enhancement_package_id);
-        NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
-            session->package_root, &identity, &current, gate_error,
-            sizeof(gate_error));
+        identity.enhancement_hook_only = session->enhancement_hook_only;
+        NkRuntimePackageStatus status = nk_launch_validate_runtime_package_for_launch(
+            session->package_root, &identity, &session->enhancement_sources, &current,
+            gate_error, sizeof(gate_error));
         if (status != NK_RUNTIME_PACKAGE_OK ||
             strcmp(current.package_root, session->working_directory) != 0 ||
             strcmp(current.executable_path, session->executable_path) != 0 ||
@@ -2145,6 +2281,16 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         return NK_ERROR_PROCESS_SPAWN;
     }
 
+    if (session->package_launch) {
+        memcpy(session->package_identity, current.completion_digest,
+               sizeof(session->package_identity));
+        memcpy(session->runtime_source_commit, current.runtime_source_commit,
+               sizeof(session->runtime_source_commit));
+        memcpy(session->runtime_source_origin, current.runtime_source_origin,
+               sizeof(session->runtime_source_origin));
+        memcpy(session->runtime_source_reason, current.runtime_source_reason,
+               sizeof(session->runtime_source_reason));
+    }
     session->is_running = true;
     return NK_OK;
 }

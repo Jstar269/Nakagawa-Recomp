@@ -135,6 +135,15 @@ bool nk_platform_path_missing(const char *path) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
+bool nk_platform_available_disk_bytes(const char *path, uint64_t *available) {
+    WCHAR wide[32768];
+    ULARGE_INTEGER free_bytes;
+    if (!path || !available || !utf8_to_wide(path, wide, sizeof(wide) / sizeof(wide[0])) ||
+        !GetDiskFreeSpaceExW(wide, &free_bytes, NULL, NULL)) return false;
+    *available = (uint64_t)free_bytes.QuadPart;
+    return true;
+}
+
 #define TREE_PATH_CAP 32768u
 
 /* A tree walk keeps one path buffer: each level appends "\name", works on it
@@ -2443,6 +2452,12 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name) {
        empty while the player ran (#1303). Unbuffered, each printf reaches it as one write. */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+}
+
+/* Android only: a Windows process gets its environment from the process that started it. */
+bool nk_platform_android_import_environment(void *jni_env) {
+    (void)jni_env;
+    return true;
 }
 
 /* Nothing to prepare on Windows: the player and runtime start as ordinary processes. */
