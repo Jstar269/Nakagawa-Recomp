@@ -4,11 +4,14 @@
 package io.github.jstar269.nakagawa;
 
 import android.content.Context;
+import android.hardware.Sensor;
 import android.content.pm.PackageInfo;
 import android.content.res.AssetManager;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
+
+import org.libsdl.app.SDLSurface;
 
 import java.io.BufferedInputStream;
 import java.io.File;
@@ -50,6 +53,25 @@ final class NakagawaHost {
     static final String TAG = "nakagawa";
 
     private NakagawaHost() {}
+
+    /**
+     * SDL's surface for both activities (SDLActivity.createSDLSurface). SDL asks for the
+     * accelerometer on every resume (SDLSurface.handleResume); on a device with none, such as a
+     * headset's panel, Android logs "sensor or listener is null" each time. With no sensor there
+     * is nothing to listen to, so the request is not made; with one, SDL's own runs unchanged.
+     */
+    static final class Surface extends SDLSurface {
+        Surface(Context context) {
+            super(context);
+        }
+
+        @Override
+        protected void enableSensor(int sensortype, boolean enabled) {
+            Sensor sensor = mSensorManager != null ? mSensorManager.getDefaultSensor(sensortype) : null;
+            if (sensor == null) return;
+            super.enableSensor(sensortype, enabled);
+        }
+    }
 
     /** The user data folder. Every host names it Nakagawa, with the same layout inside. */
     static File dataDir(Context context) {

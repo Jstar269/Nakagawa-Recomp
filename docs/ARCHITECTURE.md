@@ -663,6 +663,35 @@ stamps. C objects emit `-MMD -MP` dependency files so transitive headers partici
 The [`Makefile`](../Makefile) is the source of truth for the current optimization split and
 generated chunk policy.
 
+## Current execution contract
+
+[AGENTS.md section 7](../AGENTS.md#7-current-execution-contract) points here, and this contract binds every change to
+the areas it names. Re-check live source before changing these; PR numbers are navigation, not evidence.
+
+- **PR #118:** the interpreter is a fail-closed floor: only analyzer-owned spans run, unsupported forms fail closed; not an all-Allegrex interpreter.
+- **PR #126:** a `jr`/`jalr` target is latched at transfer, before link writes and the delay slot.
+- **PR #127:** `dispatch_call` carries `target` and `resume_pc`; CALL and TAIL differ; live `$ra` is not a resume descriptor.
+- **PR #128:** cosimulation compares AOT/interpreter state, CALL/TAIL cells included; its negative corpus fails closed; a build-only mutant is not a valid semantic kill.
+- **Issue #2172:** resume at a PC is native re-entry and opt-in (`codegen.py --state-resume`; default output stays
+  byte-identical; [contract](#resume-at-a-pc-direct-save-states)): a parked thread is a frame
+  list (body entry, resume point and kind, entry `$sp`) read from its return-boundary records, never from live
+  `$ra` or host frames; anything not exactly describable or resumable is refused by name, and it does not extend
+  the interpreter floor.
+- Nested interpreted calls outside that floor are unproven; broader claims need a new contract and test.
+- `src/rt/recomp.h` is a load-bearing ABI: `$ra` is `r[31]`; `CpuState` is versioned by `SR_CPUSTATE_ABI_VERSION`.
+- Chunk count is dynamic; `FUNCS_PER_CHUNK` is not a fixed ABI.
+- LLE CPU and import seam are opt-in (`--lle-cpu`, `--lle-import-seam`; the seam implies `--lle-cpu`); default
+  output stays byte-identical.
+- An unmeasured cell normally stops by name. A limited second tier may use a public PPSSPP or JPCSP implementation
+  for a known, named cell whose exact behavior it supports, unless the issue prohibits emulator-derived work:
+  record the repository, exact upstream revision and symbol; classify adapted code `derived-translated`; label it
+  in code `PPSSPP-derived, not PSP-measured` or `JPCSP-derived, not PSP-measured`; add a production-path
+  regression; log first use once per run. A PSP measurement for the same scope supersedes it, and it proves
+  neither PSP behavior nor independence. It never fills an unknown NID or unowned dispatch, enables save-data and
+  flash writes whose behavior is unmeasured, or supplies behavior with no public reference; those stay named
+  fail-closed boundaries, and [AGENTS.md section 3](../AGENTS.md#3-human-only-hard-stops) still forbids device writes.
+- HLE arguments 1-4 are `A0`-`A3`, 5-8 `t0`-`t3` (`stack_arg`), 9+ the stack; never read past the public signature.
+
 ## Runtime Execution Model
 
 ### Dispatch
@@ -738,7 +767,12 @@ reached it: on one compilation disc a module of about 100,000 instructions becam
 branch may also land on the delay slot of such a transfer; on that path the slot is an ordinary
 instruction, so the body owns the word after it too, whichever the walk meets first. The emitter
 refuses a body whose slot label has no owned successor. `cosim-selftest` covers both (`bjoin`,
-`bslot`, `jslot`, `bself`).
+`bslot`, `jslot`, `bself`). A labelled delay slot of a transfer that can fall through is
+translated twice, inline at the transfer and under its label, and the transfer's fall-through
+jumps over the labelled copy. The body's own entry counts as such a label when it lies above the
+body's lowest address (#3163): a body entered at the delay slot of a branch or call it loops back
+to runs that word once as its entry and then only as the slot (`eslot`, `eslot_likely`,
+`eslot_call`).
 
 **Entry splitting.** A body owns the code it reaches from its entry. Straight-line fall-through and
 `j` into another entry already leave through TAIL transfers, but a conditional branch, taken or not
@@ -754,7 +788,10 @@ emitter, the stale-code records, the LLVM backend's lowering plan) gets the same
 the LLVM backend lowers a crossing as the same TAIL transfer. Bodies within the threshold are
 byte-identical to the unsplit output. `mingw32-make cosim-selftest-split` runs the cosimulation
 with every body split (`xing_*` cells), and the split-generator mutants show it catches a crossing
-that drops or misplaces its delay slot, ignores its condition or loses its fall-through.
+that drops or misplaces its delay slot, ignores its condition or loses its fall-through. A branch
+may land on the delay slot of a call, or of a split body's conditional branch, whose next word is
+another entry: on that path the slot is an ordinary instruction and the body takes the same
+continuation into that entry after it (#3128; `cslot_call` in both lanes, `cslot_branch` when split).
 
 Some paths still nest:
 

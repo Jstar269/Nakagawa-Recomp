@@ -29,6 +29,189 @@ import nk_cli
 from nk_core import package_cache
 
 
+class AceDeclarationSnapshotTests(unittest.TestCase):
+    def test_ace_declarations_and_sidecars_are_snapshotted_for_codegen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "staged-inputs"
+            snapshot_names = set()
+            for label in ("enhancement package", "code-hook package"):
+                source_dir = root / label.replace(" ", "-")
+                source_dir.mkdir()
+                source = source_dir / "ace.json"
+                source.write_bytes(b'{"id":"selected"}')
+                sidecar = source.with_suffix(".symbols.json")
+                sidecar.write_bytes(b'{"public_fixture":"original"}')
+                snapshot = title_codegen_plan._stage_ace_declaration(source, stage, label)
+                self.assertNotEqual(snapshot, source)
+                self.assertEqual(snapshot.parent, stage)
+                snapshot_names.add(snapshot.name)
+                source.write_bytes(b'{"id":"edited"}')
+                sidecar.write_bytes(b'{"public_fixture":"edited"}')
+                self.assertEqual(snapshot.read_bytes(), b'{"id":"selected"}')
+                self.assertEqual(snapshot.with_suffix(".symbols.json").read_bytes(),
+                                 b'{"public_fixture":"original"}')
+            self.assertEqual(len(snapshot_names), 2)
+
+    def test_reusing_output_does_not_reuse_a_removed_symbol_map(self) -> None:
+        class StopAtCacheOptions(Exception):
+            pass
+
+        manifest_path = ROOT / "assets" / "titles" / "synthetic.json"
+        manifest = title_manifest.load_manifest(manifest_path)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            reused = root / "reused"
+            if title_codegen_plan._make_unsafe(reused.as_posix()) or (
+                os.name == "nt" and len(reused.as_posix()) + 85 >= 260
+            ):
+                self.skipTest("requires a Make-safe temporary output path")
+            elf = root / "fixture.elf"
+            elf.write_bytes(b"synthetic executable")
+            declaration = root / "timing.json"
+            document = json.dumps({
+                "schema_version": 1, "id": "synth.overlay.fps",
+                "display_name": "Synthetic Frame Rate Overlay", "version": "1.0.0",
+                "category": "presentation_only", "target_title_id": "*",
+                "capabilities": ["hud_overlay", "fps_counter"],
+            })
+            declaration.write_text(document, encoding="utf-8")
+            sidecar = declaration.with_suffix(".symbols.json")
+            sidecar.write_text('{"fixture":"0x08804000"}', encoding="utf-8")
+            expected_map = package_cache.sha256_file(sidecar)
+            options: list[dict[str, object]] = []
+            snapshots: list[Path] = []
+            cache_options = title_codegen_plan._cache_codegen_options
+
+            def observe_cache(*args, **kwargs):
+                snapshots.append(kwargs["enhancement_package_path"])
+                options.append(cache_options(*args, **kwargs))
+                raise StopAtCacheOptions
+
+            with (
+                mock.patch.dict(os.environ, {"CC": "gcc"}, clear=True),
+                mock.patch.object(title_codegen_plan, "_make_input_images",
+                                  return_value=([], {}, [], [])),
+                mock.patch.object(title_codegen_plan, "_version_identity",
+                                  return_value=("tool", "tool 1")),
+                mock.patch.object(title_codegen_plan.shutil, "which", return_value="tool"),
+                mock.patch.object(title_codegen_plan, "_cache_codegen_options",
+                                  side_effect=observe_cache),
+            ):
+                for build_number, output in enumerate((reused, reused, root / "fresh")):
+                    if build_number == 1:
+                        sidecar.unlink()
+                    with self.assertRaises(StopAtCacheOptions):
+                        title_codegen_plan.build_package(
+                            manifest, manifest_path=manifest_path, game_elf=elf,
+                            output_dir=output, game_name="synthetic",
+                            enhancement_package_path=declaration,
+                        )
+
+            key = "enhancement_symbol_map_sha256"
+            self.assertEqual(len(options), 3)
+            self.assertEqual(options[0][key], expected_map)
+            self.assertNotIn(key, options[2])
+            self.assertNotIn(key, options[1])
+            self.assertEqual(options[1], options[2])
+            self.assertEqual(len(set(snapshots)), 3)
+            self.assertTrue(all(not path.exists() for path in snapshots))
+            self.assertEqual(declaration.read_text(encoding="utf-8"), document)
+
+    def test_explicit_map_snapshot_feeds_cache_and_package_make(self) -> None:
+        class StopAtMake(Exception):
+            pass
+
+        manifest_path = ROOT / "assets" / "titles" / "synthetic.json"
+        manifest = title_manifest.load_manifest(manifest_path)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            output = root / "out"
+            if title_codegen_plan._make_unsafe(output.as_posix()) or (
+                os.name == "nt" and len(output.as_posix()) + 85 >= 260
+            ):
+                self.skipTest("requires a Make-safe temporary output path")
+            elf = root / "fixture.elf"
+            elf.write_bytes(b"synthetic executable")
+            declaration = root / "timing.json"
+            declaration.write_text(json.dumps({
+                "schema_version": 1, "id": "synth.overlay.fps",
+                "display_name": "Synthetic Frame Rate Overlay", "version": "1.0.0",
+                "category": "presentation_only", "target_title_id": "*",
+                "capabilities": ["hud_overlay", "fps_counter"],
+            }), encoding="utf-8")
+            declaration.with_suffix(".symbols.json").write_text("ignored", encoding="utf-8")
+            guest_map = root / "selected.map"
+            original = b"fixture = 0x08804000;\n"
+            guest_map.write_bytes(original)
+            digest = package_cache.sha256_file(guest_map)
+            snapshots: list[Path] = []
+            arguments = f'--symbol-map "{guest_map.as_posix()}" --nan-trap'
+
+            def cache_options(**kwargs):
+                snapshot = kwargs["staged_symbol_map"]
+                snapshots.append(snapshot)
+                guest_map.write_bytes(b"fixture = 0x08804040;\n")
+                options = title_codegen_plan._cache_codegen_options(
+                    kwargs["plan"], selected_optional=kwargs["selected_optional"],
+                    funcs_per_chunk=kwargs["funcs_per_chunk"],
+                    enhancement_package_path=kwargs["enhancement_package_path"],
+                    staged_symbol_map=snapshot,
+                )
+                self.assertEqual(options["enhancement_explicit_symbol_map_sha256"], digest)
+                self.assertEqual(options["codegen_user_args"], arguments)
+                self.assertNotIn("enhancement_symbol_map_sha256", options)
+                return {}, options, {}
+
+            def inspect_make(command, **kwargs):
+                snapshot, = snapshots
+                self.assertNotEqual(snapshot, guest_map)
+                self.assertEqual(snapshot.read_bytes(), original)
+                self.assertIn(f"SYMBOL_MAP={snapshot.as_posix()}", command)
+                self.assertIn(f"CODEGEN_USER_ARGS={arguments} --symbol-map={snapshot.as_posix()}", command)
+                self.assertEqual(command[-1], "pipeline")
+                self.assertFalse(Path(kwargs["env"]["ENHANCEMENT_PACKAGE"])
+                                 .with_suffix(".symbols.json").exists())
+                raise StopAtMake
+
+            with (
+                mock.patch.dict(os.environ, {"CC": "gcc", "SYMBOL_MAP": "ignored.map",
+                                            "CODEGEN_USER_ARGS": arguments}, clear=True),
+                mock.patch.object(title_codegen_plan, "_version_identity",
+                                  return_value=("tool", "tool 1")),
+                mock.patch.object(title_codegen_plan.shutil, "which", return_value="tool"),
+                mock.patch.object(title_codegen_plan, "_cache_key_for_build", side_effect=cache_options),
+                mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=inspect_make),
+            ):
+                with self.assertRaises(StopAtMake):
+                    title_codegen_plan.build_package(
+                        manifest, manifest_path=manifest_path, game_elf=elf,
+                        output_dir=output, game_name="synthetic", aot_stage=True,
+                        enhancement_package_path=declaration,
+                    )
+            self.assertEqual(len(snapshots), 1)
+            self.assertFalse(snapshots[0].exists())
+            self.assertEqual(guest_map.read_bytes(), b"fixture = 0x08804040;\n")
+
+    def test_ignored_adjacent_maps_are_not_read_or_copied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "ace.json"
+            source.with_suffix(".symbols.json").write_bytes(b"ignored input")
+            for name, declaration, read_map in (
+                ("published", '{"published_package":1}', True),
+                ("explicit", '{"id":"private"}', False),
+            ):
+                with self.subTest(name=name):
+                    source.write_text(declaration, encoding="utf-8")
+                    with mock.patch.object(title_codegen_plan.shutil, "copyfile",
+                                           wraps=title_codegen_plan.shutil.copyfile) as copy:
+                        staged = title_codegen_plan._stage_ace_declaration(
+                            source, root / "stage", name, read_symbol_map=read_map)
+                    copy.assert_called_once_with(source, staged)
+                    self.assertFalse(staged.with_suffix(".symbols.json").exists())
+
+
 class TitleCodegenPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.hst_path = ROOT / "assets" / "titles" / "hst-ucus98701.json"
@@ -617,6 +800,58 @@ class TitleCodegenPlanTests(unittest.TestCase):
             self.assertTrue(libraries)
             self.assertFalse([name for name in libraries if name.lower().endswith(".dll")],
                              libraries)
+
+    def test_verified_package_build_requests_timing_observation(self) -> None:
+        from nk_core import package_cache
+
+        class StopAtMake(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps(self.synthetic), encoding="utf-8")
+            elf = root / "fixture.elf"
+            elf.write_bytes(b"synthetic ELF identity")
+            identity = root / "title-input-identity.json"
+            identity.write_text(json.dumps(package_cache.build_title_input_identity(
+                manifest=self.synthetic,
+                executable_name=elf.name,
+                executable_sha256=package_cache.sha256_file(elf),
+                modules=[],
+                disc_id="TEST30340",
+                disc_version="1.00",
+            )), encoding="utf-8")
+            actual = []
+            run = title_codegen_plan.subprocess.run
+
+            def inspect_make(argv, **kwargs):
+                if Path(argv[0]).name == "fixture-make":
+                    actual.append(kwargs["env"]["CODEGEN_USER_ARGS"])
+                    raise StopAtMake
+                return run(argv, **kwargs)
+
+            with mock.patch.dict(os.environ, {"CODEGEN_USER_ARGS": "--nan-trap"}), \
+                    mock.patch.object(title_codegen_plan.shutil, "which",
+                                      side_effect=lambda name, **_kwargs: f"/fixture/{name}"), \
+                    mock.patch.object(title_codegen_plan, "_version_identity",
+                                      return_value=("tool", "tool 1")), \
+                    mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=inspect_make):
+                for name, supplied in (("verified", identity), ("direct", None)):
+                    with self.subTest(name=name), self.assertRaises(StopAtMake):
+                        title_codegen_plan.build_package(
+                            self.synthetic,
+                            manifest_path=manifest,
+                            game_elf=elf,
+                            output_dir=root / name,
+                            game_name="synthetic",
+                            make_command="fixture-make",
+                            title_input_identity_file=supplied,
+                            aot_stage=True,
+                        )
+            self.assertEqual(actual, [
+                "--nan-trap --record-timing-identity=TEST30340:1.00", "--nan-trap",
+            ])
 
     def test_package_inputs_with_the_same_name_keep_distinct_staged_bytes(self) -> None:
         class StopAfterStaging(Exception):
