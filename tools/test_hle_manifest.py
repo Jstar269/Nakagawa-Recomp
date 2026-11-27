@@ -2384,8 +2384,6 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0xd1c8945e": ("sceHttpEnd", "0x80010086"),
                 "0xd1f59fdb": ("sceAtracStartEntry", "0x80630004"),
                 # sceMp3 entry points whose contracts are not established are refused by name.
-                "0x1b839b83": ("sceMp3LowLevelInit", "0x80010086"),
-                "0xe3ee2c81": ("sceMp3LowLevelDecode", "0x80010086"),
                 "0x8ab81558": ("sceMp3StartEntry", "0x80010086"),
                 "0x732b042a": ("sceMp3EndEntry", "0x80010086"),
                 # The 59 public PSPSDK ad hoc entry points refuse under the offline network policy (#1139).
