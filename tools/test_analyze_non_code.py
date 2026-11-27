@@ -1247,9 +1247,12 @@ class PublicFixtureTest(unittest.TestCase):
     # lines: each cell's transfer ends in a `goto` to the word after the entry, and that word
     # carries a label. The fixed-address executable's `jal`s are not relocated, so no body
     # there is entered at a delay slot.
+    # #3128's cells (`cslot_call`, `cslot_branch`, `cslot_dst`) and their entry calls move the
+    # other cells. They come with no codegen change: on the old and on the expanded inputs
+    # main's codegen and this one write identical files.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "51f070476a3686941a5860043513beef713c6cd32d3c3bde95eb3d6ab6968a25",
-        ("cosim", "exec"): "c4496757709eabaf2c32e5caaa41189ddd8d5939c930503c6e94d8e48ed22140",
+        ("cosim", "prx"): "2dce80bd3c8cac19a0ebd407837dcb258e988f595e2b04957131c5c61efdf5f7",
+        ("cosim", "exec"): "ddf4c5ba3b0153f304080bfffc09775425b28f44162dc46c82041a894d459e81",
         ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
         ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
         ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",

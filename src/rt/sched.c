@@ -871,6 +871,7 @@ static uint64_t sched_transfer_wake_deadline(void);
 void sched_init(CpuState *cpu) {
     sr_flight_init();
     sr_flight_set_thread_source(sched_flight_thread_source);
+    sr_watch_set_thread_source(sched_current_uid);
     sr_aot_return_boundaries_reset();
     for (int i = 0; i < MAXTHREADS; i++)
         sr_aot_return_boundary_stack_destroy(&s_tcb[i].aot_return_boundary_stack);
