@@ -81,7 +81,6 @@ static const uint32_t sr_hle_unverified_nids[69] = {
     0xd1f59fdbu,
     0xd5a229c9u,
     0xdba273fau,
-    0xe855bf76u,
     0xf6107f00u,
     0xf7d13214u,
     0xf983b186u,

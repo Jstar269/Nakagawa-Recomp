@@ -16213,6 +16213,84 @@ static void test_achievement_badge_cache(void) {
            "files go PASS\n");
 }
 
+/* #2744, first half: the storage for one shared Memory Stick is in the tree, and no launch uses
+   it. A package launch with no SR_MEMSTICK still gets <saves>/<DISC_ID>, the folder the Saves
+   page works on (Back up, Restore, Add a save, Open folder, Remove), whatever the layout record
+   says, and preparing a launch makes none of the shared layout. This fails when the launch root
+   moves to the shared stick before the Saves page does. */
+static void assert_package_launch_root_is_the_saves_page_folder(const GameRecord *game,
+                                                                 const char *runtime_root) {
+    static const char *const cases[] = {"no layout record", "a MOVING record",
+                                        "a READY record and its stick"};
+    const char sep = nk_platform_path_separator();
+    char saves[NK_MAX_PATH], expected[NK_MAX_PATH + MAX_DISC_ID_LEN + 2];
+    NkMemstickPaths paths;
+    bool had_memstick_env;
+    char *old_memstick_env = capture_environment_value("SR_MEMSTICK", &had_memstick_env);
+    set_environment_value("SR_MEMSTICK", "");
+    assert(game && game->disc_id[0]);
+    assert(nk_platform_get_path(NK_PATH_SAVES, saves, sizeof(saves)));
+    assert(native_test_path_within(saves, native_test_get_root()));
+    assert(nk_memstick_layout_paths(saves, &paths));
+    snprintf(expected, sizeof(expected), "%s%c%s", saves, sep, game->disc_id);
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.stick));
+
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (i != 0u) {
+            NkMemstickLayout layout;
+            assert(nk_memstick_layout_init(&layout, i == 1u ? NK_MEMSTICK_STATE_MOVING
+                                                            : NK_MEMSTICK_STATE_READY, "test"));
+            assert(nk_memstick_layout_write(saves, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+            nk_memstick_layout_free(&layout);
+            if (i == 2u) assert(nk_platform_mkdir_p(paths.stick));
+        }
+        NkLaunchSession session;
+        NkResult prepared = nk_launch_prepare_session(&session, game, runtime_root);
+        if (prepared != NK_OK) {
+            fprintf(stderr, "default launch root, %s: prepare failed: %s\n", cases[i],
+                    session.last_error);
+        }
+        assert(prepared == NK_OK && session.package_launch);
+
+        /* The Saves page's folder is <saves>/<DISC_ID>, and the launch root is that folder. */
+        char folder[NK_MAX_PATH], folder_real[NK_MAX_PATH], launch_real[NK_MAX_PATH];
+        assert(player_app_save_folder(game, folder, sizeof(folder)));
+        assert(strcmp(folder, expected) == 0);
+        /* Preparing the launch made its root; a folder that does not exist is compared as named. */
+        if (!nk_platform_real_path(folder, folder_real, sizeof(folder_real))) {
+            snprintf(folder_real, sizeof(folder_real), "%s", folder);
+        }
+        if (!nk_platform_real_path(session.memstick_root, launch_real, sizeof(launch_real))) {
+            snprintf(launch_real, sizeof(launch_real), "%s", session.memstick_root);
+        }
+        if (strcmp(launch_real, folder_real) != 0) {
+            fprintf(stderr, "default launch root, %s: the launch uses %s, the Saves page %s\n",
+                    cases[i], launch_real, folder_real);
+        }
+        assert(strcmp(launch_real, folder_real) == 0);
+        nk_launch_stop(&session);
+
+        /* Preparing a launch makes nothing of the shared layout. */
+        if (i == 0u) {
+            assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.stick));
+        }
+        assert(nk_platform_path_missing(paths.staging) &&
+               nk_platform_path_missing(paths.migration) &&
+               nk_platform_path_missing(paths.kept_copies) &&
+               nk_platform_path_missing(paths.lock) && nk_platform_path_missing(paths.claims));
+    }
+
+    /* Leave the profile as it was found: later cases start with no layout record. */
+    assert(nk_remove_utf8(paths.record) == 0);
+    assert(nk_platform_remove_empty_dir(paths.stick));
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.record_temp) &&
+           nk_platform_path_missing(paths.stick));
+    restore_environment_value("SR_MEMSTICK", old_memstick_env, had_memstick_env);
+    free(old_memstick_env);
+    printf("[PLAYER_STATE_TEST] a package launch's default root is the Saves page's "
+           "<saves>/<DISC_ID>, with no layout record, MOVING and READY PASS\n");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -21383,6 +21461,9 @@ int main(int argc, char **argv) {
         char slot_sentinel[NK_MAX_PATH + 64];
         slot_sentinel[0] = '\0';
 
+        /* Before anything here makes a save folder: the default root itself (#2744). */
+        assert_package_launch_root_is_the_saves_page_folder(&rep->games[0], user_root);
+
         /* The per-disc save slot is created here, inside this run's temporary
            root, as the pre-existing state the repeat contract starts from. A
            sentinel file in it must still exist after the second launch. Launch
@@ -22344,14 +22425,15 @@ int main(int argc, char **argv) {
            hidden for the rest of the session, and the next launch reads its own path. */
         {
             static const struct {
-                bool vulkan_started, gpu_ge_started;
+                bool vulkan_started, gpu_ge_started, vulkan_cpu;
                 NkRenderFallback fallback;
                 const char *names;
             } forced[] = {
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
-                {true, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
-                {true, true, NK_RENDER_FALLBACK_NONE, NULL},
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
+                {true, false, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
+                {true, true, true, NK_RENDER_FALLBACK_VULKAN_CPU, "Vulkan is running on the CPU"},
+                {true, true, false, NK_RENDER_FALLBACK_NONE, NULL},
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
             };
             bool render_ok = true;
             for (size_t f = 0; f < sizeof(forced) / sizeof(forced[0]); ++f) {
@@ -22362,7 +22444,8 @@ int main(int argc, char **argv) {
                 char line[160];
                 char timed[192];
                 NkRenderPath path = nk_render_path_from_init(true, forced[f].vulkan_started,
-                                                             true, forced[f].gpu_ge_started);
+                                                             true, forced[f].gpu_ge_started,
+                                                             forced[f].vulkan_cpu);
                 set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
                 bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
                                 rep->boot_event_file_path[0] != '\0';
@@ -22393,7 +22476,8 @@ int main(int argc, char **argv) {
                             shown && heading == want_heading && text == want_text &&
                             strcmp(heading, "Drawn in software") == 0 &&
                             strstr(text, forced[f].names) != NULL &&
-                            strstr(text, "Internal resolution setting has no effect") != NULL;
+                            (strstr(text, "Internal resolution setting has no effect") != NULL) ==
+                                (forced[f].fallback != NK_RENDER_FALLBACK_VULKAN_CPU);
                         /* Another game's page has no notice for this launch. */
                         render_ok = render_ok && rep->game_count > 1 &&
                             !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
@@ -22443,8 +22527,8 @@ int main(int argc, char **argv) {
             char words[384];
             bool effects_ok = true;
             int failed_pass = -1;
-            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
-            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false);
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true, false);
+            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false, false);
             assert(rep->game_count > 1);
             assert(player_render_effects_text(0x1FFu, words, sizeof(words)) &&
                    strcmp(words, all_effects) == 0);
@@ -22558,7 +22642,7 @@ int main(int argc, char **argv) {
             const char *disc = rep->games[0].disc_id;
             const char *heading, *text;
             char line[256], event[300], old_events[NK_MAX_PATH];
-            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true, false);
             const NkRenderFallbackEvent points = {
                 NK_RENDER_EFFECT_POINT, 360u, 5000u, 20000u, 0u, 200u
             };

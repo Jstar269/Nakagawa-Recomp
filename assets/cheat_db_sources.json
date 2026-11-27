@@ -1,0 +1,17 @@
+{
+  "format": "nakagawa-cheat-db-sources",
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "cwcheat-database-plus",
+      "name": "CWCheat-Database-Plus",
+      "maintainer": "Saramagrean",
+      "licence": "No licence stated",
+      "homepage": "https://github.com/Saramagrean/CWCheat-Database-Plus-",
+      "commit": "d0cfd8d6d90f81bcf9c5d500388143200c83fecb",
+      "url": "https://raw.githubusercontent.com/Saramagrean/CWCheat-Database-Plus-/d0cfd8d6d90f81bcf9c5d500388143200c83fecb/cheat.db",
+      "size": 9257310,
+      "sha256": "acea2ee869d12b5775a076db4d62b1fcc4aa841f8d258b456dfe57d01482de96"
+    }
+  ]
+}
