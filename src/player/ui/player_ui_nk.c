@@ -732,7 +732,8 @@ static bool player_ui_settings_view(PlayerView view) {
            view == VIEW_CONFIRM_FACTORY_RESET || view == VIEW_ACCESSIBILITY_SETTINGS ||
            view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT ||
            view == VIEW_ONLINE_PLAY_CARD || view == VIEW_ONLINE_PLAY_SERVERS ||
-           view == VIEW_ACHIEVEMENTS_CARD || view == VIEW_ACHIEVEMENTS_SIGN_IN;
+           view == VIEW_ACHIEVEMENTS_CARD || view == VIEW_ACHIEVEMENTS_SIGN_IN ||
+           view == VIEW_CHEAT_DB || view == VIEW_CHEAT_DB_BUSY || view == VIEW_CHEAT_DB_CONFIRM;
 }
 
 /* The views the next UI draws: the library (router screens), the setup wizard,
@@ -893,6 +894,7 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
     PlayerUiWizardModel model;
     char size[48];
     memset(&model, 0, sizeof(model));
+    model.host = nk_platform_host_kind();
     model.step = (int)app->wizard.step;
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;
@@ -1403,6 +1405,9 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     memset(&model, 0, sizeof(model));
     switch (app->active_view) {
         case VIEW_ONLINE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE; break;
+        case VIEW_CHEAT_DB:
+        case VIEW_CHEAT_DB_BUSY: model.page = PLAYER_UI_SETTINGS_PAGE_CHEAT_DB; break;
+        case VIEW_CHEAT_DB_CONFIRM: model.page = PLAYER_UI_SETTINGS_PAGE_CHEAT_DB_CONFIRM; break;
         case VIEW_ONLINE_PLAY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY; break;
         case VIEW_ONLINE_PLAY_CARD: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD; break;
         case VIEW_ONLINE_PLAY_SERVERS:
@@ -1618,6 +1623,15 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
 #endif
     model.cheats = app->settings.cheats;
+    model.cheat_db_status = app->cheat_db.status;
+    model.cheat_db_source = app->cheat_db.source.name;
+    model.cheat_db_maintainer = app->cheat_db.source.maintainer;
+    model.cheat_db_licence = app->cheat_db.source.licence;
+    model.cheat_db_import = app->cheat_db.import_path[0] != '\0';
+    model.cheat_db_replace = app->cheat_db.replace;
+    model.cheat_db_download_available = app->cheat_db.download_available;
+    model.cheat_db_busy = app->cheat_db.busy || app->cheat_db.picking;
+    model.cheat_db_fetching_sources = app->cheat_db.fetching_sources;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
     /* The build tools and cache page says what its clear button did. */
@@ -2452,10 +2466,21 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                    Coming back from the Online play page returns to its row. */
                 if (player->last_view == VIEW_ONLINE_PLAY_SETTINGS) {
                     focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY;
+                } else if (player->last_view == VIEW_CHEAT_DB ||
+                           player->last_view == VIEW_CHEAT_DB_BUSY) {
+                    focus = PLAYER_UI_ID_SETTINGS_CHEAT_DB;
                 } else {
                     focus = app->settings.online_mode ? PLAYER_UI_ID_SETTINGS_ONLINE_MODE
                                                       : PLAYER_UI_ID_SETTINGS_DEVELOPER;
                 }
+                break;
+            case VIEW_CHEAT_DB:
+                focus = app->cheat_db.download_available && !app->cheat_db.busy
+                    ? PLAYER_UI_ID_CHEAT_DB_DOWNLOAD : PLAYER_UI_ID_CHEAT_DB_IMPORT;
+                break;
+            case VIEW_CHEAT_DB_BUSY:
+            case VIEW_CHEAT_DB_CONFIRM:
+                focus = PLAYER_UI_ID_SETTINGS_BACK;
                 break;
             case VIEW_ONLINE_PLAY_SETTINGS:
                 /* Back from the picker, its Server row; else the switch. */
@@ -3284,6 +3309,23 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     return true;
 }
 
+/* A tapped Back on the prompt bar is the system's Back, so every view goes back the way it
+   takes Android's back button (the host gives that key Esc's routes), and touch stays the
+   active input. */
+static void player_ui_push_system_back(const PlayerUiNk *player) {
+    SDL_Event back;
+    memset(&back, 0, sizeof(back));
+    back.type = SDL_EVENT_KEY_DOWN;
+    back.key.windowID = player->window != NULL ? SDL_GetWindowID(player->window) : 0u;
+    back.key.key = SDLK_AC_BACK;
+    back.key.scancode = SDL_SCANCODE_AC_BACK;
+    back.key.down = true;
+    (void)SDL_PushEvent(&back);
+    back.type = SDL_EVENT_KEY_UP;
+    back.key.down = false;
+    (void)SDL_PushEvent(&back);
+}
+
 void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused) {
     if (player == NULL) return;
     player->window_unfocused = !focused;
@@ -4098,6 +4140,7 @@ static PlayerUiLibraryModel player_ui_library_view(const PlayerUiNk *player, siz
     view.title_count = count;
     view.grid = player->library_grid;
     view.grid_count = player->library_grid_count;
+    view.host = nk_platform_host_kind();
     return view;
 }
 
@@ -4421,6 +4464,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     int pixel_h = 0;
     int window_w = 0;
     int window_h = 0;
+    NkUiPixelRect safe_px;
+    SDL_Rect safe_area;
     float display_scale;
     float point_to_pixel;
     double now_s;
@@ -4458,8 +4503,18 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     }
     display_scale = SDL_GetWindowDisplayScale(window);
     if (!(display_scale > 0.0f)) display_scale = 1.0f;
-    player->viewport.pixel_w = pixel_w;
-    player->viewport.pixel_h = pixel_h;
+    /* The UI is laid out and drawn inside the window's safe area: on Android, the app draws
+       edge to edge, and a control under the gesture-navigation area lost its taps to the
+       system's back gesture. Everywhere else the safe area is the whole window. */
+    safe_px = (NkUiPixelRect){ 0, 0, pixel_w, pixel_h };
+    if (SDL_GetWindowSafeArea(window, &safe_area)) {
+        safe_px = player_ui_safe_pixel_rect(
+            window_w, window_h, pixel_w, pixel_h,
+            (NkUiPixelRect){ safe_area.x, safe_area.y, safe_area.x + safe_area.w,
+                             safe_area.y + safe_area.h });
+    }
+    player->viewport.pixel_w = safe_px.x1 - safe_px.x0;
+    player->viewport.pixel_h = safe_px.y1 - safe_px.y0;
     player->viewport.display_scale = display_scale;
     {
         /* Prompts follow the last input device ("Match input"), and an Automatic
@@ -4472,6 +4527,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         display.high_contrast_focus = player_app_high_contrast_focus(app);
         display.interface_size_pct = app->settings.interface_size_pct;
         display.text_size_pct = app->settings.text_size_pct;
+        display.touch = nk_ui_input_touch_active(&player->input.input);
         player_ui_apply_display(player->ui, &player->viewport, &display,
                                 nk_ui_input_prompt_style(&player->input.input));
     }
@@ -4483,6 +4539,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     scale = nk_ui_scale_for_viewport(&player->viewport);
     point_to_pixel = window_w > 0 ? (float)pixel_w / (float)window_w
                                   : display_scale;
+    nk_ui_sdl_input_set_event_origin(&player->input, (float)safe_px.x0 / point_to_pixel,
+                                     (float)safe_px.y0 / point_to_pixel);
     nk_ui_sdl_input_set_event_scale(&player->input,
                                     point_to_pixel / scale.density);
     nk_ui_set_viewport(player->ui, &player->viewport);
@@ -4916,6 +4974,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             }
             player_ui_title_art(player, app, (size_t)index, true);
             memset(&model, 0, sizeof(model));
+            model.host = nk_platform_host_kind();
             model.title = &player->titles[index];
             model.title_index = (size_t)index;
             if (app->settings.achievements_enabled) {
@@ -5389,6 +5448,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
     player_ui_secret_draw(player, scale, now_s);
     draw_list = nk_ui_end(player->ui);
+    if (nk_ui_take_prompt_back(player->ui)) player_ui_push_system_back(player);
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     if (g_title_achievement_count) {
         player_ui_title_report_achievement_rows(draw_list, g_title_achievement_count,
@@ -5434,8 +5494,18 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         (void)SDL_SetRenderDrawColor(renderer, (Uint8)(page >> 24), (Uint8)(page >> 16),
                                      (Uint8)(page >> 8), 255u);
     }
-    (void)SDL_RenderClear(renderer);
-    if (!nk_ui_sdlr_render(player->backend, draw_list)) return false;
+    (void)SDL_RenderClear(renderer);   /* the whole window, the viewport aside */
+    {
+        SDL_Rect ui_rect = { safe_px.x0, safe_px.y0, safe_px.x1 - safe_px.x0,
+                             safe_px.y1 - safe_px.y0 };
+        bool inset = ui_rect.x != 0 || ui_rect.y != 0 || ui_rect.w != pixel_w ||
+                     ui_rect.h != pixel_h;
+        bool drawn;
+        if (inset) (void)SDL_SetRenderViewport(renderer, &ui_rect);
+        drawn = nk_ui_sdlr_render(player->backend, draw_list);
+        if (inset) (void)SDL_SetRenderViewport(renderer, NULL);
+        if (!drawn) return false;
+    }
     SDL_RenderPresent(renderer);
     return true;
 }

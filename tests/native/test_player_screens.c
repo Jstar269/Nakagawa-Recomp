@@ -1235,7 +1235,7 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
            this page pushed the prompt bar off the window. The render case adds #2151's notice
-           with the longer of its two sentences (player_render_notice_text); the effects case
+           with the longest of its sentences (player_render_notice_text); the effects case
            the longest sentence player_render_effects_text writes, every effect named. The
            font note case is the Authentic page with the font note (player_app_font_note). */
         static PlayerUiTitle fixture;
@@ -4927,8 +4927,7 @@ static void test_settings_pages(void) {
               strstr(dump, "thumbnails.libretro.com") != NULL,
           "Online and developer offers Discord status and opt-in cover art, off by default");
     {
-        /* Focus steps cleanly through every row on Online and developer, reaching both
-           Online play and Download cover art without duplicate widget IDs. */
+        /* Focus reaches every active row in order, including Cheat database. */
         static const NkUiId expected_order[] = {
             PLAYER_UI_ID_SETTINGS_DEVELOPER,
             PLAYER_UI_ID_SETTINGS_DISCORD,
@@ -4936,6 +4935,7 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
             PLAYER_UI_ID_SETTINGS_CHEATS,
+            PLAYER_UI_ID_SETTINGS_CHEAT_DB,
             PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         NkUi *ui = NULL;
@@ -4949,7 +4949,7 @@ static void test_settings_pages(void) {
             (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
             (void)nk_ui_end(ui);
             CHECK(nk_ui_focused(ui) == expected_order[step],
-                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, Cheats, and Developer log");
+                  "Down reaches every enabled Online and developer control in order");
         }
         if (ui != NULL) {
             push_nav(ui, NK_UI_DIR_LEFT);
@@ -4962,14 +4962,12 @@ static void test_settings_pages(void) {
         }
     }
     {
-        /* All six optional/standard rows active together (Online mode, Developer mode,
-           Discord status, Nickname, Online play, Download cover art) stay within the row
-           table and keep distinct focusable controls. */
+        /* Optional and standard rows fit together and keep distinct focusable controls. */
         NkUiConfig config;
         NkUiTextBackend text = screen_test_text_backend();
         PlayerUiSettingsModel six;
         const NkUiDrawList *draw = NULL;
-        static const NkUiId six_order[] = {
+        static const NkUiId full_order[] = {
             PLAYER_UI_ID_SETTINGS_ONLINE_MODE,
             PLAYER_UI_ID_SETTINGS_DEVELOPER,
             PLAYER_UI_ID_SETTINGS_DISCORD,
@@ -4977,13 +4975,14 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
             PLAYER_UI_ID_SETTINGS_CHEATS,
+            PLAYER_UI_ID_SETTINGS_CHEAT_DB,
             PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         memset(&config, 0, sizeof(config));
         config.host = NK_UI_HOST_LAUNCHER;
         config.text = &text;
         NkUi *ui = screen_ui_create(&config);
-        CHECK(ui != NULL, "create UI for 6-row Online and developer regression");
+        CHECK(ui != NULL, "create UI for the populated Online and developer layout");
         if (ui != NULL) {
             set_test_viewport(ui, 1280, 800);
             memset(&six, 0, sizeof(six));
@@ -5006,12 +5005,13 @@ static void test_settings_pages(void) {
             CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u &&
                       strstr(dump, "\"ONLINE MODE: ON\"") != NULL &&
                       strstr(dump, "\"ONLINE PLAY: ON (SOCOM.CC)\"") != NULL &&
-                      strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL,
-                  "all 6 rows on Online and developer render together cleanly");
-            for (size_t step = 0u; step < sizeof(six_order) / sizeof(six_order[0]); ++step) {
-                CHECK(nk_ui_focused(ui) == six_order[step],
-                      "6-row Online and developer focus visits every control in order");
-                if (step + 1u < sizeof(six_order) / sizeof(six_order[0])) {
+                      strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL &&
+                      strstr(dump, "\"CHEAT DATABASE: OPEN\"") != NULL,
+                  "the optional and standard Online and developer rows fit together");
+            for (size_t step = 0u; step < sizeof(full_order) / sizeof(full_order[0]); ++step) {
+                CHECK(nk_ui_focused(ui) == full_order[step],
+                      "the populated Online and developer layout visits every control in order");
+                if (step + 1u < sizeof(full_order) / sizeof(full_order[0])) {
                     push_nav(ui, NK_UI_DIR_DOWN);
                     nk_ui_begin(ui, 0.0);
                     (void)player_ui_screen_settings(ui, &six);
@@ -5023,7 +5023,7 @@ static void test_settings_pages(void) {
             (void)player_ui_screen_settings(ui, &six);
             (void)nk_ui_end(ui);
             CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_SETTINGS_BACK,
-                  "Left from Developer log reaches Back in 6-row Online and developer layout");
+                  "Left from Developer log reaches Back in the populated layout");
             nk_ui_destroy(ui);
         }
     }
@@ -11666,6 +11666,202 @@ static void test_input_chip_words(void) {
           "any other pad is a controller");
 }
 
+/* Android is a phone, tablet, headset or handheld, not "this PC", and its window takes no
+   dropped files: on it the launcher's main path says "this device" and offers no drop. The
+   host comes in the model (nk_platform_host_kind at run time), so both wordings run here. */
+/* The launcher draws inside the window's safe area (#3215): an Android app draws edge to edge,
+   and a footer control under the 78 px gesture-navigation inset lost its taps to the system's
+   back gesture. The area is scaled from window points to output pixels and rounded inward. */
+static void test_safe_area_pixel_rect(void) {
+    NkUiPixelRect r;
+    /* A desktop window: the safe area is the whole window, so nothing moves. */
+    r = player_ui_safe_pixel_rect(1280, 720, 1280, 720, (NkUiPixelRect){ 0, 0, 1280, 720 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 1280 && r.y1 == 720, "a whole-window safe area");
+    /* A phone in landscape, 2342 x 1080 pixels: a status-bar inset at the top and the
+       gesture-navigation inset at the bottom. */
+    r = player_ui_safe_pixel_rect(2342, 1080, 2342, 1080, (NkUiPixelRect){ 0, 161, 2342, 1002 });
+    CHECK(r.x0 == 0 && r.y0 == 161 && r.x1 == 2342 && r.y1 == 1002,
+          "the system-bar and gesture insets are left out");
+    /* Points to pixels at 2x, with odd edges rounded inward. */
+    r = player_ui_safe_pixel_rect(1000, 500, 1999, 1000, (NkUiPixelRect){ 31, 41, 969, 461 });
+    CHECK(r.x0 == 62 && r.y0 == 82 && r.x1 == 1937 && r.y1 == 922,
+          "scaled to the output and rounded inward");
+    /* Out of range is kept inside the output; nothing left, or no size, is the whole. */
+    r = player_ui_safe_pixel_rect(800, 600, 800, 600, (NkUiPixelRect){ -20, -5, 900, 700 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 800 && r.y1 == 600, "kept inside the output");
+    r = player_ui_safe_pixel_rect(800, 600, 800, 600, (NkUiPixelRect){ 400, 300, 400, 600 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 800 && r.y1 == 600, "an empty safe area is the whole");
+    r = player_ui_safe_pixel_rect(0, 600, 800, 600, (NkUiPixelRect){ 10, 10, 20, 20 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 800 && r.y1 == 600, "a window with no size is the whole");
+}
+
+static void test_host_words_on_android(void) {
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUiConfig config;
+    NkUi *ui;
+    PlayerUiLibraryModel library;
+    PlayerUiWizardModel wizard;
+    PlayerUiTitleModel title;
+    static char dump[CASE_DUMP_CAP];
+    const char *frame;
+    int step;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create a UI for the host's words");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    CHECK(player_ui_host_is_pc(NK_HOST_WINDOWS) && player_ui_host_is_pc(NK_HOST_LINUX) &&
+              player_ui_host_is_pc(NK_HOST_MACOS) && !player_ui_host_is_pc(NK_HOST_ANDROID),
+          "Windows, Linux and macOS are PCs; Android is not");
+
+    memset(&library, 0, sizeof(library));
+    library.logical_width = 1280.0f;
+    library.logical_height = 800.0f;
+    library.titles = k_demo_only_titles;
+    library.title_count = sizeof(k_demo_only_titles) / sizeof(k_demo_only_titles[0]);
+    library.page_size = player_ui_library_page_size_with_demos(1280.0f, 800.0f, 2u,
+                                                               &library.columns);
+    (void)library_frame_dump(ui, &library, NULL);
+    frame = library_frame_dump(ui, &library, NULL);
+    CHECK(strstr(frame, "ready to play on this PC.") != NULL &&
+              strstr(frame, "Or drop an .iso onto this window.") != NULL &&
+              strstr(frame, "\"TEST THIS PC\"") != NULL,
+          "a PC's empty library says this PC and offers the drop");
+    library.host = NK_HOST_ANDROID;
+    (void)library_frame_dump(ui, &library, NULL);
+    frame = library_frame_dump(ui, &library, NULL);
+    CHECK(strstr(frame, "ready to play on this device.") != NULL &&
+              strstr(frame, "this PC") == NULL && strstr(frame, "THIS PC") == NULL &&
+              strstr(frame, "drop an .iso") == NULL && strstr(frame, "this window") == NULL &&
+              strstr(frame, "\"TEST THIS DEVICE\"") != NULL,
+          "on Android the empty library says this device and offers no drop");
+
+    for (step = 0; step <= 2; step += 2) { /* welcome, then choose a disc */
+        memset(&wizard, 0, sizeof(wizard));
+        wizard.step = step;
+        wizard.logical_width = 1280.0f;
+        wizard.logical_height = 800.0f;
+        wizard.host = NK_HOST_ANDROID;
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_wizard(ui, &wizard);
+        (void)end_frame(ui);
+        (void)dump_frame(ui, dump, sizeof(dump));
+        CHECK(strstr(dump, "this PC") == NULL && strstr(dump, "A PC ") == NULL &&
+                  strstr(dump, "this window") == NULL && strstr(dump, "drop an") == NULL,
+              "on Android the wizard never says this PC, a PC or this window");
+        if (step == 0) {
+            CHECK(strstr(dump, "stages its files on this device") != NULL &&
+                      strstr(dump, "Your games stay on this device.") != NULL &&
+                      strstr(dump, "A device with a recent graphics driver") != NULL &&
+                      strstr(dump, "Touch, a controller, or a keyboard and mouse") != NULL,
+                  "on Android the welcome step names the device and its inputs");
+        } else {
+            CHECK(strstr(dump, "\"Choose a disc image below.\"") != NULL,
+                  "on Android the choose step only says to choose");
+        }
+        wizard.host = NK_HOST_WINDOWS;
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_wizard(ui, &wizard);
+        (void)end_frame(ui);
+        (void)dump_frame(ui, dump, sizeof(dump));
+        CHECK(step == 0 ? strstr(dump, "Your games stay on this PC.") != NULL &&
+                              strstr(dump, "Keyboard and mouse, or a controller") != NULL
+                        : strstr(dump, "or drop an .iso file onto this window.") != NULL,
+              "a PC's wizard keeps its words");
+    }
+
+    memset(&title, 0, sizeof(title));
+    title.title = &k_titles[0];
+    title.logical_width = 1280.0f;
+    title.logical_height = 800.0f;
+    title.host = NK_HOST_ANDROID;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_title(ui, &title);
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "Built for this device and ready to play.") != NULL &&
+              strstr(dump, "this PC") == NULL,
+          "on Android a ready package is built for this device");
+    title.host = NK_HOST_WINDOWS;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_title(ui, &title);
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "Built for this PC and ready to play.") != NULL,
+          "a PC's ready package is built for this PC");
+    nk_ui_destroy(ui);
+}
+
+/* With touch, the top bar's chip says TOUCH and the library's prompt bar offers FIND and
+   SETTINGS as buttons, with no key glyphs, MOVE or OPEN: a tap on SETTINGS opens Settings
+   as F1 and Start do. */
+static void test_library_touch_prompts(void) {
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUiConfig config;
+    NkUiPrefs prefs;
+    NkUi *ui;
+    PlayerUiLibraryModel library;
+    PlayerUiAction action;
+    NkUiRect settings;
+    NkUiEvent tap;
+    const char *frame;
+    /* The library's prompt bar, and its fourth prompt (nk_ui_prompt_bar's ids). */
+    const NkUiId settings_prompt =
+        nk_ui_child_id(NK_UI_ID(NK_UI_ID_SCREEN_LIBRARY, 0x000040u), 16u + 3u * 4u);
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create a UI for the touch prompts");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    memset(&library, 0, sizeof(library));
+    library.logical_width = 1280.0f;
+    library.logical_height = 800.0f;
+    library.titles = k_titles;
+    library.title_count = sizeof(k_titles) / sizeof(k_titles[0]);
+    library.page_size = player_ui_library_page_size(1280.0f, 800.0f, &library.columns);
+    memset(&prefs, 0, sizeof(prefs));
+    prefs.reduce_motion = true;
+    prefs.prompt_style = NK_UI_PROMPT_KEYCAPS;
+    nk_ui_set_prefs(ui, &prefs);
+    (void)library_frame_dump(ui, &library, NULL);
+    frame = library_frame_dump(ui, &library, NULL);
+    CHECK(strstr(frame, "\"KEYBOARD AND MOUSE\"") != NULL && strstr(frame, "\"MOVE\"") != NULL,
+          "keys: the chip and the glyph prompts");
+    CHECK(nk_ui_element_rect(ui, nk_ui_child_id(settings_prompt, 1u), &settings),
+          "keys: SETTINGS has its key's glyph");
+    prefs.touch = true;
+    nk_ui_set_prefs(ui, &prefs);
+    (void)library_frame_dump(ui, &library, NULL);
+    frame = library_frame_dump(ui, &library, NULL);
+    CHECK(strstr(frame, "\"TOUCH\"") != NULL && strstr(frame, "KEYBOARD AND MOUSE") == NULL,
+          "touch: the chip says TOUCH");
+    CHECK(strstr(frame, "\"FIND\"") != NULL && strstr(frame, "\"SETTINGS\"") != NULL &&
+              strstr(frame, "\"MOVE\"") == NULL,
+          "touch: FIND and SETTINGS are offered, MOVE is not");
+    CHECK(!nk_ui_element_rect(ui, nk_ui_child_id(settings_prompt, 1u), &settings),
+          "touch: no key glyph");
+    CHECK(nk_ui_element_rect(ui, settings_prompt, &settings) && settings.y > 700.0f &&
+              settings.x + settings.w <= 1280.0f,
+          "touch: the SETTINGS button sits in the prompt bar at the bottom");
+    memset(&tap, 0, sizeof(tap));
+    tap.type = NK_UI_EV_POINTER;
+    tap.x = settings.x + settings.w * 0.5f;
+    tap.y = settings.y + settings.h * 0.5f;
+    tap.down = true;
+    nk_ui_push_event(ui, &tap);
+    tap.down = false;
+    nk_ui_push_event(ui, &tap);
+    (void)library_frame_dump(ui, &library, &action);
+    CHECK(action.kind == PLAYER_UI_ACTION_NONE, "the tap's own frame opens nothing yet");
+    (void)library_frame_dump(ui, &library, &action);
+    CHECK(action.kind == PLAYER_UI_ACTION_OPEN_SETTINGS, "the next frame opens Settings");
+    nk_ui_destroy(ui);
+}
+
 /* The category -> player tier table in scr_title.c and the "Status words"
    table in docs/COMPATIBILITY.md say the same thing, row for row (#1297). */
 static void test_tier_table_matches_the_docs(void) {
@@ -12568,6 +12764,9 @@ int main(int argc, char **argv) {
     test_disc_verify_line_badge_and_note();
     test_binding_labels_fit();
     test_input_chip_words();
+    test_host_words_on_android();
+    test_safe_area_pixel_rect();
+    test_library_touch_prompts();
     test_build_bar_shows_compiled_parts();
     test_library_demos();
     test_library_centres_in_a_wide_window();

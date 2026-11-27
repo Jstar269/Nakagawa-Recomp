@@ -176,7 +176,12 @@ adb logcat -s nakagawa nakagawa-title SDL
 `<app files>` is `/data/user/0/io.github.jstar269.nakagawa/files`. Add
 `--esa env "SR_GESTAT=1,SR_EXIT_AT_VBLANK=600"` for the runtime's frame counters and a bounded
 run. The runtime's and the player's standard output and error go to the system log under the
-tags `nakagawa-title` and `nakagawa`.
+tags `nakagawa-title` and `nakagawa`, at the info level. The launcher also writes its own to
+`<app files>/Nakagawa/logs/player-output.txt`, in the app's own folder: each start sets the
+earlier file aside as `player-output.1.txt` (up to `player-output.4.txt`), and a file that reaches
+1 MiB is set aside the same way. That file has every line even on a device whose firmware keeps
+no info lines in its system log. A title started from the launcher writes to the run log the
+launcher names in the same `logs` folder.
 
 `adb install --abi arm64-v8a` installs the arm64 libraries instead, which an x86_64 Google APIs
 image runs through its ARM translation layer: a functional check of the arm64 build, not a
@@ -260,9 +265,11 @@ needs route B.
 - **Rotate** the phone while the demo runs.
 - **Fold and unfold** while the demo runs. The screen size changes, so the presenter has to
   recreate its swapchain.
-- **Background and return.** Press Home while the demo runs, wait ten seconds, and switch back.
-  In the emulator the demo kept running unseen and did not draw again after returning (the
-  Lifecycle row below). Report what the phone does.
+- **Background and return.** Press Home while the demo runs, wait ten seconds, and switch back;
+  then do it once more. Before the presenter replaced a lost surface, the demo in the emulator
+  kept running unseen and did not draw again after returning. With that change (the Lifecycle
+  row below) the picture should come back, but no emulator or device has run it yet. Report
+  whether the picture comes back after each return.
 - The same rotate, fold and background steps on the launcher.
 
 ### What to report
@@ -281,6 +288,16 @@ adb logcat -d -v time -s nakagawa nakagawa-title SDL > nakagawa-android.log
 The `-s` filter keeps only the launcher's, the title runtime's and SDL's lines, so other apps'
 lines and the rest of the system log stay out. Do not attach a full `adb logcat` or a bug report
 from Developer options: those carry other apps' data and account details.
+
+Some devices' firmware keeps no info lines in the system log, so the capture above has none of
+the launcher's. The launcher's own log file has them all; a debug build lets `adb` copy it:
+
+```bash
+adb exec-out run-as io.github.jstar269.nakagawa cat files/Nakagawa/logs/player-output.txt > player-output.txt
+```
+
+The run before is in `player-output.1.txt`. Read it before you attach it: it lists the
+app's own folders and the titles you added.
 
 ## Native tests on a device
 
@@ -416,7 +433,7 @@ translation, with no "isn't responding" dialog; on a device it is not yet measur
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
 | Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Only the showcase demos reach the phone, inside the APK (`nk.demos`); copying another package to it is not wired. |
 | Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the default APK; `-Pnk.toolchain` bundles them for arm64-v8a, and nothing runs them yet. |
-| Lifecycle | Measured in the emulator, `nk.demos` APK under ARM translation: after Home, reopening the app started a new launcher process and left the title stopped in the background, so recovery after the background is not measured there. Earlier, with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
+| Lifecycle | The presenter replaces a lost Vulkan surface: when Android destroys the window surface it makes a new surface and swapchain for the same window, and while the title is in the background it holds frames back instead of turning the renderer terminal. Checked by host selftests on Windows and Linux, and in the emulator (`nk.demos` APK under ARM translation, software GPU; no device): after Home and a return to the title's own task (Recents, or `am start` of `TitleActivity`), and after screen off and on, the picture comes back with one replacement line each time, where the build before this change went terminal (`swapchain acquire failed`) and stayed black. Reopening the app from its launcher icon after Home starts a second launcher instance and leaves the title stopped in the background. Rotation resizes the same surface and does not use this path. Pausing the guest, its audio and its clock in the background is not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
 | Video | The FFmpeg H.264 subset builds for Android; it has not been run on a device. |
 | Devices | The APK has run only in the emulator. The native test set has run on one physical arm64 device, an Android 16 handheld with a Snapdragon 7 Gen 4-class SoC ([Native tests on a device](#native-tests-on-a-device)). Memory and API floors have not been measured. |

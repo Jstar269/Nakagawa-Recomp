@@ -25,7 +25,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over four shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
-| Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all four groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
+| Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all six groups; the player group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
 | Pull request, full run, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
 | Marked Ready (`ready_for_review`) | a new run on the head the Draft's run covered: the quick checks again when the head runs light, the path-applicable jobs when it runs full | as for that tier |
 | Workflow/CI configuration | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
@@ -57,9 +57,10 @@ change, a manual run, the nightly schedule, a merge group) used to need 23 jobs,
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
 shard makes 16, a fourth Windows group makes 17, the short coverage upload job
-(`coverage_upload`), which starts only after the Python shards end, makes 18, two more `native_tools` parts (#3166) make 20, and installer and
+(`coverage_upload`), which starts only after the Python shards end, makes 18, two more `native_tools` parts (#3166) make 20, two more Windows
+groups (#3166) make 22, and installer and
 Windows-runtime changes add one path-gated Windows installer job. The nightly schedule and a manual
-run add the informational C coverage job (`c_coverage`): 22 jobs in all, with the installer job
+run add the informational C coverage job (`c_coverage`): 24 jobs in all, with the installer job
 they also run. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
@@ -85,7 +86,7 @@ The jobs:
 | `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | 5 parts since #3166 ([Native gates in parallel parts](#native-gates-in-parallel-parts)): `core`, `translation`, `gpu`, `player`, `routes`, expected 6.4-12.9 min |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
-| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
+| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7), medians 7.3-25.0 min over the 20 full runs of 2026-11-25 to 2026-11-26 (smoke 25.0, selftests 20.1, routes 13.6, ladder-fuzz 7.3); since #3166, 6 groups, expected 9.3-13.6 min (smoke-ladder-fuzz 13.1, player 10.1, homebrew 10.5, cosim 9.3, selftests 12.4, each the sum of its steps' medians, about half a minute under a whole job; routes unchanged at its measured 13.6), not yet measured |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged on a full run; does not run on a quick one |
@@ -106,9 +107,9 @@ The jobs:
   artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
   Under the same condition, the job then builds the two homebrew fixtures
   (`tests/fixtures/pspdev_phase5`, `tests/fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
-  for the Windows `smoke` part (#2143). `BUILD_PROFILE_ZERO` also holds for `run_installer`:
+  for the Windows `homebrew` part (#2143). `BUILD_PROFILE_ZERO` also holds for `run_installer`:
   an installer-only change (`assets/installer/**`, say) starts the Windows job with
-  `run_python` and `run_windows` both false, and its `smoke` and `routes` parts download
+  `run_python` and `run_windows` both false, and its `homebrew` and `routes` parts download
   this job's artifacts.
   The Python, native and Windows jobs wait for this job as before; native now also waits for
   the fixture builds: about 25 seconds for the profile-zero fixture, plus a few seconds for
@@ -116,9 +117,9 @@ The jobs:
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
   about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
-- **Windows.** The five parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
-  and run in four matrix groups: `smoke`, `routes`, `ladder-fuzz` (ladder, fuzz)
-  and `selftests`. A group runs the shared setup and the runtime-object
+- **Windows.** The eight parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
+  and run in six matrix groups: `smoke-ladder-fuzz` (smoke, ladder, fuzz), `player`, `homebrew`,
+  `routes`, `cosim` and `selftests`. A group runs the shared setup and the runtime-object
   compile gate once, then its parts in the workflow's step order. Parts in one group share the
   checkout and its build tree. The ladder builds under `build/platform-ladder`, the fuzzer under
   `build/windows-runtime`. The synthetic VFPU fuzzer runs once over every case and fails unless it
@@ -133,11 +134,26 @@ The jobs:
   (79 % and 62 % hits; the 20-minute run had 85 %). Neither
   uses what the other builds: `native-core-tests` and `profile-zero-e2e` build their own inputs,
   and the player targets build the libchdr archive that `native-core-tests` used to leave behind
-  (a Make prerequisite). The compiler cache is keyed on the group, so after a change to the groups
+  (a Make prerequisite). Over the 20 newest full runs before #3166 (2026-11-25 to 2026-11-26),
+  the `smoke` group had grown to a median of 25.0 minutes, the longest job of a full run, and
+  `windows_installer` waits for every group; `selftests` took 20.1. #3166 made the player steps,
+  the homebrew import routes and the cosimulation, snapshot and verify steps the parts `player`,
+  `homebrew` and `cosim`, each a group of its own, and put `smoke` in one group with the ladder
+  and the fuzzer; no step moved in the workflow and no command changed. From those runs' step
+  medians plus the shared setup, the groups are expected to take `smoke-ladder-fuzz` 13.1
+  minutes, `player` 10.1, `homebrew` 10.5, `cosim` 9.3 and `selftests` 12.4, and `routes` stays at its measured 13.6; no
+  hosted run has measured the layout yet. Steps that read what another step builds share its
+  part: the staged production smoke follows the production smoke (`smoke`), and the installer
+  package and the staging smoke use `build/nakagawa_player.exe` from the player build
+  (`player`). The homebrew route tests build their own player under a scratch `BUILD_ROOT`,
+  `display-smoke-run` builds its own guests, and the cosimulation, snapshot, verify and mutant
+  targets build their own inputs. The compiler cache is keyed on the group, so after a change to the groups
   a group restores only an older entry under its name, if one is left, until a run on `main` has
-  saved a current one. When `run_installer` applies, the smoke group stages the already-built
+  saved a current one; the new `smoke-ladder-fuzz`, `player`, `homebrew` and `cosim` groups have
+  none, so their first runs compile without a restored cache. When `run_installer` applies, the
+  player group stages the already-built
   player and its runtime closure into a package artifact; an installer-only change therefore
-  runs all four Windows groups, and a failed staging or upload step fails `windows_runtime`.
+  runs all six Windows groups, and a failed staging or upload step fails `windows_runtime`.
   The separate `windows_installer`
   job downloads that artifact, downloads the locked Inno Setup (up to three attempts) and checks its
   SHA-256 before a silent `/CURRENTUSER` install under the runner temp folder, and runs
@@ -157,19 +173,21 @@ only when `run_installer` is true. The Markdown lint, the main smoke and the fix
 two always-required jobs they now belong to, so `tools/ci_required.py` no longer takes a result
 or run flag of their own. Each merged job's `timeout-minutes` covers its parts: hygiene 35
 (15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part plus the own
-limit of a step added to a part since (smoke 40 with the homebrew import routes' 15, routes
-25, ladder-fuzz 75, selftests 25), and each Python shard 60, twice the former 30 because it
+limit of each step in it (smoke-ladder-fuzz 75, player 25, homebrew 40 with the homebrew import
+routes' 15, routes 25, cosim 25, selftests 45 with the Windows-only Python tests' 20), and each Python shard 60, twice the former 30 because it
 does about twice the work.
 
 The trade-offs: a step that fails stops the later steps of its own job, so a pull request that
-fails, for example, the Windows smoke part does not learn about its routes part in the same run
+fails, for example, the Windows smoke part does not learn about its ladder part in the same run
 (the Markdown lint is the exception above). A Python shard now takes about as long as the old
 slowest shard, and the longest Windows group about 13 minutes instead of 10-12, which is still
 shorter than a Python shard, so a run on idle runners takes about as long as before, and less
-time waiting when other runs are queued.
+time waiting when other runs are queued. The smoke group later grew to the 25.0-minute median
+above; since #3166 the longest Windows groups are expected at about 13 to 14 minutes (`routes` and `smoke-ladder-fuzz`), for two
+more Windows runners per run.
 `tools/test_public_ci_wiring.py` (`PublicExportJobTests`, `WindowsRuntimePartitionTests`)
-pins the merged jobs: every former step with its command and condition, its order, and every
-Windows part in exactly one group.
+pins the merged jobs: every former step with its command and condition, its order, every
+Windows step in exactly one pinned part, and every Windows part in exactly one group.
 
 #### Tests-only changes
 
@@ -486,8 +504,8 @@ gate runs in exactly one part with the command it had in the serial job:
   fails the step. The nightly schedule also
   runs `gpu-coherence-twin-mutants` on lavapipe: its fourteen mutants each build their own
   coherence selftest, which is too long for every run.
-- `player`: present pacing, the player UI tests and regressions, the CMake player, the
-  showcase and the two player smokes that stage its ISO.
+- `player`: present pacing, the player UI tests and regressions, the CMake player and its
+  Release build, the showcase and the two player smokes that stage its ISO.
 
 The `routes` part builds the pinned PSPSDK `gu-cube` sample offline and runs it through a fresh
 native player profile under Xvfb and lavapipe. It checks the refused filename, package validation,
@@ -659,7 +677,7 @@ counted as a kill. Both are source-owned and need no game input. See
 [`tests/fixtures/cosim/README.md`](../tests/fixtures/cosim/README.md) for the comparison contract and the
 limits of the evidence.
 
-Both hosts run `snapshot-selftest` (#1842): the Windows job in its `selftests` part and the Linux
+Both hosts run `snapshot-selftest` (#1842): the Windows job in its `cosim` part and the Linux
 `native_tools` job in its `translation` part. It builds `src/rt/snapshot_runner.c` against a
 source-owned synthetic module (`tests/fixtures/snapshot/`), runs each case's translated function and
 the reference interpreter in `src/ref` from the same snapshot, and requires the exact verdict
@@ -809,10 +827,11 @@ player UI event and recovery flows, which are UI evidence rather than staging ev
 harness (`tests/native/test_player_ui.py`) forces SDL's dummy video and software render drivers for
 every player it spawns, so the gate is headless without any step environment. The target runs the
 suite as four parallel shards (`PLAYER_UI_SHARDS`, `NAKAGAWA_PLAYER_UI_SHARD`) that together run
-every test exactly once; each test already uses its own temporary data roots. The CMake player is configured with CMake's default, unoptimized build type, so
-the gate covers only that configuration: an optimized Release configuration fails under the global
-`-Werror` on existing truncation warnings in `src/core/nk_launch.c`, a separate defect, and this
-job does not claim that configuration builds. Consumer ISO compatibility on Linux is not supported
+every test exactly once; each test already uses its own temporary data roots. The CMake player is configured with CMake's default, unoptimized build type, and its CTest
+and smokes run from that tree. A second step builds every target in the CMake `Release`
+configuration, in its own tree: `-O3` under the top-level `-Wall -Wextra -Werror` reports warnings
+the default build type does not, and such a break went unseen until #3134. That step compiles and
+links only; it runs no test from the Release tree. Consumer ISO compatibility on Linux is not supported
 (#306); these checks do not establish PSP hardware acceptance or interactive desktop presentation.
 
 ### GCC 16 canary
@@ -2193,7 +2212,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 20 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 22 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.
@@ -2373,7 +2392,7 @@ developer runs locally, without private inputs:
 - `windows_runtime` links the native player (`mingw32-make player`), runs
   `player-ui-tests`, executes headless native player UI regressions
   (`mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 player-ui-regressions`,
-  `smoke` part only; the harness forces SDL's dummy video and software render drivers),
+  `player` part only; the harness forces SDL's dummy video and software render drivers),
   runs the complete platform ladder
   (`mingw32-make --no-print-directory platform-ladder`), and runs
   `profile-zero-e2e` for the two profile-zero manifests. That gate
@@ -2395,7 +2414,7 @@ developer runs locally, without private inputs:
   result file, save and first rasterized frame with the values pinned in
   `tools/test_profile_zero_e2e.py` (`CROSS_HOST_DIGESTS`), so Windows and Linux must
   produce the same bytes (#306).
-  The `smoke` part runs the homebrew import route tests (#2143,
+  The `homebrew` part runs the homebrew import route tests (#2143,
   `tools/test_player_package_route.py`), on the player the tests build, through the code the
   player's library uses when a user picks a homebrew `EBOOT.PBP`
   (`player_psn_package_inspect` and `player_psn_package_convert`) and its launch
@@ -2430,14 +2449,18 @@ developer runs locally, without private inputs:
   found no Memory Stick folder in the import and the second-folder test was not stopped; with
   the launch booting the program from its disc image, the probe wrote
   `ARGV0=disc0:/PSP_GAME/SYSDIR/EBOOT.BIN` and `DATA_BYTES=-1`, and the test failed on it.
-  **Minutes added:** not yet measured on a hosted runner. Locally the step took 419 seconds
+  **Minutes added:** a median of 510 seconds on hosted runners (below). Locally the step took 419 seconds
   (Windows 11, `-j4`, a shared host, no compiler cache), most of it the player build and the
   two package builds. No compiler-cache saving is assumed: the player and its two test
   programs are each compiled and linked by one command, which the cache does not store, and
-  the builds run under a fresh temporary folder. The step's own limit is 15 minutes and the
-  `smoke` group's limit is 40, its former 25 plus those 15. The steps run in `smoke`, measured
-  at 8.1 minutes, rather than in `routes`, measured at 13.9, so that the longest Windows group
-  stays below a Python shard. The first full run records the real figure here.
+  the builds run under a fresh temporary folder. The step's own limit is 15 minutes. The steps
+  ran in `smoke`, measured at 8.1 minutes, rather than in `routes`, measured at 13.9, so that
+  the longest Windows group stayed below a Python shard, and the `smoke` group's limit was 40,
+  its former 25 plus those 15. Since #3166 they are the `homebrew` part and group, with the
+  same limit of 40. Over the 20 full runs of 2026-11-25 to 2026-11-26, in the `smoke`
+  group after its player build, the step took a median of 510 seconds and at most 554. The first
+  full run of the `homebrew` group, which starts without a restored compiler cache, records
+  the figure for the new layout here.
   The same job builds Nakagawa Font Copy (`src/psp_companion/Makefile`), the PSP app
   behind the player's font import, through its user-mode import gate; nothing from
   that build is uploaded. Public

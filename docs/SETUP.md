@@ -1260,8 +1260,9 @@ The full `make verify` command needs external trace data that is not in the repo
 ### Cheats (CWCheat files)
 
 Cheats are off unless you turn them on ([#2639](https://github.com/Jstar269/nakagawa-recomp/issues/2639)).
-The project ships no cheats and downloads none: you supply the file, as text in the CWCheat format
-that PPSSPP's per-game cheat files and `cheat.db` use.
+The project ships no cheats: you supply the file, as text in the CWCheat format that PPSSPP's
+per-game cheat files and `cheat.db` use, or you ask the player to download a community database
+(below).
 
 **Where the file goes.** One file per game, named by the disc ID without its hyphen, in the
 `cheats` folder of the user data folder (create the folder if it is not there):
@@ -1269,6 +1270,29 @@ that PPSSPP's per-game cheat files and `cheat.db` use.
 ```text
 <user data>/cheats/<DISC_ID>.ini      for example  <user data>/cheats/ULUS12345.ini
 ```
+
+**A cheat database.** A game with no file of its own reads its `_S` section of
+`<user data>/cheats/cheat.db`, a database of many games; the game's own file always wins. Settings >
+Online and developer options > **Cheat database** fills it in either of two ways:
+
+- **DOWNLOAD** (Windows) asks the project's list of sources (`assets/cheat_db_sources.json` in this
+  repository, read from its `main` branch, so the project can change a source without a release)
+  which database to fetch, then shows its name, its maintainer and its licence as stated (the
+  first and only source, CWCheat-Database-Plus by Saramagrean, states no licence), warns that
+  cheats can break a game or its saves, and asks before it replaces a `cheat.db` you already have.
+  Only your second click fetches the file. Cancel the confirmation to leave without fetching the
+  database. After you confirm, Back returns to Settings while the download finishes.
+  Each source in the list is pinned to one commit of its
+  repository with the file's exact size and SHA-256: a download that differs is refused by name
+  (`CHEAT_DB_SIZE_MISMATCH`, `CHEAT_DB_HASH_MISMATCH`) and nothing is written. The file is also
+  read by the cheat reader before it replaces anything; one with a cheat outside every game's
+  `_S` line, which would apply to every game, is refused (`CHEAT_DB_NOT_A_DATABASE`).
+- **USE MY OWN FILE** lets you pick a database from disk, then confirm its import. The player
+  checks it the same way without a download pin.
+
+Any downloaded or imported database that contains an enabled code is refused by name
+(`CHEAT_DB_NOT_A_DATABASE`). Turning a code on later means changing its `_C0` to `_C1` in
+the file, or copying the game's section into its own `<DISC_ID>.ini` and editing that.
 
 **Turning them on.** Either of:
 
@@ -1574,6 +1598,7 @@ runtime can make is listed below, and each is opt-in and off by default.
 | Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
 | Online play (ad hoc relay) | The shipped servers `socom.cc`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, `relay-sa.arenaanywhere.site` and `relay-asia.arenaanywhere.site`, a relay server you pick from PPSSPP's list (any host it names), or a server you enter yourself (`27312` lobby, `27313` data, plain TCP) | Only after you select **TURN ON** on the Online play card, which names that exact server, and only while a game that starts PSP ad hoc networking runs | The Online play card; **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) turns it off and ends the connection |
 | Online play server list | `metadata.ppsspp.org` (HTTPS) | Only while Online play is on, when you open the server picker or select **Refresh** in it | Online play being on; no download starts at start, in the background, or while Online play is off, and one already under way when you turn it off finishes but its list is thrown away |
+| Download cheat database | `raw.githubusercontent.com` (HTTPS) | Only when you select **DOWNLOAD** on **Cheat database** (Settings > Online and developer): one request for the project's list of sources, then, after you confirm the source it names, one for that database | That button and its confirmation, per download |
 
 **RetroAchievements** is off by default. Its consent card, a launcher page, names `retroachievements.org` and
 `media.retroachievements.org` and the data sent:
@@ -1670,8 +1695,14 @@ The disc check needs no connection either: Redump's PSP list ships beside the pl
 ([Disc check](COMPATIBILITY.md#updating-the-disc-list)).
 
 **Cheats** (Settings > Online and developer options, off by default) make no network connection
-either: the cheat file is one you put in the user data folder yourself
-([Cheats](#cheats-cwcheat-files)).
+either: the runtime reads only files in the user data folder ([Cheats](#cheats-cwcheat-files)).
+**Download cheat database** sends two anonymous GET requests that name themselves
+`NakagawaRecomp/CheatDatabase` and carry no ID, setting, path or anything about your games:
+`https://raw.githubusercontent.com/Jstar269/nakagawa-recomp/main/assets/cheat_db_sources.json`,
+then the pinned file the list names (today
+`https://raw.githubusercontent.com/Saramagrean/CWCheat-Database-Plus-/<commit>/cheat.db`, about
+9 MB). GitHub, which runs that host, sees your IP address as any web host does. Redirects to
+another host are refused. Nothing is uploaded, and nothing repeats on its own.
 
 **Discord status** (Settings > Online and developer, off by default) makes no network
 connection either. While a game runs, the player passes three things to the Discord app on this
@@ -1730,6 +1761,20 @@ the table and, for the source releases of the libraries built into the CPython r
 `github.com` (whose downloads redirect to `release-assets.githubusercontent.com` and
 `codeload.github.com`), `www.sqlite.org`, `sourceware.org` and `www.bytereef.org`. The player
 never passes those options.
+
+#### Adding an opt-in host or feature
+
+This is the checklist [AGENTS.md section 5](../AGENTS.md#5-private-and-public-boundaries) points to; it binds every
+network change to the player or runtime. The maintainer approves opt-in network features in principle
+(#1139, #1316, #2632); that does not authorize an upload, or any connection before the player has opted in to the
+feature, each of which needs its own maintainer decision. A host that an approved opt-in feature needs may be
+added without a separate decision when all of this holds: it is contacted only after that feature's opt-in; it
+receives nothing beyond what the feature's consent text names; and the pull request names the host and lists it
+in the feature's public issue, its consent text, `docs/SETUP.md` Network use and the allowlist test
+`tools/test_prereq_fetcher.py`. A first-run question may offer a documented opt-in feature: nothing connects
+before the player answers, and no answer means off. Each feature's public issue must name its hosts, payload,
+consent and data boundaries; before it ships it is off by default, listed in `docs/SETUP.md` Network use and in
+the allowlist test.
 
 ### Build lifecycle and cleanup targets
 

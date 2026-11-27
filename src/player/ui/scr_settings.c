@@ -2496,7 +2496,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             /* Cheats (#2639): the user's own CWCheat file; the game marks a run that applies one. */
             static const char k_cheats_sentence[] =
                 NK_UI_STR(SETTINGS_CHEATS_EXPLANATION);
-            WizardRow rows[9];
+            WizardRow rows[10];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_ONLINE_MODE), NK_UI_STR(SETTINGS_ON),
@@ -2518,7 +2518,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                             k_cover_art_sentence};
             rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_CHEATS), settings_on_off(model->cheats),
                                             k_cheats_sentence};
-            /* RetroAchievements (#1316) comes last: where it can run it adds a switch, and the
+            /* RetroAchievements (#1316): where it can run it adds a switch, and the
                rows above keep their keyboard order on every platform. */
             rows[row_count++] = (WizardRow){
                 NK_UI_STR(SETTINGS_ACHIEVEMENTS),
@@ -2538,6 +2538,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                               ? NK_UI_STR(SETTINGS_SIGNED_IN_STATUS)
                                                               : NK_UI_STR(SETTINGS_SIGN_IN_TO_CONNECT))};
             }
+            rows[row_count++] = (WizardRow){NK_UI_STR(SETTINGS_CHEAT_DB), NK_UI_STR(LIBRARY_OPEN), ""};
             /* The RetroAchievements row's button carries the account name, of any length, which
                widens the button column; while it shows, a sentence the column would cut goes
                under its button at every text size instead of ending in an ellipsis. */
@@ -2621,6 +2622,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                           ? PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS
                                           : PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS);
             }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_CHEAT_DB, SET_ID_TEXT + 0xF8u,
+                                 NK_UI_STR(SETTINGS_CHEAT_DB), NK_UI_STR(LIBRARY_OPEN), "",
+                                 false, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_OPEN_CHEAT_DB);
+            }
             nk_ui_end_container(ui);
         }
         {
@@ -2640,6 +2646,84 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             }
         }
         break;
+    case PLAYER_UI_SETTINGS_PAGE_CHEAT_DB:
+    case PLAYER_UI_SETTINGS_PAGE_CHEAT_DB_CONFIRM: {
+        const bool confirm = model->page == PLAYER_UI_SETTINGS_PAGE_CHEAT_DB_CONFIRM;
+        const NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
+        const float text_width = inner - 2.0f * NK_UI_SPACE_4;
+        nk_ui_text_role(ui, FLOW_ID_TITLE, NK_UI_STR(SETTINGS_CHEAT_DB), NK_UI_TYPE_TITLE,
+                        theme->paper);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            if (!confirm) {
+                const char *lead = model->cheat_db_download_available
+                    ? NK_UI_STR(SETTINGS_CHEAT_DB_DOWNLOAD_LEAD) : NK_UI_STR(SETTINGS_CHEAT_DB_OFFLINE);
+                nk_ui_text_role(ui, SET_ID_TEXT + 0x7D0u,
+                                nk_ui_text_break(ui, lead, &body, text_width),
+                                NK_UI_TYPE_BODY_S, theme->paper);
+                if (model->cheat_db_status && model->cheat_db_status[0]) {
+                    nk_ui_text_role(ui, SET_ID_TEXT + 0x7D1u,
+                                    nk_ui_text_break(ui, model->cheat_db_status, &body, text_width),
+                                    NK_UI_TYPE_BODY_S, theme->paper);
+                }
+            } else {
+                if (model->cheat_db_import) {
+                    nk_ui_text_role(ui, SET_ID_TEXT + 0x7D2u, NK_UI_STR(SETTINGS_CHEAT_DB_IMPORT_CONFIRM),
+                                    NK_UI_TYPE_BODY_S, theme->paper);
+                } else {
+                    char source[256];
+                    char maintainer[256];
+                    char licence[256];
+                    snprintf(source, sizeof(source), NK_UI_STR(SETTINGS_CHEAT_DB_SOURCE_FORMAT),
+                             model->cheat_db_source);
+                    snprintf(maintainer, sizeof(maintainer), NK_UI_STR(SETTINGS_CHEAT_DB_MAINTAINER_FORMAT),
+                             model->cheat_db_maintainer);
+                    snprintf(licence, sizeof(licence), NK_UI_STR(SETTINGS_CHEAT_DB_LICENCE_FORMAT),
+                             model->cheat_db_licence);
+                    const char *lines[] = {source, maintainer, licence};
+                    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
+                        nk_ui_text_role(ui, SET_ID_TEXT + 0x7D3u + i,
+                                        nk_ui_text_break(ui, lines[i], &body, text_width),
+                                        NK_UI_TYPE_BODY_S, theme->paper);
+                    }
+                }
+                nk_ui_text_role(ui, SET_ID_TEXT + 0x7D6u, NK_UI_STR(SETTINGS_CHEAT_DB_RISK),
+                                NK_UI_TYPE_BODY_S, theme->paper);
+                if (model->cheat_db_replace) {
+                    nk_ui_text_role(ui, SET_ID_TEXT + 0x7D7u, NK_UI_STR(SETTINGS_CHEAT_DB_REPLACE),
+                                    NK_UI_TYPE_BODY_S, theme->paper);
+                }
+            }
+            nk_ui_end_container(ui);
+        }
+        NkUiLayout actions = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fit(), sizing_fit(), NK_UI_SPACE_2);
+        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &actions, NULL)) {
+            if (confirm) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_CHEAT_DB_CONFIRM,
+                                 model->cheat_db_import ? NK_UI_STR(SETTINGS_CHEAT_DB_IMPORT_ACTION)
+                                                        : NK_UI_STR(SETTINGS_DOWNLOAD), 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_CONFIRM_CHEAT_DB);
+                }
+            } else if (!model->cheat_db_busy) {
+                if (model->cheat_db_download_available &&
+                    nk_ui_button(ui, PLAYER_UI_ID_CHEAT_DB_DOWNLOAD, NK_UI_STR(SETTINGS_DOWNLOAD),
+                                 NK_UI_BUTTON_PRIMARY)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_FETCH_CHEAT_DB_SOURCES);
+                }
+                if (nk_ui_button(ui, PLAYER_UI_ID_CHEAT_DB_IMPORT,
+                                 NK_UI_STR(SETTINGS_CHEAT_DB_IMPORT), 0u)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_CHOOSE_CHEAT_DB_FILE);
+                }
+            }
+            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK,
+                             confirm || model->cheat_db_fetching_sources
+                                 ? NK_UI_STR(SETTINGS_CANCEL) : NK_UI_STR(SETTINGS_BACK),
+                             confirm ? NK_UI_BUTTON_PRIMARY : 0u)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_BACK);
+            }
+            nk_ui_end_container(ui);
+        }
+        break;
+    }
     case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY: {
         /* Online play (#1139): the switch, the server, the console ID and the port offset. The
            switch never turns it on by itself: Off opens the consent card for the server shown. */

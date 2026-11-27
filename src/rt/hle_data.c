@@ -2134,8 +2134,16 @@ int io_restore_truncated_gap(Fd *f) {
     if (!sr_stream_size_u32(f->host, &end)) return 0;
     const uint32_t stop = f->off < f->truncated_size ? f->off : f->truncated_size;
     if (end >= stop) return 1;
-    return io_host_seek(f->host, end) == 0 &&
-           fwrite(f->truncated_bytes + end, 1, stop - end, f->host) == stop - end;
+    if (io_host_seek(f->host, end) != 0) return 0;
+    clearerr(f->host);
+    const uint32_t restored = (uint32_t)fwrite(f->truncated_bytes + end, 1, stop - end, f->host);
+    /* The gap itself can have made partial host progress before the guest payload. */
+    f->size = end + restored;
+    if (restored != stop - end) {
+        clearerr(f->host);
+        return 0;
+    }
+    return 1;
 }
 
 /* Host-serve a guest file from the extracted-XB data root (SR_DATAROOT).
@@ -2371,6 +2379,14 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             fclose(fp);
             return io_open_read_only_create_boundary(path);
         }
+        /* For ordinary writable files, count accepted bytes at fwrite. Keep
+         * append and read-only streams on their existing policy. */
+        const int write_counted = fp && (writing || creating) && !(flags & 0x0100u);
+        if (write_counted && setvbuf(fp, NULL, _IONBF, 0u) != 0) {
+            fprintf(stderr, "sceIoOpen: cannot configure counted host writes: %s\n", path);
+            fclose(fp);
+            return 0x80010005u;
+        }
         if (!fp) {
             if (read_only_create_exclusive_ms0) {
                 if (read_only_create_exclusive_missing) return 0x80010016u;
@@ -2477,6 +2493,14 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             fprintf(stderr, "sceIoOpen: not found: %s\n", path);
             return 0x80010002;
         }
+        /* Count an append's progress at fwrite, before a later flush can hide
+         * an accepted prefix. Ordinary files keep their existing stream policy. */
+        if ((writing || creating) && (flags & 0x0100u) &&
+            setvbuf(fp, NULL, _IONBF, 0u) != 0) {
+            fprintf(stderr, "sceIoOpen: cannot configure counted append: %s\n", path);
+            fclose(fp);
+            return 0x80010005u;
+        }
         uint32_t host_size = 0;
         if (!sr_stream_size_u32(fp, &host_size)) {
             fclose(fp);
@@ -2496,8 +2520,10 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             host_size = 0;
         }
         s_fds[slot].used = 1; s_fds[slot].host = fp; s_fds[slot].lba = 0;
+        s_fds[slot].write_counted = write_counted;
         s_fds[slot].size = host_size; s_fds[slot].off = 0;
         s_fds[slot].writable = writing || creating;
+        s_fds[slot].append = (writing || creating) && (flags & 0x0100u) != 0u;
         s_fds[slot].truncated_bytes = truncated_bytes;
         s_fds[slot].truncated_size = truncated_bytes ? truncated_size : 0u;
         return (uint32_t)slot;
@@ -3072,6 +3098,13 @@ uint32_t sr_hle_test_io_devctl_callback_at(uint32_t index) {
 void sr_hle_test_io_async_import_boundary(void) { io_async_dispatch_tick(); }
 int sr_hle_test_fd_kind(uint32_t fd) {
     return fd < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) ? (int)s_fds[fd].kind : -1;
+}
+/* Put `host` in place of a file descriptor's host stream; the previous stream, or NULL. */
+FILE *sr_hle_test_io_replace_host(uint32_t fd, FILE *host) {
+    if (!hle_fd_is_file(fd)) return NULL;
+    FILE *previous = s_fds[fd].host;
+    s_fds[fd].host = host;
+    return previous;
 }
 #endif
 #ifdef SR_HLE_THREAD_SELFTEST

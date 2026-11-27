@@ -135,6 +135,15 @@ bool nk_platform_path_missing(const char *path) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
+bool nk_platform_available_disk_bytes(const char *path, uint64_t *available) {
+    WCHAR wide[32768];
+    ULARGE_INTEGER free_bytes;
+    if (!path || !available || !utf8_to_wide(path, wide, sizeof(wide) / sizeof(wide[0])) ||
+        !GetDiskFreeSpaceExW(wide, &free_bytes, NULL, NULL)) return false;
+    *available = (uint64_t)free_bytes.QuadPart;
+    return true;
+}
+
 #define TREE_PATH_CAP 32768u
 
 /* A tree walk keeps one path buffer: each level appends "\name", works on it
@@ -2443,6 +2452,40 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name) {
        empty while the player ran (#1303). Unbuffered, each printf reaches it as one write. */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+}
+
+/* `path` with ".<n>" before its extension (from the last '.' of its last component, unless
+   that component starts with it), else at its end. Either separator ends a component. */
+static bool numbered_log_path(const char *path, unsigned n, char *out, size_t out_size) {
+    const char *leaf = path;
+    for (const char *c = path; *c; c++) {
+        if (*c == '/' || *c == '\\') leaf = c + 1;
+    }
+    const char *dot = strrchr(leaf, '.');
+    if (dot == leaf) dot = NULL;
+    size_t stem = dot ? (size_t)(dot - path) : strlen(path);
+    int written = snprintf(out, out_size, "%.*s.%u%s", (int)stem, path, n, dot ? dot : "");
+    return written > 0 && (size_t)written < out_size;
+}
+
+bool nk_platform_rotate_log_files(const char *path, unsigned keep) {
+    char from[NK_MAX_PATH];
+    char to[NK_MAX_PATH];
+    bool ok = true;
+    if (!path || !path[0] || strlen(path) >= NK_MAX_PATH) return false;
+    if (keep == 0u) return !nk_platform_file_exists(path) || nk_remove_utf8(path) == 0;
+    if (!numbered_log_path(path, keep, to, sizeof(to))) return false;
+    if (nk_platform_file_exists(to) && nk_remove_utf8(to) != 0) ok = false;
+    for (unsigned n = keep; n > 1u; n--) {
+        if (!numbered_log_path(path, n - 1u, from, sizeof(from)) ||
+            !numbered_log_path(path, n, to, sizeof(to))) {
+            return false;
+        }
+        if (nk_platform_file_exists(from) && nk_rename_utf8(from, to) != 0) ok = false;
+    }
+    if (!numbered_log_path(path, 1u, to, sizeof(to))) return false;
+    if (nk_platform_file_exists(path) && nk_rename_utf8(path, to) != 0) ok = false;
+    return ok;
 }
 
 /* Android only: a Windows process gets its environment from the process that started it. */

@@ -392,26 +392,36 @@ static void test_boot_events(void) {
    back as that path in the player. */
 static void test_render_path(void) {
     static const struct {
-        bool vulkan_asked, vulkan_started, gpu_ge_asked, gpu_ge_started;
+        bool vulkan_asked, vulkan_started, gpu_ge_asked, gpu_ge_started, vulkan_cpu;
         bool vulkan, gpu_ge;
         NkRenderFallback fallback;
         const char *line;
     } cases[] = {
         /* What the player launches with: Vulkan and the GPU GE renderer, both started. */
-        {true, true, true, true, true, true, NK_RENDER_FALLBACK_NONE,
+        {true, true, true, true, false, true, true, NK_RENDER_FALLBACK_NONE,
          "BOOT_EVENT phase=render_path presenter=vulkan ge=gpu fallback=none"},
         /* Vulkan did not start: the GDI window, and so the software GE. */
-        {true, false, true, false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER,
+        {true, false, true, false, false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER,
          "BOOT_EVENT phase=render_path presenter=gdi ge=software fallback=gdi_presenter"},
-        {true, false, false, false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER,
+        {true, false, false, false, false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER,
          "BOOT_EVENT phase=render_path presenter=gdi ge=software fallback=gdi_presenter"},
         /* The GPU GE renderer did not start in the Vulkan window. */
-        {true, true, true, false, true, false, NK_RENDER_FALLBACK_SOFTWARE_GE,
+        {true, true, true, false, false, true, false, NK_RENDER_FALLBACK_SOFTWARE_GE,
          "BOOT_EVENT phase=render_path presenter=vulkan ge=software fallback=software_ge"},
+        /* A running CPU Vulkan device is reported regardless of the GE path. */
+        {true, true, true, true, true, true, true, NK_RENDER_FALLBACK_VULKAN_CPU,
+         "BOOT_EVENT phase=render_path presenter=vulkan ge=gpu fallback=vulkan_cpu"},
+        {true, true, true, false, true, true, false, NK_RENDER_FALLBACK_VULKAN_CPU,
+         "BOOT_EVENT phase=render_path presenter=vulkan ge=software fallback=vulkan_cpu"},
+        {true, true, false, false, true, true, false, NK_RENDER_FALLBACK_VULKAN_CPU,
+         "BOOT_EVENT phase=render_path presenter=vulkan ge=software fallback=vulkan_cpu"},
+        /* Device selection alone is insufficient when Vulkan failed later in startup. */
+        {true, false, true, false, true, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER,
+         "BOOT_EVENT phase=render_path presenter=gdi ge=software fallback=gdi_presenter"},
         /* Not asked for, so no fallback: SR_GPU_GE unset, or SR_VIDEO=gdi. */
-        {true, true, false, false, true, false, NK_RENDER_FALLBACK_NONE,
+        {true, true, false, false, false, true, false, NK_RENDER_FALLBACK_NONE,
          "BOOT_EVENT phase=render_path presenter=vulkan ge=software fallback=none"},
-        {false, false, true, false, false, false, NK_RENDER_FALLBACK_NONE,
+        {false, false, true, false, false, false, false, NK_RENDER_FALLBACK_NONE,
          "BOOT_EVENT phase=render_path presenter=gdi ge=software fallback=none"},
     };
     static const char *const refused[] = {
@@ -426,7 +436,8 @@ static void test_render_path(void) {
         NkRenderPath path = nk_render_path_from_init(cases[i].vulkan_asked,
                                                      cases[i].vulkan_started,
                                                      cases[i].gpu_ge_asked,
-                                                     cases[i].gpu_ge_started);
+                                                     cases[i].gpu_ge_started,
+                                                     cases[i].vulkan_cpu);
         NkRenderPath read = {false, false, NK_RENDER_FALLBACK_COUNT};
         char line[128];
         char timed[160];

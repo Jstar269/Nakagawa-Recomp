@@ -453,11 +453,10 @@
     "status": "complete"
   },
   "0x1b839b83": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_Mp3LowLevelInit",
     "name": "sceMp3LowLevelInit",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x1c0d95a6": {
     "classification": "dedicated",
@@ -1273,7 +1272,7 @@
     "classification": "dedicated",
     "handler": "h_SasSetVolume",
     "name": "__sceSasSetVolume",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x446d8de6": {
     "classification": "dedicated",
@@ -1478,7 +1477,7 @@
     "classification": "dedicated",
     "handler": "h_SasCoreWithMix",
     "name": "__sceSasCoreWithMix",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x50c4cd57": {
     "classification": "dedicated",
@@ -3872,11 +3871,10 @@
     "status": "partial"
   },
   "0xe3ee2c81": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_Mp3LowLevelDecode",
     "name": "sceMp3LowLevelDecode",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0xe47e40e4": {
     "classification": "dedicated",

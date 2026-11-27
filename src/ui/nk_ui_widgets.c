@@ -878,6 +878,17 @@ const char *nk_ui_input_label(NkUiPromptStyle style) {
     }
 }
 
+const char *nk_ui_input_chip_label(const NkUi *ui) {
+    return nk_ui_touch_input(ui) ? NK_UI_STR(SHARED_INPUT_TOUCH)
+                                 : nk_ui_input_label(nk_ui_prompt_style(ui));
+}
+
+/* In touch mode a prompt is a button to tap, except Confirm and Move: a tap on the
+   control itself is its confirm, and touch moves no focus. */
+static bool nk_ui_prompt_tappable(NkUiPromptAction action) {
+    return action != NK_UI_PROMPT_ACT_CONFIRM && action != NK_UI_PROMPT_ACT_MOVE;
+}
+
 int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count,
                   const char *input_label, bool input_active) {
     const NkUiTheme *theme = nk_ui_theme(ui);
@@ -927,6 +938,8 @@ void nk_ui_prompt_bar(NkUi *ui, NkUiId id, const char *hint,
     NkUiLayout layout = nk_ui_row(nk_ui_grow(), nk_ui_fixed(NK_UI_PROMPT_BAR_HEIGHT - 1.0f),
                                   NK_UI_SPACE_5);
     NkUiStyle style = nk_ui_fill(theme->surface_raised, 0u, 0.0f);
+    const bool touch = nk_ui_touch_input(ui);
+    const uint32_t tap_flags = NK_UI_BUTTON_NOT_DEFAULT | NK_UI_BUTTON_POINTER_ONLY;
     size_t i;
     nk_ui_divider(ui, nk_ui_child_id(id, 1u), true);
     nk_ui_pad(&layout, 0.0f, NK_UI_GUTTER, 0.0f, NK_UI_GUTTER);
@@ -944,11 +957,17 @@ void nk_ui_prompt_bar(NkUi *ui, NkUiId id, const char *hint,
                    instead of running under them. */
                 NkUiTextStyle label = nk_ui_type(NK_UI_TYPE_LABEL, 0u);
                 float room = nk_ui_layout_width(ui) - 2.0f * NK_UI_GUTTER;
+                bool first = true;
                 for (i = 0; items != NULL && i < count; ++i) {
-                    room -= (i == 0u ? NK_UI_SPACE_5 : 18.0f) +
-                            nk_ui_prompt_glyph_size(ui, items[i].action, NK_UI_GLYPH_SIZE) +
-                            NK_UI_SPACE_2 +
-                            nk_ui_text_width(ui, nk_ui_caps(ui, items[i].label), &label);
+                    if (touch && !nk_ui_prompt_tappable(items[i].action)) continue;
+                    room -= (first ? NK_UI_SPACE_5 : 18.0f) +
+                            (touch ? nk_ui_button_width(ui, items[i].label, tap_flags)
+                                   : nk_ui_prompt_glyph_size(ui, items[i].action,
+                                                             NK_UI_GLYPH_SIZE) +
+                                         NK_UI_SPACE_2 +
+                                         nk_ui_text_width(ui, nk_ui_caps(ui, items[i].label),
+                                                          &label));
+                    first = false;
                 }
                 nk_ui_text(ui, nk_ui_child_id(id, 3u),
                            nk_ui_text_clamp(ui, hint, &text, room > 1.0f ? room : 1.0f, 1),
@@ -962,6 +981,13 @@ void nk_ui_prompt_bar(NkUi *ui, NkUiId id, const char *hint,
         for (i = 0; items != NULL && i < count; ++i) {
             NkUiId item = nk_ui_child_id(id, 16u + (uint32_t)i * 4u);
             NkUiLayout row = nk_ui_row(nk_ui_fit(), nk_ui_fit(), NK_UI_SPACE_2);
+            if (touch) {
+                if (nk_ui_prompt_tappable(items[i].action) &&
+                    nk_ui_button(ui, item, items[i].label, tap_flags)) {
+                    nk_ui_prompt_tap(ui, items[i].action);
+                }
+                continue;
+            }
             if (!nk_ui_begin_container(ui, item, &row, NULL)) {
                 continue;
             }

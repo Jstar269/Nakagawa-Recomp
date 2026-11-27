@@ -930,6 +930,195 @@ class _SynthTimingElfFixture(unittest.TestCase):
 class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
     """Verify authentic byte-identity, all 6 transform classes, fail-closed digest rejection, and AOT cache epoch."""
 
+    def test_timing_identity_preserves_positional_codegen_options(self) -> None:
+        from codegen import CodegenOptions
+
+        options = CodegenOptions(True, True)
+        self.assertTrue(options.lle_cpu)
+        self.assertTrue(options.lle_import_seam)
+        self.assertIsNone(options.timing_run_identity)
+
+    def test_timing_run_identity_observes_generated_startup(self) -> None:
+        """Run separately compiled synthetic startup registrations and the real diagnostic."""
+        if GCC is None:
+            self.skipTest("TOOLCHAIN_MISSING: needs a host compiler to run generated startup")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            elf_path = root / "fixture.elf"
+            words = dict(self.words)
+            for offset in (0, 4, 8):
+                words[0x1700 + offset] = words[0x1100 + offset]
+            words.update({0x1030: 0x0C0005C0, 0x1034: 0, 0x1038: 0x03E00008, 0x103C: 0})
+            elf = _write_synthetic_mips_elf(elf_path, words, self.entry)
+            package, symbols = self._make_package_and_symbols(elf)
+            harness = root / "startup.c"
+            harness.write_text(
+                '#include "recomp.h"\n'
+                'void sr_register_all(void);\n'
+                'void sr_register_chunk_0(void) {}\n'
+                'void sr_guest_symbols_register(const SrGuestSymbol *table, uint32_t count) '
+                '{ (void)table; (void)count; }\n'
+                'void sr_exec_span_reset(void) {}\n'
+                'int sr_exec_span_register(uint32_t start, uint32_t end) { return end > start; }\n'
+                'void sr_enhancement_register_updates(const volatile uint32_t *counter) { (void)counter; }\n'
+                'int main(void) { sr_register_all(); return 0; }\n',
+                encoding="ascii",
+            )
+
+            def build(name, revision, declaration=None, *, symbol_indent=None, explicit_wait=None):
+                out = root / name
+                out.mkdir()
+                flags = [f"--record-timing-identity=TEST30340:{revision}"] if revision else []
+                if declaration is not None:
+                    package_path = out / "timing.json"
+                    package_path.write_text(json.dumps(declaration), encoding="utf-8")
+                    package_path.with_suffix(".symbols.json").write_text(
+                        json.dumps(symbols, indent=symbol_indent), encoding="utf-8")
+                    flags.append(f"--enhancement-package={package_path}")
+                if explicit_wait is not None:
+                    symbol_path = out / "guest.map"
+                    effective = dict(symbols, synth_vblank_wait=f"0x{explicit_wait:08x}")
+                    symbol_path.write_bytes("".join(
+                        f"{name} = {addr};\n" for name, addr in effective.items()
+                    ).encode("ascii"))
+                    flags.append(f"--symbol-map={symbol_path}")
+                rc, log, files = self._run_codegen(elf_path, out / "out.c", flags)
+                self.assertEqual(rc, 0, log)
+                if explicit_wait is not None:
+                    generated = files["out_0.c"].decode()
+                    wait = re.findall(
+                        r"if \(nk_enhancement_on\(\)\) \{ sr_begin\(s, (0x[0-9a-f]+)u, 0x24020002u\);",
+                        generated,
+                    )
+                    self.assertEqual(wait, [f"0x{explicit_wait:08x}"])
+                exe = out / "startup.exe"
+                # The generated image gets the package build's include path: the build
+                # directory and src/rt only (mk/pipeline.mk), never src/core.
+                main_obj = out / "out.o"
+                compiler = _run([
+                    GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(out), "-I", str(ROOT / "src/rt"),
+                    "-c", "-o", str(main_obj), str(out / "out.c"),
+                ], capture_output=True, text=True)
+                self.assertEqual(compiler.returncode, 0, compiler.stderr)
+                if revision:
+                    # Its own declaration must stay compatible with the runtime header's.
+                    checked = _run([
+                        GCC, "-std=c11", "-D_GNU_SOURCE", "-fsyntax-only", "-I", str(out),
+                        "-I", str(ROOT / "src/rt"),
+                        "-include", str(ROOT / "src/core/nk_shared_helpers.h"), str(out / "out.c"),
+                    ], capture_output=True, text=True)
+                    self.assertEqual(checked.returncode, 0, checked.stderr)
+                compiler = _run([
+                    GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(ROOT / "src/rt"),
+                    "-I", str(ROOT / "src/core"), "-o", str(exe), str(harness), str(main_obj),
+                    str(ROOT / "src/core/nk_shared_helpers.c"),
+                ], capture_output=True, text=True)
+                self.assertEqual(compiler.returncode, 0, compiler.stderr)
+                return exe
+
+            def append_capture(path):
+                if os.name != "nt":
+                    return path.open("ab")
+                import ctypes
+                import msvcrt
+                from ctypes import wintypes
+
+                # Match the player's native append-only handle. Python's CRT append
+                # mode alone does not transfer its seek-to-end policy to the child.
+                create = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+                create.restype = wintypes.HANDLE
+                create.argtypes = (
+                    wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+                )
+                append_access = 0x4 | 0x00100000  # FILE_APPEND_DATA | SYNCHRONIZE
+                share_all = 7  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                handle = create(str(path), append_access, share_all, None, 4, 0x80, None)
+                if handle == ctypes.c_void_p(-1).value:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                return os.fdopen(msvcrt.open_osfhandle(handle, os.O_BINARY), "wb", buffering=0)
+
+            def observe(exe, name, setting, *, shared_sink=False, boot_file=True):
+                event_file = root / f"{name}.events"
+                env = {**os.environ, "SR_EXPERIMENTAL_60HZ": setting}
+                env.pop("SR_BOOT_EVENT_FILE", None)
+                if boot_file:
+                    env["SR_BOOT_EVENT_FILE"] = str(event_file)
+                if shared_sink:
+                    # Normal launch gives both child streams and SR_BOOT_EVENT_FILE the same
+                    # append destination. Read the exact resulting run log.
+                    with append_capture(event_file) as output:
+                        _run([str(exe)], env=env, check=True, stdout=output, stderr=output)
+                else:
+                    run = _run([str(exe)], env=env, check=True, capture_output=True, text=True)
+                    if not event_file.exists():
+                        # Older generated startup sent progress to stderr, but no timing event.
+                        event_file.write_text(run.stderr, encoding="utf-8")
+                result = _run([
+                    sys.executable, "-B", str(ROOT / "tools/enhancement_package.py"),
+                    "--inspect-timing-run", str(event_file),
+                ], check=True, capture_output=True, text=True)
+                return json.loads(result.stdout)
+
+            stock = build("stock", "1.00")
+            timed = build("timed", "1.00", package)
+            legacy = build("legacy", None)
+            revision = build("other-revision", "1.01")
+            changed = build("changed-declaration", "1.00", dict(package, version="1.1.0"))
+            changed_symbols = build("changed-sidecar", "1.00", package, symbol_indent=2)
+            mismatched = build("mismatched-declaration", "1.01", package)
+            explicit_maps = {
+                "first-map": build("first-map", "1.00", package, explicit_wait=0x1100),
+                "second-map": build("second-map", "1.00", package, explicit_wait=0x1700),
+            }
+
+            stock_identity = observe(stock, "stock", "1")
+            self.assertEqual(stock_identity, {
+                "status": "observed", "mode": "stock", "disc_id": "TEST30340", "disc_version": "1.00",
+                "executable_sha256": hashlib.sha256(elf).hexdigest(),
+            })
+            inactive = observe(timed, "timed-off", "0")
+            active = observe(timed, "timed-on", "1")
+            self.assertEqual(inactive, dict(active, mode="stock"))
+            self.assertEqual(observe(stock, "stock-shared", "1", shared_sink=True), stock_identity)
+            self.assertEqual(observe(timed, "timed-shared", "1", shared_sink=True), active)
+            self.assertEqual(observe(timed, "timed-stderr", "1", boot_file=False), active)
+            self.assertEqual(active, {
+                **stock_identity, "mode": "timing", "declaration_id": package["id"],
+                "declaration_sha256": enhancement_package.compute_package_digest(validate_package(package)),
+                "symbol_map_sha256": hashlib.sha256(json.dumps(symbols).encode()).hexdigest(),
+            })
+            self.assertEqual(observe(legacy, "legacy", "1"), {"status": "unavailable"})
+            self.assertEqual(observe(mismatched, "mismatched", "1"), {"status": "unavailable"})
+            self.assertEqual(observe(revision, "revision", "1"), dict(stock_identity, disc_version="1.01"))
+
+            newer = observe(changed, "changed", "1")
+            self.assertEqual(newer["declaration_id"], active["declaration_id"])
+            self.assertNotEqual(newer["declaration_sha256"], active["declaration_sha256"])
+            other_symbols = observe(changed_symbols, "other-symbols", "1")
+            self.assertEqual(other_symbols["declaration_sha256"], active["declaration_sha256"])
+            self.assertNotEqual(other_symbols["symbol_map_sha256"], active["symbol_map_sha256"])
+
+            for name, executable in explicit_maps.items():
+                with self.subTest(name=name):
+                    digest = hashlib.sha256((root / name / "guest.map").read_bytes()).hexdigest()
+                    self.assertEqual(observe(executable, name, "1"), dict(active, symbol_map_sha256=digest))
+                    self.assertEqual(observe(executable, f"{name}-off", "0"),
+                                     dict(active, mode="stock", symbol_map_sha256=digest))
+
+            event_text = (root / "timed-on.events").read_text(encoding="utf-8")
+            for name, text in (
+                ("two launches", event_text * 2),
+                ("truncated record", event_text + "BOOT_EVENT phase=timing_package"),
+                ("program replaced", event_text + "BOOT_EVENT phase=loadexec_restart\n"),
+                ("retained tail", "[nakagawa] the first 32 bytes of this run were cut; "
+                                  "the last 16777216 bytes are kept\n" + event_text),
+            ):
+                with self.subTest(name=name):
+                    ambiguous = root / "ambiguous.events"
+                    ambiguous.write_text(text, encoding="utf-8")
+                    self.assertEqual(enhancement_package.inspect_timing_run(ambiguous), {"status": "unavailable"})
+
     def test_authentic_mode_output_and_transforms_and_fail_closed_digest(self) -> None:
         """Verify authentic output stays untouched, all 6 transforms apply when enabled, and 1 wrong digest fails closed."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3071,20 +3260,113 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
 
         timing, hook = self._write_pkg("pkg.json"), self._hook_pkg("hook.json")
         alone = package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(timing)})
-        self.assertEqual(sorted(alone), ["enhancement_package_epoch", "enhancement_package_id",
-                                         "enhancement_package_sha256"])
+        self.assertEqual(sorted(alone), [
+            "enhancement_declaration_sha256_v1", "enhancement_package_epoch",
+            "enhancement_package_id", "enhancement_package_sha256",
+        ])
+        timing_declaration = enhancement_package.load_package(timing)
+        timing.write_bytes(json.dumps(timing_declaration, sort_keys=True, indent=2).encode() + b"\r\n")
+        self.assertEqual(
+            package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(timing)}), alone,
+        )
         both = package_cache.enhancement_package_options(
             {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
         self.assertEqual({k: v for k, v in both.items() if k in alone}, alone)
         self.assertEqual(both["code_hook_package_id"], "synth.widen.clip")
         self.assertEqual(both["code_hook_package_sha256"],
                          enhancement_package.compute_package_digest(enhancement_package.load_and_validate_package(hook)))
+        self.assertEqual(both["code_hook_declaration_sha256_v1"],
+                         package_cache.enhancement_declaration_fingerprint(
+                             enhancement_package.load_package(hook)))
         self.assertNotIn("code_hook_symbol_map_sha256", both)
         # Its symbols sidecar names its sites, so an edited one is a different build.
         hook.with_suffix(".symbols.json").write_text('{"synth_scene_cache": "0x00001200"}', encoding="utf-8")
         named = package_cache.enhancement_package_options(
             {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
         self.assertEqual(named["code_hook_symbol_map_sha256"], package_cache.sha256_file(hook.with_suffix(".symbols.json")))
+
+    def test_explicit_symbol_map_has_precedence_over_adjacent_maps(self) -> None:
+        from nk_core import package_cache
+
+        timing, hook = self._write_pkg("pkg.json"), self._hook_pkg("hook.json")
+        for path in (timing, hook):
+            path.with_suffix(".symbols.json").write_text('{"synth_site": "0x00001200"}', encoding="utf-8")
+        environment = {"ENHANCEMENT_PACKAGE": str(timing),
+                       "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)}
+        enabled = package_cache.enhancement_package_options(environment)
+        self.assertIn("enhancement_symbol_map_sha256", enabled)
+        self.assertIn("code_hook_symbol_map_sha256", enabled)
+        guest_map = self.root / "guest-symbols.json"
+        guest_map.write_text('{"synth_site": "0x00001204"}', encoding="utf-8")
+        map_sha = package_cache.sha256_file(guest_map)
+        make_path = guest_map.as_posix().replace(" ", "\\ ")
+        for explicit in (
+            {"SYMBOL_MAP": guest_map.as_posix()},
+            {"SYMBOL_MAP": "ignored.json", "MAKEFLAGS": f"SYMBOL_MAP={make_path}"},
+            {"MAKEFLAGS": "SYMBOL_MAP=ignored.json",
+             "CODEGEN_USER_ARGS": f'--symbol-map=ignored.json --symbol-map "{guest_map.as_posix()}"'},
+            {"CODEGEN_USER_ARGS": "--symbol-map=ignored.json", "MAKEFLAGS":
+             f"CODEGEN_USER_ARGS=--symbol-map\\ {make_path}"},
+        ):
+            with self.subTest(explicit=explicit):
+                used = package_cache.enhancement_package_options(environment | explicit)
+                self.assertIs(used["enhancement_explicit_symbol_map"], True)
+                self.assertEqual(used["enhancement_explicit_symbol_map_sha256"], map_sha)
+                self.assertNotIn("enhancement_symbol_map_sha256", used)
+                self.assertNotIn("code_hook_symbol_map_sha256", used)
+
+    def test_explicit_map_bytes_change_cli_and_planner_aot_keys(self) -> None:
+        from types import SimpleNamespace
+
+        import codegen
+        import nk_cli
+        import title_codegen_plan
+        from nk_core import package_cache
+
+        declaration = self._write_pkg("timing.json")
+        package = enhancement_package.load_and_validate_package(declaration)
+        symbol = package["sites"][0]["function"]
+        guest_map = self.root / "explicit.map"
+        environment = {"SYMBOL_MAP": str(guest_map), "ENHANCEMENT_PACKAGE": str(declaration)}
+        base = 0x08810000
+        manifest = {"executable": {"base": base, "entry": base}}
+        plan = {
+            "environment": {"GAME_BASE": f"0x{base:08x}", "GAME_ENTRY": f"0x{base:08x}",
+                            "TITLE_EXTRA_SPANS": ""},
+            "codegen_profile": "none",
+        }
+
+        def aot_digest(options: dict[str, Any]) -> str:
+            result = package_cache.build_cache_key(
+                input_hashes={"manifest": {"sha256": "a" * 64},
+                              "executable": {"sha256": "b" * 64}, "modules": []},
+                codegen_options=options, analyzer_sha256="synthetic-analyzer",
+                codegen_sha256="synthetic-codegen", compiler="synthetic-compiler",
+                target="synthetic-target", runtime_source_digest="synthetic-runtime",
+            )["aot"]["digest"]
+            assert isinstance(result, str)
+            return result
+
+        def keys(address: int) -> tuple[str, str, str]:
+            guest_map.write_text(f"{symbol} = 0x{address:08x};\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, environment, clear=True):
+                cli = nk_cli._package_codegen_options(manifest, environment)
+                planner = title_codegen_plan._cache_codegen_options(
+                    plan, selected_optional=set(), funcs_per_chunk=2000,
+                    enhancement_package_path=declaration,
+                )
+            _, resolved, _ = codegen._package_symbol_map(
+                SimpleNamespace(sec=lambda _: None), package, declaration,
+                codegen.load_symbol_map(guest_map), guest_map, None, None, None,
+            )
+            self.assertEqual(resolved[symbol], address)
+            stock = nk_cli._package_codegen_options(manifest, {"SYMBOL_MAP": str(guest_map)})
+            return aot_digest(cli), aot_digest(planner), aot_digest(stock)
+
+        before, after = keys(base), keys(base + 0x40)
+        self.assertNotEqual(before[0], after[0])
+        self.assertNotEqual(before[1], after[1])
+        self.assertEqual(before[2], after[2])
 
     def test_an_inherited_code_hook_package_is_ambient(self) -> None:
         from nk_core import package_cache
@@ -4699,6 +4981,39 @@ class TestCodeHookBesideTiming(unittest.TestCase):
 
     def _elf(self, tmp: Path) -> None:
         self.elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.ENTRY)
+
+    def test_adjacent_symbol_map_moves_the_generated_rewrite(self) -> None:
+        from nk_core import package_cache
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.words[self.RELAY] = self.COUNT
+            self._elf(root)
+            path = root / "timing.json"
+            path.write_text(json.dumps(self._timing(self._count_site("SYNTH_COUNT", "synth_count", 0))),
+                            encoding="utf-8")
+            sidecar = path.with_suffix(".symbols.json")
+            options = []
+            generated = []
+            for target in (self.TIMER, self.RELAY):
+                sidecar.write_text(json.dumps(self.symbols | {"synth_count": f"0x{target:08x}"}),
+                                   encoding="utf-8")
+                options.append(package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(path)}))
+                output = root / f"out-{target}" / "out.c"
+                output.parent.mkdir()
+                rc, info, files = TestEnhancementAotCodegenAndCache._run_codegen(
+                    root / "synth.elf", output, [f"--enhancement-package={path}"])
+                self.assertEqual(rc, 0, info)
+                self.assertIn(
+                    f"if (nk_enhancement_on()) {{ sr_begin(s, 0x{target:08x}u, 0x2404001eu); "
+                    "s->r[4] = (0u + 0x0000003cu);",
+                    files["out_0.c"].decode("utf-8"),
+                )
+                self.assertTrue(files)
+                generated.append(files)
+            first, second = options
+            self.assertEqual([key for key in first if first[key] != second[key]], ["enhancement_symbol_map_sha256"])
+            self.assertNotEqual(generated[0], generated[1])
 
     def test_the_hook_package_adds_only_its_site_and_its_header_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -8558,6 +8873,162 @@ class TestLinkingBranchesAreCalls(unittest.TestCase):
                         self.fail(f"0x{word:08x}: the analyzer follows a branch this file reads as plain code")
                     if branch and not reserved and analyze.branch_target(pc, word) != pc + 16:
                         self.fail(f"0x{word:08x}: a branch here that the analyzer does not follow")
+
+
+class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
+    """A replay that starts at an odd logic-update count (contract section 9.5, the replay checklist).
+
+    A title's own replay re-runs recorded input through its logic from a known state. Under a 60 Hz
+    package the update count is the run's, not the replay's: the attract loop, menus and loads
+    before the replay advance it too. These tests compile the generated code and start replays
+    after odd and after even numbers of updates. A plain gate follows the parity of the run's
+    count, so after an odd count it runs on the other updates of the replay than in a recording
+    started on an even count; a gate_30hz_alt site keeps its own phase and makes the stock call
+    first whenever it is reached again after a gap, whatever the parity and whichever call ended
+    its previous visit.
+    """
+
+    REPLAY = 12   # updates the replay re-runs; input k (0-based) is k + 1
+
+    def _gate_and_count(self, tmp: Path) -> tuple[str, str]:
+        """The generated gate definition and the generated update boundary statement."""
+        elf_path = tmp / "synth.elf"
+        elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+        pkg, symbols = self._make_package_and_symbols(elf_bytes)
+        pkg_path = tmp / "replay.json"
+        pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+        (tmp / "replay.symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+        out_dir = tmp / "replay"
+        out_dir.mkdir()
+        rc, output, files = self._run_codegen(elf_path, out_dir / "out.c",
+                                              [f"--enhancement-package={pkg_path}"])
+        self.assertEqual(rc, 0, output)
+        header = files["out_funcs.h"].decode("utf-8")
+        gate_def = next(line for line in header.splitlines()
+                        if "int nk_enhancement_gate_30hz(void)" in line)
+        combined = b"\n".join(files.values()).decode("utf-8")
+        # The boundary is found by the call it makes, not by how it counts, so a boundary that
+        # counts wrongly compiles and fails the behaviour checks below.
+        count_stmt = next(line.strip() for line in combined.splitlines()
+                          if "sr_enhancement_update_begin();" in line)
+        return gate_def, count_stmt
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
+    def test_a_plain_gate_follows_the_run_count_not_the_replay_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            gate_def, count_stmt = self._gate_and_count(tmp)
+            harness = tmp / "replay.c"
+            harness.write_text(
+                "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n"
+                "int nk_enhancement_on(void) { return 1; }\n"
+                "uint32_t nk_enhancement_updates;\n"
+                "void sr_enhancement_update_begin(void) {}\n"
+                f"{gate_def}\n"
+                "/* One logic update: the boundary counts it, then a gated accumulation\n"
+                " * (a gate_30hz addu) adds this update's input. */\n"
+                "static unsigned update(unsigned input, unsigned *x) {\n"
+                f"    {count_stmt}\n"
+                "    if (nk_enhancement_gate_30hz()) { *x += input; return 1; }\n"
+                "    return 0;\n"
+                "}\n"
+                "int main(int argc, char **argv) {\n"
+                "    unsigned before = argc > 1 ? (unsigned)atoi(argv[1]) : 0u, x = 0;\n"
+                "    for (unsigned u = 0; u < before; u++) { unsigned attract = 0; update(0, &attract); }\n"
+                f"    for (unsigned k = 0; k < {self.REPLAY}u; k++) printf(\"%u\", update(k + 1u, &x));\n"
+                "    printf(\" %u\\n\", x);\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "replay.exe"
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+            built = _run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
+                          "-o", str(exe), str(harness)], capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+
+            def replay(before: int) -> tuple[str, int]:
+                out = _run([str(exe), str(before)], check=True, capture_output=True, text=True).stdout
+                ran, total = out.split()
+                return ran, int(total)
+
+            # Section 9.5: a gated statement runs when the number of updates begun so far is even.
+            # A recording that starts with the run (count 0) runs it on replay updates 2, 4, ...
+            recorded = replay(0)
+            self.assertEqual(recorded, ("01" * (self.REPLAY // 2), sum(range(2, self.REPLAY + 1, 2))))
+            # After an even number of updates the replay sees the recording's phase exactly.
+            self.assertEqual(replay(8), recorded)
+            # After an odd number (7, 1 and 31 updates), every update of the replay is still one of
+            # an alternating pair, but the gate runs on updates 1, 3, ...: the other half of the
+            # same input, so the gated state the replay builds differs from the recording's.
+            for before in (7, 1, 31):
+                with self.subTest(before=before):
+                    ran, total = replay(before)
+                    self.assertEqual(ran, "10" * (self.REPLAY // 2))
+                    self.assertEqual(total, sum(range(1, self.REPLAY + 1, 2)))
+                    self.assertNotEqual(total, recorded[1])
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
+    def test_an_alt_gate_makes_the_stock_call_first_at_any_replay_start(self) -> None:
+        # The gate_30hz_alt fixture of TestAltGateStaticChecks, used through an instance so
+        # this class adds no second copy of it.
+        alt_fixture = TestAltGateStaticChecks("test_caller_refusals")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            statement = alt_fixture._site_statement(tmp, "alt", with_package=True)
+            callees = list(dict.fromkeys(re.findall(r"(\w+)\(s\); SR_TAIL_DRAIN", statement)))
+            self.assertEqual(len(callees), 3, statement)
+            stubs = "".join(f"static void {fn}(CpuState *s) {{ (void)s; putchar('{tag}'); }}\n"
+                            for fn, tag in zip(callees, "SAB", strict=True))
+            harness = tmp / "alt_replay.c"
+            harness.write_text(
+                "#include \"recomp.h\"\n"
+                "#undef SR_TAIL_DRAIN\n#define SR_TAIL_DRAIN(s) ((void)0)\n"
+                "#define sr_aot_return_boundary_begin(s, r, c, k) 0\n"
+                "#define sr_aot_return_boundary_end(s) 0\n"
+                "int nk_enhancement_on(void) { return 1; }\n"
+                "uint32_t nk_enhancement_updates;\n"
+                f"{stubs}"
+                f"static void site(CpuState *s) {{\n{statement}\n}}\n"
+                "/* Updates that reach the site (a race or its replay), then updates that do not\n"
+                " * (the menus and loads between them): each segment is a count of updates. */\n"
+                "static void segment(CpuState *s, unsigned updates, int visits) {\n"
+                "    for (unsigned u = 0; u < updates; u++) {\n"
+                "        nk_enhancement_updates++;\n"
+                "        if (visits) site(s);\n"
+                "    }\n"
+                "    if (visits) putchar('|');\n"
+                "}\n"
+                "int main(void) {\n"
+                "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
+                f"    segment(s, {self.REPLAY}u, 1);   /* the recording, from count 0 */\n"
+                "    segment(s, 7u, 0);   /* replay 1 starts after 19 updates */\n"
+                f"    segment(s, {self.REPLAY + 1}u, 1);   /* odd length: it ends on a stock call */\n"
+                "    segment(s, 1u, 0);   /* replay 2 starts after 33, one update after that stock call */\n"
+                f"    segment(s, {self.REPLAY + 1}u, 1);\n"
+                "    segment(s, 6u, 0);   /* replay 3 starts after 52, an even count */\n"
+                f"    segment(s, {self.REPLAY}u, 1);\n"
+                "    putchar('\\n');\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "alt_replay.exe"
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+            built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                          "-Wno-misleading-indentation", "-Wno-unused-variable",
+                          f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
+                         capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            out = _run([str(exe)], check=True, capture_output=True, text=True).stdout.strip()
+            # Sections 9.2 and 9.5: the site makes its alternates only in an update right after
+            # one in which it made the stock call, so each segment begins with the stock call
+            # (S), then the two alternates (AB), whatever the parity of the count it starts on.
+            # Replays 2 and 3 follow a segment that ended on a stock call: a site that toggled on
+            # its own last choice without the gap rule would start them with AB.
+            even = "SAB" * (self.REPLAY // 2)
+            odd = even + "S"
+            self.assertEqual(out, "|".join([even, odd, odd, even]) + "|")
 
 
 if __name__ == "__main__":

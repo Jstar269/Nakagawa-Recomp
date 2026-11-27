@@ -160,10 +160,18 @@ typedef enum {
     NK_MEMSTICK_PLAN_DEDUPLICATE = 2
 } NkMemstickPlanDecision;
 
+typedef enum {
+    NK_MEMSTICK_UNIT_TREE = 0,
+    NK_MEMSTICK_UNIT_FILE = 1
+} NkMemstickUnitKind;
+
 typedef struct {
     char slot[NK_MAX_PATH];
+    char parent[NK_MAX_PATH]; /* relative to the old stick, with forward slashes */
     char name[NK_MAX_PATH];
     uint8_t digest[32];
+    NkMemstickUnitKind kind;
+    bool seeded_homebrew;
     NkMemstickPlanDecision decision;
     /* Index of the stored equivalent version. A materialized version refers to itself. */
     size_t copy_of;
@@ -186,7 +194,15 @@ typedef struct {
     NkMemstickPlanSource *sources;
     size_t source_count;
     bool active_stick_present;
+    bool complete_legacy_scope;
+    bool includes_stock_discovery;
 } NkMemstickSavePlan;
+
+/* Verified PSP/GAME ownership from the stock homebrew seed reader. */
+typedef struct {
+    const char *slot;
+    const char *folder;
+} NkMemstickHomebrewOwner;
 
 /* Read-only first-migration plan for whole PSP/SAVEDATA folders. Entries group by
  * ASCII-folded save name. Each group's first row goes to staging. The rest are
@@ -198,6 +214,18 @@ typedef struct {
  * failure out is empty. Free a successful plan before reusing it. */
 bool nk_memstick_plan_savedata(const char *saves_root, const NkMemstickPlanInput *inputs,
                                size_t input_count, NkMemstickSavePlan *out);
+/* Full legacy migration also collects whole PSP/GAME folders and individual
+ * loose files anywhere else. An owned PSP/GAME folder takes priority over an
+ * unclaimed version so it cannot silently start another program. */
+bool nk_memstick_plan_legacy(const char *saves_root, const NkMemstickPlanInput *inputs,
+                             size_t input_count, const NkMemstickHomebrewOwner *homebrew,
+                             size_t homebrew_count, NkMemstickSavePlan *out);
+/* Also find stock-form disc and content keys on disk, including a game removed
+ * from the library, plus the legacy unidentified slot. The supplied inputs add
+ * recognized title aliases and their disc ownership. */
+bool nk_memstick_plan_stock_legacy(const char *saves_root, const NkMemstickPlanInput *inputs,
+                                   size_t input_count, const NkMemstickHomebrewOwner *homebrew,
+                                   size_t homebrew_count, NkMemstickSavePlan *out);
 void nk_memstick_save_plan_free(NkMemstickSavePlan *plan);
 
 /* Apply the group starting with first_unit. The caller holds the stick lock and
@@ -208,10 +236,11 @@ NkMemstickCollisionResult nk_memstick_replay_savedata(const char *saves_root,
                                                       const NkMemstickSavePlan *plan,
                                                       size_t first_unit);
 
-/* Freeze an immutable PSP/SAVEDATA plan under .nakagawa-migration/psp-savedata in MOVING,
+/* Freeze an immutable per-stick plan under .nakagawa-migration/psp-savedata in MOVING,
  * before making a staged copy. Repeating begin with the same plan is safe.
- * plan.json carries schema 1, source slots and statuses, and the
- * ordered unit records (slot, name, SHA-256, decision and equivalent row).
+ * plan.json carries schema 2, its scope, source slots and statuses, and the
+ * ordered unit records (source slot, relative path, kind, SHA-256, ownership
+ * and replay decision).
  * progress.json binds the first unfinished row to the plan's SHA-256.
  * Resume opens that plan from disk, verifies the sources and any checkpointed
  * outputs, and commits progress only after a complete group's verified copy.
@@ -243,6 +272,23 @@ NkMemstickCollisionResult nk_memstick_savedata_bring_in(const char *saves_root,
                                                        const char *slot,
                                                        const NkMemstickPlanUnit *offer);
 const char *nk_memstick_bring_in_result_code(NkMemstickCollisionResult result);
+
+/* Open, finish or recover the full first migration with the stick lock held.
+ * A missing immutable plan needs a complete legacy plan from the caller.
+ * Passing NULL asks to open or resume existing state without making a plan.
+ * written_by is the player's version, as in nk_memstick_layout_init. It is used
+ * only when this call writes the first layout record and may be NULL otherwise.
+ * On success only the READY shared stick may be handed to a game. Nothing in the
+ * player calls this yet: a launch still uses <saves>/<DISC_ID> (#2744). */
+typedef enum {
+    NK_MEMSTICK_SHARED_READY,
+    NK_MEMSTICK_SHARED_NEEDS_PLAN,
+    NK_MEMSTICK_SHARED_REFUSED
+} NkMemstickSharedResult;
+NkMemstickSharedResult nk_memstick_prepare_shared(const char *saves_root,
+                                                   const NkMemstickSavePlan *initial,
+                                                   const char *written_by,
+                                                   char *err, size_t err_size);
 
 typedef enum {
     NK_MEMSTICK_STATE_MOVING = 0,
