@@ -894,6 +894,7 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
     PlayerUiWizardModel model;
     char size[48];
     memset(&model, 0, sizeof(model));
+    model.host = nk_platform_host_kind();
     model.step = (int)app->wizard.step;
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;
@@ -3308,6 +3309,23 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     return true;
 }
 
+/* A tapped Back on the prompt bar is the system's Back, so every view goes back the way it
+   takes Android's back button (the host gives that key Esc's routes), and touch stays the
+   active input. */
+static void player_ui_push_system_back(const PlayerUiNk *player) {
+    SDL_Event back;
+    memset(&back, 0, sizeof(back));
+    back.type = SDL_EVENT_KEY_DOWN;
+    back.key.windowID = player->window != NULL ? SDL_GetWindowID(player->window) : 0u;
+    back.key.key = SDLK_AC_BACK;
+    back.key.scancode = SDL_SCANCODE_AC_BACK;
+    back.key.down = true;
+    (void)SDL_PushEvent(&back);
+    back.type = SDL_EVENT_KEY_UP;
+    back.key.down = false;
+    (void)SDL_PushEvent(&back);
+}
+
 void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused) {
     if (player == NULL) return;
     player->window_unfocused = !focused;
@@ -4122,6 +4140,7 @@ static PlayerUiLibraryModel player_ui_library_view(const PlayerUiNk *player, siz
     view.title_count = count;
     view.grid = player->library_grid;
     view.grid_count = player->library_grid_count;
+    view.host = nk_platform_host_kind();
     return view;
 }
 
@@ -4496,6 +4515,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         display.high_contrast_focus = player_app_high_contrast_focus(app);
         display.interface_size_pct = app->settings.interface_size_pct;
         display.text_size_pct = app->settings.text_size_pct;
+        display.touch = nk_ui_input_touch_active(&player->input.input);
         player_ui_apply_display(player->ui, &player->viewport, &display,
                                 nk_ui_input_prompt_style(&player->input.input));
     }
@@ -4940,6 +4960,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             }
             player_ui_title_art(player, app, (size_t)index, true);
             memset(&model, 0, sizeof(model));
+            model.host = nk_platform_host_kind();
             model.title = &player->titles[index];
             model.title_index = (size_t)index;
             if (app->settings.achievements_enabled) {
@@ -5413,6 +5434,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
     player_ui_secret_draw(player, scale, now_s);
     draw_list = nk_ui_end(player->ui);
+    if (nk_ui_take_prompt_back(player->ui)) player_ui_push_system_back(player);
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     if (g_title_achievement_count) {
         player_ui_title_report_achievement_rows(draw_list, g_title_achievement_count,

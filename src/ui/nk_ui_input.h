@@ -107,6 +107,9 @@ typedef struct {
     float pointer_x;
     float pointer_y;
     bool pointer_down;
+    /* The last press was a finger or a pen on the screen (nk_ui_input_touch). Touch shares
+       the keyboard and mouse device; a key, a click, the wheel or a pad clears it. */
+    bool touch;
     int pad_ids[NK_UI_INPUT_MAX_PADS];       /* connected pads, oldest first */
     NkUiPadFamily pad_families[NK_UI_INPUT_MAX_PADS];
     size_t pad_count;
@@ -138,6 +141,15 @@ size_t nk_ui_input_stick(NkUiInput *input, float x, float y, int device,
    event whose down is true while the previous event's was false. Hover never focuses. */
 size_t nk_ui_input_pointer(NkUiInput *input, float x, float y, bool down,
                            NkUiEvent *out, size_t cap);
+/* A finger or pen press or release at x, y (logical px): the NK_UI_EV_POINTER a click
+   makes, and touch becomes the active input (nk_ui_input_touch_active). */
+size_t nk_ui_input_touch(NkUiInput *input, float x, float y, bool down,
+                         NkUiEvent *out, size_t cap);
+/* The system's Back (Android's back button or gesture): NK_UI_EV_BACK on the press, from
+   the input that is active, which stays active, so Back after a tap keeps the touch
+   prompts and Back after a pad press keeps the pad's. */
+size_t nk_ui_input_system_back(NkUiInput *input, bool down, double now_s,
+                               NkUiEvent *out, size_t cap);
 /* The pointer left the window: emits NK_UI_EV_POINTER_LEAVE once, until the pointer
    comes back with a position. */
 size_t nk_ui_input_pointer_leave(NkUiInput *input, NkUiEvent *out, size_t cap);
@@ -166,6 +178,10 @@ int nk_ui_input_last_device(const NkUiInput *input);
    controller. Keyboard and mouse give NK_UI_PROMPT_KEYCAPS; a pad gives its
    family's set (nk_ui_prompt_style_for_family). */
 NkUiPromptStyle nk_ui_input_prompt_style(const NkUiInput *input);
+/* True while a touch was the last press: the prompt bar draws its actions as buttons to
+   tap (NkUiPrefs.touch). nk_ui_input_prompt_style then gives NK_UI_PROMPT_KEYCAPS, the
+   keyboard and mouse set the next key would use. */
+bool nk_ui_input_touch_active(const NkUiInput *input);
 /* True while at least one pad is connected. */
 bool nk_ui_input_pad_connected(const NkUiInput *input);
 /* The glyph set of the pad the user would pick up, for showing controller bindings

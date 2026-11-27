@@ -802,7 +802,7 @@ static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
     }
 }
 
-/* Backspace and the mouse's back button (X1) are Back: each is taken as Esc,
+/* Backspace, the system's Back and the mouse's back button (X1) are Back: each is taken as Esc,
    so every view goes back the same way. A key the Controls page is waiting
    for keeps its own name, so Backspace can still be mapped, and so does
    Backspace in the library's find box and the nickname editor, where it
@@ -818,15 +818,20 @@ static const SDL_Event *player_back_as_escape(const PlayerApp *app, const Player
     bool x1 = (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                event->type == SDL_EVENT_MOUSE_BUTTON_UP) &&
               event->button.button == SDL_BUTTON_X1;
-    if (!backspace && !x1) return event;
+    /* The system's Back (Android's back button or gesture) keeps its scancode, so the
+       launcher's input still tells it from a key and leaves the active input as it is. */
+    bool system_back = (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) &&
+                       event->key.key == SDLK_AC_BACK;
+    bool key = backspace || system_back;
+    if (!key && !x1) return event;
     memset(escape, 0, sizeof(*escape));
-    escape->type = backspace ? event->type
+    escape->type = key ? event->type
         : event->type == SDL_EVENT_MOUSE_BUTTON_DOWN ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
-    escape->key.windowID = backspace ? event->key.windowID : event->button.windowID;
+    escape->key.windowID = key ? event->key.windowID : event->button.windowID;
     escape->key.key = SDLK_ESCAPE;
-    escape->key.scancode = SDL_SCANCODE_ESCAPE;
+    escape->key.scancode = system_back ? SDL_SCANCODE_AC_BACK : SDL_SCANCODE_ESCAPE;
     escape->key.down = escape->type == SDL_EVENT_KEY_DOWN;
-    escape->key.repeat = backspace && event->key.repeat;
+    escape->key.repeat = key && event->key.repeat;
     return escape;
 }
 

@@ -172,7 +172,12 @@ void player_ui_apply_display(NkUi *ui, NkUiViewport *viewport, const PlayerUiDis
     prefs.reduce_motion = display->reduce_motion;
     prefs.high_contrast_focus = display->high_contrast_focus;
     prefs.prompt_style = prompt_style;
+    prefs.touch = display->touch;
     nk_ui_set_prefs(ui, &prefs);
+}
+
+bool player_ui_host_is_pc(NkHostKind host) {
+    return host != NK_HOST_ANDROID;
 }
 
 PlayerUiActionKind player_ui_top_bar(NkUi *ui, NkUiId id, PlayerUiRoute active) {
@@ -191,7 +196,7 @@ PlayerUiActionKind player_ui_top_bar(NkUi *ui, NkUiId id, PlayerUiRoute active) 
     /* Down from a top-bar tab goes to the nearest control under it. */
     sections[0].down = sections[1].down = sections[2].down = 0u;
     chosen = nk_ui_top_bar(ui, id, sections, 3u,
-                           nk_ui_input_label(nk_ui_prompt_style(ui)),
+                           nk_ui_input_chip_label(ui),
                            nk_ui_prompt_style(ui) != NK_UI_PROMPT_KEYCAPS);
     /* LIBRARY stays highlighted on a title page, its parent, and choosing it
        there goes back to the grid; only on the grid itself does it do nothing.

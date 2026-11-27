@@ -121,6 +121,11 @@ static size_t nk_ui_sdl_key(NkUiSdlInput *state, const SDL_KeyboardEvent *key, d
     if (key->repeat) {
         return 0u; /* repeat timing belongs to nk_ui_input_poll */
     }
+    /* The system's Back (Android's back button or gesture) is SDL_SCANCODE_AC_BACK, also
+       when the host has already renamed its key Esc for its own routes. */
+    if (key->key == SDLK_AC_BACK || key->scancode == SDL_SCANCODE_AC_BACK) {
+        return nk_ui_input_system_back(in, down, now_s, out, cap);
+    }
     if ((key->mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0 && down) {
         return 0u; /* Alt+Enter and friends stay with the host */
     }
@@ -302,6 +307,16 @@ size_t nk_ui_sdl_input_translate(NkUiSdlInput *state, const union SDL_Event *eve
                                    state->input.pointer_down, out, cap);
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
+        /* SDL reports a tap or a pen press as the left button of a mouse it names
+           SDL_TOUCH_MOUSEID or SDL_PEN_MOUSEID. Only these are read, not the finger and
+           pen events themselves, so one tap is never taken twice. */
+        if ((event->button.which == SDL_TOUCH_MOUSEID ||
+             event->button.which == SDL_PEN_MOUSEID) &&
+            event->button.button == SDL_BUTTON_LEFT) {
+            return nk_ui_input_touch(&state->input, event->button.x * state->event_scale,
+                                     event->button.y * state->event_scale,
+                                     event->button.down, out, cap);
+        }
         /* The mouse's back button is Back, as Esc is. */
         if (event->button.button == SDL_BUTTON_X1) {
             return nk_ui_input_button(&state->input, NK_UI_BTN_BACK, event->button.down,

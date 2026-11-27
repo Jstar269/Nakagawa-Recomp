@@ -7,6 +7,7 @@
 #include "nk_ui.h"
 #include "nk_ui_input.h"  /* NkUiPromptAction: the Controls page's binding glyphs */
 #include "../../core/nk_nickname.h" /* the nickname editor's default and cap (#2197) */
+#include "../../core/nk_platform.h" /* NkHostKind: the words a screen uses for the host */
 #include "ui_keyboard.h"             /* its on-screen keyboard */
 
 #include <stdbool.h>
@@ -428,6 +429,9 @@ typedef struct {
        nothing. */
     const char *verify_notice;
     bool verify_offers_cancel;
+    /* The host (nk_platform_host_kind): its words for the machine, and whether a file
+       can be dropped onto the window (player_ui_host_is_pc). */
+    NkHostKind host;
 } PlayerUiLibraryModel;
 
 /* What a setup wizard control asks for (PLAYER_UI_ACTION_WIZARD; the op rides
@@ -534,6 +538,7 @@ typedef struct {
     /* Verify, blocked: the files the disc needs (#308). With files, the step
        offers Check again and Open folder instead of only choosing another disc. */
     PlayerUiInputGuide input_guide;
+    NkHostKind host;                /* as PlayerUiLibraryModel.host */
 } PlayerUiWizardModel;
 
 /* The card a disc gets when it is added from the library: checking it
@@ -1239,6 +1244,7 @@ typedef struct {
     /* The files the title's package build still waits for, with Check again
        and Open folder (#308); file_count 0 when it waits for none. */
     PlayerUiInputGuide input_guide;
+    NkHostKind host;        /* as PlayerUiLibraryModel.host */
 } PlayerUiTitleModel;
 
 typedef struct {
@@ -1760,6 +1766,7 @@ typedef struct {
     bool high_contrast_focus;  /* the white ring between black keylines */
     int interface_size_pct;    /* NkUiViewport.ui_scale_pct: 0 follows the display */
     int text_size_pct;         /* NkUiViewport.text_size_pct: 100, 125 or 150 (0 is 100) */
+    bool touch;                /* NkUiPrefs.touch: the last press was a touch */
 } PlayerUiDisplay;
 
 /* Gives the design system the launcher's display settings and the prompt
@@ -1770,6 +1777,10 @@ typedef struct {
    on the way (Reduce motion was, and the waves kept moving). */
 void player_ui_apply_display(NkUi *ui, NkUiViewport *viewport, const PlayerUiDisplay *display,
                              NkUiPromptStyle prompt_style);
+
+/* The launcher runs on a PC: its copy says "this PC" and its window takes dropped disc
+   images. Android is a phone, tablet, headset or handheld, whose window takes none. */
+bool player_ui_host_is_pc(NkHostKind host);
 
 /* The build date for an epoch (Unix seconds, UTC) as MM-DD-YYYY. Returns false
    for a negative epoch or a short buffer. */
