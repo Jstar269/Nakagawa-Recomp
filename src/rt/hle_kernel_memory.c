@@ -382,23 +382,62 @@ static uint32_t fpl_wait_ended(uint32_t uid, uint32_t thread_uid, uint32_t resul
     return result;
 }
 
+static int s_fpl_bad_opt_noted;   /* the unreadable-option refusal has been logged this run */
+
 static uint32_t h_CreateFpl(CpuState *s) {
     /* a0=name, a1=partition, a2=attr, a3=blockSize. 5th arg (numBlocks) is in t0 (r8). */
     char name[32] = {0};
     if (A0) (void)guest_cstr(A0, name, sizeof(name));
     uint32_t bsize = A3;
     uint32_t nblocks = stack_arg(s, 0);
+    uint32_t opt = stack_arg(s, 1);
     if (bsize == 0) return FPL_ILLEGAL_MEMSIZE;
     if (nblocks == 0) nblocks = 1;
-    /* The pool spans bsize * nblocks bytes, computed without wrapping. A product past 4 GB is
+    /* The option struct is SceKernelFplOptParam2 {size, alignment}. Every block starts on the
+     * alignment, so blocks lie blockSize rounded up to it apart. pspautotests
+     * tests/threads/fpl/allocate.expected (recorded on a PSP): with alignment 32 a 0x10-byte
+     * pool's second block is 32 bytes after its first; tests/threads/fpl/create.expected: an
+     * alignment that is not a power of two (-1, 3, 5, 6, 7, 36, 0x7FFFFFFF) is
+     * SCE_KERNEL_ERROR_ILLEGAL_ARGUMENT, and 0, 1, 2 and the powers up to 4096 make a pool.
+     * UNMEASURED: which size words make the alignment count (here 4 or more, as PPSSPP reads it),
+     * and the stride with no option or an alignment below 4 (here blockSize itself; PPSSPP
+     * rounds it up to 4). */
+    uint32_t align = 1u;
+    if (opt) {
+        /* An option struct the guest cannot read (its size word, or the alignment word that size
+         * names) is refused with SCE_KERNEL_ERROR_ILLEGAL_ADDR, as sceKernelCreateTlspl refuses
+         * its options. UNMEASURED: no recording shows CreateFpl with an unreadable option
+         * pointer; the code is a project model, logged once per run so the refusal is visible. */
+        if (!sr_guest_span_readable(opt, 4u) ||
+            (MEM_R32(opt) >= 4u && !sr_guest_span_readable(opt, 8u))) {
+            if (!s_fpl_bad_opt_noted) {
+                s_fpl_bad_opt_noted = 1;
+                fprintf(stderr, "HLE: sceKernelCreateFpl: option pointer 0x%08x is not readable; "
+                                "returning SCE_KERNEL_ERROR_ILLEGAL_ADDR (UNMEASURED, project model)\n",
+                        opt);
+            }
+            return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+        }
+    }
+    if (opt && MEM_R32(opt) >= 4u) {
+        align = MEM_R32(opt + 4u);
+        if ((align & (align - 1u)) != 0u) return SCE_KERNEL_ERROR_ILLEGAL_ARGUMENT;
+        if (align == 0u) align = 1u;
+    }
+    const uint64_t stride64 = ((uint64_t)bsize + align - 1u) & ~(uint64_t)(align - 1u);
+    /* The pool spans stride * nblocks bytes, computed without wrapping. A product past 4 GB is
      * a pool no partition holds; it is refused like the measured 0x7FFFFFFF-byte block
      * (UNMEASURED for a product that wraps 32 bits). */
-    uint64_t total64 = (uint64_t)bsize * nblocks;
+    uint64_t total64 = stride64 * nblocks;
     if (total64 > UINT32_MAX) return FPL_NO_MEMORY;
     uint32_t total = (uint32_t)total64;
-    uint32_t block_uid = alloc_block(total);
+    /* A partition block starts on 256 bytes; a stricter alignment takes the slack it may need
+     * to move the pool's first block up to it. */
+    const uint32_t slack = align > 0x100u ? align - 0x100u : 0u;
+    if (total > UINT32_MAX - slack) return FPL_NO_MEMORY;
+    uint32_t block_uid = alloc_block(total + slack);
     if (block_uid == 0xFFFFFFFFu) return FPL_NO_MEMORY;
-    uint32_t pool = block_addr(block_uid);
+    uint32_t pool = (block_addr(block_uid) + align - 1u) & ~(align - 1u);
     uint32_t *free_blocks = (uint32_t *)calloc(nblocks, sizeof(uint32_t));
     uint8_t *allocated = (uint8_t *)calloc(nblocks, sizeof(uint8_t));
     if (!free_blocks || !allocated) {
@@ -418,6 +457,7 @@ static uint32_t h_CreateFpl(CpuState *s) {
     p->cur = pool;
     p->end = pool + total;
     p->bsize = bsize;
+    p->stride = (uint32_t)stride64;
     p->used = 1;
     p->block_uid = block_uid;
     p->attr = A2;
@@ -434,15 +474,15 @@ static uint32_t h_CreateFpl(CpuState *s) {
 static uint32_t fpl_try_allocate_internal(FplPool *p, uint32_t *addr_out) {
     if (p->nfree > 0) {
         uint32_t addr = p->free_blocks[--p->nfree];
-        uint32_t bidx = (addr - p->base) / p->bsize;
+        uint32_t bidx = (addr - p->base) / p->stride;
         if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 1;
         *addr_out = addr;
         return 0;
     }
-    if (p->end - p->cur >= p->bsize) {
+    if (p->end - p->cur >= p->stride) {
         uint32_t addr = p->cur;
-        p->cur += p->bsize;
-        uint32_t bidx = (addr - p->base) / p->bsize;
+        p->cur += p->stride;
+        uint32_t bidx = (addr - p->base) / p->stride;
         if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 1;
         *addr_out = addr;
         return 0;
@@ -633,14 +673,14 @@ static uint32_t h_FreeFpl(CpuState *s) {
     uint32_t uid = A0, addr = A1;
     FplPool *p = fpl_lookup(uid);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_FPLID;
-    /* Offsets, so no sum wraps: the block [addr, addr + bsize) lies wholly inside the pool. */
+    /* Offsets, so no sum wraps: the block [addr, addr + stride) lies wholly inside the pool. */
     uint32_t span = p->end - p->base;
     uint32_t off = addr - p->base;
-    if (addr < p->base || off >= span || span - off < p->bsize || (off % p->bsize) != 0) {
+    if (addr < p->base || off >= span || span - off < p->stride || (off % p->stride) != 0) {
         /* Exact bad-address error code for FreeFpl is UNMEASURED; using SCE_KERNEL_ERROR_ILLEGAL_ADDR (0x80000103u) as defined in hle.c. */
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    uint32_t bidx = off / p->bsize;
+    uint32_t bidx = off / p->stride;
     if (p->allocated && bidx < (uint32_t)p->nblocks && !p->allocated[bidx]) {
         /* Double-free or block not currently in use; exact error code is UNMEASURED, returning SCE_KERNEL_ERROR_ILLEGAL_ADDR */
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
@@ -703,7 +743,7 @@ static uint32_t h_ReferFplStatus(CpuState *s) {
     info.attr = p->attr;
     info.blockSize = (int32_t)p->bsize;
     info.numBlocks = p->nblocks;
-    info.freeBlocks = p->nfree + (int32_t)((p->end - p->cur) / p->bsize);
+    info.freeBlocks = p->nfree + (int32_t)((p->end - p->cur) / p->stride);
     info.numWaitThreads = p->nwaiters;
     for (uint32_t i = 0; i < write_len; i++)
         MEM_W8(info_addr + i, ((const uint8_t *)&info)[i]);

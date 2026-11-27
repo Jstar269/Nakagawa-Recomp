@@ -1280,6 +1280,58 @@ def _cell_jrtail() -> list[int]:
     ]
 
 
+def _cell_jrlow_leaf() -> list[int]:
+    """The callee `jrlow` and `jrlowx` reach through a target with its low bits set.
+
+    The PSP ignores bits 1:0 of a jr/jalr target (pspautotests e37443a6
+    tests/cpu/jump/unaligned.expected, recorded on a PSP: `ran=003`, `link=next+0`,
+    `bal ra=next+0`), so a call to this entry + 1 or + 2 runs from its first word.
+    $a2 keeps the link the call wrote, $a3 the link of a `bal .+8` (the PC it reads
+    carries no low bits), and the leaf returns through $ra with bits 1:0 set: the
+    caller's return boundary must still see its own resume PC.
+    """
+    return [
+        _r(RA, ZERO, A2, 0, 0x21),          # 0x00 addu  a2, ra, zero (only the aligned entry runs this)
+        _i(0x09, ZERO, V1, 0x00C3),         # 0x04 addiu v1, zero, 0xc3 (marker)
+        _i(0x09, V0, V0, 0x30),             # 0x08 addiu v0, v0, 0x30
+        _regimm(ZERO, 0x11, 1),             # 0x0c bal   .+8 (reads the PC)
+        NOP,                                # 0x10 slot
+        _r(RA, ZERO, A3, 0, 0x21),          # 0x14 addu  a3, ra, zero (leaf + 0x14)
+        _i(0x0D, A2, RA, 3),                # 0x18 ori   ra, a2, 3
+        JR_RA,                              # 0x1c jr    ra -> resume PC + 3
+        _r(RA, ZERO, T2, 0, 0x21),          # 0x20 addu  t2, ra, zero (slot: $ra keeps its bits)
+    ]
+
+
+def _jrlow_caller() -> list[int]:
+    """A `jalr` to `jrlow_leaf` plus a low offset (patched), whose continuation runs once."""
+    return [
+        _i(0x09, SP, SP, -16),              # 0x00 addiu sp, sp, -16
+        _i(0x2B, SP, RA, 12),               # 0x04 sw    ra, 12(sp)
+        _i(0x09, ZERO, V0, 0),              # 0x08 addiu v0, zero, 0
+        _i(0x0F, 0, T0, 0),                 # 0x0c lui   t0, %hi(leaf + n) (patched)
+        _i(0x0D, T0, T0, 0),                # 0x10 ori   t0, t0, %lo(leaf + n)
+        _r(T0, 0, RA, 0, 0x09),             # 0x14 jalr  ra, t0
+        _i(0x09, V0, V0, 1),                # 0x18 addiu v0, v0, 1 (slot)
+        _i(0x09, V0, V0, 0x100),            # 0x1c addiu v0, v0, 0x100 (the resume PC)
+        _r(V1, ZERO, S1, 0, 0x21),          # 0x20 addu  s1, v1, zero (leaf marker)
+        _i(0x23, SP, RA, 12),               # 0x24 lw    ra, 12(sp)
+        JR_RA,                              # 0x28
+        _i(0x09, SP, SP, 16),               # 0x2c addiu sp, sp, 16 (return slot)
+    ]
+
+
+def _cell_jrlowtail() -> list[int]:
+    """`jr $rs` to leaf A + 3: a TAIL transfer whose target has bits 1:0 set."""
+    return [
+        _i(0x09, ZERO, V0, 0),              # 0x00 addiu v0, zero, 0
+        _i(0x0F, 0, T0, 0),                 # 0x04 lui   t0, %hi(leafA + 3) (patched)
+        _i(0x0D, T0, T0, 0),                # 0x08 ori   t0, t0, %lo(leafA + 3)
+        _r(T0, 0, 0, 0, 0x08),              # 0x0c jr    t0
+        NOP,                                # 0x10 slot
+    ]
+
+
 def _cell_xstore() -> list[int]:
     """CROSS-TIER: the returning callee, omitted from the dispatch table.
 
@@ -1905,6 +1957,10 @@ CELLS: tuple[tuple[str, str, object], ...] = (
     ("linkr", "jalr link semantics", _cell_linkr),
     ("jrslot", "computed-transfer target vs its delay slot", _cell_jrslot),
     ("jrtail", "computed tail call vs its delay slot", _cell_jrtail),
+    ("jrlow_leaf", "callee entered through a target with bits 1:0 set", _cell_jrlow_leaf),
+    ("jrlow", "jalr to an entry + 2 and a return to its resume PC + 3", _jrlow_caller),
+    ("jrlowx", "cross-tier: jalr to an interpreted entry + 1", _jrlow_caller),
+    ("jrlowtail", "jr to an entry + 3", _cell_jrlowtail),
     ("xstore", "cross-tier: the interpreted returning callee", _cell_xstore),
     ("xtailmid", "cross-tier: the interpreted tail middle", _cell_xtailmid),
     ("xread", "cross-tier: the registered tail destination", _cell_xread),
@@ -1951,7 +2007,7 @@ NON_ENTRY_CELLS = frozenset(
     {"link_leaf", "link_leaf_b", "ret", "negpad", "xstore", "xtailmid", "xread", "fpu_aot",
      "rs_inner", "rs_mid",
      "xsibmid", "xsibpiece", "xnestmid", "xnestleaf", "rarewrite_callee", "rarewrite_target", "nonlocal_mid",
-     "nonlocal_exit", "lj_f", "lj_g", "lj_set", "lj_jmp"}
+     "nonlocal_exit", "lj_f", "lj_g", "lj_set", "lj_jmp", "jrlow_leaf"}
 )
 
 # Discovered so codegen emits a native body, but entered only by the independent
@@ -1973,6 +2029,7 @@ CROSS_TIER_OMISSIONS: dict[str, str] = {
     "xsibtail": "xsibmid",
     "xsibcall": "xsibmid",
     "lj": "lj_set",
+    "jrlowx": "jrlow_leaf",
 }
 
 # The trampoline is deliberately NOT called from the fixture entry: nothing in
@@ -2105,6 +2162,10 @@ def build_text_segment() -> bytes:
         ("jrslot", 0x14, leaf_b),
         ("jrtail", 0x04, leaf_a),
         ("jrtail", 0x0C, leaf_b),
+        # The PSP clears bits 1:0 of a jr/jalr target: each of these reaches the entry.
+        ("jrlow", 0x0C, BASE + layout["jrlow_leaf"][0] + 2),
+        ("jrlowx", 0x0C, BASE + layout["jrlow_leaf"][0] + 1),
+        ("jrlowtail", 0x04, leaf_a + 3),
     ):
         base = layout[cell][0] + slot
         register = T1 if address == leaf_b else T0

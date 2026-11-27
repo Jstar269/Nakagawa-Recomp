@@ -252,7 +252,8 @@ void TestMisalignedAccessFaults() {
 		std::snprintf(what, sizeof what, "%s word 1 kept", c.name);
 		Check(what, mem.Read32(data + 4), 0x88776655);
 	}
-	// A jump to a pc that is not word aligned stops at the fetch, before anything executes.
+	// A run entered at a pc that is not word aligned stops at the fetch, before anything executes
+	// (a jr/jalr clears bits 1:0 of its target; TestJumpTargetLowBitsIgnored).
 	Memory mem;
 	mem.Write32(code, I(0x09, ZERO, T0, 1));
 	mem.Write32(code + 4, I(0x09, ZERO, T0, 2));
@@ -1051,6 +1052,79 @@ void TestJalrLatchesTargetBeforeLink() {
 	Check("jalr rd==rs link", s.r[T9], base + 8);
 }
 
+// The PSP ignores bits 1:0 of a jr/jalr target (pspautotests e37443a6
+// tests/cpu/jump/unaligned.expected, recorded on a PSP): a jump to an aligned address + 1, + 2
+// or + 3 runs the aligned word (`ran=003`), jalr links next+0 (`link=next+0`), and a bal there
+// links from a PC with no low bits (`bal ra=next+0`). Cleared, a target of 3 is null.
+void TestJumpTargetLowBitsIgnored() {
+	const uint32_t base = 0x08900000;
+	const uint32_t target = 0x08900100;
+	for (uint32_t low = 1; low < 4; low++) {
+		for (int link = 0; link < 2; link++) {
+			Memory mem;
+			mem.Write32(target, I(0x09, ZERO, T2, 0x111));     // addiu t2, zero, 0x111
+			mem.Write32(target + 4, (0x01u << 26) | (0x11u << 16) | 1u);  // bal .+8
+			mem.Write32(target + 8, 0);                          // delay slot
+			mem.Write32(target + 12, SYSCALL);
+			ref::CpuState s;
+			s.r[T0] = target + low;
+			StepResult res = RunWords(&mem, &s, {
+				link ? R(T0, 0, T9, 0, 0x09) : R(T0, 0, 0, 0, 0x08),  // jalr t9, t0 / jr t0
+				0,
+				SYSCALL,
+			}, base, 16);
+			char what[64];
+			const char *name = link ? "jalr" : "jr";
+			std::snprintf(what, sizeof what, "%s +%u stop", name, low);
+			Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kSyscall);
+			std::snprintf(what, sizeof what, "%s +%u stop pc", name, low);
+			Check(what, res.pc, target + 12);
+			std::snprintf(what, sizeof what, "%s +%u ran the aligned word", name, low);
+			Check(what, s.r[T2], 0x111u);
+			std::snprintf(what, sizeof what, "%s +%u bal link", name, low);
+			Check(what, s.r[RA], target + 12);
+			std::snprintf(what, sizeof what, "%s +%u link", name, low);
+			Check(what, s.r[T9], link ? base + 8 : 0u);
+			std::snprintf(what, sizeof what, "%s +%u target register kept", name, low);
+			Check(what, s.r[T0], target + low);
+		}
+	}
+	Memory mem;
+	ref::CpuState s;
+	s.r[T0] = 3;
+	StepResult res = RunWords(&mem, &s, {R(T0, 0, 0, 0, 0x08), I(0x09, ZERO, T2, 1), SYSCALL},
+	                          base, 8);
+	Check("jr null + 3 stop", (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
+	Check("jr null + 3 stop pc", res.pc, base);
+	Check("jr null + 3 no slot", s.r[T2], 0u);
+
+	// The low bits clear on the value latched at the transfer (PR #126), before the link
+	// write and the delay slot: a jalr whose link register is its target register, and a jr
+	// whose delay slot rewrites its target register, still reach the aligned old target.
+	for (int form = 0; form < 2; form++) {
+		Memory lm;
+		lm.Write32(target, I(0x09, ZERO, T2, 0x111));  // addiu t2, zero, 0x111
+		lm.Write32(target + 4, SYSCALL);
+		ref::CpuState ls;
+		ls.r[T0] = target + 2;
+		StepResult lr = RunWords(&lm, &ls, {
+			form ? R(T0, 0, 0, 0, 0x08) : R(T0, 0, T0, 0, 0x09),  // jr t0 / jalr t0, t0
+			form ? I(0x09, ZERO, T0, 0x41) : 0u,                  // addiu t0, zero, 0x41 / nop
+			SYSCALL,
+		}, base, 8);
+		const char *name = form ? "jr slot rewrites rs +2" : "jalr rd==rs +2";
+		char what[64];
+		std::snprintf(what, sizeof what, "%s stop", name);
+		Check(what, (uint32_t)lr.reason, (uint32_t)StopReason::kSyscall);
+		std::snprintf(what, sizeof what, "%s stop pc", name);
+		Check(what, lr.pc, target + 4);
+		std::snprintf(what, sizeof what, "%s ran the aligned old target", name);
+		Check(what, ls.r[T2], 0x111u);
+		std::snprintf(what, sizeof what, "%s register after", name);
+		Check(what, ls.r[T0], form ? 0x41u : base + 8);
+	}
+}
+
 // c.cond.s orders denormals from their raw bits, as sr_fpu_condition_s does for the generated
 // code, whatever the host's ambient FP mode. With DAZ set in the process (a library may set
 // it), a host float compare treats 1 ulp of denormal as 0: c.eq.s said equal and c.lt.s said
@@ -1343,6 +1417,7 @@ int main() {
 	TestAllegrexExtIns();
 	TestAllegrexMaxMin();
 	TestJalrLatchesTargetBeforeLink();
+	TestJumpTargetLowBitsIgnored();
 	TestCompareIgnoresAmbientDenormalMode();
 	TestErrorStopsDoNotCommit();
 	TestNullCodePointerStopsAtTransfer();

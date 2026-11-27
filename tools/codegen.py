@@ -1780,6 +1780,19 @@ def _sp_load_check(line, indent="    "):
             f"{indent}    _sp_named = sr_tail_release_bound(_sp_named, _sp_load, s->r[29]); }} }}")
 
 
+def emit_latched_target(reg):
+    """The target a jr/jalr latches from GPR ``reg`` at the transfer (PR #126), bits 1:0 clear.
+
+    The PSP ignores the low two bits of a register jump target: a jr or jalr to an aligned
+    address + 1, + 2 or + 3 runs the aligned word, links next+0, and the PC it then runs at
+    carries no low bits (pspautotests e37443a6 tests/cpu/jump/unaligned.expected, recorded on
+    a PSP: `ran=003`, `link=next+0`, `bal ra=next+0`). The null code pointer check, the
+    dispatch and the return capture all see the aligned value, as in the interpreter
+    (classify_control in src/rt/guest_interp.c). The register itself keeps its bits.
+    """
+    return f"({R(reg)} & ~3u)"
+
+
 def emit_code_pointer_check(target_expr, transfer_pc):
     """A computed jr/jalr refuses a null code pointer before its link write and slot (#1375).
 
@@ -4924,7 +4937,7 @@ def _emit_jalr(ctx, out, addr, w, ds, dsw):
     # runs. Reading it after the slot lets a slot that writes the target
     # register redirect the call -- proven divergent against the
     # production interpreter by the `jrslot` cosim cell.
-    out.append(f"    {{ uint32_t _t = {R(a)};")
+    out.append(f"    {{ uint32_t _t = {emit_latched_target(a)};")
     out.append(f"      {emit_code_pointer_check('_t', addr)}")
     out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); {link}sr_end(s, 0u, 0);")
     out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
@@ -4950,7 +4963,7 @@ def _emit_jr(ctx, out, addr, w, ds, dsw):
     if a == 31:
         # Capture the architectural target at transfer, before a delay
         # slot (or syscall bridge) can rewrite the live register.
-        out.append(f"    {{ uint32_t _sr_return_target = {R(a)};")
+        out.append(f"    {{ uint32_t _sr_return_target = {emit_latched_target(a)};")
         out.append(f"      SR_AOT_RETURN_CAPTURE(s, _sr_return_target);")
         if ds_is_syscall and dsw is not None and not lle_cpu:
             out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
@@ -4982,7 +4995,7 @@ def _emit_jr(ctx, out, addr, w, ds, dsw):
     else:
         # Computed return/tail-call: same contract as jalr above -- the
         # target register is read at the transfer, not after the slot.
-        out.append(f"    {{ uint32_t _t = {R(a)};")
+        out.append(f"    {{ uint32_t _t = {emit_latched_target(a)};")
         out.append(f"      {emit_code_pointer_check('_t', addr)}")
         out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
         out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,

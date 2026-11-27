@@ -166,12 +166,15 @@ class LoweringTests(unittest.TestCase):
         words = program(jalr(31, 4), addiu(4, 0, 0x40), JR_RA, NOP)
         _, text = self.ir(words)
         lines = text.splitlines()
-        latch = next(i for i, l in enumerate(lines) if "load i32, ptr %r4" in l)
+        load = next(i for i, l in enumerate(lines) if "load i32, ptr %r4" in l)
+        loaded = re.search(r"(%r4\.\d+) = load", lines[load]).group(1)
+        # Bits 1:0 are cleared at the latch (codegen.emit_latched_target).
+        latch = next(i for i, l in enumerate(lines) if f"and i32 {loaded}, -4" in l)
         slot = next(i for i, l in enumerate(lines) if "@sr_llvm_begin(ptr %s, i32 4100," in l)
         dispatch = next(i for i, l in enumerate(lines) if "@dispatch_call_checked(" in l)
         self.assertLess(latch, slot)
         self.assertLess(slot, dispatch)
-        latched = re.search(r"(%r4\.\d+) = load", lines[latch]).group(1)
+        latched = re.search(r"(%target\.\d+) = and", lines[latch]).group(1)
         self.assertIn(f"i32 {latched}, i32 4104", lines[dispatch])
         self.assertVerifies(text)
 
@@ -184,8 +187,8 @@ class LoweringTests(unittest.TestCase):
             with self.subTest(name):
                 _, text = self.ir(words)
                 lines = text.splitlines()
-                latch = next(i for i, l in enumerate(lines) if "load i32, ptr %r4" in l)
-                latched = re.search(r"(%r4\.\d+) = load", lines[latch]).group(1)
+                latch = next(i for i, l in enumerate(lines) if "and i32 %r4." in l)
+                latched = re.search(r"(%target\.\d+) = and", lines[latch]).group(1)
                 compare = next(i for i, l in enumerate(lines)
                                if "icmp eq i32" in l and f"{latched}, 0" in l)
                 stop = next(i for i, l in enumerate(lines)
@@ -205,6 +208,9 @@ class LoweringTests(unittest.TestCase):
         capture = next(i for i, l in enumerate(lines) if "@sr_llvm_return_capture" in l)
         slot = next(i for i, l in enumerate(lines) if "@sr_llvm_begin(ptr %s, i32 4100," in l)
         self.assertLess(capture, slot)
+        # The captured target has bits 1:0 clear (codegen.emit_latched_target).
+        latched = re.search(r"(%target\.\d+) = and i32 %r31\.\d+, -4", text).group(1)
+        self.assertIn(f"@sr_llvm_return_capture(ptr %s, i32 {latched})", lines[capture])
         # A callable body restores its entry SP (loaded in the prologue) on return.
         entry_sp = re.search(r"(%r29\.\d+) = load i32", text).group(1)
         self.assertIn(f"store i32 {entry_sp}, ptr", text)
