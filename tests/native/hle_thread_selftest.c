@@ -56087,6 +56087,316 @@ static void test_mbx_send_wakes_a_blocked_receiver(void) {
     s_cur = -1;
 }
 
+/* ---- A thread-priority mailbox (attr 0x100) serves its best-priority receiver ------
+ * Three receivers block in the order A (priority 40), B (20), C (20). With attr 0x100 each
+ * send goes to the waiter of best current priority, the earliest among equals: B, C, then A.
+ * Without the attribute the same queue is served in arrival order: A first.
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelMbx.cpp, sceKernelSendMbx (SCE_KERNEL_MBA_THPRI picks
+ * HLEKernel::FindBestPriorityWaiter).
+ * MUTANT: serve waiters[0] whatever the attribute -- A takes the first message.
+ *
+ * #3066: the packet a send gives a blocked receiver is that receiver's from the send on. The
+ * sender here has the best priority, so it keeps the CPU after every send; before the readied
+ * receiver runs, the mailbox reports no message and the sender's own PollMbx finds none. The
+ * receiver then returns 0 with exactly that packet. mbx_handoff_assigned_packet_cases adds a
+ * priority changed while the receiver waits, the sends no blocked receiver can take (the queue
+ * keeps those), and the timed and callback receives.
+ * Project model for the cells no measurement covers: the public PSPAutotests priority transcript
+ * shows which receiver a send serves, not what a poll between the send and the receiver sees.
+ * MUTANT: queue the packet in h_SendMbx and only ready the receiver -- the sender's PollMbx
+ *   takes the packet and the readied receiver waits again. */
+#define MBX_HANDOFF_OUT (MBX_BULK_BASE + 0x1a00u)
+#define MBX_HANDOFF_MSG (MBX_BULK_BASE + 0x1b00u)
+
+/* Run a receiver until it blocks in ReceiveMbx[CB], or resume one that was readied. */
+static void mbx_handoff_run(SelftestMbxWaiterCtx *w, TCB *cur) {
+    s_cur = (int)(w->tcb - s_tcb);
+    w->tcb->state = TH_RUNNING;
+    sr_coro_switch(w->tcb->coro);
+    s_cur = (int)(cur - s_tcb);
+}
+
+static void mbx_handoff_block(SelftestMbxWaiterCtx *w, TCB *cur, uint32_t uid, int priority,
+                              uint32_t mbx, uint32_t outptr, uint32_t toptr, int is_cb) {
+    memset(w, 0, sizeof *w);
+    w->uid = uid;
+    w->mbx_uid = mbx;
+    w->outptr = outptr;
+    w->toptr = toptr;
+    w->is_cb = is_cb;
+    MEM_W32(outptr, 0xfeedfaceu);
+    w->tcb = fixture_thread(uid, TH_READY, priority);
+    w->tcb->started = 1;
+    w->tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, w, (size_t)1 << 20);
+    mbx_handoff_run(w, cur);
+}
+
+static void mbx_handoff_finish(SelftestMbxWaiterCtx *w, TCB *cur) {
+    if (!w->tcb) return;
+    if (!w->returned && w->tcb->state == TH_READY) mbx_handoff_run(w, cur);
+    if (w->tcb->coro) { sr_coro_destroy(w->tcb->coro); w->tcb->coro = NULL; }
+}
+
+/* After a SendMbx that readied a receiver, and before that receiver runs: the sender is still
+ * the running thread, `waiting` receivers remain on the mailbox, and it has no message. */
+static void mbx_handoff_expect_assigned(TCB *cur, uint32_t mbx, uint32_t waiting, const char *what) {
+    char msg[280];
+    snprintf(msg, sizeof msg, "MBX handoff: %s: the sender is still the running thread", what);
+    expect(cur->state == TH_RUNNING && s_cur == (int)(cur - s_tcb), msg);
+    const uint32_t referred = selftest_mbx_refer(mbx, MBX_INFO);
+    snprintf(msg, sizeof msg, "MBX handoff: %s: the mailbox holds no message before the readied "
+                              "receiver runs (waiting=%u messages=%u first=0x%x)", what,
+             MEM_R32(MBX_INFO + 40u), MEM_R32(MBX_INFO + 44u), MEM_R32(MBX_INFO + 48u));
+    expect(referred == 0u && MEM_R32(MBX_INFO + 40u) == waiting && MEM_R32(MBX_INFO + 44u) == 0u &&
+               MEM_R32(MBX_INFO + 48u) == 0u, msg);
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    const uint32_t polled = selftest_mbx_poll(mbx, MBX_OUTPTR);
+    snprintf(msg, sizeof msg, "MBX handoff: %s: the sender's PollMbx finds no message and writes "
+                              "none (rc=0x%x out=0x%x)", what, polled, MEM_R32(MBX_OUTPTR));
+    expect(polled == MBX_EMPTY_ERR && MEM_R32(MBX_OUTPTR) == 0xfeedfaceu, msg);
+}
+
+static void mbx_handoff_assigned_packet_cases(void) {
+    char msg[280];
+
+    /* A priority changed while the receiver waits, by the production
+     * sceKernelChangeThreadPriority. A (priority 40) blocks before B (30). With attr 0x100, A
+     * raised to 20 is served first: the send reads the priority A has now, not the one it
+     * blocked with. Without the attribute, raising B to 20 changes nothing: A arrived first. */
+    for (int prio_attr = 1; prio_attr >= 0; prio_attr--) {
+        const uint32_t attr = prio_attr ? 0x100u : 0u;
+        reset_fixture();
+        sr_hle_init();
+        TCB *cur = fixture_thread(0x1d0u, TH_RUNNING, 8);
+        s_cur = (int)(cur - s_tcb);
+        cur->started = 1;
+        const uint32_t mbx = selftest_mbx_create(attr);
+        SelftestMbxWaiterCtx w[2];
+        static const int prios[2] = {40, 30};
+        for (int i = 0; i < 2; i++)
+            mbx_handoff_block(&w[i], cur, 0x1d1u + (uint32_t)i, prios[i], mbx,
+                              MBX_HANDOFF_OUT + 4u * (uint32_t)i, 0u, 0);
+        expect(w[0].tcb->state == TH_WAIT_OBJ && w[1].tcb->state == TH_WAIT_OBJ,
+               "MBX handoff: two receivers block before the priority change");
+        const int raised = prio_attr ? 0 : 1;
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = w[raised].uid;
+        cpu.r[5] = 20u;
+        const uint32_t changed = sr_syscall(&cpu, 0x71bc9871u);   /* sceKernelChangeThreadPriority */
+        snprintf(msg, sizeof msg, "MBX handoff: attr 0x%x: sceKernelChangeThreadPriority raises "
+                                  "receiver %c to 20 while it waits (rc=0x%x priority=%d)", attr,
+                 'A' + raised, changed, w[raised].tcb->priority);
+        expect(changed == 0u && w[raised].tcb->priority == 20 &&
+                   w[raised].tcb->state == TH_WAIT_OBJ && w[raised].tcb->wait_kind == 5 &&
+                   cur->state == TH_RUNNING && s_cur == (int)(cur - s_tcb), msg);
+        for (int k = 0; k < 2; k++) {
+            const uint32_t packet = MBX_HANDOFF_MSG + 0x10u * (uint32_t)k;
+            mbx_init_packet(packet, 0u);
+            const uint32_t sent = selftest_mbx_send(mbx, packet);
+            snprintf(msg, sizeof msg, "MBX handoff: attr 0x%x, receiver %c raised: send %d readies "
+                                      "receiver %c only", attr, 'A' + raised, k, 'A' + k);
+            expect(sent == 0u && w[k].tcb->state == TH_READY &&
+                       (k == 1 || w[1].tcb->state == TH_WAIT_OBJ), msg);
+            snprintf(msg, sizeof msg, "attr 0x%x, receiver %c raised, send %d", attr, 'A' + raised, k);
+            mbx_handoff_expect_assigned(cur, mbx, (uint32_t)(1 - k), msg);
+            if (w[k].tcb->state == TH_READY) mbx_handoff_run(&w[k], cur);
+            snprintf(msg, sizeof msg, "MBX handoff: attr 0x%x, receiver %c raised: receiver %c "
+                                      "returns 0 with packet %d (ret=0x%x out=0x%x)", attr,
+                     'A' + raised, 'A' + k, k, (unsigned)w[k].ret, MEM_R32(w[k].outptr));
+            expect(w[k].returned && w[k].ret == 0u && MEM_R32(w[k].outptr) == packet, msg);
+            if (k == 0)
+                expect(!w[1].returned && w[1].tcb->state == TH_WAIT_OBJ &&
+                           MEM_R32(w[1].outptr) == 0xfeedfaceu,
+                       "MBX handoff: the receiver the send did not serve still waits, with nothing "
+                       "written for it");
+        }
+        (void)selftest_mbx_delete(mbx);
+        for (int i = 0; i < 2; i++) mbx_handoff_finish(&w[i], cur);
+        s_cur = -1;
+    }
+
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x1e0u, TH_RUNNING, 8);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t mbx = selftest_mbx_create(0u);
+    const uint32_t queued = MBX_HANDOFF_MSG + 0x40u;
+    const uint32_t passed = MBX_HANDOFF_MSG + 0x50u;
+    const uint32_t for_cb = MBX_HANDOFF_MSG + 0x60u;
+    const uint32_t for_timed = MBX_HANDOFF_MSG + 0x70u;
+
+    /* No receiver at all: the queue keeps the packet, and the sender can poll it back. */
+    mbx_init_packet(queued, 0u);
+    expect(selftest_mbx_send(mbx, queued) == 0u, "MBX handoff: SendMbx with no receiver succeeds");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 40u) == 0u &&
+               MEM_R32(MBX_INFO + 44u) == 1u && MEM_R32(MBX_INFO + 48u) == queued,
+           "MBX handoff: with no receiver the packet is the queue's first message");
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    expect(selftest_mbx_poll(mbx, MBX_OUTPTR) == 0u && MEM_R32(MBX_OUTPTR) == queued,
+           "MBX handoff: with no receiver the sender's PollMbx takes the queued packet");
+    expect(selftest_mbx_poll(mbx, MBX_OUTPTR) == MBX_EMPTY_ERR,
+           "MBX handoff: the queued packet is taken once");
+
+    /* A receiver still on the wait queue but not blocked (its timed wait ran out and it has not
+     * run yet) cannot be handed a packet: the queue keeps it, the sender can poll it back, and
+     * the receiver then returns its timeout with nothing written. */
+    SelftestMbxWaiterCtx late;
+    MEM_W32(MBX_TIMEOUT_PTR, 500000u);
+    mbx_handoff_block(&late, cur, 0x1e1u, 40, mbx, MBX_HANDOFF_OUT + 0x10u, MBX_TIMEOUT_PTR, 0);
+    expect(late.tcb->state == TH_WAIT_OBJ, "MBX handoff: the timed receiver blocks");
+    late.tcb->state = TH_READY;
+    late.tcb->wake_cause = SCHED_WAKE_TIMEOUT;
+    mbx_init_packet(passed, 0u);
+    expect(selftest_mbx_send(mbx, passed) == 0u &&
+               cur->state == TH_RUNNING && s_cur == (int)(cur - s_tcb),
+           "MBX handoff: SendMbx past a timed-out receiver succeeds and the sender keeps running");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 44u) == 1u &&
+               MEM_R32(MBX_INFO + 48u) == passed && MEM_R32(late.outptr) == 0xfeedfaceu,
+           "MBX handoff: with no blocked receiver the queue keeps the packet and no receiver is "
+           "written");
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    expect(selftest_mbx_poll(mbx, MBX_OUTPTR) == 0u && MEM_R32(MBX_OUTPTR) == passed,
+           "MBX handoff: the sender's PollMbx takes the packet no blocked receiver was given");
+    mbx_handoff_run(&late, cur);
+    snprintf(msg, sizeof msg, "MBX handoff: the timed-out receiver returns WAIT_TIMEOUT, time left "
+                              "0, no packet (ret=0x%x left=%u out=0x%x)", (unsigned)late.ret,
+             MEM_R32(MBX_TIMEOUT_PTR), MEM_R32(late.outptr));
+    expect(late.returned && late.ret == MBX_WAIT_TIMEOUT_ERR && MEM_R32(MBX_TIMEOUT_PTR) == 0u &&
+               MEM_R32(late.outptr) == 0xfeedfaceu, msg);
+
+    /* A receiver blocked in ReceiveMbxCB is handed the packet. A CancelReceiveMbx made before it
+     * runs finds no waiter and does not take the packet back (project model). */
+    SelftestMbxWaiterCtx cbw;
+    mbx_handoff_block(&cbw, cur, 0x1e2u, 40, mbx, MBX_HANDOFF_OUT + 0x14u, 0u, 1);
+    expect(cbw.tcb->state == TH_WAIT_OBJ && cbw.tcb->wait_kind == 5,
+           "MBX handoff: the ReceiveMbxCB receiver blocks with no callback pending");
+    mbx_init_packet(for_cb, 0u);
+    expect(selftest_mbx_send(mbx, for_cb) == 0u && cbw.tcb->state == TH_READY,
+           "MBX handoff: SendMbx readies the ReceiveMbxCB receiver");
+    mbx_handoff_expect_assigned(cur, mbx, 0u, "ReceiveMbxCB receiver");
+    MEM_W32(MBX_NUMWAIT_PTR, 0xdeadbeefu);
+    expect(selftest_mbx_cancel(mbx, MBX_NUMWAIT_PTR) == 0 && MEM_R32(MBX_NUMWAIT_PTR) == 0u,
+           "MBX handoff: CancelReceiveMbx counts no waiter once the receiver has its packet");
+    if (cbw.tcb->state == TH_READY) mbx_handoff_run(&cbw, cur);
+    snprintf(msg, sizeof msg, "MBX handoff: the ReceiveMbxCB receiver returns 0 with its packet "
+                              "(ret=0x%x out=0x%x)", (unsigned)cbw.ret, MEM_R32(cbw.outptr));
+    expect(cbw.returned && cbw.ret == 0u && MEM_R32(cbw.outptr) == for_cb, msg);
+
+    /* A blocked timed receiver is handed the packet and is told the time it had left, 50 ms
+     * into a 500 ms wait. A DeleteMbx made before it runs does not take the packet back either
+     * (project model). */
+    SelftestMbxWaiterCtx timed;
+    MEM_W32(MBX_TIMEOUT_PTR, 500000u);
+    mbx_handoff_block(&timed, cur, 0x1e3u, 40, mbx, MBX_HANDOFF_OUT + 0x18u, MBX_TIMEOUT_PTR, 0);
+    expect(timed.tcb->state == TH_WAIT_OBJ, "MBX handoff: a second timed receiver blocks");
+    s_vtime_us += 50000u;
+    mbx_init_packet(for_timed, 0u);
+    expect(selftest_mbx_send(mbx, for_timed) == 0u && timed.tcb->state == TH_READY,
+           "MBX handoff: SendMbx readies the blocked timed receiver");
+    mbx_handoff_expect_assigned(cur, mbx, 0u, "timed receiver");
+    expect(selftest_mbx_delete(mbx) == 0u,
+           "MBX handoff: DeleteMbx succeeds before the readied timed receiver runs");
+    if (timed.tcb->state == TH_READY) mbx_handoff_run(&timed, cur);
+    snprintf(msg, sizeof msg, "MBX handoff: the timed receiver returns 0 with its packet and the "
+                              "time left, 0 < left < 500000 (ret=0x%x out=0x%x left=%u)",
+             (unsigned)timed.ret, MEM_R32(timed.outptr), MEM_R32(MBX_TIMEOUT_PTR));
+    expect(timed.returned && timed.ret == 0u && MEM_R32(timed.outptr) == for_timed &&
+               MEM_R32(MBX_TIMEOUT_PTR) > 0u && MEM_R32(MBX_TIMEOUT_PTR) < 500000u, msg);
+
+    (void)selftest_mbx_delete(mbx);
+    mbx_handoff_finish(&late, cur);
+    mbx_handoff_finish(&cbw, cur);
+    mbx_handoff_finish(&timed, cur);
+    s_cur = -1;
+}
+
+static void test_mbx_thread_priority_serves_best_receiver(void) {
+    for (int prio_attr = 1; prio_attr >= 0; prio_attr--) {
+        reset_fixture();
+        sr_hle_init();
+        TCB *cur = fixture_thread(0x1c0u, TH_RUNNING, 8);
+        s_cur = (int)(cur - s_tcb);
+        cur->started = 1;
+        uint32_t mbx = selftest_mbx_create(prio_attr ? 0x100u : 0u);
+        SelftestMbxWaiterCtx w[3];
+        static const int prios[3] = {40, 20, 20};
+        memset(w, 0, sizeof w);
+        for (int i = 0; i < 3; i++) {
+            w[i].uid = 0x1c1u + (uint32_t)i;
+            w[i].mbx_uid = mbx;
+            w[i].outptr = MBX_BULK_BASE + 0x1900u + 4u * (uint32_t)i;
+            MEM_W32(w[i].outptr, 0xfeedfaceu);
+            w[i].tcb = fixture_thread(w[i].uid, TH_READY, prios[i]);
+            w[i].tcb->started = 1;
+            w[i].tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, &w[i], (size_t)1 << 20);
+            s_cur = (int)(w[i].tcb - s_tcb);
+            w[i].tcb->state = TH_RUNNING;
+            sr_coro_switch(w[i].tcb->coro);
+            s_cur = (int)(cur - s_tcb);
+        }
+        expect(w[0].tcb->state == TH_WAIT_OBJ && w[1].tcb->state == TH_WAIT_OBJ &&
+                   w[2].tcb->state == TH_WAIT_OBJ,
+               "MBX priority: three receivers block on the empty mailbox");
+        const int order[2][3] = {{0, 1, 2}, {1, 2, 0}};
+        for (int k = 0; k < 3; k++) {
+            const int want = order[prio_attr][k];
+            const uint32_t msg_addr = MBX_MSG_BASE + 0x10u * (uint32_t)k;
+            mbx_init_packet(msg_addr, 0u);
+            const uint32_t original_link = 0x5a5a5a5au;
+            MEM_W32(msg_addr, original_link);
+            expect(selftest_mbx_send(mbx, msg_addr) == 0u, "MBX priority: SendMbx succeeds");
+            int ready = -1, readied = 0;
+            for (int i = 0; i < 3; i++)
+                if (!w[i].returned && w[i].tcb->state == TH_READY) { ready = i; readied++; }
+            char msg[200];
+            snprintf(msg, sizeof msg, "MBX priority: attr 0x%x send %d wakes receiver %c "
+                                      "(woke %c, %d readied)", prio_attr ? 0x100u : 0u, k,
+                     'A' + want, ready < 0 ? '-' : 'A' + ready, readied);
+            expect(readied == 1 && ready == want, msg);
+            /* #3066: the sender (priority 8) keeps the CPU, and the packet is already the
+             * readied receiver's: the two receivers not yet served still wait. */
+            snprintf(msg, sizeof msg, "attr 0x%x send %d", prio_attr ? 0x100u : 0u, k);
+            mbx_handoff_expect_assigned(cur, mbx, (uint32_t)(2 - k), msg);
+            expect(MEM_R32(msg_addr) == original_link,
+                   "MBX handoff: a directly delivered packet keeps its original link");
+            if (ready >= 0) {
+                s_cur = (int)(w[ready].tcb - s_tcb);
+                w[ready].tcb->state = TH_RUNNING;
+                sr_coro_switch(w[ready].tcb->coro);
+                s_cur = (int)(cur - s_tcb);
+                snprintf(msg, sizeof msg, "MBX priority: attr 0x%x receiver %c takes message %d",
+                         prio_attr ? 0x100u : 0u, 'A' + ready, k);
+                expect(w[ready].returned && w[ready].ret == 0u &&
+                           MEM_R32(w[ready].outptr) == msg_addr, msg);
+            }
+            int others_untouched = 1;
+            for (int i = 0; i < 3; i++)
+                if (!w[i].returned)
+                    others_untouched &= w[i].tcb->state == TH_WAIT_OBJ &&
+                                        MEM_R32(w[i].outptr) == 0xfeedfaceu;
+            snprintf(msg, sizeof msg, "MBX priority: attr 0x%x send %d leaves every receiver it did "
+                                      "not serve waiting, with nothing written for it",
+                     prio_attr ? 0x100u : 0u, k);
+            expect(others_untouched, msg);
+        }
+        (void)selftest_mbx_delete(mbx);
+        for (int i = 0; i < 3; i++) {
+            if (!w[i].returned && w[i].tcb->state == TH_READY) {
+                s_cur = (int)(w[i].tcb - s_tcb);
+                w[i].tcb->state = TH_RUNNING;
+                sr_coro_switch(w[i].tcb->coro);
+                s_cur = (int)(cur - s_tcb);
+            }
+            if (w[i].tcb->coro) { sr_coro_destroy(w[i].tcb->coro); w[i].tcb->coro = NULL; }
+        }
+        s_cur = -1;
+    }
+    mbx_handoff_assigned_packet_cases();
+}
+
 /* ---- ReceiveMbxCB takes a message its own callback sent ----------------------------
  * The receiver runs a pending callback before it blocks; the callback sends to the mailbox
  * the receiver waits on. The send finds the receiver running, not blocked, so the receiver
@@ -72821,6 +73131,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mbx_lifecycle_and_ordering();
     test_mbx_has_no_host_table_limits();
     test_mbx_send_wakes_a_blocked_receiver();
+    test_mbx_thread_priority_serves_best_receiver();
     test_mbx_receive_cb_takes_callback_message();
     test_mbx_refer_honours_size_word();
     test_intr_context_conformance();
