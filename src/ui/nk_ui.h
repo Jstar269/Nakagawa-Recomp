@@ -321,6 +321,10 @@ typedef struct {
     bool reduce_motion;
     NkUiPromptStyle prompt_style;
     NkUiRepeatRate repeat;
+    /* The last press was a touch (nk_ui_input_touch_active): the prompt bar draws its
+       actions as buttons to tap, with no keys or pad buttons, and no focus ring is drawn
+       until a key or a pad is used again. */
+    bool touch;
 } NkUiPrefs;
 
 typedef enum {
@@ -511,6 +515,13 @@ const NkUiTheme *nk_ui_theme(const NkUi *ui);
 void nk_ui_set_theme(NkUi *ui, const NkUiTheme *theme);
 /* The prompt-glyph style in the current preferences. */
 NkUiPromptStyle nk_ui_prompt_style(const NkUi *ui);
+/* NkUiPrefs.touch: the last press was a touch. */
+bool nk_ui_touch_input(const NkUi *ui);
+/* A tap on a prompt bar's Back in touch mode, once per tap, read after nk_ui_end. Hosts
+   route Back outside the frame (a route stack), so the host gives it as it gives the
+   system's Back. The bar's other actions reach the screen as the next frame's events,
+   the ones their keys make (nk_ui_take_event). */
+bool nk_ui_take_prompt_back(NkUi *ui);
 /* Glyph images for the prompt bar (an NkUiPromptImages from nk_ui_input.h,
    which must outlive every frame drawn with it); NULL returns to the
    geometric glyphs. */
@@ -550,7 +561,8 @@ bool nk_ui_next_wake(const NkUi *ui, double *at_s);
 /* How long a host may wait for input before it draws the next frame, at most
    idle_s: one display frame (NK_UI_MOTION_FRAME) while something moves
    (nk_ui_in_motion), until the waves' next step (nk_ui_next_wake) while they
-   play, else idle_s. now_s is on the clock the frames are drawn with. */
+   play, none while a tapped prompt waits for the next frame, else idle_s. now_s
+   is on the clock the frames are drawn with. */
 double nk_ui_wait_s(const NkUi *ui, double now_s, double idle_s);
 /* Scroll containers. nk_ui_scroll_to moves container id so the content shows
    from `offset` down (clamped to the content), from this frame on when called
