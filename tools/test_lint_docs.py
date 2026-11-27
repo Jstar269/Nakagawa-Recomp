@@ -1136,6 +1136,32 @@ class RetiredIssueDenylistExpiry(unittest.TestCase):
             "a denylisted number is at or below the public numbering frontier",
         )
 
+    # The URL form the denylist matches, with the number captured. Case-insensitive
+    # because tracked files spell the repository both `Nakagawa-Recomp` and
+    # `nakagawa-recomp`; GitHub resolves either.
+    CITED_ISSUE_URL = re.compile(
+        r"github\.com/Jstar269/nakagawa-recomp/(?:issues|pull)/(\d+)\b", re.IGNORECASE)
+
+    def test_frontier_is_not_behind_the_tracked_tree(self) -> None:
+        """The frontier is a lower bound on the numbers the public repository has
+        allocated, so any issue or PR a tracked file cites is at or below it. A cited
+        number above the frontier means the constant has fallen behind; raise it."""
+        result = run_git(
+            ["grep", "-I", "-h", "-o", "-i", "-E",
+             r"github\.com/Jstar269/nakagawa-recomp/(issues|pull)/[0-9]+"],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        # git grep exits 1 when nothing matches; anything else is a real failure.
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        cited = {int(m.group(1)) for m in self.CITED_ISSUE_URL.finditer(result.stdout)}
+        above = sorted(n for n in cited if n > lint_docs.PUBLIC_ISSUE_NUMBER_FRONTIER)
+        if above:
+            self.fail(
+                f"tracked files cite {len(above)} issue/PR number(s) above "
+                f"PUBLIC_ISSUE_NUMBER_FRONTIER ({lint_docs.PUBLIC_ISSUE_NUMBER_FRONTIER}), "
+                f"highest {above[-1]}; raise the frontier in tools/lint_docs.py"
+            )
+
     ANCHOR = "RETIRED_PRIVATE_ISSUE_NUMBERS: tuple[int, ...] = ()"
 
     def _load_with_denylist(self, numbers: str) -> dict:

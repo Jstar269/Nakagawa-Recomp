@@ -85,10 +85,13 @@ OBSOLETE_TOPOLOGY_PATTERNS = [
 # ever moves up. State it as a bound rather than as an exact count: an exact count is stale
 # the moment the next object is opened, and the dangerous direction is a frontier that is
 # too LOW, because that is what lets a soon-to-be-live number sit in the denylist unnoticed.
-# Raise it whenever this file is touched during a sweep. The public sequence has allocated
-# through at least 860 as of 2026-10-12 (with open PR #860), so every number up to 860 is
-# a live public object.
-PUBLIC_ISSUE_NUMBER_FRONTIER = 860
+# Raise it whenever this file is touched during a sweep;
+# tools/test_lint_docs.py fails once a tracked file cites a number above it. The public
+# sequence has allocated through at least 3208 as of 2026-11-27: the newest issue or pull
+# request was #3208, read with `gh api
+# "repos/Jstar269/nakagawa-recomp/issues?state=all&per_page=1&sort=created&direction=desc"
+# --jq '.[0].number'`, so every number up to 3208 is a live public object.
+PUBLIC_ISSUE_NUMBER_FRONTIER = 3208
 
 # Every former private-era number is now at or below the frontier, i.e. reallocated to a
 # live public issue or PR, so none may be flagged any more.
