@@ -1142,10 +1142,9 @@ class RetiredIssueDenylistExpiry(unittest.TestCase):
     CITED_ISSUE_URL = re.compile(
         r"github\.com/Jstar269/nakagawa-recomp/(?:issues|pull)/(\d+)\b", re.IGNORECASE)
 
-    def test_frontier_is_not_behind_the_tracked_tree(self) -> None:
-        """The frontier is a lower bound on the numbers the public repository has
-        allocated, so any issue or PR a tracked file cites is at or below it. A cited
-        number above the frontier means the constant has fallen behind; raise it."""
+    def _highest_cited_issue_number(self) -> int:
+        """The highest issue or PR number a tracked file links to. Any such number is
+        a live public object, whatever PUBLIC_ISSUE_NUMBER_FRONTIER says."""
         result = run_git(
             ["grep", "-I", "-h", "-o", "-i", "-E",
              r"github\.com/Jstar269/nakagawa-recomp/(issues|pull)/[0-9]+"],
@@ -1153,14 +1152,36 @@ class RetiredIssueDenylistExpiry(unittest.TestCase):
         )
         # git grep exits 1 when nothing matches; anything else is a real failure.
         self.assertIn(result.returncode, (0, 1), result.stderr)
-        cited = {int(m.group(1)) for m in self.CITED_ISSUE_URL.finditer(result.stdout)}
-        above = sorted(n for n in cited if n > lint_docs.PUBLIC_ISSUE_NUMBER_FRONTIER)
-        if above:
+        cited = [int(m.group(1)) for m in self.CITED_ISSUE_URL.finditer(result.stdout)]
+        return max(cited, default=0)
+
+    def _assert_denylist_above_live_numbers(self) -> None:
+        live = max(self._highest_cited_issue_number(), lint_docs.PUBLIC_ISSUE_NUMBER_FRONTIER)
+        live_entries = sorted(n for n in lint_docs.RETIRED_PRIVATE_ISSUE_NUMBERS if n <= live)
+        if live_entries:
             self.fail(
-                f"tracked files cite {len(above)} issue/PR number(s) above "
-                f"PUBLIC_ISSUE_NUMBER_FRONTIER ({lint_docs.PUBLIC_ISSUE_NUMBER_FRONTIER}), "
-                f"highest {above[-1]}; raise the frontier in tools/lint_docs.py"
+                f"RETIRED_PRIVATE_ISSUE_NUMBERS {live_entries} are at or below {live}, the "
+                "highest of PUBLIC_ISSUE_NUMBER_FRONTIER and the issue/PR numbers tracked "
+                "files cite, so they name live public objects; remove them"
             )
+
+    def test_no_denylisted_number_is_cited_as_a_live_public_object(self) -> None:
+        """The frontier constant may lag the public repository, so the denylist is
+        also checked against the numbers the tracked tree actually links to: every
+        entry must be above both."""
+        self._assert_denylist_above_live_numbers()
+
+    def test_the_tree_check_is_load_bearing(self) -> None:
+        """MUTATION: a denylisted number above the frontier but below a number the
+        tree cites must fail the check."""
+        cited = self._highest_cited_issue_number()
+        if cited <= lint_docs.PUBLIC_ISSUE_NUMBER_FRONTIER + 1:
+            self.skipTest("the tree cites no number above the frontier to mutate against")
+        with patch.object(lint_docs, "RETIRED_PRIVATE_ISSUE_NUMBERS",
+                          (lint_docs.PUBLIC_ISSUE_NUMBER_FRONTIER + 1,)):
+            with self.assertRaises(AssertionError) as caught:
+                self._assert_denylist_above_live_numbers()
+        self.assertIn("name live public objects", str(caught.exception))
 
     ANCHOR = "RETIRED_PRIVATE_ISSUE_NUMBERS: tuple[int, ...] = ()"
 
