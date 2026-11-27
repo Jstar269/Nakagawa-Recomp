@@ -6,6 +6,7 @@
    centred card, and the prompt bar along the bottom. */
 
 #include "nk_overlay.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 
 #include <string.h>
@@ -31,9 +32,9 @@ void nk_overlay_close(NkOverlayState *state) {
 
 const char *nk_overlay_scaling_label(int scaling) {
     switch (scaling) {
-    case NK_OVERLAY_SCALING_INTEGER: return "Integer";
-    case NK_OVERLAY_SCALING_SMOOTH: return "Smooth";
-    default: return "Sharp";
+    case NK_OVERLAY_SCALING_INTEGER: return NK_UI_STR(OVERLAY_SCALING_INTEGER);
+    case NK_OVERLAY_SCALING_SMOOTH: return NK_UI_STR(OVERLAY_SCALING_SMOOTH);
+    default: return NK_UI_STR(OVERLAY_SCALING_SHARP);
     }
 }
 

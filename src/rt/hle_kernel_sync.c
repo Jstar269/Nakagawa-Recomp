@@ -1861,6 +1861,7 @@ static uint32_t h_DeleteLwMutex(CpuState *s) {
     /* PSP-B1-01: deleting an already-deleted workarea is NOT_FOUND. */
     if (!m) return SCE_KERNEL_ERROR_LWMUTEX_NOT_FOUND;
     m->used = 0;
+    int waiters = sched_count_waiters(uid);
     /* Anything still blocked here would wait forever otherwise. Each woken
      * waiter finds the mutex gone and finishes its own record. */
     sched_wake(uid);
@@ -1869,6 +1870,9 @@ static uint32_t h_DeleteLwMutex(CpuState *s) {
     MEM_W32(wa + LWMUTEX_LOCK_LEVEL, 0u);
     MEM_W32(wa + LWMUTEX_LOCK_THREAD, LWMUTEX_DELETED_WORD);
     MEM_W32(wa + LWMUTEX_UID, LWMUTEX_DELETED_WORD);
+    /* pspautotests tests/threads/lwmutex/delete.expected "Delete same" (PSP-recorded):
+     * a released waiter of higher priority runs before the delete returns. */
+    if (waiters) sched_preempt();
     return 0;
 }
 

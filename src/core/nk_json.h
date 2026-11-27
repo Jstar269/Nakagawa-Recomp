@@ -34,6 +34,7 @@ typedef struct {
     double num_val;
     int64_t int_val;
     bool is_integer;
+    bool integer_overflow;
 } NkJsonNumber;
 
 struct NkJsonNode {
@@ -99,6 +100,9 @@ size_t nk_json_utf8_encode(uint32_t cp, char out[4]);
  * included, is zeroed before it is released (nk_json_free too), so text such as
  * a key file's hex values does not stay readable in freed heap. */
 NkJsonNode *nk_json_parse(const char *src, size_t len, char *err_buf, size_t err_len);
+/* Readers that already bound an input may opt into a larger number token. */
+NkJsonNode *nk_json_parse_number_limit(const char *src, size_t len, size_t max_number_bytes,
+                                       char *err_buf, size_t err_len);
 void nk_json_free(NkJsonNode *node);
 
 /* Object Member Lookup */
