@@ -901,8 +901,21 @@ bool nk_platform_harden_library_search(void);
    terminal's console when there is one, else to `fallback_log_name` in the NK_PATH_LOGS
    folder, rewritten each run. Both streams are then unbuffered, since the Windows CRT has no
    line buffering (#1303). POSIX streams already reach the terminal or the launcher's log:
-   nothing changes. Call after nk_platform_set_app_data_dir_override. */
+   nothing changes, except on Android, where they reach only the system log
+   (nk_platform_host_startup): a process there that the launcher gave no run log (the launcher
+   itself) also copies them to `fallback_log_name` in the NK_PATH_LOGS folder, keeping the
+   earlier runs' files beside it (nk_platform_rotate_log_files) and setting the file aside
+   again each time it reaches 1 MiB. Call after nk_platform_set_app_data_dir_override. */
 void nk_platform_setup_standard_streams(const char *fallback_log_name);
+
+/* Keeps the last `keep` copies of the file at `path` (Android's own log, above).
+   The oldest, <stem>.<keep><ext>, is removed, each <stem>.<n><ext> becomes <stem>.<n+1><ext>,
+   and `path` becomes <stem>.1<ext>, where <ext> is the last component's extension
+   (player-output.txt -> player-output.1.txt; a name with none, or a leading dot only, gets
+   the number at its end). Copies that do not exist are skipped, so `path` is always free
+   afterwards for the caller to create. keep 0 removes `path`. False when a name does not fit
+   NK_MAX_PATH or an existing copy could not be moved or removed. */
+bool nk_platform_rotate_log_files(const char *path, unsigned keep);
 
 /* Android: apply the variables the activity set (NakagawaHost.nativeEnvironment: the launcher's
    NK_ANDROID_PID_FILE, NK_ANDROID_EXIT_FILE, SR_BOOT_EVENT_FILE, NK_ANDROID_APP_DIR and the rest)

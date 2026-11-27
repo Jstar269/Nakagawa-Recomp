@@ -147,6 +147,9 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
 - High-contrast focus (`NkUiPrefs.high_contrast_focus`): a 4 px white ring between 2 px black keylines. The
   launcher draws it when Settings > Accessibility > High contrast is On, or Automatic while Windows uses a contrast
   theme.
+- While touch is the active input (`NkUiPrefs.touch`) no ring is drawn, the high-contrast one included: a tap moves
+  no focus a person follows. Focus itself stays where it is, and the first key or pad press draws its ring again
+  (`test_focus_ring_waits_for_keys_after_touch` in `tests/native/test_nk_ui_core.c`).
 - A focusable control calls `nk_ui_register_button` and, when focused, `nk_ui_focus_ring(ui, id, radius)`. A focused
   secondary button also fills with `surface_high`; a focused card's edge becomes `line_strong`.
 - Arrow keys move to the nearest control in that direction. A control may name the control an Up and a Down move
@@ -247,7 +250,11 @@ The launcher offers it as Settings > Accessibility > Text size; the in-game over
 screens are laid out on at least its
 1280 x 720 design size (`NkUiViewport.min_logical_w` / `min_logical_h`): a smaller window, down to the 960 x 540
 minimum, lowers the density so the same layout is drawn smaller, instead of pushing buttons and the prompt bar off
-the window. A larger window keeps its density and gains room. Clay clips at most 100 containers per layout: shorten
+the window. A larger window keeps its density and gains room. The window here is its safe area
+(`SDL_GetWindowSafeArea`, `player_ui_safe_pixel_rect`): on Android the app draws edge to edge, so the launcher lays
+out and draws inside the area the system bars, the gesture-navigation insets and a display cutout leave, and pointer
+positions are taken from that area's corner (`nk_ui_sdl_input_set_event_origin`). The page colour still fills the
+whole window. On the desktop the safe area is the whole window. Clay clips at most 100 containers per layout: shorten
 long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
 value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
 One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,
@@ -359,6 +366,12 @@ decode falls back to the project-drawn geometric form, which tests and SDL-free 
   Confirm and back follow position (south confirms), so a pad with A east shows B for confirm. The chip names the
   pad the way a player would: XBOX-STYLE CONTROLLER, NINTENDO-STYLE CONTROLLER, PLAYSTATION-STYLE CONTROLLER, or
   CONTROLLER for the neutral set.
+- **Touch** (a tap or a pen press was the last input: SDL's mouse events from `SDL_TOUCH_MOUSEID` or
+  `SDL_PEN_MOUSEID`): no glyphs. Every prompt but Confirm and Move is a button with its label, and a tap on it does
+  what the action's key does (`nk_ui_prompt_tap`), so the library's prompt bar offers FIND and SETTINGS to tap. A
+  tapped BACK is the system's Back, as Android's back button (`SDLK_AC_BACK`) is. The chip says TOUCH. The next
+  key, click, wheel notch or pad press, or a pad that connects, ends touch; the system's Back leaves the active
+  input as it is.
 - A pad that connects switches the set at once; when it disconnects the set falls back to another connected pad or
   to the keyboard. Pointer motion alone never switches.
 
@@ -454,7 +467,9 @@ as you type, with an on-screen keyboard for controllers, and Esc or B clears and
 would collide with the letter shortcuts, so "/" and Ctrl+F open it from a hardware keyboard and every letter shortcut stays (#1742). A library holds up to 4096 games; only the page shown reads
 its disc icons and checks its packages, so a page of a large library costs what a small library does. Empty library: one centred 640 px card with a disc icon, `TITLE` "Add your first game", a `BODY`
 line, the primary START SETUP WIZARD button (the default focus), CHOOSE A DISC IMAGE, and a caption about dropping an
-.iso onto the window.
+.iso onto the window. Android is not a PC and its window takes no dropped file (`player_ui_host_is_pc`): there the
+card, TEST THIS DEVICE, the setup wizard and the title page say "this device" instead of "this PC", and neither the
+card nor the wizard mentions dropping a file.
 
 TEST THIS PC: the demos that come with Nakagawa (the showcase packages beside the player) never join the grid. They
 sit in their own row under it, or under the empty-library card while the user has no games, so the setup wizard is
