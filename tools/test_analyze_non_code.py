@@ -1251,11 +1251,12 @@ class PublicFixtureTest(unittest.TestCase):
     # other cells. They come with no codegen change: on the old and on the expanded inputs
     # main's codegen and this one write identical files.
     # Every digest changes because a jr/jalr latches its target with bits 1:0 clear, as the PSP
-    # runs it (`_t = (s->r[N] & ~3u)`, codegen.emit_latched_target); nothing else in any output
-    # differs. The cosim guest also gains the jrlow cells.
+    # runs it (`_t = (s->r[N] & ~3u)`, codegen.emit_latched_target), and ctc1 drops FCR31 bits
+    # 18..22 as well as 25..31 (`& ~0xfe7c0000u`, #3197); nothing else in any output differs.
+    # The cosim guest also gains the jrlow cells.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "86630fc984e4aaffa4df35d8cf246390d8089ef9bfd5fdb5f96923159b6113fb",
-        ("cosim", "exec"): "99eae9bcdad437707dbd6c4263d4a06cb2660ec3c5b1c3b1af78de68c446b71f",
+        ("cosim", "prx"): "fc6910b20de5e3ba20ccab88df1b524fc40eb03cede69b0397a96344f764d2d7",
+        ("cosim", "exec"): "9347defaf5236f50382294471057c486db410a04f1e603a10782c205457981fe",
         ("display_smoke", "prx"): "9d003fad6b10ceb2246b75b9fd15a1f9da009f9da2769e69b4c117c9dfa2dce2",
         ("display_smoke", "exec"): "bf16654d5c6c04009194ebd52145c9392b773760e9e920fc7f08f1957d40201e",
         ("production_smoke", "prx"): "d7708c6c84d4e8bf47988cce66ebee1223435360883b268e49d2feac7333197d",

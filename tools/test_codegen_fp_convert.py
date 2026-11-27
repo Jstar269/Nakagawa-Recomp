@@ -807,6 +807,60 @@ int main(void) {
 """
 
 
+# pspautotests e37443a6 tests/cpu/fpu/fcr.expected (recorded on a PSP), lines 6-24: each
+# written word, installed with ctc1 and read back with cfc1 (fcr.c, updatefcr31), and the
+# FCR31 word the PSP returned. Bits 18..22 (FO, FN and the three above the cause field) and
+# 25..31 read back 0; bit 17 (cause E) is absent because writing it traps on the PSP.
+_FCR_EXPECTED_WRITES = (
+    (0x00000003, 0x00000003), (0x0000007C, 0x0000007C), (0x00000F80, 0x00000F80),
+    (0x0001F000, 0x0001F000), (0x01000000, 0x01000000), (0x00400000, 0x00000000),
+    (0x00200000, 0x00000000), (0x00800000, 0x00800000), (0xFE000000, 0x00000000),
+    (0x001C0000, 0x00000000),
+)
+
+
+def _cell6_words() -> list[int]:
+    """ctc1 of each _FCR_EXPECTED_WRITES word from t0, cfc1 into r9, r10, ..."""
+    words: list[int] = []
+    for index, (written, _) in enumerate(_FCR_EXPECTED_WRITES):
+        words.extend((
+            _lui(8, written >> 16),
+            (0x0D << 26) | (8 << 21) | (8 << 16) | (written & 0xFFFF),  # ori t0, t0, lo
+            _ctc1(8),
+            _cfc1(9 + index),
+        ))
+    words.extend((0x03E00008, 0x00000000))
+    return words
+
+
+_CELL6_MAIN = (
+    "#include <stdio.h>\n\n"
+    "static const uint32_t written[] = {"
+    + ", ".join(f"0x{w:08x}u" for w, _ in _FCR_EXPECTED_WRITES) + "};\n"
+    "static const uint32_t psp[] = {"
+    + ", ".join(f"0x{r:08x}u" for _, r in _FCR_EXPECTED_WRITES) + "};\n"
+    """
+int main(void) {
+    int failures = 0;
+    CpuState s = {0};
+    f_00001000(&s);
+    for (unsigned i = 0; i < sizeof psp / sizeof psp[0]; i++) {
+        if (s.r[9 + i] != psp[i]) {
+            fprintf(stderr, "FAIL cell6 cfc1 after ctc1 0x%08x: %08x (PSP %08x)\\n",
+                    written[i], s.r[9 + i], psp[i]);
+            failures++;
+        }
+    }
+    if (s.fcr31 != 0x00000000u || s.fpcond != 0u) {
+        fprintf(stderr, "FAIL cell6 final FCR31 %08x fpcond %u\\n", s.fcr31, s.fpcond);
+        failures++;
+    }
+    printf("generated_fp_scalar_fcr_writes: %s\\n", failures == 0 ? "PASS" : "FAIL");
+    return failures == 0 ? 0 : 1;
+}
+""")
+
+
 _CELL_HOSTILE_MAIN = """\
 #include <fenv.h>
 #include <stdio.h>
@@ -931,7 +985,7 @@ int main(void) {
 class GeneratedScalarFcr31Tests(unittest.TestCase):
     """Guest-visible scalar COP1 semantics driven entirely through generated code.
 
-    Four cells from the research IF-1 packet and one hardware-measured cell,
+    Four cells from the research IF-1 packet and two PSP-recorded cells,
     each exercising a real MIPS instruction sequence (including the guest
     `ctc1` that installs FCR31):
       CELL 1 - non-default RM directs add/sub/mul/div.s results.
@@ -941,13 +995,16 @@ class GeneratedScalarFcr31Tests(unittest.TestCase):
       CELL 4 - cvt.s.w honors guest RM near the float precision boundary.
       CELL 5 - ctc1 drops FCR31 bits 25..31 and condition codes 1..7 alias
                FCC0, as measured on a PSP-3000 (PSP-FPU-CC-001).
+      CELL 6 - ctc1 drops FCR31 bits 18..22 and keeps the fields
+               pspautotests tests/cpu/fpu/fcr.expected reads back.
 
     Expectations are raw IEEE-754 words derived independently by rational
     arithmetic in this repository; the mul.s row additionally reproduces the
-    public PSP_HARDWARE RM anchors, and CELL 5 pins the project's own PSP-3000
-    measurement words. The bounded interpreter subset is exercised separately
-    by the two-tier cosim cells; this broad kernel oracle remains AOT-only for
-    scalar operations outside that subset.
+    public PSP_HARDWARE RM anchors, CELL 5 pins the project's own PSP-3000
+    measurement words and CELL 6 pins pspautotests' recorded words. The bounded
+    interpreter subset is exercised separately by the two-tier cosim cells; this
+    broad kernel oracle remains AOT-only for scalar operations outside that
+    subset.
     """
 
     def test_cell1_rounding_modes_direct_scalar_arithmetic(self):
@@ -1030,9 +1087,19 @@ class GeneratedScalarFcr31Tests(unittest.TestCase):
         bc1t with condition codes 1..7 write and test FCC0. Failing before: ctc1
         stored the guest word wholesale and cfc1 returned 0xFE800000.
         """
-        emitted = _run_generated_fixture(
+        _run_generated_fixture(
             self, "fp_scalar_fcc_measured", _cell5_words(), _CELL5_MAIN)
-        self.assertIn("& ~0xfe000000u;", emitted)
+
+    def test_cell6_ctc1_drops_bits_the_psp_does_not_store(self):
+        """CELL 6 - pspautotests e37443a6 tests/cpu/fpu/fcr.expected (recorded on a PSP).
+
+        A ctc1 of 0x00400000, 0x00200000 or 0x001C0000 reads back 0; RM, flags,
+        enables, cause, FS and FCC0 read back as written. Failing before: ctc1 kept
+        bits 18..22 and cfc1 returned the written word.
+        """
+        emitted = _run_generated_fixture(
+            self, "fp_scalar_fcr_writes", _cell6_words(), _CELL6_MAIN)
+        self.assertIn("& ~0xfe7c0000u;", emitted)
 
     def test_hostile_host_environment_isolated_from_default_guest_ops(self):
         """Guest RM=RN/FS=0 must be isolated from a hostile host FP environment.

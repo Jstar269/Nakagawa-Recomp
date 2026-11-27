@@ -1557,11 +1557,12 @@ static int run_fpu_reference_oracle(void) {
                     state.fi[0] = a;
                     state.fi[1] = b;
                     state.r[8] = g_fpu_values[ai].cvt_source;
-                    /* The two ctc1 seeds also carry FCR31 bits 25..31, which the
-                     * PSP FPU does not implement (PSP-FPU-CC-001): the guest
-                     * writes them and the cell's last ctc1 must drop them. */
-                    state.r[14] = fcr31 | 0xfe800000u;
-                    state.r[15] = fcr31 | 0xfe000000u;
+                    /* The two ctc1 seeds also carry FCR31 bits 18..22 and 25..31,
+                     * which the PSP does not store (PSP-FPU-CC-001; pspautotests
+                     * e37443a6 tests/cpu/fpu/fcr.expected, recorded on a PSP): the
+                     * guest writes them and the cell's last ctc1 must drop them. */
+                    state.r[14] = fcr31 | 0xfefc0000u;
+                    state.r[15] = fcr31 | 0xfe7c0000u;
                     state.fcr31 = fcr31;
                     s_cpu = &state;
                     COSIM_FPU_ORACLE_FN(&state);

@@ -1981,7 +1981,7 @@ CELLS: tuple[tuple[str, str, object], ...] = (
     ("fpu_compare", "unordered COP1 compare predicates", _cell_fpu_compare),
     ("fpu_interp", "scalar COP1 forms and FCR31", _cell_fpu_interp),
     ("fpu_interp_nan", "scalar COP1 NaN and FCR31 masking",
-     lambda: _cell_fpu_interp(0x7fc12345, 0x80000000, 0xfe800001)),
+     lambda: _cell_fpu_interp(0x7fc12345, 0x80000000, 0xfefc0001)),
     ("fpu_aot", "AOT-only scalar FPU oracle cell", _cell_fpu_aot),
     ("spleak", "positive control: unbalanced $sp epilogue", _cell_spleak),
     ("xsibmid", "cross-tier: the interpreted body that hands its live frame to a native piece",
