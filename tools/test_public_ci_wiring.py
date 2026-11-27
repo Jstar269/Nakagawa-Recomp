@@ -1504,6 +1504,7 @@ _NATIVE_SERIAL_GATES = {
     "Reproduce the GLSL shaders with the pinned glslc":
         'python tools/shader_embed.py verify --shader-set psp --recompile --glslc "$sdk_dir/1.4.363.0/x86_64/bin/glslc"',
     "Configure, build, and test CMake Linux player": 'ctest --test-dir "$player_build" --output-on-failure',
+    "Build the CMake Linux Release configuration": "-DBUILD_PLAYER=ON -DCMAKE_BUILD_TYPE=Release",
     "Run the pinned gu-cube player smoke":
         "python -m unittest -v tools.test_homebrew_corpus.CorpusRuntimeSmokeTests.test_gu_cube_runtime_smoke",
     "Build and run the Linux showcase headlessly": "make CC=gcc showcase-linux",
@@ -1634,6 +1635,24 @@ class NativeToolsPartitionTests(unittest.TestCase):
                          "set -euo pipefail", "grep -Eq '^GU_CUBE_RUNTIME_SMOKE presents=120 "):
             self.assertIn(required, step)
         for prerequisite in ("Install PSPDEV from the checked-in lock", "Select the lavapipe Vulkan ICD"):
+            self.assertLess(self.names.index(prerequisite), self.names.index(name))
+
+    def test_the_cmake_release_configuration_is_built_in_its_own_tree(self) -> None:
+        """#3134: the Release build type (-O3 under the top-level -Werror) broke with no hosted job
+        building it; the default-type player tree does not cover it."""
+        name = "Build the CMake Linux Release configuration"
+        self.assertEqual(self.part_of(name), "player")
+        step = "\n".join(line.strip() for line in _required(self.steps[name], f"missing {name!r}"))
+        for required in ("set -euo pipefail", 'release_build="$RUNNER_TEMP/nakagawa-cmake-release"',
+                         'cmake -S . -B "$release_build" -G Ninja',
+                         "-DCMAKE_C_COMPILER=gcc -DCMAKE_PREFIX_PATH=/usr/local",
+                         "-DBUILD_PLAYER=ON -DCMAKE_BUILD_TYPE=Release",
+                         'cmake --build "$release_build" --parallel 2'):
+            self.assertIn(required, step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("nakagawa-cmake-player", step)
+        for prerequisite in ("Install the pinned SDL3 into the Linux prefix",
+                             "Install and verify pinned SDL3_ttf and shaping libraries"):
             self.assertLess(self.names.index(prerequisite), self.names.index(name))
 
     def test_every_serial_gate_runs_in_exactly_one_declared_part_with_its_command(self) -> None:
@@ -2885,6 +2904,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Run the parser mutation fuzzers under ASan and UBSan":
             "sanitizer builds; native-core-tests measures the same harness",
         "Configure, build, and test CMake Linux player": "an end-to-end player route",
+        "Build the CMake Linux Release configuration": "compiles only",
         "Run the pinned gu-cube player smoke": "an end-to-end player route",
         "Build and run the Linux showcase headlessly": "an end-to-end player route",
         "Build and run the profile-zero production route on Linux": "an end-to-end route",
