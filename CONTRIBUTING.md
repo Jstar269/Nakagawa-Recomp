@@ -67,6 +67,13 @@ project-authored, and don't replace its licence identifier. Some questions about
 provenance are still under qualified review, so don't bring in code derived from a third party until you
 know exactly where it came from and under which licence.
 
+### Importing compatible source
+
+Read this before vendoring or adapting upstream source ([AGENTS.md section 4](AGENTS.md#4-provenance-and-publication)).
+Source under a GPL-3.0-or-later compatible licence may be vendored or adapted without a per-import decision only
+when it is: pinned to an exact upstream revision, listed in a `PROVENANCE.md` manifest as byte-identical or LOCAL
+DELTA, notices kept (adapted files add a modification note), credited in `CREDITS.md`, and admitted.
+
 ## Provenance controls
 
 Run `make contrib-refresh`, or leave this to a maintainer. Two files,
@@ -366,7 +373,7 @@ focused gate for each changed surface first:
 | FPU/VFPU conversion | relevant `tools/test_*fpu*.py` plus `fp-convert-selftest`/`vfpu-interp-selftest` |
 | publication/provenance | `tools/policy_sync.py`, both publication-audit legs (the command above, with and without `--worktree`), and `tools/modified_file_notice_audit.py` |
 | docs and agent policy | `python -m unittest tools.test_lint_docs tools.test_dco_policy`, markdownlint (below), and `python tools/audit_public_issue_links.py` |
-| workflow/configuration | `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted matrix |
+| workflow/configuration | `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted matrix on its own head; while `NK_CI_TIERS` is `on`, its reviewer adds the `ci-full-matrix` label for that |
 | LLE CPU / domain modes | `tools/test_cpu_lle.py`, `tools/test_domain_mode.py`, then `mingw32-make native-core-tests` |
 
 The whole Python suite
