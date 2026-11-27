@@ -103,6 +103,17 @@ NkUiTtf *nk_ui_ttf_create(const char *const *library_paths, size_t count);
 void nk_ui_ttf_destroy(NkUiTtf *ttf);
 const char *nk_ui_ttf_last_error(void);
 
+/* The places nk_ui_ttf_create tries by default where the library is found by its soname
+   (Linux, Apple, Android), in order: the soname beside the executable, then the bare
+   soname. `base` is SDL_GetBasePath(); the first place exists only when it is an absolute
+   folder. Returns how many were written. Exposed so a test can check the order. It is
+   defined only where the default is a soname; Windows tries full DLL paths instead, and a
+   caller there must not use it. */
+#define NK_UI_TTF_CANDIDATE_MAX 2u
+#define NK_UI_TTF_CANDIDATE_LEN 1024u
+size_t nk_ui_ttf_default_candidates(const char *base,
+                                    char out[NK_UI_TTF_CANDIDATE_MAX][NK_UI_TTF_CANDIDATE_LEN]);
+
 /* Registers font `font` (0 to 7, the id nk_ui widgets pass) from a TrueType or
    OpenType file, read once into memory. Re-registering an id is refused. */
 bool nk_ui_ttf_add_font(NkUiTtf *ttf, int font, const char *path);

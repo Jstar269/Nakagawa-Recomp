@@ -241,7 +241,7 @@ The **Where** column of each table names the places a code can appear:
 | `RUNTIME_NOT_FOUND` | player | The game's recompiled program is not available. |
 | `RUNTIME_NO_NEW_FRAMES` | player | The game presented no new frame for a long stretch, and it was stopped from the stall notice. |
 | `RUNTIME_NO_PICTURE` | player | The game kept presenting frames, but every one was dark for a long stretch, and it was stopped from the stall notice. |
-| `RUNTIME_PREMATURE_EXIT` | player | The game's process exited within 500 ms of starting, whatever its exit code. |
+| `RUNTIME_PREMATURE_EXIT` | player | The game's process exited within 500 ms of starting, with a non-zero exit code or before the game presented its first frame. A clean exit 0 after the first frame is a short successful run, not this code. |
 | `RUNTIME_SEMANTIC_BOUNDARY` | report, player | The game reached a feature Nakagawa does not run; the [stop boundary](#stop-boundaries) names it. |
 | `RUNTIME_START_TIMEOUT` | player | The game's process wrote no boot event within the start time limit, so the player stopped it. |
 | `RUNTIME_TRACE_UNAVAILABLE` | report | The runtime could not read a usable reference trace. |
@@ -263,6 +263,21 @@ The **Where** column of each table names the places a code can appear:
 | `BUILD_TOOLCHAIN_MISSING` | player | The build tools are not installed. |
 | `CACHE_CLEAR_FAILED` | player | Some files in the shared-library cache could not be removed. |
 | `CANCELLED` | decrypt, disc, player | The operation was cancelled; nothing was kept. |
+| `CHEAT_DB_BAD_ARGUMENT` | player | A cheat database step was given no pinned source, file or transport. |
+| `CHEAT_DB_CANCELLED` | player | The cheat database download was cancelled; nothing was written. |
+| `CHEAT_DB_EXISTS` | player | A `cheat.db` is already there and replacing it was not confirmed. |
+| `CHEAT_DB_HASH_MISMATCH` | player | The downloaded cheat database is not the file its source pins (SHA-256); nothing was written. |
+| `CHEAT_DB_HTTP_STATUS` | player | The cheat database host answered with an HTTP status other than 200. |
+| `CHEAT_DB_IO_ERROR` | player | The cheat database could not be read or written in the user data folder. |
+| `CHEAT_DB_LIST_INVALID` | player | The list of cheat database sources is not valid, or names a source that is not pinned. |
+| `CHEAT_DB_LIST_VERSION` | player | The list of cheat database sources is a newer version than this player reads. |
+| `CHEAT_DB_NOT_A_DATABASE` | player | The file is not a usable cheat database. It may contain a cheat outside every game or a cheat that starts enabled. |
+| `CHEAT_DB_NOT_REACHED` | player | The cheat database host did not answer. |
+| `CHEAT_DB_OUT_OF_MEMORY` | player | There was not enough memory to hold the cheat database. |
+| `CHEAT_DB_REDIRECT_REFUSED` | player | The cheat database answer came from a host other than `raw.githubusercontent.com`. |
+| `CHEAT_DB_SIZE_MISMATCH` | player | The downloaded cheat database is not the size its source pins; nothing was written. |
+| `CHEAT_DB_TOO_LARGE` | player | The cheat database or its list of sources is larger than allowed. |
+| `CHEAT_DB_TRUNCATED` | player | The cheat database download broke off before its end. |
 | `CLI_NOT_FOUND` | player | The bundled tools folder could not be found. |
 | `DATA_DIR_UNAVAILABLE` | route, player | Nakagawa's data folder is not available. |
 | `DESTINATION_WRITE_FAILED` | player | A verified download could not be moved into place, or its downloads folder could not be prepared. |

@@ -111,6 +111,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_update_check",
     "build/test_cover_art",
     "build/test_adhoc_servers",
+    "build/test_cheat_db",
     "build/test_discord_presence",
     "build/test_xb_parser",
     "build/test_disc_expand",
@@ -302,6 +303,9 @@ class StandaloneTestBinTargetTests(unittest.TestCase):
                             for c in commands))
         # The saves fault seams (#1883) compile into nk_zip.c and player_state.c here only.
         self.assertTrue(any("-DNK_SAVES_TEST_SEAMS" in c and "src/core/nk_zip.c" in c
+                            and "src/player/player_state.c" in c for c in commands))
+        # The monitor's live-read seam (#306) compiles into player_state.c here only.
+        self.assertTrue(any("-DNK_PLAYER_STATE_TEST_SEAMS" in c
                             and "src/player/player_state.c" in c for c in commands))
 
 

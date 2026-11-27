@@ -149,6 +149,30 @@ rebuild with SDL3_ttf installed.
 - The launcher does not bring the game window to the front: X11 and Wayland leave focus to the
   window manager.
 
+### Run paths and moving an install (#306)
+
+The player and the showcase demos record their SDL3 search as `$ORIGIN`-relative run paths, never
+as a folder of the machine that built them (`readelf -d` shows `RUNPATH`):
+
+| Executable | Run path | Looks for `libSDL3.so.0` (and `libSDL3_ttf.so.0`) |
+| --- | --- | --- |
+| `bin/nakagawa_player` | `$ORIGIN` | beside itself, in `bin/` (the folder that holds the DLLs on Windows) |
+| `bin/demos/packages/<disc id>/<demo>` | `$ORIGIN/../../..` | `bin/`, three folders up |
+
+A copy of the install in another folder therefore finds them with no `LD_LIBRARY_PATH` wrapper. A
+build run from its build folder finds a system SDL3 through the loader's own search, as before.
+CMake builds can add one folder for an SDL3 outside that search with
+`-DNK_PLAYER_EXTRA_RUNPATH=<folder>` (such a binary is not relocatable); the Makefile variables are
+`PLAYER_RUNPATH_ORIGIN` and `RUNTIME_RUNPATH_ORIGIN`. Staging the libraries into `bin/` is the
+stager's job and is not done yet. `showcase.py audit` (part of `make showcase-linux`) refuses a demo
+executable whose run path is absolute or lacks `$ORIGIN/../../..`, and the CTest
+`player_run_path_audit` refuses an absolute run path in the player. The installed copy of each
+showcase package drops the build's own files (dependency files, objects, the link map) and keeps the
+runtime files and the generated C that `nk_add_title_runtime` compiles, so no file in a demo folder
+names the folder that built it; the build folder under `NK_SHOWCASE_BUILD_ROOT` stays whole. The
+audit reads both `RUNPATH` and `RPATH`; which of the two a link writes is the linker's default
+(Ubuntu's writes `RUNPATH`).
+
 ### Makefile title-configured HLE selftests
 
 `make CC=gcc hle-title-selftest` runs the production-HLE harness under the generic and both fixture

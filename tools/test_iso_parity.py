@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import hle_manifest
 from import_fixtures import BASE_VADDR, SYSLIB_EXPORT, build_module_elf
-from nk_core import iso_inspect
+from nk_core import iso_inspect, package_cache
 from nk_core.iso_inspect import (
     _classify_decrypted_elf_file,
     check_needed_modules,
@@ -197,16 +197,17 @@ def create_test_iso(
 def create_test_iso_with_executables(
     path: Path, eboot: bytes, boot: bytes | None = None,
     disc_id: str = "TEST00001", title: str = "Test Game",
+    *, version: str = "1.00",
 ) -> None:
     """Add synthetic SYSDIR executables to the source-owned ISO fixture."""
-    create_test_iso(path, disc_id=disc_id, title=title)
+    create_test_iso(path, disc_id=disc_id, title=title, version=version)
     sector_size = 2048
     data = bytearray(path.read_bytes())
     game_lba, sysdir_lba, eboot_lba, boot_lba = 34, 35, 36, 37
     game_entries = (
         _dir_record(bytes([0]), game_lba, sector_size, True)
         + _dir_record(bytes([1]), 33, sector_size, True)
-        + _dir_record(b"PARAM.SFO;1", 32, len(build_param_sfo(disc_id, title)), False)
+        + _dir_record(b"PARAM.SFO;1", 32, len(build_param_sfo(disc_id, title, version)), False)
         + _dir_record(b"SYSDIR", sysdir_lba, sector_size, True)
     )
     sysdir_entries = (
@@ -5278,6 +5279,185 @@ int main(int argc, char **argv) {
         res = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0)
         self.assertIn("READER:OPEN_FAILED", res.stdout)
+
+
+class InspectRuntimePackageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory(prefix="nk-inspect-package-")
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.user_data = self.root / "user"
+        self.user_data.mkdir()
+        self.elf = build_plain_mips_elf()
+
+    def _write_package(
+        self, user_data: Path, iso: Path, *, profile_id: str | None = None,
+        codegen_options: dict[str, str | int] | None = None,
+    ) -> Path:
+        metadata = inspect_iso(iso)
+        disc_id: str = metadata.disc_id
+        profile = metadata.matched_profile
+        title_id = profile_id or (profile.id if profile is not None else f"experimental-{disc_id.lower()}")
+        folder = user_data / "packages" / disc_id
+        folder.mkdir(parents=True)
+        executable = folder / "fixture.exe"
+        executable.write_bytes(b"synthetic host executable")
+        (folder / "fixture_image.bin").write_bytes(b"synthetic runtime image")
+
+        executable_hash = hashlib.sha256(self.elf).hexdigest()
+        empty_digest = "0" * 64
+        inputs: dict[str, object] = {
+            "manifest": {"sha256": empty_digest},
+            "executable": {"sha256": executable_hash},
+            "modules": [], "psp_header": None,
+        }
+        identity = package_cache.build_title_input_identity(
+            manifest={"id": title_id, "schema_version": 1},
+            executable_name="EBOOT.BIN", executable_sha256=executable_hash, modules=[],
+            disc_id=disc_id, disc_version=metadata.version, param_sfo=metadata.param_sfo_facts,
+            source_media={
+                "executable": {"path": "PSP_GAME/SYSDIR/EBOOT.BIN", "sha256": executable_hash},
+                "modules": [],
+            },
+        )
+        options = codegen_options or {}
+        key = package_cache.build_cache_key(
+            input_hashes=inputs, title_input_identity=identity, codegen_options=options,
+            analyzer_sha256=empty_digest, codegen_sha256=empty_digest,
+            compiler="synthetic-fixture", target="synthetic", runtime_source_digest=empty_digest,
+        )
+        cache = package_cache.cache_metadata(key, options)
+        package = {
+            "format": "nakagawa-aot-package", "schema_version": 3,
+            "title": {"id": title_id, "manifest_sha256": empty_digest},
+            "cache": cache, "inputs": inputs, "title_input_identity": identity,
+            "executable": {"path": executable.name, "sha256": package_cache.sha256_file(executable)},
+        }
+        (folder / "package.json").write_text(package_cache.canonical_json(package), encoding="utf-8")
+        (folder / "build-report.json").write_text(
+            package_cache.canonical_json({"cache": cache}), encoding="utf-8",
+        )
+        package_cache.write_local_title_input_identity(user_data, identity)
+        package_cache.write_completion_manifest(folder, key)
+        valid, reason = package_cache.validate_package_cache(folder)
+        self.assertTrue(valid, reason)
+        return folder
+
+    def _inspect(
+        self, iso: Path, *, supported: bool = False, user_data: Path | None = None,
+    ) -> dict:
+        result = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "tools" / "nk_cli.py"), "inspect",
+             str(iso), "--json", "--user-data-root", str(user_data or self.user_data)],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0 if supported else 2, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["supported"], supported)
+        self.assertEqual(payload["catalogued"], supported)
+        report = payload["compatibility_preflight"]
+        self.assertEqual(report["is_experimental"], not supported)
+        checks: dict[str, dict] = {check["code"]: check for check in report["checks"]}
+        if not supported:
+            self.assertEqual(checks["EXPERIMENTAL"]["status"], "IN_PROGRESS")
+        return checks["RUNTIME_PACKAGE"]
+
+    def test_cli_experimental_package_status_checks_the_selected_input(self) -> None:
+        iso = self.root / "experimental.iso"
+        disc_id = "ULUS99998"
+        create_test_iso_with_executables(iso, self.elf, disc_id=disc_id)
+        write_experimental_profile(iso, self.user_data, metadata=inspect_iso(iso))
+        self.assertEqual(self._inspect(iso)["status"], "MISSING")
+
+        package = self._write_package(self.user_data, iso)
+        self.assertEqual(self._inspect(iso)["status"], "OK")
+        for name, elf, version, reason in (
+            ("changed-executable", self.elf + b"fixture variant", "1.00", "bytes differ"),
+            ("changed-revision", self.elf, "2.00", "disc revision"),
+        ):
+            with self.subTest(name=name):
+                other = self.root / f"{name}.iso"
+                create_test_iso_with_executables(other, elf, disc_id=disc_id, version=version)
+                check = self._inspect(other)
+                self.assertEqual(check["status"], "UNSUPPORTED")
+                self.assertIn(reason, check["message"])
+
+        local_identity = package_cache.local_title_input_identity_path(self.user_data, disc_id)
+        original_identity = local_identity.read_bytes()
+        changed_identity = json.loads(original_identity)
+        changed_identity["main_executable"]["sha256"] = "f" * 64
+        local_identity.write_text(package_cache.canonical_json(changed_identity), encoding="utf-8")
+        check = self._inspect(iso)
+        self.assertEqual(check["status"], "UNSUPPORTED")
+        self.assertIn("local record", check["message"])
+        local_identity.unlink()
+        check = self._inspect(iso)
+        self.assertEqual(check["status"], "UNSUPPORTED")
+        self.assertIn("missing or unreadable", check["message"])
+        local_identity.write_bytes(original_identity)
+
+        with (package / "build-report.json").open("ab") as report:
+            report.write(b"\n")
+        check = self._inspect(iso)
+        self.assertEqual(check["status"], "UNSUPPORTED")
+        self.assertIn("validation failed", check["message"])
+
+    def test_cli_experimental_package_rejects_a_valid_other_disc_package(self) -> None:
+        selected_disc_id = "ULUS99998"
+        other_disc_id = "ULUS99997"
+        selected = self.root / "selected.iso"
+        other = self.root / "other.iso"
+        create_test_iso_with_executables(selected, self.elf, disc_id=selected_disc_id)
+        create_test_iso_with_executables(other, self.elf, disc_id=other_disc_id)
+        other_root = self.root / "other-user"
+        other_package = self._write_package(other_root, other)
+        selected_package = self.user_data / "packages" / selected_disc_id
+        shutil.copytree(other_package, selected_package)
+        self.assertTrue(package_cache.validate_package_cache(selected_package)[0])
+        other_identity = package_cache.local_title_input_identity_path(other_root, other_disc_id)
+        selected_identity = package_cache.local_title_input_identity_path(self.user_data, selected_disc_id)
+        selected_identity.parent.mkdir(parents=True)
+        shutil.copyfile(other_identity, selected_identity)
+        check = self._inspect(selected)
+        self.assertEqual(check["status"], "UNSUPPORTED")
+        self.assertIn("different disc", check["message"])
+
+    def test_cli_supported_title_keeps_its_package_and_exit_status(self) -> None:
+        iso = self.root / "supported.iso"
+        create_test_iso_with_executables(iso, self.elf)
+        self.assertEqual(self._inspect(iso, supported=True)["status"], "MISSING")
+        self._write_package(self.user_data, iso)
+        self.assertEqual(self._inspect(iso, supported=True)["status"], "OK")
+
+    def test_cli_experimental_package_rejects_the_wrong_profile_or_variant(self) -> None:
+        iso = self.root / "experimental.iso"
+        create_test_iso_with_executables(iso, self.elf, disc_id="ULUS99998")
+        self._write_package(self.user_data, iso, profile_id="other-experimental-profile")
+        check = self._inspect(iso)
+        self.assertEqual(check["status"], "UNSUPPORTED")
+        self.assertIn("different experimental profile", check["message"])
+
+        for option, value in (
+            ("enhancement_package_id", "fixture-60hz"),
+            ("enhancement_package_epoch", 1),
+            ("code_hook_package_id", "fixture-hook"),
+        ):
+            with self.subTest(option=option):
+                user_data = self.root / option
+                self._write_package(user_data, iso, codegen_options={option: value})
+                check = self._inspect(iso, user_data=user_data)
+                self.assertEqual(check["status"], "UNSUPPORTED")
+                self.assertIn("enhanced build", check["message"])
+
+    def test_cli_inspect_failure_keeps_its_error_exit(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "tools" / "nk_cli.py"), "inspect",
+             str(self.root / "absent.iso"), "--json", "--user-data-root", str(self.user_data)],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("Error inspecting ISO", result.stderr)
 
 
 class PbpBoundaryCodeParityTests(unittest.TestCase):

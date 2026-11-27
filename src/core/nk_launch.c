@@ -124,7 +124,8 @@ bool nk_launch_runtime_reads_cheats(const char *executable_path) {
 
 /* The cheat file a launch with cheats on names (#2639): the one the session names, else
    <user_data_root>/cheats/<DISC>.ini with the disc ID as the package folders spell it
-   (ULUS12345). False, with `out_path` empty, when the session names none and has no per-user
+   (ULUS12345), or, when that file does not exist, <user_data_root>/cheats/cheat.db if that
+   does. False, with `out_path` empty, when the session names none and has no per-user
    data directory or no PSP disc ID, or the path does not fit; the runtime then says that no
    file is named and applies nothing. */
 static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, size_t out_size) {
@@ -142,6 +143,19 @@ static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, s
         }
         written = snprintf(out_path, out_size, "%s%ccheats%c%s.ini", session->user_data_root, sep,
                            sep, disc);
+        /* No file of the title's own, but a cheat database (cheats/cheat.db, which Settings
+           downloads or imports; src/player/cheat_db.h): the runtime reads this disc's _S
+           section of it. The title's own file always wins. */
+        if (written >= 0 && (size_t)written < out_size && !nk_platform_file_exists(out_path)) {
+            char database[NK_MAX_PATH];
+            int db_written = snprintf(database, sizeof(database), "%s%ccheats%ccheat.db",
+                                      session->user_data_root, sep, sep);
+            if (db_written > 0 && (size_t)db_written < sizeof(database) &&
+                (size_t)db_written < out_size && nk_platform_file_exists(database)) {
+                memcpy(out_path, database, (size_t)db_written + 1u);
+                written = db_written;
+            }
+        }
     }
     if (written < 0 || (size_t)written >= out_size) {
         out_path[0] = '\0';
@@ -554,10 +568,9 @@ static bool find_candidate_executable(
                 if (rel[k] == '/') rel[k] = sep;
             }
             int w = snprintf(cand, sizeof(cand), "%s%c%s", root, sep, rel);
-            if (w > 0 && (size_t)w < sizeof(cand) &&
-                nk_platform_file_exists(cand)) {
-                if ((size_t)w >= max_len) return false;
-                snprintf(out_path, max_len, "%s", cand);
+            if (w <= 0 || (size_t)w >= sizeof(cand) || (size_t)w >= max_len) continue;
+            if (nk_platform_file_exists(cand)) {
+                memcpy(out_path, cand, (size_t)w + 1u);
                 return true;
             }
         }
@@ -1562,9 +1575,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
 
     /* Revalidate the package and current source media immediately before spawn
        so changed executable/module revisions fail closed. */
+    NkRuntimePackageInfo current;
     if (session->package_launch) {
         NkGameEntry identity;
-        NkRuntimePackageInfo current;
         char gate_error[1024] = "";
         memset(&identity, 0, sizeof(identity));
         snprintf(identity.disc_id, sizeof(identity.disc_id), "%s", session->disc_id);
@@ -2145,6 +2158,16 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         return NK_ERROR_PROCESS_SPAWN;
     }
 
+    if (session->package_launch) {
+        memcpy(session->package_identity, current.completion_digest,
+               sizeof(session->package_identity));
+        memcpy(session->runtime_source_commit, current.runtime_source_commit,
+               sizeof(session->runtime_source_commit));
+        memcpy(session->runtime_source_origin, current.runtime_source_origin,
+               sizeof(session->runtime_source_origin));
+        memcpy(session->runtime_source_reason, current.runtime_source_reason,
+               sizeof(session->runtime_source_reason));
+    }
     session->is_running = true;
     return NK_OK;
 }

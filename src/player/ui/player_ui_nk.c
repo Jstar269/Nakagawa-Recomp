@@ -284,6 +284,8 @@ struct PlayerUiNk {
     size_t saves_ask_row;
     char saves_ask_path[NK_MAX_PATH];   /* the folder a replacing Add a save copies */
     char saves_ask_name[72];
+    NkMemstickPlanUnit saves_bring_in;
+    char saves_bring_in_problem[160];
     char saves_status[NK_MAX_PATH + 200];
     PlayerUiNoteKind saves_status_kind;
     /* Add to Steam (#2152): the title the dialog is for, what it found (Steam, the
@@ -375,11 +377,13 @@ struct PlayerUiNk {
 /* The clip reader: PSP_GAME/SND0.AT3 from the user's disc image, read into memory
    only (player_ui_snd0.h); a disc without one is silent. */
 static PlayerUiSnd0ReadResult player_ui_read_snd0(const char *iso_path, uint8_t **bytes,
-                                                  size_t *size, void *user) {
+                                                  size_t *size, void *user,
+                                                  bool (*cancel)(void *), void *cancel_user) {
     NkIconStatus status;
     (void)user;
     status = nk_iso_read_bounded_entry(iso_path, PLAYER_UI_SND0_PATH,
-                                       PLAYER_UI_SND0_MAX_FILE_BYTES, bytes, size);
+                                       PLAYER_UI_SND0_MAX_FILE_BYTES, bytes, size,
+                                       cancel, cancel_user);
     if (status == NK_ICON_OK) return PLAYER_UI_SND0_READ_OK;
     return status == NK_ICON_ERR_MISSING || status == NK_ICON_ERR_INVALID_PARAM
                ? PLAYER_UI_SND0_READ_MISSING
@@ -728,7 +732,8 @@ static bool player_ui_settings_view(PlayerView view) {
            view == VIEW_CONFIRM_FACTORY_RESET || view == VIEW_ACCESSIBILITY_SETTINGS ||
            view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT ||
            view == VIEW_ONLINE_PLAY_CARD || view == VIEW_ONLINE_PLAY_SERVERS ||
-           view == VIEW_ACHIEVEMENTS_CARD || view == VIEW_ACHIEVEMENTS_SIGN_IN;
+           view == VIEW_ACHIEVEMENTS_CARD || view == VIEW_ACHIEVEMENTS_SIGN_IN ||
+           view == VIEW_CHEAT_DB || view == VIEW_CHEAT_DB_BUSY || view == VIEW_CHEAT_DB_CONFIRM;
 }
 
 /* The views the next UI draws: the library (router screens), the setup wizard,
@@ -1399,6 +1404,9 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     memset(&model, 0, sizeof(model));
     switch (app->active_view) {
         case VIEW_ONLINE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE; break;
+        case VIEW_CHEAT_DB:
+        case VIEW_CHEAT_DB_BUSY: model.page = PLAYER_UI_SETTINGS_PAGE_CHEAT_DB; break;
+        case VIEW_CHEAT_DB_CONFIRM: model.page = PLAYER_UI_SETTINGS_PAGE_CHEAT_DB_CONFIRM; break;
         case VIEW_ONLINE_PLAY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY; break;
         case VIEW_ONLINE_PLAY_CARD: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD; break;
         case VIEW_ONLINE_PLAY_SERVERS:
@@ -1614,6 +1622,15 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
 #endif
     model.cheats = app->settings.cheats;
+    model.cheat_db_status = app->cheat_db.status;
+    model.cheat_db_source = app->cheat_db.source.name;
+    model.cheat_db_maintainer = app->cheat_db.source.maintainer;
+    model.cheat_db_licence = app->cheat_db.source.licence;
+    model.cheat_db_import = app->cheat_db.import_path[0] != '\0';
+    model.cheat_db_replace = app->cheat_db.replace;
+    model.cheat_db_download_available = app->cheat_db.download_available;
+    model.cheat_db_busy = app->cheat_db.busy || app->cheat_db.picking;
+    model.cheat_db_fetching_sources = app->cheat_db.fetching_sources;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
     /* The build tools and cache page says what its clear button did. */
@@ -2448,10 +2465,21 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                    Coming back from the Online play page returns to its row. */
                 if (player->last_view == VIEW_ONLINE_PLAY_SETTINGS) {
                     focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY;
+                } else if (player->last_view == VIEW_CHEAT_DB ||
+                           player->last_view == VIEW_CHEAT_DB_BUSY) {
+                    focus = PLAYER_UI_ID_SETTINGS_CHEAT_DB;
                 } else {
                     focus = app->settings.online_mode ? PLAYER_UI_ID_SETTINGS_ONLINE_MODE
                                                       : PLAYER_UI_ID_SETTINGS_DEVELOPER;
                 }
+                break;
+            case VIEW_CHEAT_DB:
+                focus = app->cheat_db.download_available && !app->cheat_db.busy
+                    ? PLAYER_UI_ID_CHEAT_DB_DOWNLOAD : PLAYER_UI_ID_CHEAT_DB_IMPORT;
+                break;
+            case VIEW_CHEAT_DB_BUSY:
+            case VIEW_CHEAT_DB_CONFIRM:
+                focus = PLAYER_UI_ID_SETTINGS_BACK;
                 break;
             case VIEW_ONLINE_PLAY_SETTINGS:
                 /* Back from the picker, its Server row; else the switch. */
@@ -2622,6 +2650,14 @@ static void player_ui_saves_reload(PlayerUiNk *player, const PlayerApp *app, int
         player->saves_has = true;
         player->saves_bytes = bytes;
     }
+    NkMemstickCollisionResult offer = player_app_bring_in_offer(app, index, &player->saves_bring_in);
+    player->saves_bring_in_problem[0] = '\0';
+    if (offer != NK_MEMSTICK_COLLISION_COPIED && offer != NK_MEMSTICK_COLLISION_LAYOUT_BLOCKED &&
+        offer != NK_MEMSTICK_COLLISION_INVALID) {
+        (void)snprintf(player->saves_bring_in_problem, sizeof(player->saves_bring_in_problem),
+                       NK_UI_STR(REMOVE_SAVES_BRING_IN_INSPECT_FAILED),
+                       nk_memstick_bring_in_result_code(offer));
+    }
     player->saves_list_count = player_app_list_save_backups(
         app, index, player->saves_list, PLAYER_UI_SAVES_LIST_CAP, &player->saves_total);
     if (player->saves_first >= player->saves_list_count) player->saves_first = 0u;
@@ -2663,6 +2699,20 @@ static size_t player_ui_saves_page_rows(const PlayerUiNk *player) {
 static void player_ui_saves_status(PlayerUiNk *player, PlayerUiNoteKind kind, const char *text) {
     (void)snprintf(player->saves_status, sizeof(player->saves_status), "%s", text);
     player->saves_status_kind = kind;
+}
+
+static NkUiId player_ui_saves_initial_focus(const PlayerUiNk *player) {
+    if (player->saves_bring_in.name[0]) return PLAYER_UI_ID_SAVES_BRING_IN;
+    return player->saves_has ? PLAYER_UI_ID_SAVES_BACK_UP : PLAYER_UI_ID_SAVES_ADD;
+}
+
+static const char *player_ui_saves_bring_in_note(NkMemstickPlanDecision decision) {
+    switch (decision) {
+    case NK_MEMSTICK_PLAN_KEEP: return NK_UI_STR(REMOVE_SAVES_BRING_IN_KEEP);
+    case NK_MEMSTICK_PLAN_DEDUPLICATE: return NK_UI_STR(REMOVE_SAVES_BRING_IN_IDENTICAL);
+    case NK_MEMSTICK_PLAN_STAGE: return NK_UI_STR(REMOVE_SAVES_BRING_IN_ACTIVE);
+    }
+    return NULL;
 }
 
 /* Add to Steam (#2152): finds Steam, its accounts and the shortcut; writes nothing. */
@@ -2743,7 +2793,7 @@ static void player_ui_open_saves(PlayerUiNk *player, const PlayerApp *app, int i
     player->saves_status[0] = '\0';
     player->saves_status_kind = PLAYER_UI_NOTE_NEUTRAL;
     player_ui_saves_reload(player, app, index);
-    player->saves_focus = player->saves_has ? PLAYER_UI_ID_SAVES_BACK_UP : PLAYER_UI_ID_SAVES_ADD;
+    player->saves_focus = player_ui_saves_initial_focus(player);
 }
 
 /* Add a save with the folder picked: a save of that name already there asks
@@ -2792,6 +2842,32 @@ static void player_ui_saves_add(PlayerUiNk *player, PlayerApp *app, int index,
 }
 
 /* One Saves dialog control. Back up and Restore run here, on this frame. */
+static void player_ui_saves_bring_in(PlayerUiNk *player, PlayerApp *app, int index) {
+    NkMemstickPlanUnit selected = player->saves_bring_in;
+    NkMemstickCollisionResult result = player_app_bring_in(app, index, &selected);
+    char text[sizeof(player->saves_status)];
+    player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
+    player_ui_saves_reload(player, app, index);
+    player->saves_focus = player_ui_saves_initial_focus(player);
+    if (result == NK_MEMSTICK_COLLISION_COPIED) {
+        if (selected.decision == NK_MEMSTICK_PLAN_KEEP)
+            (void)snprintf(text, sizeof(text), NK_UI_STR(REMOVE_SAVES_BRING_IN_KEPT), selected.name);
+        else if (selected.decision == NK_MEMSTICK_PLAN_DEDUPLICATE)
+            (void)snprintf(text, sizeof(text), NK_UI_STR(REMOVE_SAVES_BRING_IN_ALREADY), selected.name);
+        else
+            (void)snprintf(text, sizeof(text), NK_UI_STR(REMOVE_SAVES_BRING_IN_DONE), selected.name);
+        player_ui_saves_status(player, PLAYER_UI_NOTE_DONE, text);
+    } else if (result == NK_MEMSTICK_COLLISION_STICK_IN_USE) {
+        player_ui_saves_status(player, PLAYER_UI_NOTE_WARNING, NK_UI_STR(REMOVE_SAVES_BRING_IN_BUSY));
+    } else {
+        (void)snprintf(text, sizeof(text), NK_UI_STR(REMOVE_SAVES_BRING_IN_FAILED),
+                       nk_memstick_bring_in_result_code(result));
+        player_ui_saves_status(player, PLAYER_UI_NOTE_WARNING, text);
+    }
+    fprintf(stderr, "SAVES_BRING_IN %s: %s\n", nk_memstick_bring_in_result_code(result),
+            player->saves_status);
+}
+
 static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, unsigned op,
                                PlayerUiAction *out_action) {
     char stamp[24];
@@ -2849,6 +2925,9 @@ static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, un
         app->request_save_folder_picker = true;
         player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL,
                                NK_UI_STR(ADAPTER_SAVES_PICK_FOLDER));
+    } else if (op == PLAYER_UI_SAVES_BRING_IN && !blocked && player->saves_bring_in.name[0]) {
+        player->saves_ask = PLAYER_UI_SAVES_ASK_BRING_IN;
+        player->saves_focus = PLAYER_UI_ID_SAVES_CANCEL;
     } else if (op >= PLAYER_UI_SAVES_RESTORE_BASE) {
         size_t row = (size_t)(op - PLAYER_UI_SAVES_RESTORE_BASE);
         if (row < player_ui_saves_page_rows(player)) {
@@ -2857,9 +2936,12 @@ static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, un
             player->saves_focus = PLAYER_UI_ID_SAVES_CANCEL;
         }
     } else if (op == PLAYER_UI_SAVES_CANCEL) {
+        player->saves_focus = player->saves_ask == PLAYER_UI_SAVES_ASK_BRING_IN
+                            ? PLAYER_UI_ID_SAVES_BRING_IN
+                            : player->saves_has ? PLAYER_UI_ID_SAVES_BACK_UP : PLAYER_UI_ID_SAVES_ADD;
         player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
-        player->saves_focus = player->saves_has ? PLAYER_UI_ID_SAVES_BACK_UP
-                                                : PLAYER_UI_ID_SAVES_ADD;
+    } else if (op == PLAYER_UI_SAVES_CONFIRM && player->saves_ask == PLAYER_UI_SAVES_ASK_BRING_IN) {
+        player_ui_saves_bring_in(player, app, index);
     } else if (op == PLAYER_UI_SAVES_CONFIRM &&
                player->saves_ask == PLAYER_UI_SAVES_ASK_REPLACE) {
         (void)snprintf(path, sizeof(path), "%s", player->saves_ask_path);
@@ -5196,6 +5278,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             model.ask = player->saves_ask;
             model.ask_row = player->saves_ask_row;
             model.ask_name = player->saves_ask_name;
+            if (player->saves_bring_in.name[0]) {
+                model.bring_in_name = player->saves_bring_in.name;
+                model.bring_in_note = player_ui_saves_bring_in_note(player->saves_bring_in.decision);
+            }
+            model.bring_in_problem = player->saves_bring_in_problem;
             model.status = player->saves_status;
             model.status_kind = player->saves_status_kind;
             model.blocked = blocked;

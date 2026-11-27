@@ -609,7 +609,7 @@ static void test_controls_long_bindings_fit_their_cells(void) {
         static char dump[TEXT_DUMP_CAP];
         bool split = s == 1;
         size_t first = split ? 5u : 10u;
-        int card[4];
+        int card[4] = {0, 0, 0, 0}; /* stays zero if the card is missing; that CHECK fails */
         if (ui == NULL) return;
         model.controls = rows;
         model.control_count = 10u;

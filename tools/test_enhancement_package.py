@@ -649,13 +649,15 @@ class TestEnhancementPackageSchema(unittest.TestCase):
 
 def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
                               sections: tuple[tuple[str, int, int, int], ...] = (),
-                              symbols: tuple[tuple[str, int, int, int, int], ...] = ()) -> bytes:
-    """Write a minimal synthetic MIPS32 little-endian ET_EXEC ELF for testing.
+                              symbols: tuple[tuple[str, int, int, int, int], ...] = (),
+                              *, elf_type: int = 2) -> bytes:
+    """Write a minimal synthetic MIPS32 little-endian ELF for testing.
 
     ``sections`` adds a section header table of (name, addr, size, flags) PROGBITS
-    sections over the loaded image.
+    sections over the loaded image. A .bss section is zero-filled (NOBITS).
     """
     filesz = max(max(words) + 8, 0x1000)
+    memsz = max([filesz] + [addr + size for name, addr, size, _ in sections if name == ".bss"])
     payload_off = 52 + 32
     blob = bytearray(payload_off + filesz)
     blob[:8] = b"\x7fELF\x01\x01\x01\x00"
@@ -663,7 +665,7 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
         "<HHIIIIIHHHHHH",
         blob,
         16,
-        2,  # e_type = ET_EXEC
+        elf_type,
         8,  # e_machine = EM_MIPS
         1,
         entry,
@@ -677,7 +679,7 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
         0,
         0,
     )
-    struct.pack_into("<8I", blob, 52, 1, payload_off, 0, 0, filesz, filesz, 5, 4)
+    struct.pack_into("<8I", blob, 52, 1, payload_off, 0, 0, filesz, memsz, 5, 4)
     for addr, word in words.items():
         struct.pack_into("<I", blob, payload_off + addr, word)
     if sections or symbols:
@@ -726,9 +728,10 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
             ),
         ]
         for name, addr, size, flags in sections:
+            offset = payload_off + (filesz if name == ".bss" else addr)
             headers.append(struct.pack(
-                "<10I", section_name_offsets[name], 1, flags, addr,
-                payload_off + addr, size, 0, 0, 4, 0,
+                "<10I", section_name_offsets[name], 8 if name == ".bss" else 1, flags, addr,
+                offset, size, 0, 0, 4, 0,
             ))
         if symbols:
             strtab_index = len(headers)
@@ -820,12 +823,13 @@ class _SynthTimingElfFixture(unittest.TestCase):
         }
 
     @staticmethod
-    def _run_codegen(elf_path: Path, out_c: Path, extra_args: list[str] | None = None) -> tuple[int, str, dict[str, bytes]]:
+    def _run_codegen(elf_path: Path, out_c: Path, extra_args: list[str] | None = None,
+                     *, base: int = 0) -> tuple[int, str, dict[str, bytes]]:
         argv = [
             "codegen.py",
             str(elf_path),
             str(out_c),
-            "--base=0",
+            f"--base={base:x}",
             "--profile=none",
             "--funcs-per-chunk=4000",
         ]
@@ -2152,8 +2156,9 @@ class TestEnhancementDataTransforms(unittest.TestCase):
                 plan_data_value(transform, dtype, raw)
 
     def test_f32_data_overflow_is_reported_as_a_rescale_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "overflows when rescaled"):
-            plan_data_value("count_x2", "f32", struct.pack("<f", 3.0e38))
+        for transform in ("count_x2", "f32_x3"):
+            with self.subTest(transform=transform), self.assertRaisesRegex(ValueError, "overflows when rescaled"):
+                plan_data_value(transform, "f32", struct.pack("<f", 3.0e38))
 
     def test_f32_float_pair_overflow_is_a_named_refusal(self) -> None:
         bits = struct.unpack("<I", struct.pack("<f", 3.0e38))[0]
@@ -4864,10 +4869,10 @@ class TestPublishedPackages(_SynthTimingElfFixture):
     DISC = "ULUS99999"
     VERSION = "1.01"
 
-    def _readers(self, elf_bytes: bytes):
+    def _readers(self, elf_bytes: bytes, *, base: int = 0):
         from analyze import Elf
 
-        return enhancement_package.elf_readers(Elf(elf_bytes, base=0))
+        return enhancement_package.elf_readers(Elf(elf_bytes, base=base))
 
     def _publish(self, elf_bytes: bytes, pkg: dict[str, Any] | None = None) -> dict[str, Any]:
         private, symbols = self._make_package_and_symbols(elf_bytes)
@@ -5271,6 +5276,207 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 enhancement_package.resolve_published_package(
                     published, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data,
                     data_root=tmp / "data")
+
+    def test_data_only_timing_package_scales_f32_at_opt_in_startup(self) -> None:
+        """The normal and opted-in builds share the same synthetic code and differ only in data."""
+        from analyze import ET_SCE_PRX
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            stock = struct.pack("<f", 1.25)
+            data_addr = 0x00002000
+            bss_addr = 0x00003000
+            base = 0x08800000
+            placed_addr = base + data_addr
+            words = dict(self.words)
+            words[data_addr] = struct.unpack("<I", stock)[0]
+            elf_bytes = _write_synthetic_mips_elf(
+                elf_path, words, self.entry,
+                sections=((".text", 0x00001000, 0x700, 6), (".rodata.sceModuleInfo", 0x1900, 52, 2),
+                          (".data", data_addr, 4, 3),
+                          (".bss", bss_addr, 4, 3)), elf_type=ET_SCE_PRX)
+            private, _ = self._make_package_and_symbols(elf_bytes)
+            instruction_sites = private["sites"]
+            update_boundary = private.pop("update_boundary")
+            private.update(sites=[], capabilities=["timing_data"],
+                           rng_policy={"mode": "unmodified",
+                                       "reason": "The synthetic fixture uses no RNG."},
+                           data_sites=[{
+                               "id": "TIMING_SCALE", "symbol": "synth_interval",
+                               "offset": 0, "type": "f32",
+                               "stock_digest": hashlib.sha256(stock).hexdigest(),
+                               "transform": "f32_x3",
+                           }])
+            symbols = {"synth_interval": f"0x{placed_addr:08x}"}
+
+            def generate(label: str, options: list[str]) -> tuple[int, str, dict[str, bytes]]:
+                output_dir = tmp / label
+                output_dir.mkdir()
+                return self._run_codegen(elf_path, output_dir / "out.c", options, base=base)
+
+            rc, output, authentic = generate("authentic", [])
+            self.assertEqual(rc, 0, output)
+            local_path = tmp / "local.json"
+            local_path.write_text(json.dumps(private), encoding="utf-8")
+            local_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+            rc, output, generated = generate("local", [f"--enhancement-package={local_path}"])
+            self.assertEqual(rc, 0, output)
+
+            read_words, read_data = self._readers(elf_bytes, base=base)
+            published = enhancement_package.publish_package(
+                private, {"synth_interval": placed_addr}, executable=elf_bytes,
+                disc_id=self.DISC, disc_version=self.VERSION,
+                read_words_fn=read_words, read_data_fn=read_data)
+            self.assertEqual(published["site_map"], symbols)
+            self.assertEqual(published["rng_policy"], private["rng_policy"])
+            self.assertNotEqual(published["data_sites"][0]["stock_digest"],
+                                private["data_sites"][0]["stock_digest"])
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+            public_path = tmp / "public.json"
+            public_path.write_text(json.dumps(published), encoding="utf-8")
+            rc, output, public_generated = generate("public", [f"--enhancement-package={public_path}"])
+            self.assertEqual(rc, 0, output)
+            self.assertEqual(public_generated, generated)
+
+            load_site = dict(instruction_sites[5], transform="vblank_wait_skip")
+            with self.assertRaisesRegex(EnhancementPackageError, "cannot declare load instruction sites"):
+                validate_package(dict(private, update_boundary=update_boundary,
+                                      ace_parts={"load": {"sites": [load_site]}}))
+
+            probability_transform = "probability_per_update_x0.5"
+            probability_site = dict(private["data_sites"][0], transform=probability_transform)
+            probability_file = {
+                "id": "SYNTH_PROBABILITY", "path": "data/probability.csv",
+                "sha256": hashlib.sha256(b"Rate\n0.25\n").hexdigest(),
+                "format": "csv", "header_row": 0, "first_data_row": 1,
+                "cells": [{"column": "Rate", "type": "f32", "transform": probability_transform}],
+            }
+            for field, elements in (("data_sites", [probability_site]), ("data_files", [probability_file])):
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    EnhancementPackageError, "probability rescaling requires an RNG policy"
+                ):
+                    validate_package(dict(private, **{field: elements}))
+            for mode in ("rescale_probability", "subtick_30hz"):
+                with self.subTest(mode=mode):
+                    legacy = dict(private, sites=instruction_sites, update_boundary=update_boundary,
+                                  data_sites=[probability_site], data_files=[probability_file],
+                                  rng_policy={"mode": mode, "reason": "Legacy timing policy."})
+                    self.assertEqual(validate_package(legacy)["rng_policy"]["mode"], mode)
+
+            for label, value, diagnostic in (
+                ("local-mismatch", private, "Stock data digest mismatch"),
+                ("published-mismatch", published, "site_mismatch"),
+            ):
+                with self.subTest(label=label):
+                    bad = copy.deepcopy(value)
+                    bad["data_sites"][0]["stock_digest"] = "0" * 64
+                    path = tmp / f"{label}.json"
+                    path.write_text(json.dumps(bad), encoding="utf-8")
+                    if label == "local-mismatch":
+                        path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+                    rc, output, files = generate(label, [f"--enhancement-package={path}"])
+                    self.assertEqual(rc, 1, output)
+                    self.assertIn(diagnostic, output)
+                    self.assertEqual(files, {})
+
+            for label, offset, changes, diagnostic in (
+                ("no-data-sites", data_addr, {"data_sites": []}, "data_sites must be a non-empty array"),
+                ("integer-scale", data_addr, {"data_sites": [dict(private["data_sites"][0], type="u32")]},
+                 "f32_x3 requires type 'f32'"),
+                ("missing-data-rng-policy", data_addr,
+                 {"rng_policy": {"mode": "rescale_probability", "reason": "A code-site policy."}},
+                 "data-only timing packages must declare 'unmodified'"),
+                ("unmodified-rng-rewrite", data_addr, {"sites": [instruction_sites[4]]},
+                 "'unmodified' is only for data-only timing packages"),
+                ("unmodified-rng-gate", data_addr, {"sites": [instruction_sites[5]]},
+                 "'unmodified' is only for data-only timing packages"),
+                ("code-as-data", self.entry, {}, "initialised data"),
+                ("bss-as-data", bss_addr, {}, "initialised data"),
+            ):
+                with self.subTest(label=label):
+                    path = tmp / f"{label}.json"
+                    path.write_text(json.dumps(dict(private, **changes)), encoding="utf-8")
+                    path.with_suffix(".symbols.json").write_text(
+                        json.dumps({"synth_interval": f"0x{base + offset:08x}"}), encoding="utf-8")
+                    rc, output, files = generate(label, [f"--enhancement-package={path}"])
+                    self.assertEqual(rc, 1, output)
+                    self.assertIn(diagnostic, output)
+                    self.assertEqual(files, {})
+
+            rc, output, authentic_after = generate("authentic-after", [])
+            self.assertEqual(rc, 0, output)
+            self.assertEqual(authentic_after, authentic)
+            self.assertNotIn(b"nk_enhancement_apply_data", authentic["out.c"])
+            self.assertEqual(generated["out_0.c"], authentic["out_0.c"])
+            main = generated["out.c"].decode("utf-8")
+            self.assertIn("sites=0", main)
+            lines = main.splitlines()
+            start = lines.index("int nk_enhancement_on(void) {")
+            enabled = "\n".join(lines[start:lines.index("uint32_t nk_enhancement_updates;", start) + 1])
+            start = next(i for i, line in enumerate(lines) if line.startswith("static const uint8_t nk_enh_data_stock_0"))
+            apply_data = "\n".join(lines[start:lines.index("}", start) + 1])
+            hook = "    if (nk_enhancement_on()) nk_enhancement_apply_data();"
+            self.assertIn(hook, main[main.index("void sr_register_all(void)"):])
+            if GCC is None:
+                self.skipTest("TOOLCHAIN_MISSING: needs a host compiler for the emitted startup test")
+            harness = tmp / "startup.c"
+            stock_bytes = ", ".join(f"0x{byte:02x}" for byte in stock)
+            harness.write_text(
+                "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+                f"static uint8_t data[] = {{{stock_bytes}}};\n"
+                f"int sr_guest_span_writable(uint32_t addr, uint32_t len) {{ return addr == {placed_addr} && len == sizeof(data); }}\n"
+                "void *sr_host_address(uint32_t addr) { (void)addr; return data; }\n"
+                "void sr_enhancement_register_updates(uint32_t *p) { (void)p; }\n"
+                f"{enabled}\n{apply_data}\nint main(void) {{\n{hook}\n"
+                '    for (unsigned i = 0; i < sizeof(data); ++i) printf("%02x", (unsigned)data[i]);\n'
+                "    return 0;\n}\n", encoding="utf-8")
+            exe = tmp / "startup.exe"
+            _run([GCC, "-std=c11", "-Wall", "-Werror", "-o", str(exe), str(harness)],
+                 check=True, capture_output=True)
+            for setting, expected in ((None, 1.25), ("0", 1.25), ("01", 1.25), ("1", 3.75)):
+                env = os.environ.copy()
+                env.pop("SR_EXPERIMENTAL_60HZ", None)
+                if setting is not None:
+                    env["SR_EXPERIMENTAL_60HZ"] = setting
+                run = _run([str(exe)], env=env, check=True, capture_output=True, text=True)
+                self.assertEqual(run.stdout, struct.pack("<f", expected).hex(), setting)
+
+    def test_initialized_data_reader_uses_elf_placement_once(self) -> None:
+        from analyze import ET_SCE_PRX, Elf
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "synth.elf"
+            data_addr, bss_addr = 0x2000, 0x3000
+            stock = struct.pack("<f", 1.25)
+            words = dict(self.words)
+            words[data_addr] = struct.unpack("<I", stock)[0]
+            sections = ((".text", self.entry, 0x700, 6), (".data", data_addr, 4, 3),
+                        (".bss", bss_addr, 4, 3))
+            for elf_type, base in ((2, 0x08800000), (ET_SCE_PRX, 0), (ET_SCE_PRX, 0x08800000)):
+                with self.subTest(elf_type=elf_type, base=base):
+                    executable = _write_synthetic_mips_elf(
+                        path, words, self.entry, sections, elf_type=elf_type)
+                    elf = Elf(executable, base=base)
+                    _, read_data = enhancement_package.elf_readers(elf)
+                    delta = base if elf_type == ET_SCE_PRX else 0
+                    self.assertEqual(elf.read_at_vaddr(data_addr + delta, 4), stock)
+                    self.assertEqual(read_data(data_addr + delta, 4), stock)
+                    segment = elf.segments[0]
+                    self.assertEqual(
+                        enhancement_package._elf_file_backed_offset(elf, data_addr + delta, 4),
+                        segment["off"] + data_addr)
+                    file_end = segment["vaddr"] + segment["filesz"]
+                    self.assertEqual(enhancement_package._elf_file_backed_offset(elf, file_end - 2, 2),
+                                     segment["off"] + segment["filesz"] - 2)
+                    self.assertIsNone(enhancement_package._elf_file_backed_offset(elf, file_end - 2, 4))
+                    self.assertEqual(elf.read_at_vaddr(self.entry + delta, 4),
+                                     struct.pack("<I", self.words[self.entry]))
+                    self.assertIsNone(read_data(self.entry + delta, 4))
+                    if elf_type == ET_SCE_PRX:
+                        self.assertEqual(elf.read_at_vaddr(bss_addr + delta, 4), b"\0" * 4)
+                    self.assertIsNone(enhancement_package._elf_file_backed_offset(elf, bss_addr + delta, 4))
+                    self.assertIsNone(read_data(bss_addr + delta, 4))
 
     def test_publish_keeps_no_values_read_from_the_game_and_refuses_wrong_digests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -8352,6 +8558,162 @@ class TestLinkingBranchesAreCalls(unittest.TestCase):
                         self.fail(f"0x{word:08x}: the analyzer follows a branch this file reads as plain code")
                     if branch and not reserved and analyze.branch_target(pc, word) != pc + 16:
                         self.fail(f"0x{word:08x}: a branch here that the analyzer does not follow")
+
+
+class TestReplayAtOddUpdateCount(_SynthTimingElfFixture):
+    """A replay that starts at an odd logic-update count (contract section 9.5, the replay checklist).
+
+    A title's own replay re-runs recorded input through its logic from a known state. Under a 60 Hz
+    package the update count is the run's, not the replay's: the attract loop, menus and loads
+    before the replay advance it too. These tests compile the generated code and start replays
+    after odd and after even numbers of updates. A plain gate follows the parity of the run's
+    count, so after an odd count it runs on the other updates of the replay than in a recording
+    started on an even count; a gate_30hz_alt site keeps its own phase and makes the stock call
+    first whenever it is reached again after a gap, whatever the parity and whichever call ended
+    its previous visit.
+    """
+
+    REPLAY = 12   # updates the replay re-runs; input k (0-based) is k + 1
+
+    def _gate_and_count(self, tmp: Path) -> tuple[str, str]:
+        """The generated gate definition and the generated update boundary statement."""
+        elf_path = tmp / "synth.elf"
+        elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+        pkg, symbols = self._make_package_and_symbols(elf_bytes)
+        pkg_path = tmp / "replay.json"
+        pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+        (tmp / "replay.symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+        out_dir = tmp / "replay"
+        out_dir.mkdir()
+        rc, output, files = self._run_codegen(elf_path, out_dir / "out.c",
+                                              [f"--enhancement-package={pkg_path}"])
+        self.assertEqual(rc, 0, output)
+        header = files["out_funcs.h"].decode("utf-8")
+        gate_def = next(line for line in header.splitlines()
+                        if "int nk_enhancement_gate_30hz(void)" in line)
+        combined = b"\n".join(files.values()).decode("utf-8")
+        # The boundary is found by the call it makes, not by how it counts, so a boundary that
+        # counts wrongly compiles and fails the behaviour checks below.
+        count_stmt = next(line.strip() for line in combined.splitlines()
+                          if "sr_enhancement_update_begin();" in line)
+        return gate_def, count_stmt
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
+    def test_a_plain_gate_follows_the_run_count_not_the_replay_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            gate_def, count_stmt = self._gate_and_count(tmp)
+            harness = tmp / "replay.c"
+            harness.write_text(
+                "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n"
+                "int nk_enhancement_on(void) { return 1; }\n"
+                "uint32_t nk_enhancement_updates;\n"
+                "void sr_enhancement_update_begin(void) {}\n"
+                f"{gate_def}\n"
+                "/* One logic update: the boundary counts it, then a gated accumulation\n"
+                " * (a gate_30hz addu) adds this update's input. */\n"
+                "static unsigned update(unsigned input, unsigned *x) {\n"
+                f"    {count_stmt}\n"
+                "    if (nk_enhancement_gate_30hz()) { *x += input; return 1; }\n"
+                "    return 0;\n"
+                "}\n"
+                "int main(int argc, char **argv) {\n"
+                "    unsigned before = argc > 1 ? (unsigned)atoi(argv[1]) : 0u, x = 0;\n"
+                "    for (unsigned u = 0; u < before; u++) { unsigned attract = 0; update(0, &attract); }\n"
+                f"    for (unsigned k = 0; k < {self.REPLAY}u; k++) printf(\"%u\", update(k + 1u, &x));\n"
+                "    printf(\" %u\\n\", x);\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "replay.exe"
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+            built = _run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
+                          "-o", str(exe), str(harness)], capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+
+            def replay(before: int) -> tuple[str, int]:
+                out = _run([str(exe), str(before)], check=True, capture_output=True, text=True).stdout
+                ran, total = out.split()
+                return ran, int(total)
+
+            # Section 9.5: a gated statement runs when the number of updates begun so far is even.
+            # A recording that starts with the run (count 0) runs it on replay updates 2, 4, ...
+            recorded = replay(0)
+            self.assertEqual(recorded, ("01" * (self.REPLAY // 2), sum(range(2, self.REPLAY + 1, 2))))
+            # After an even number of updates the replay sees the recording's phase exactly.
+            self.assertEqual(replay(8), recorded)
+            # After an odd number (7, 1 and 31 updates), every update of the replay is still one of
+            # an alternating pair, but the gate runs on updates 1, 3, ...: the other half of the
+            # same input, so the gated state the replay builds differs from the recording's.
+            for before in (7, 1, 31):
+                with self.subTest(before=before):
+                    ran, total = replay(before)
+                    self.assertEqual(ran, "10" * (self.REPLAY // 2))
+                    self.assertEqual(total, sum(range(1, self.REPLAY + 1, 2)))
+                    self.assertNotEqual(total, recorded[1])
+
+    @unittest.skipUnless(GCC, "TOOLCHAIN_MISSING: needs a host C compiler")
+    def test_an_alt_gate_makes_the_stock_call_first_at_any_replay_start(self) -> None:
+        # The gate_30hz_alt fixture of TestAltGateStaticChecks, used through an instance so
+        # this class adds no second copy of it.
+        alt_fixture = TestAltGateStaticChecks("test_caller_refusals")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            statement = alt_fixture._site_statement(tmp, "alt", with_package=True)
+            callees = list(dict.fromkeys(re.findall(r"(\w+)\(s\); SR_TAIL_DRAIN", statement)))
+            self.assertEqual(len(callees), 3, statement)
+            stubs = "".join(f"static void {fn}(CpuState *s) {{ (void)s; putchar('{tag}'); }}\n"
+                            for fn, tag in zip(callees, "SAB", strict=True))
+            harness = tmp / "alt_replay.c"
+            harness.write_text(
+                "#include \"recomp.h\"\n"
+                "#undef SR_TAIL_DRAIN\n#define SR_TAIL_DRAIN(s) ((void)0)\n"
+                "#define sr_aot_return_boundary_begin(s, r, c, k) 0\n"
+                "#define sr_aot_return_boundary_end(s) 0\n"
+                "int nk_enhancement_on(void) { return 1; }\n"
+                "uint32_t nk_enhancement_updates;\n"
+                f"{stubs}"
+                f"static void site(CpuState *s) {{\n{statement}\n}}\n"
+                "/* Updates that reach the site (a race or its replay), then updates that do not\n"
+                " * (the menus and loads between them): each segment is a count of updates. */\n"
+                "static void segment(CpuState *s, unsigned updates, int visits) {\n"
+                "    for (unsigned u = 0; u < updates; u++) {\n"
+                "        nk_enhancement_updates++;\n"
+                "        if (visits) site(s);\n"
+                "    }\n"
+                "    if (visits) putchar('|');\n"
+                "}\n"
+                "int main(void) {\n"
+                "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
+                f"    segment(s, {self.REPLAY}u, 1);   /* the recording, from count 0 */\n"
+                "    segment(s, 7u, 0);   /* replay 1 starts after 19 updates */\n"
+                f"    segment(s, {self.REPLAY + 1}u, 1);   /* odd length: it ends on a stock call */\n"
+                "    segment(s, 1u, 0);   /* replay 2 starts after 33, one update after that stock call */\n"
+                f"    segment(s, {self.REPLAY + 1}u, 1);\n"
+                "    segment(s, 6u, 0);   /* replay 3 starts after 52, an even count */\n"
+                f"    segment(s, {self.REPLAY}u, 1);\n"
+                "    putchar('\\n');\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "alt_replay.exe"
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+            built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                          "-Wno-misleading-indentation", "-Wno-unused-variable",
+                          f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
+                         capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            out = _run([str(exe)], check=True, capture_output=True, text=True).stdout.strip()
+            # Sections 9.2 and 9.5: the site makes its alternates only in an update right after
+            # one in which it made the stock call, so each segment begins with the stock call
+            # (S), then the two alternates (AB), whatever the parity of the count it starts on.
+            # Replays 2 and 3 follow a segment that ended on a stock call: a site that toggled on
+            # its own last choice without the gap rule would start them with AB.
+            even = "SAB" * (self.REPLAY // 2)
+            odd = even + "S"
+            self.assertEqual(out, "|".join([even, odd, odd, even]) + "|")
 
 
 if __name__ == "__main__":
