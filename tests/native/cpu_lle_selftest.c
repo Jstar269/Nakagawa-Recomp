@@ -585,6 +585,41 @@ static void test_hw_psp_a3_05_halfword_through_interpreter(void) {
     sr_cpu_lle_set_enabled(0);
 }
 
+/* ctc1 $31 then cfc1 through the interpreter, with the default (LLE off) decode a game runs:
+ * pspautotests e37443a6 tests/cpu/fpu/fcr.expected (recorded on a PSP), lines 16, 18, 22 and 24,
+ * reads FO (bit 22), FN (bit 21), bits 18..20 and bits 25..31 back as 0, and lines 14 and 20 read
+ * FS and FCC0 back as written. tools/test_codegen_fp_convert.py checks the generated lane. */
+static void test_ctc1_fcr31_write_mask_through_interpreter(void) {
+    static const struct { uint32_t written, psp; } rows[] = {
+        { 0x00400000u, 0x00000000u }, { 0x00200000u, 0x00000000u },
+        { 0xFE000000u, 0x00000000u }, { 0x001C0000u, 0x00000000u },
+        { 0x01000000u, 0x01000000u }, { 0x00800000u, 0x00800000u },
+    };
+    for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        CpuState s;
+        SrGuestInterpFault fault;
+        fresh_state(&s);
+        MEM_W32_PC(TEST_BASE + 0u, 0x44C8F800u, TEST_BASE);       /* ctc1 t0, $31 */
+        MEM_W32_PC(TEST_BASE + 4u, 0x4449F800u, TEST_BASE + 4u);  /* cfc1 t1, $31 */
+        MEM_W32_PC(TEST_BASE + 8u, 0x03E00008u, TEST_BASE + 8u);  /* jr $ra */
+        MEM_W32_PC(TEST_BASE + 12u, 0x00000000u, TEST_BASE + 12u);
+        s.pc = TEST_BASE;
+        s.r[8] = rows[i].written;
+        s.r[9] = 0xDEADBEEFu;
+        s.r[31] = TEST_SPAN_END;
+        memset(&fault, 0, sizeof fault);
+        const SrGuestInterpResult r = sr_guest_interp_run(&s, TEST_BASE, &fault);
+        CHECK(r == SR_GUEST_INTERP_FETCH_BOUNDARY && fault.pc == TEST_SPAN_END,
+              "ctc1 0x%08x must run to the jr $ra (got %s at 0x%08x)", rows[i].written,
+              sr_guest_interp_result_name(r), fault.pc);
+        CHECK(s.r[9] == rows[i].psp && s.fcr31 == rows[i].psp,
+              "ctc1 0x%08x: cfc1 read 0x%08x, FCR31 0x%08x (PSP 0x%08x)", rows[i].written,
+              s.r[9], s.fcr31, rows[i].psp);
+        CHECK(s.fpcond == ((rows[i].psp >> 23) & 1u), "ctc1 0x%08x: fpcond %u",
+              rows[i].written, s.fpcond);
+    }
+}
+
 /* PSP-A3-06 (negative control): lwl/lwr/swl/swr across alignment boundaries
  * complete normally. The probe returned and wrote host0:/a3_unaligned_results.txt
  * with loaded_pair=0x88776655, lwl_only=0x332211ff, lwr_only=0x00004433 for
@@ -3354,6 +3389,7 @@ int main(int argc, char **argv) {
     test_hw_psp_a3_05_halfword_odd();
     test_hw_psp_a3_05_halfword_through_interpreter();
     test_hw_psp_a3_06_unaligned_no_fault();
+    test_ctc1_fcr31_write_mask_through_interpreter();
     test_hw_psp_a3_08_11_vfpu_alignment();
     test_hw_psp_a3_08_11_vfpu_through_interpreter();
     test_unverified_vfpu_forms_are_logged_once();

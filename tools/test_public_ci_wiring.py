@@ -470,7 +470,7 @@ class PublicCiWiringTests(unittest.TestCase):
                                                   or []))
         # Its only condition is the native_tools part that runs it; nothing can skip it there.
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
-                         ["if: matrix.part == 'translation'"])
+                         ["if: matrix.part == 'gpu'"])
         self.assertLess(
             _ci_step_index(native_tools, "Verify lavapipe and run GPU capture selftest"),
             _ci_step_index(native_tools, step_name),
@@ -570,7 +570,7 @@ class PublicCiWiringTests(unittest.TestCase):
             text, r'(?m)^\s+NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"$')
         self.assertNotIn("continue-on-error", text)
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
-                         ["if: matrix.part == 'translation'"])
+                         ["if: matrix.part == 'gpu'"])
 
     def test_gpu_ace_mip_chain_and_their_mutants_run_on_lavapipe_and_a_skip_fails(self) -> None:
         """gpu-ace-selftest, gpu-mips-selftest and five mutant gates were reachable only by hand."""
@@ -591,7 +591,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn("""if grep -q '^SKIP ' "$RUNNER_TEMP/gpu-ace-mips.log"; then""", text)
         self.assertNotIn("continue-on-error", text)
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
-                         ["if: matrix.part == 'translation'"])
+                         ["if: matrix.part == 'gpu'"])
         twin = _ci_step(native_tools, _GPU_TWIN_MUTANTS_STEP)
         self.assertIsNotNone(twin, "native_tools must run gpu-coherence-twin-mutants")
         assert twin is not None
@@ -599,7 +599,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertRegex(twin_text, r"(?m)^\s+make CC=gcc gpu-coherence-twin-mutants$")
         self.assertNotIn("continue-on-error", twin_text)
         self.assertEqual([line.strip() for line in twin if line.strip().startswith("if:")],
-                         ["if: matrix.part == 'translation'" + _NIGHTLY_ONLY_SUFFIX])
+                         ["if: matrix.part == 'gpu'" + _NIGHTLY_ONLY_SUFFIX])
 
     def test_sdl3_skips_in_native_core_tests_fail_where_sdl3_is_required(self) -> None:
         """native_tools installs the pinned SDL3; a build discovery that misses it must not pass.
@@ -686,7 +686,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertNotIn("make ", text, "make maps exit 77 to a SKIP line; the step must see it")
         self.assertNotIn("continue-on-error", text)
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
-                         ["if: matrix.part == 'translation'"])
+                         ["if: matrix.part == 'gpu'"])
 
     def test_glsl_shaders_are_reproduced_with_the_pinned_linux_glslc(self) -> None:
         """The hosted job downloads the Vulkan SDK archive shader_embed.py pins, checks its SHA-256
@@ -716,7 +716,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertNotIn("make ", text, "make maps exit 77 to a SKIP line; the step must see it")
         self.assertNotIn("continue-on-error", text)
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
-                         ["if: matrix.part == 'translation'"])
+                         ["if: matrix.part == 'gpu'"])
 
     def test_parser_fuzzers_run_under_the_sanitizers_at_a_fixed_depth(self) -> None:
         """F-6cc53528: native_tools runs make fuzz-parsers, whose build off Windows adds ASan and
@@ -1759,9 +1759,9 @@ class NativeToolsPartitionTests(unittest.TestCase):
         self.assertIsNotNone(match, f"{name}: a part condition must name exactly one part")
         return _matched(match).group(1)
 
-    def test_pinned_cube_uses_the_real_presenter_in_the_player_leg(self) -> None:
+    def test_pinned_cube_uses_the_real_presenter_in_the_routes_leg(self) -> None:
         name = "Run the pinned gu-cube player smoke"
-        self.assertEqual(self.part_of(name), "player")
+        self.assertEqual(self.part_of(name), "routes")
         step = "\n".join(_required(self.steps[name], "missing gu-cube smoke"))
         for required in ('NK_HOMEBREW_RUNTIME_REQUIRED: "1"', "SDL_VIDEODRIVER: x11",
                          'export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', "xvfb-run -a",
@@ -1840,6 +1840,67 @@ class NativeToolsPartitionTests(unittest.TestCase):
         required = "\n".join(_ci_job_blocks()["ci_required"])
         self.assertRegex(required, r"needs: \[[^\]]*\bnative_tools\b[^\]]*\]")
         self.assertIn("NATIVE_RESULT: ${{ needs.native_tools.result }}", required)
+
+    def test_gpu_and_routes_parts_run_exactly_their_steps_after_the_setup_they_need(self) -> None:
+        """#3166: the GPU steps left translation for gpu and the two routes left player for routes.
+        Each of the two runs exactly its named steps, player keeps its own, and the setup they
+        need has no part condition, so it runs in every part, before them."""
+        self.assertEqual(self.parts, ["core", "translation", "gpu", "player", "routes"])
+        gpu = [
+            "Run Linux GPU snapshot sync selftest",
+            "Verify lavapipe and run GPU capture selftest",
+            "Run GPU coherence selftest on lavapipe",
+            "Run GPU texture scaling selftest on lavapipe",
+            _GPU_ACE_MIPS_STEP,
+            _GPU_TWIN_MUTANTS_STEP,
+            "Run the FSR 3 pass selftest on lavapipe",
+            "Run the FSR 3 frame generation refusal on lavapipe",
+            "Reproduce the FSR 3 shaders with the pinned DXC",
+            "Reproduce the GLSL shaders with the pinned glslc",
+        ]
+        routes = [
+            "Run the pinned gu-cube player smoke",
+            "Build and run the profile-zero production route on Linux",
+        ]
+        player = [
+            "Run host present pacing selftest (links SDL3)",
+            "Run native player UI regressions headlessly",
+            "Run Linux native player UI tests headlessly",
+            "Configure, build, and test CMake Linux player",
+            "Build and run the Linux showcase headlessly",
+            "Smoke the CMake Linux player headlessly",
+            "Stage the installed Linux player and smoke the installed binary",
+        ]
+        for part, expected in (("gpu", gpu), ("routes", routes)):
+            with self.subTest(part=part):
+                self.assertEqual([name for name in self.names if name not in _NATIVE_OWN_CONDITION
+                                  and self.part_of(name) == part], expected)
+        for name in player:
+            with self.subTest(player=name):
+                self.assertEqual(self.part_of(name), "player")
+        # The showcase evidence upload reads the showcase step, which stays in player.
+        self.assertEqual(self.conditions("Upload the Linux showcase smoke evidence on failure"),
+                         [_NATIVE_OWN_CONDITION["Upload the Linux showcase smoke evidence on failure"]])
+        # The setup the GPU and route steps read: Xvfb, lavapipe and the Vulkan tools from apt,
+        # the pinned SDL3, PSPDEV, the recorded lavapipe ICD and the build directory.
+        apt = "\n".join(_required(self.steps["Install native test dependencies"], "missing apt step"))
+        for package in ("libvulkan-dev", "mesa-vulkan-drivers", "vulkan-tools", "vulkan-validationlayers",
+                        "xauth", "xvfb"):
+            self.assertRegex(apt, rf"(?<![\w-]){re.escape(package)}(?![\w-])", package)
+        setup = ("Install native test dependencies", "Install the pinned SDL3 into the Linux prefix",
+                 "Install and verify pinned SDL3_ttf and shaping libraries",
+                 "Install PSPDEV from the checked-in lock", "Select the lavapipe Vulkan ICD",
+                 "Create build directory")
+        for prerequisite in setup:
+            with self.subTest(setup=prerequisite):
+                self.assertIn(prerequisite, _NATIVE_EVERY_PART)
+                self.assertEqual(self.conditions(prerequisite), [])
+                for name in gpu + routes:
+                    self.assertLess(self.names.index(prerequisite), self.names.index(name), name)
+        # The lavapipe and interlock check runs in the same part before every later GPU step.
+        verify = self.names.index("Verify lavapipe and run GPU capture selftest")
+        for name in gpu[2:]:
+            self.assertLess(verify, self.names.index(name), name)
 
 
 class AndroidBuildWiringTests(unittest.TestCase):
@@ -2631,7 +2692,7 @@ class PublicExportJobTests(unittest.TestCase):
         hygiene_if = _matched(re.fullmatch(r"if: \$\{\{(.*)\}\}", conditions.pop())).group(1)
         native_if = _job_if(self.blocks["native_tools"])
         core = "\n".join(self.blocks["native_tools"])
-        self.assertIn("part: [core, translation, player]", core)
+        self.assertIn("part: [core, translation, gpu, player, routes]", core)
         native_steps = [
             "\n".join(_ci_step(self.blocks["native_tools"], name) or [])
             for name in self._step_names(self.blocks["native_tools"])
@@ -4868,9 +4929,11 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         # (#1846) and the host twin mutants.
         native_tools = "\n".join(blocks["native_tools"])
         self.assertEqual(native_tools.count("github.event_name"), len(_NIGHTLY_STEPS))
-        for name in _NIGHTLY_STEPS:
+        nightly_parts = {_NIGHTLY_REPEAT_STEP: "translation", _GPU_TWIN_MUTANTS_STEP: "gpu"}
+        self.assertEqual(set(nightly_parts), _NIGHTLY_STEPS)
+        for name, part in nightly_parts.items():
             with self.subTest(nightly=name):
-                self.assertIn("if: matrix.part == 'translation'" + _NIGHTLY_ONLY_SUFFIX,
+                self.assertIn(f"if: matrix.part == '{part}'" + _NIGHTLY_ONLY_SUFFIX,
                               "\n".join(_ci_step(blocks["native_tools"], name) or []))
 
     def test_selftest_repeat_runs_in_the_nightly_only(self) -> None:

@@ -683,7 +683,8 @@ int sdl3vk_input_profile_selftest(void) {
 /* ---- pause input selftest (#1159); no Vulkan needed ------------------------------------
  * Drives the real event path (poll_input) with an SDL virtual gamepad and pushed key events:
  * Esc, F1 and Guide ask for the pause and never reach the game; while the overlay holds the
- * claim every event goes to it and the game reads a released pad; a button held when the
+ * claim every event goes to it and the game reads a released pad; Android's Back is Esc, outside
+ * the overlay and in it (#3220); a button held when the
  * claim ends is not a fresh press until it is let go (P8); a stick pushed when the claim ends
  * reads centred until it returns; and losing the open pad asks for the pause. */
 
@@ -711,6 +712,18 @@ static void pause_test_key(SDL_Keycode key, bool repeat) {
     SDL_zero(ev);
     ev.type = SDL_EVENT_KEY_DOWN;
     ev.key.key = key;
+    ev.key.down = true;
+    ev.key.repeat = repeat;
+    SDL_PushEvent(&ev);
+}
+
+/* Android's Back as SDL reports it: SDLK_AC_BACK, from SDL_SCANCODE_AC_BACK. */
+static void pause_test_back(bool repeat) {
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = SDL_EVENT_KEY_DOWN;
+    ev.key.key = SDLK_AC_BACK;
+    ev.key.scancode = SDL_SCANCODE_AC_BACK;
     ev.key.down = true;
     ev.key.repeat = repeat;
     SDL_PushEvent(&ev);
@@ -825,6 +838,15 @@ int sdl3vk_pause_input_selftest(void) {
     (void)pause_test_sample();
     PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_NONE, "a key repeat asked again");
 
+    /* Android's Back asks as Esc does (#3220), and neither the game nor the key queue sees it. */
+    pause_test_back(false);
+    PAUSE_CHECK(pause_test_sample() == 0, "Back reached the game");
+    PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_USER, "Back did not ask for the pause");
+    PAUSE_CHECK(s_key_count == 0, "Back reached the key queue");
+    pause_test_back(true);
+    (void)pause_test_sample();
+    PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_NONE, "a Back repeat asked again");
+
     /* The overlay holds the claim: everything is its own. */
     SDL_SetJoystickVirtualButton(joy, SDL_GAMEPAD_BUTTON_SOUTH, true);
     (void)pause_test_sample();        /* cross held before the pause opens */
@@ -843,6 +865,11 @@ int sdl3vk_pause_input_selftest(void) {
     pause_test_guide_release(joy);
     PAUSE_CHECK(sink.guide_downs == 1 && sink.escapes == 1, "the overlay saw Guide %d times and Esc %d times, expected 1 and 1", sink.guide_downs, sink.escapes);
     PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_NONE, "a request latched under the claim");
+    /* In the overlay Back is Esc too, so it goes back or resumes there. */
+    pause_test_back(false);
+    (void)pause_test_sample();
+    PAUSE_CHECK(sink.escapes == 2, "the overlay saw Back as Esc %d times, expected 1", sink.escapes - 1);
+    PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_NONE, "Back latched a request under the claim");
     SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_LEFTX, SDL_JOYSTICK_AXIS_MAX);
     (void)pause_test_sample();
     uint8_t lx = 0, ly = 0;

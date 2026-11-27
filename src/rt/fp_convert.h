@@ -200,12 +200,15 @@ static inline int32_t sr_u32_as_s32(uint32_t bits) {
 #define SR_FCR31_RM_MASK 0x00000003u
 #define SR_FCR31_FCC0    0x00800000u
 #define SR_FCR31_FS      0x01000000u
-/* FCR31 bits 25..31 (FCC1..FCC7 on MIPS IV) do not exist on the PSP FPU: a
- * guest ctc1 of 0xFE800000 reads back 0x00800000 (PSP-FPU-CC-001, PSP-3000 /
- * 6.61, 2026-10-15), so ctc1 drops them and cfc1 never returns them. Only these
- * seven bits were measured as not writable; no other FCR31 bit is masked. The
- * generated C spells the same word as a literal (tools/codegen.py, ctc1). */
-#define SR_FCR31_CTC1_UNWRITABLE 0xfe000000u
+/* FCR31 bits ctc1 does not store, so cfc1 never returns them. Bits 25..31
+ * (FCC1..FCC7 on MIPS IV) do not exist on the PSP FPU: a guest ctc1 of
+ * 0xFE800000 reads back 0x00800000 (PSP-FPU-CC-001, PSP-3000 / 6.61,
+ * 2026-10-15). Bits 18..22 (FO, FN and the three above the cause field) read
+ * back 0 after a ctc1 of 0x00400000, 0x00200000 or 0x001C0000 (pspautotests
+ * e37443a6 tests/cpu/fpu/fcr.expected, recorded on a PSP). Bit 17 (cause E) is
+ * unrecorded, since writing it traps there, and stays writable. The generated
+ * C spells the same word as a literal (tools/codegen.py, ctc1). */
+#define SR_FCR31_CTC1_UNWRITABLE 0xfe7c0000u
 /* The FCR0 (FIR, implementation and revision) word a guest cfc1 of register 0
  * reads; every other FCR but 31 reads 0. The reference and runtime interpreters
  * share this name; the generated C spells the same word as a literal
