@@ -25,6 +25,7 @@ import os
 import sys
 from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
+from io import BufferedReader, RawIOBase, TextIOWrapper
 from typing import Any
 
 # The packaged Windows embeddable interpreter can omit this script's directory
@@ -72,6 +73,10 @@ class CodegenOptions:
     # byte-for-byte HLE behavior. MFC0/MTC0/ERET have no prior HLE behavior
     # (they were untranslatable) and emit helper calls in both modes.
     lle_cpu: bool = False
+
+    # The validated disc identity from the normal native package builder. An absent
+    # option preserves existing codegen callers' original output.
+    timing_run_identity: tuple[str, str] | None = dataclass_field(default=None, kw_only=True)
 
     # LLE import seam (PR 3): when True, generated import stubs route through
     # sr_import_call(s, nid, stub_pc) instead of calling sr_syscall(s, nid)
@@ -879,41 +884,71 @@ def load_symbol_map(path):
     A malformed line, an address that does not fit 32 bits, or two different
     names (or sizes) for one address is an error naming the file and line.
     """
-    symbols = {}
     with open(path, encoding="utf-8") as source:
-        for line_no, line in enumerate(source, 1):
-            text = line.strip()
-            if not text or text.startswith(("#", "//")):
-                continue
-            where = f"{path}:{line_no}"
-            match = _SYMBOL_MAP_LINE.fullmatch(text)
-            if match is None:
-                raise SymbolMapError(f"{where}: expected `name = 0xADDR;`, got {text!r}")
-            name, addr_text, comment = match.groups()
-            attributes = dict(_SYMBOL_MAP_ATTRIBUTE.findall(comment or ""))
-            if attributes.get("type", "func") != "func":
-                continue
-            addr = int(addr_text, 16)
-            if addr > 0xFFFFFFFF:
-                raise SymbolMapError(f"{where}: address {addr_text} does not fit 32 bits")
-            size = 0
-            if "size" in attributes:
-                try:
-                    size = int(attributes["size"], 0)
-                except ValueError:
-                    raise SymbolMapError(
-                        f"{where}: size {attributes['size']!r} is not a number") from None
-                if not 0 < size <= 0x100000000 - addr:
-                    raise SymbolMapError(
-                        f"{where}: size {attributes['size']} does not fit the address space")
-            previous = symbols.get(addr)
-            if previous is not None and previous != (name, size):
-                raise SymbolMapError(
-                    f"{where}: 0x{addr:08x} is already {previous[0]} "
-                    f"(size 0x{previous[1]:x}), not {name} (size 0x{size:x})")
-            symbols[addr] = (name, size)
-    return symbols
+        return _parse_symbol_map(path, source)
 
+
+class _SymbolMapDigestReader(RawIOBase):
+    """Hash the source bytes before the text reader decodes and normalizes them."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+        self.digest = hashlib.sha256()
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        count = self.source.readinto(buffer)
+        if count:
+            self.digest.update(memoryview(buffer)[:count])
+        return count
+
+
+def _load_symbol_map_with_digest(path):
+    """Parse and hash an explicit guest symbol map in one streaming read."""
+    with open(path, "rb", buffering=0) as raw:
+        reader = _SymbolMapDigestReader(raw)
+        with TextIOWrapper(BufferedReader(reader), encoding="utf-8") as source:
+            symbols = _parse_symbol_map(path, source)
+        return symbols, reader.digest.hexdigest()
+
+
+def _parse_symbol_map(path, source):
+    symbols = {}
+    for line_no, line in enumerate(source, 1):
+        text = line.strip()
+        if not text or text.startswith(("#", "//")):
+            continue
+        where = f"{path}:{line_no}"
+        match = _SYMBOL_MAP_LINE.fullmatch(text)
+        if match is None:
+            raise SymbolMapError(f"{where}: expected `name = 0xADDR;`, got {text!r}")
+        name, addr_text, comment = match.groups()
+        attributes = dict(_SYMBOL_MAP_ATTRIBUTE.findall(comment or ""))
+        if attributes.get("type", "func") != "func":
+            continue
+        addr = int(addr_text, 16)
+        if addr > 0xFFFFFFFF:
+            raise SymbolMapError(f"{where}: address {addr_text} does not fit 32 bits")
+        size = 0
+        if "size" in attributes:
+            try:
+                size = int(attributes["size"], 0)
+            except ValueError:
+                raise SymbolMapError(
+                    f"{where}: size {attributes['size']!r} is not a number") from None
+            if not 0 < size <= 0x100000000 - addr:
+                raise SymbolMapError(
+                    f"{where}: size {attributes['size']} does not fit the address space")
+        previous = symbols.get(addr)
+        if previous is not None and previous != (name, size):
+            raise SymbolMapError(
+                f"{where}: 0x{addr:08x} is already {previous[0]} "
+                f"(size 0x{previous[1]:x}), not {name} (size 0x{size:x})")
+        symbols[addr] = (name, size)
+    return symbols
 
 def site_names_from_symbol_map(symbols):
     """Turn a load_symbol_map result into {name: address} for enhancement-package sites.
@@ -3277,11 +3312,24 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
     handler = _VFPU_COP2_MOVE_FORMS.get(sub)
     if handler is None:
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
-    if sub == 7 and imm == 131:
-        # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
-        # (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
-        return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
+    if sub == 7 and imm >= 128 and imm - 128 in _VFPU_MTVC_KEPT:
+        keep, fixed = _VFPU_MTVC_KEPT[imm - 128]
+        value = f"{R(rt(w))} & 0x{keep:x}u"
+        return (f"{dst} = ({value}) | 0x{fixed:08x}u;" if fixed else f"{dst} = {value};"), None, 0
     return handler(w, src, dst)
+
+
+# What mtvc stores in a VFPU control register: (bits kept from the written word, bits that
+# always read set). VFPU_CC keeps bits 0..5 (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue
+# #326, probe case vfpu-cc-cmov: mtvc then mfvc read back written & 0x3f in every cell). The
+# S/T/D prefixes keep bits 0..19, 0..19 and 0..11 (pspautotests e37443a6
+# tests/cpu/vfpu/prefix_ctrl.expected, recorded on a PSP: 0xffffffff reads back 000fffff,
+# 000fffff, 00000fff; 0xfff00000, 0xfff00000, 0xffffff00 read 0, 0, 00000f00). RCX0-7 keep
+# bits 0..19 and read 0x3f8 above them (pspautotests e37443a6 tests/cpu/vfpu/vrnd.expected,
+# recorded on a PSP: 00000001 reads 3f800001, ffffffff reads 3f8fffff, 12345678 reads
+# 3f845678). Controls 4-7 have no recorded write and store the word as written.
+_VFPU_MTVC_KEPT = {0: (0xFFFFF, 0), 1: (0xFFFFF, 0), 2: (0xFFF, 0), 3: (0x3F, 0),
+                   **{ctrl: (0xFFFFF, 0x3F800000) for ctrl in range(8, 16)}}
 
 
 def _vfpu_cop2_mfv(w, src, dst):
@@ -6546,6 +6594,7 @@ def _command_line_parser():
     parser.add_argument("--omit-aot", action="append", default=[], metavar="ADDR[,ADDR...]",
                         help="leave these entries to the dispatcher instead of direct C calls")
     value("--enhancement-package", "enhancement package to apply")
+    value("--record-timing-identity", "observe native startup timing for a verified DISC_ID:DISC_VERSION")
     value("--code-hook-package", "a guest_memory_code_hook package applied beside --enhancement-package")
     value("--enhancement-data-root", "the title's extracted files, for package data_files")
     value("--region-split-threshold", "split regions at this many conditional edges, or off")
@@ -6801,6 +6850,11 @@ def _apply_options(cli, checked, options):
     The options are set only once every option has been accepted. Each default (the switch absent)
     reproduces the historical output byte for byte.
     """
+    if cli.record_timing_identity is not None:
+        disc_id, _, disc_version = cli.record_timing_identity.partition(":")
+        if enhancement_package.timing_disc_identity(disc_id, disc_version) is None:
+            raise _Refusal(2, "--record-timing-identity expects DISC_ID:DISC_VERSION\n")
+        options.timing_run_identity = disc_id, disc_version
     if cli.static_verify:
         options.static_verify = True
     if cli.lle_cpu:
@@ -6837,8 +6891,8 @@ def _apply_options(cli, checked, options):
 
 
 def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, data_root,
-                        read_words, read_loaded_data):
-    """The validated package and the {symbol: address} map its sites resolve through.
+                        read_words, read_loaded_data, *, explicit_map_digest=None):
+    """The validated package, the resolved symbols and any effective external map digest.
 
     A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only through its own
     site map, after its keyed digests match this executable. A private one uses the ELF's own
@@ -6847,20 +6901,24 @@ def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, 
     """
     from pathlib import Path
     if enhancement_package.is_published_package(pkg_validated):
-        return enhancement_package.resolve_published_package(
+        resolved, sym_map = enhancement_package.resolve_published_package(
             pkg_validated, executable=elf.data, read_words_fn=read_words,
             read_data_fn=read_loaded_data, data_root=data_root,
         )
+        return resolved, sym_map, None
     sym_map = enhancement_package.extract_elf_func_symbols(elf)
+    map_digest = None
     if symbol_map_path is not None:
         # The guest symbol map names the package's sites too, in place of the
         # <package>.symbols.json sidecar.
         sym_map.update(site_names_from_symbol_map(symbols))
+        map_digest = explicit_map_digest
     else:
         sidecar = Path(pkg_path).with_suffix(".symbols.json")
         if sidecar.is_file():
-            sym_map.update(enhancement_package.load_symbol_map(sidecar))
-    return pkg_validated, sym_map
+            sidecar_symbols, map_digest = enhancement_package.load_symbol_map_with_digest(sidecar)
+            sym_map.update(sidecar_symbols)
+    return pkg_validated, sym_map, map_digest
 
 
 def _refuse_uncallable_control_sites(sites):
@@ -6919,7 +6977,7 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
         raise enhancement_package.EnhancementPackageError(
             f"code-hook package {pkg['id']!r}: target_title_id {pkg['target_title_id']!r} is not "
             f"the enhancement package's {enhancement_pkg['target_title_id']!r} (fail-closed refusal)")
-    pkg, sym_map = _package_symbol_map(elf, pkg, code_hook_pkg_path, symbols, symbol_map_path, None,
+    pkg, sym_map, _ = _package_symbol_map(elf, pkg, code_hook_pkg_path, symbols, symbol_map_path, None,
                                        read_words, read_loaded_data)
     sites = enhancement_package.verify_and_resolve_sites(
         pkg,
@@ -7004,7 +7062,7 @@ def _reset_enhancement_tables() -> None:
 
 
 def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path, code_hook_pkg_path=None):
+                              symbol_map_path, code_hook_pkg_path=None, *, explicit_map_digest=None):
     """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables,
     then the ``--code-hook-package`` beside it, if any (``_load_code_hook_package``).
 
@@ -7019,13 +7077,16 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
         try:
             pkg_raw = enhancement_package.load_package(enhancement_pkg_path)
             pkg_validated = enhancement_package.validate_package(pkg_raw)
+            declaration_digest = enhancement_package.compute_package_digest(pkg_validated)
+            declaration_disc_id = pkg_validated.get("disc_id")
             elf_sha256 = hashlib.sha256(elf.data).hexdigest()
             # Instruction words as codegen reads them, and initialised data as the loader
             # places it (enhancement_package.elf_readers).
             _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
-            pkg_validated, sym_map = _package_symbol_map(
+            pkg_validated, sym_map, map_digest = _package_symbol_map(
                 elf, pkg_validated, enhancement_pkg_path, symbols, symbol_map_path,
-                enhancement_data_root, _read_words, _read_loaded_data)
+                enhancement_data_root, _read_words, _read_loaded_data,
+                explicit_map_digest=explicit_map_digest)
 
             ENHANCEMENT_SITES = enhancement_package.verify_and_resolve_sites(
                 pkg_validated,
@@ -7090,6 +7151,11 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 "version": pkg_validated["version"],
                 "epoch": enhancement_package.AOT_ENHANCEMENT_PACKAGE_EPOCH,
                 "digest": enhancement_package.compute_package_digest(pkg_validated),
+                "declaration_digest": declaration_digest,
+                "disc_id": declaration_disc_id,
+                "game_version": pkg_validated.get("game_version"),
+                "timing": pkg_validated["category"] == "timing_frame_presentation",
+                "symbol_map_sha256": map_digest,
                 "sites_count": len(ENHANCEMENT_SITES),
                 "data_sites_count": len(ENHANCEMENT_DATA_PATCHES),
                 "data_files_count": len(ENHANCEMENT_DATA_FILES),
@@ -7193,6 +7259,37 @@ def _symbol_names(symbol_map_path, name_imports, symbols, import_nids, emitted, 
     return renames, symbol_table
 
 
+# The generated image is compiled with only the build directory and src/rt on its include
+# path (mk/pipeline.mk), so it declares the src/core diagnostic itself rather than including
+# nk_shared_helpers.h. The declaration must stay identical to the one in that header.
+TIMING_RUN_OBSERVED_PROTOTYPE = (
+    "void nk_shared_timing_run_observed(bool timing, const char *disc_id, const char *disc_version,\n"
+    "                                   const char *executable_sha256, const char *declaration_id,\n"
+    "                                   const char *declaration_sha256, const char *symbol_map_sha256);"
+)
+
+
+def _timing_run_observation(elf, identity):
+    """Emit only observations tied to the verified primary image's startup."""
+    if identity is None:
+        return []
+    disc_id, disc_version = identity
+    package = ENHANCEMENT_PKG_META
+    timing = package is not None and package["timing"]
+    if timing and (package["game_version"] != disc_version
+                   or package["disc_id"] not in (None, disc_id)):
+        # Preserve launch semantics for existing local declarations, but don't
+        # report a mismatched declaration as an observed timing identity.
+        return []
+    declaration_id = package["id"] if timing else "-"
+    declaration_digest = package["declaration_digest"] if timing else "-"
+    symbols = (package["symbol_map_sha256"] or "-") if timing else "-"
+    mode = "nk_enhancement_on()" if timing else "0"
+    facts = (disc_id, disc_version, hashlib.sha256(elf.data).hexdigest(),
+             declaration_id, declaration_digest, symbols)
+    return [f"    nk_shared_timing_run_observed({mode}, {', '.join(c_string(value) for value in facts)});"]
+
+
 def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resume_owners, dispatch_boundaries,
                         *, stack_census, module_translations, symbol_table, module_record, main_var_imports,
                         main_var_exports, main_func_exports, fixed_var_imports, exec_spans, stale_funcs,
@@ -7209,6 +7306,9 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
         "#include <stdio.h>",
         ""
     ]
+    timing_run_observation = _timing_run_observation(elf, options.timing_run_identity)
+    if timing_run_observation:
+        main_out.extend((TIMING_RUN_OBSERVED_PROTOTYPE, ""))
     if ENHANCEMENT_PKG_META is not None:
         main_out.append(
             f"/* AOT Enhancement Epoch: {ENHANCEMENT_PKG_META['epoch']} "
@@ -7363,6 +7463,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     main_out.append(f'    fprintf(stderr, "sr_register_all: starting {len(emitted)} registrations\\n");')
     for i in range(num_files):
         main_out.append(f"    sr_register_chunk_{i}();")
+    main_out.extend(timing_run_observation)
     main_out.append('    fprintf(stderr, "sr_register_all: completed\\n");\n}')
     return main_out
 
@@ -7539,10 +7640,14 @@ def _translate(argv):
         cfg_gate = True
 
     symbols = {}
+    explicit_map_digest = None
     if symbol_map_path is not None:
         # Read before the analysis so a bad map fails in a second, not after it.
         try:
-            symbols = load_symbol_map(symbol_map_path)
+            if options.timing_run_identity is not None and enhancement_pkg_path is not None:
+                symbols, explicit_map_digest = _load_symbol_map_with_digest(symbol_map_path)
+            else:
+                symbols = load_symbol_map(symbol_map_path)
         except (OSError, UnicodeDecodeError, SymbolMapError) as exc:
             sys.stderr.write(f"codegen: symbol map: {exc}\n")
             return 2
@@ -7612,7 +7717,8 @@ def _translate(argv):
 
     GUEST_SP_ENTRIES.clear()
     _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path, code_hook_pkg_path)
+                              symbol_map_path, code_hook_pkg_path,
+                              explicit_map_digest=explicit_map_digest)
 
     try:
         impmap = primary_import_map(elf)

@@ -124,8 +124,9 @@ static inline void sr_vfpu_thread_ctrl_init(CpuState *s) {
  * c' = ((C2 >> 2) + (C3 >> 3) + (c >> 2)) >> 30, and the drawn word is
  * C0' + C1' + C3'. It reproduces all 1792 measured rows (the drawn word and RCX0-7
  * after the step). The new state goes back in the same layout. Bits 20-31 are not part
- * of the state and are left as found: the probe wrote 0x3f8 there in every cell; what
- * the unit does with other upper bits (reachable only through mtvc) is unmeasured.
+ * of the state and are left as found: they read 0x3f8 at thread entry, and mtvc stores
+ * 0x3f8 there whatever was written (pspautotests e37443a6 tests/cpu/vfpu/vrnd.expected,
+ * recorded on a PSP), so no guest write reaches another value.
  * The generated code and sr_vfpu_interp both call this. */
 static inline uint32_t sr_vfpu_rnd_step(uint32_t rcx[8]) {
     uint32_t c[4], carry = 0u;

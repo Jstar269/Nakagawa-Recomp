@@ -13,8 +13,11 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
+    <!-- NoActionBar: the activities draw only SDL's surface, so the default theme's title bar
+         ("Nakagawa", about 270 px on a phone) would only cover the top of the player. -->
     <application
         android:label="@string/app_name"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:isGame="true">

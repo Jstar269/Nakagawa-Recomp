@@ -427,6 +427,93 @@ static bool count_listed_name(const char *name, void *ctx) {
     return true;
 }
 
+/* Writes `text` as the whole file at `path`. */
+static void write_text_file(const char *path, const char *text) {
+    FILE *file = fopen(path, "wb");
+    assert(file != NULL);
+    assert(fputs(text, file) >= 0);
+    assert(fclose(file) == 0);
+}
+
+/* The whole file at `path` as text, or "" when it does not exist. */
+static const char *read_text_file(const char *path, char *out, size_t out_size) {
+    FILE *file = fopen(path, "rb");
+    out[0] = '\0';
+    if (!file) return out;
+    size_t n = fread(out, 1u, out_size - 1u, file);
+    out[n] = '\0';
+    fclose(file);
+    return out;
+}
+
+/* dir/leaf into out, a NK_MAX_PATH buffer. */
+static void in_dir(char *out, const char *dir, const char *leaf) {
+    int n = snprintf(out, NK_MAX_PATH, "%s/%s", dir, leaf);
+    assert(n > 0 && (size_t)n < NK_MAX_PATH);
+}
+
+/* 17. Android's launcher keeps its own log, rotated (nk_platform_setup_standard_streams): each
+ * start sets the earlier runs' files aside, newest first, and drops the oldest beyond `keep`;
+ * a copy that is missing is skipped, and the numbers go before the extension. */
+static void log_rotation_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 17: log files rotate, newest first\n");
+    fflush(stdout);
+    char dir[NK_MAX_PATH];
+    char path[NK_MAX_PATH];
+    char copy[NK_MAX_PATH];
+    char text[64];
+    snprintf(dir, sizeof(dir), "%s/posix_log_rotation_XXXXXX", SR_SELFTEST_BUILD_ROOT);
+    assert(mkdtemp(dir) != NULL);
+    in_dir(path, dir, "player-output.txt");
+
+    /* Nothing there yet: nothing to move, and that is not a failure. */
+    assert(nk_platform_rotate_log_files(path, 2u));
+    for (int run = 1; run <= 4; run++) {
+        snprintf(text, sizeof(text), "run %d\n", run);
+        write_text_file(path, text);
+        assert(nk_platform_rotate_log_files(path, 2u));
+        assert(access(path, F_OK) != 0);   /* free for the next run to create */
+    }
+    in_dir(copy, dir, "player-output.1.txt");
+    assert(strcmp(read_text_file(copy, text, sizeof(text)), "run 4\n") == 0);
+    in_dir(copy, dir, "player-output.2.txt");
+    assert(strcmp(read_text_file(copy, text, sizeof(text)), "run 3\n") == 0);
+    in_dir(copy, dir, "player-output.3.txt");
+    assert(access(copy, F_OK) != 0);   /* beyond keep: gone, not kept */
+
+    /* A gap in the copies is skipped; a name with no extension, or only a leading dot, takes
+       the number at its end. */
+    in_dir(copy, dir, "player-output.1.txt");
+    assert(remove(copy) == 0);
+    write_text_file(path, "run 5\n");
+    assert(nk_platform_rotate_log_files(path, 2u));
+    assert(strcmp(read_text_file(copy, text, sizeof(text)), "run 5\n") == 0);
+    in_dir(copy, dir, "player-output.2.txt");
+    assert(access(copy, F_OK) != 0);   /* the oldest copy still goes first */
+    in_dir(path, dir, ".log");
+    write_text_file(path, "dot\n");
+    assert(nk_platform_rotate_log_files(path, 1u));
+    in_dir(copy, dir, ".log.1");
+    assert(strcmp(read_text_file(copy, text, sizeof(text)), "dot\n") == 0);
+
+    /* keep 0 keeps no copy; an over-long name is refused, not truncated. */
+    write_text_file(path, "dot\n");
+    assert(nk_platform_rotate_log_files(path, 0u));
+    assert(access(path, F_OK) != 0);
+    char long_path[NK_MAX_PATH + 8];
+    memset(long_path, 'a', sizeof(long_path) - 1u);
+    long_path[sizeof(long_path) - 1u] = '\0';
+    assert(!nk_platform_rotate_log_files(long_path, 2u));
+    assert(!nk_platform_rotate_log_files("", 2u));
+
+    const char *leaves[] = { "player-output.1.txt", "player-output.2.txt", ".log.1" };
+    for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++) {
+        in_dir(copy, dir, leaves[i]);
+        (void)remove(copy);
+    }
+    assert(rmdir(dir) == 0);
+}
+
 /* 14. nk_platform_list_files lists a file whose name starts with a dot, as the Win32 backend
  * does and as nk_platform.h says ("each regular file directly inside dir"). POSIX dropped
  * every such name, so a caller saw different files on the two hosts. */
@@ -719,6 +806,7 @@ int main(int argc, char **argv) {
     get_path_private_subtest();
     list_files_dot_subtest();
     child_signal_state_subtest();
+    log_rotation_subtest();
 #if !defined(__ANDROID__)
     exec_failure_subtest();
 #endif

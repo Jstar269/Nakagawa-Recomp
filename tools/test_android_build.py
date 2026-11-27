@@ -219,6 +219,78 @@ class AndroidAppContractTests(unittest.TestCase):
             text = manifest.read_text(encoding="utf-8")
             self.assertNotIn("uses-permission", text, f"{manifest} asks for a permission")
 
+    def test_the_activities_have_no_title_bar(self) -> None:
+        """The activities show only SDL's surface: the default theme's ActionBar put a separate
+        "Nakagawa" title bar, about 270 px tall on a phone, over the top of the player."""
+        for manifest in sorted(ANDROID.glob("app/src/*/AndroidManifest.xml")):
+            text = manifest.read_text(encoding="utf-8")
+            # No activity, in any source set, brings a theme of its own back.
+            self.assertNotRegex(text, r'<activity[^>]*android:theme=', f"{manifest} themes an activity")
+        text = (ANDROID / "app" / "src" / "main" / "AndroidManifest.xml").read_text(encoding="utf-8")
+        application = re.search(r"<application\b([^>]*)>", text, re.S)
+        self.assertIsNotNone(application)
+        assert application is not None
+        theme = re.search(r'android:theme="([^"]+)"', application.group(1))
+        self.assertIsNotNone(theme, "the application names no theme, so it gets the ActionBar default")
+        assert theme is not None
+        self.assertRegex(theme.group(1), r"^@android:style/Theme\.[A-Za-z.]*\.NoActionBar(\.|$)")
+
+    def test_no_accelerometer_request_on_a_device_without_one(self) -> None:
+        """SDL asks for the accelerometer on every resume; on a device with none (a headset's
+        panel) Android logged "sensor or listener is null" each time. Both activities use
+        NakagawaHost's surface, which makes the request only when the sensor exists."""
+        java = ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" / "nakagawa"
+        for name in ("LauncherActivity.java", "TitleActivity.java"):
+            source = (java / name).read_text(encoding="utf-8")
+            self.assertRegex(source, r"protected SDLSurface createSDLSurface\(Context context\) \{\s*"
+                                     r"return new NakagawaHost\.Surface\(context\);", name)
+        host = (java / "NakagawaHost.java").read_text(encoding="utf-8")
+        surface = re.search(r"protected void enableSensor\(int sensortype, boolean enabled\) \{(.*?)\n        \}",
+                            host, re.S)
+        self.assertIsNotNone(surface)
+        assert surface is not None
+        body = surface.group(1)
+        self.assertLess(body.index("if (sensor == null) return;"),
+                        body.index("super.enableSensor(sensortype, enabled);"))
+
+    def test_the_launcher_keeps_its_own_rotated_log(self) -> None:
+        """On Android the player's output reached only the system log, which some devices'
+        firmware filters down to warnings: the launcher (no run log named) now also writes
+        player-output.txt in its logs folder, rotated, through the one line writer that both
+        the system log and the file take every line from."""
+        posix = (ROOT / "src" / "core" / "nk_platform_posix.c").read_text(encoding="utf-8")
+        setup = re.search(r"void nk_platform_setup_standard_streams\(const char \*fallback_log_name\) \{"
+                          r"(.*?)\n\}", posix, re.S)
+        self.assertIsNotNone(setup)
+        assert setup is not None
+        self.assertRegex(setup.group(1), r"#if defined\(__ANDROID__\)[^#]*android_open_own_log\(fallback_log_name\);")
+        own = posix[posix.index("static void android_open_own_log(const char *name) {"):]
+        own = own[:own.index("\n}\n")]
+        self.assertIn("nk_platform_get_path(NK_PATH_LOGS, dir, sizeof(dir))", own)
+        self.assertLess(own.index("nk_platform_rotate_log_files(path, NK_ANDROID_LOG_KEEP)"),
+                        own.index('fopen(path, "we")'))
+        self.assertIn("if (has_file) return;", own)   # a title's run log stays the launcher's
+        pump = posix[posix.index("static void *android_log_pump(void *arg) {"):]
+        pump = pump[:pump.index("\n}\n")]
+        # Every line, the overlong and the unterminated last one included, goes to both.
+        self.assertEqual(pump.count("android_log_line("), 3)
+        self.assertNotIn("__android_log_write", pump)
+        self.assertNotIn("fprintf(", pump)
+        line = posix[posix.index("static void android_log_line(const char *line) {"):]
+        line = line[:line.index("\n}\n")]
+        self.assertIn("NK_ANDROID_LOG_MAX_BYTES", line)
+        # A failed write (a full disk) is said by name, once until a write succeeds again
+        # (AGENTS.md section 6: no hidden failures).
+        self.assertIn("if (fflush(s_android_log_file) != 0) wrote = false;", line)
+        failed = line[line.index("} else if (!s_android_log_write_failed) {"):]
+        self.assertLess(failed.index("s_android_log_write_failed = true;"),
+                        failed.index('"NK_LOG_WRITE_FAILED %s (%s)'))
+        self.assertLess(line.index("s_android_log_write_failed = false;"),
+                        line.index("} else if (!s_android_log_write_failed) {"))
+        player = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertLess(player.index('nk_platform_host_startup("nakagawa");'),
+                        player.index('nk_platform_setup_standard_streams("player-output.txt");'))
+
     def test_title_activity_runs_in_its_own_process(self) -> None:
         text = (ANDROID / "app" / "src" / "main" / "AndroidManifest.xml").read_text(encoding="utf-8")
         block = re.search(r'<activity\s+android:name="\.TitleActivity"(.*?)/>', text, re.S)
@@ -848,6 +920,17 @@ class AndroidTitleLibraryTests(unittest.TestCase):
                                   r"[^}]*endProcess\(EXIT_NOT_STARTED\);")
         shim = (ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c").read_text(encoding="utf-8")
         self.assertIn("    __wrap_exit(main(argc, argv));\n}", shim)
+
+    def test_the_launcher_takes_the_system_back_itself(self) -> None:
+        """Untrapped, SDL let the system end the launcher on every Back, whatever page was
+        open, after sending SDLK_AC_BACK too (SDLActivity.onBackPressed): the player traps it
+        before SDL starts and goes back one view, as Esc does (#3215)."""
+        player = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        opened = player[player.index("static int player_open_window(PlayerRun *run) {"):]
+        self.assertLess(opened.index('SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");'),
+                        opened.index("SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)"))
+        back = player[player.index("static const SDL_Event *player_back_as_escape("):]
+        self.assertIn("event->key.key == SDLK_AC_BACK", back[:back.index("\n}\n")])
 
     def test_a_failed_bundled_file_unpack_is_shown(self) -> None:
         """A failed copy of the bundled files is shown by the launcher, and does not also hide
