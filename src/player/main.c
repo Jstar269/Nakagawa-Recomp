@@ -802,7 +802,7 @@ static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
     }
 }
 
-/* Backspace and the mouse's back button (X1) are Back: each is taken as Esc,
+/* Backspace, the system's Back and the mouse's back button (X1) are Back: each is taken as Esc,
    so every view goes back the same way. A key the Controls page is waiting
    for keeps its own name, so Backspace can still be mapped, and so does
    Backspace in the library's find box and the nickname editor, where it
@@ -818,15 +818,20 @@ static const SDL_Event *player_back_as_escape(const PlayerApp *app, const Player
     bool x1 = (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                event->type == SDL_EVENT_MOUSE_BUTTON_UP) &&
               event->button.button == SDL_BUTTON_X1;
-    if (!backspace && !x1) return event;
+    /* The system's Back (Android's back button or gesture) keeps its scancode, so the
+       launcher's input still tells it from a key and leaves the active input as it is. */
+    bool system_back = (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) &&
+                       event->key.key == SDLK_AC_BACK;
+    bool key = backspace || system_back;
+    if (!key && !x1) return event;
     memset(escape, 0, sizeof(*escape));
-    escape->type = backspace ? event->type
+    escape->type = key ? event->type
         : event->type == SDL_EVENT_MOUSE_BUTTON_DOWN ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
-    escape->key.windowID = backspace ? event->key.windowID : event->button.windowID;
+    escape->key.windowID = key ? event->key.windowID : event->button.windowID;
     escape->key.key = SDLK_ESCAPE;
-    escape->key.scancode = SDL_SCANCODE_ESCAPE;
+    escape->key.scancode = system_back ? SDL_SCANCODE_AC_BACK : SDL_SCANCODE_ESCAPE;
     escape->key.down = escape->type == SDL_EVENT_KEY_DOWN;
-    escape->key.repeat = backspace && event->key.repeat;
+    escape->key.repeat = key && event->key.repeat;
     return escape;
 }
 
@@ -2895,6 +2900,7 @@ typedef struct {
     char prior_identity[65];
     char package_identity[65];
     char reason[2048];
+    NkLaunchEnhancementSources enhancement_sources;
     NkRuntimePackageInfo package_info;
     GameRecord game;
     NkRuntimePackageStatus status;
@@ -2979,8 +2985,8 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
     }
 
     char before_identity[65] = "";
-    bool before_valid = root && nk_launch_runtime_package_cache_identity(
-        root, &job->game, before_identity);
+    bool before_valid = root && nk_launch_runtime_package_cache_identity_for_launch(
+        root, &job->game, &job->enhancement_sources, before_identity);
     if (!job->force && job->prior_status_valid && job->prior_identity_valid &&
         before_valid && strcmp(before_identity, job->prior_identity) == 0) {
         job->status_unchanged = true;
@@ -2989,7 +2995,8 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
                  before_identity);
     } else if (root) {
         job->status = player_runtime_package_status_check(
-            root, &job->game, &job->package_info, job->reason, sizeof(job->reason));
+            root, &job->game, &job->enhancement_sources, &job->package_info,
+            job->reason, sizeof(job->reason));
         job->runtime_available = player_runtime_available(job->status, &job->game, root);
     } else {
         job->status = NK_RUNTIME_PACKAGE_MISSING;
@@ -3014,14 +3021,15 @@ static int SDLCALL player_package_status_thread_main(void *userdata) {
 
     if (!job->status_unchanged) {
         char after_identity[65] = "";
-        bool after_valid = root && nk_launch_runtime_package_cache_identity(
-            root, &job->game, after_identity);
+        bool after_valid = root && nk_launch_runtime_package_cache_identity_for_launch(
+            root, &job->game, &job->enhancement_sources, after_identity);
         job->identity_valid = after_valid;
+        job->identity_changed_during_validation =
+            (before_valid && after_valid && strcmp(before_identity, after_identity) != 0) ||
+            (job->game.enhancement_package_id[0] && before_valid != after_valid);
         if (after_valid) {
             snprintf(job->package_identity, sizeof(job->package_identity), "%s",
                      after_identity);
-            job->identity_changed_during_validation = before_valid &&
-                strcmp(before_identity, after_identity) != 0;
         }
     }
     SDL_Event event;
@@ -3129,6 +3137,9 @@ static bool player_package_status_start_next(
     job->cache_generation = app->runtime_package_cache_generation;
     job->force = force_requested[index];
     job->game = app->games[index];
+    if (job->game.enhancement_package_id[0]) {
+        player_app_enhancement_sources(app, &job->enhancement_sources);
+    }
     if (build_check_pending && *build_check_pending &&
         build_check_disc_id &&
         strcmp(build_check_disc_id, job->game.disc_id) == 0 &&
@@ -7385,6 +7396,12 @@ static int player_command_line_launch(PlayerRun *run) {
 static int player_open_window(PlayerRun *run) {
     PlayerApp *app = &run->app;
     nk_title_manifest_set_cancel_check(player_closing, NULL);
+
+    /* Android: the system's Back reaches the launcher only as SDLK_AC_BACK, which goes back
+       one view as Esc does (player_back_as_escape) and, on the library, quits as Esc does.
+       Untrapped, the system also ended the launcher on every Back, whatever page was open.
+       The hint does nothing on other hosts. */
+    (void)SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
 
     /* Initialize SDL3 */
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {

@@ -1908,9 +1908,23 @@ PC, starting address, value, width in bytes, and most recently delivered vblank:
 $env:SR_WATCH = '0x08800000:4'
 ```
 
-Output uses `SR_WATCH: pc=... addr=... val=... width=... vblank=...`. A vblank value of zero
-means no vblank has been delivered yet. The watch is inert when unset; the shared store helpers
-take only a predicted-false flag check in that case.
+Output uses `SR_WATCH: pc=... addr=... val=... width=... vblank=... ra=... sp=... thread=... old=...`.
+A vblank value of zero means no vblank has been delivered yet. The fields after `vblank` were
+appended for #2809, so a filter written for the shorter line still matches its prefix:
+
+- `ra` and `sp` are `$ra` (`r[31]`) and `$sp` (`r[29]`) of the running thread's register file at
+  the store, or `none` when no register file is current. A store inside a promoted run of a
+  `--promote-registers` build sees the values written back at the start of that run, and an
+  HLE host store names the thread that made the call.
+- `thread` is the running thread's UID, `0x00000000` when no thread is current.
+- `old` is the bytes the store replaced, read just before it in the same layout as `val`. A
+  VRAM store reads them through the CPU read-prepare path, as a guest load would; that read
+  happens only for a store the armed range covers, and it can make the renderer read VRAM back
+  where the store alone would not, so a watch over VRAM changes GPU synchronization.
+
+The watch is inert when unset. With it unset, a store takes the inline fast path or, in a slow
+store helper, one predicted-false flag check; an armed store goes whole to one cold out-of-line
+helper.
 
 ### Sampling guest state per vblank
 
@@ -2731,11 +2745,13 @@ retail title is private: keep it out of the repository and every upload.
 2. Use specific categories: `SR_DEBUG=0x02` for HLE tracing only
 3. Set `SR_WATCHDOG_EXIT=N` to abort after N vblanks without a newly presented frame; the firing is a NO-NEW-FLIP observation, so classify it with the display counters, thread dump, and MPEG/PSMF activity the watchdog prints, not the threshold alone
 4. Check how the picture is drawn: before `window_ready`, the runtime writes one
-   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge>`
+   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge|vulkan_cpu>`
    line from what `gui_init` asked for and what started (`nk_render_path_from_init` in
    `src/core/nk_shared_helpers.c`, #2151). `gdi_presenter` means SDL3/Vulkan did not start and the GDI window shows a
-   software-drawn picture; `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed. A path
-   that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
+   software-drawn picture. `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed.
+   `vulkan_cpu` means the selected Vulkan device runs on the CPU, regardless of the GE renderer in use. The
+   `ge` field still records which GE renderer started. An explicitly selected GDI or software GE path alone
+   gives `fallback=none`. The native player names a fallback
    on the game's page, with Hide for the rest of its session. The game window names it too, over the picture, in
    every play mode (the [render notice](ENHANCEMENT_CONTRACT.md#1024-the-render-notice)): a chip at the bottom left
    that any pause hides for the rest of the run, or, in the GDI window, a band of text that F1 hides. Such a run

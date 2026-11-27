@@ -1804,6 +1804,169 @@ static int draw_ring_pair(NkUi *ui, double now_s) {
     return INT_MIN;
 }
 
+/* Touch moves no focus a person follows: in touch mode no ring is drawn, the high-contrast
+   one included, and the first key or pad press (touch off) shows it again. */
+static int test_focus_ring_waits_for_keys_after_touch(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiPrefs prefs;
+    NkUi *ui;
+    int frame;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create touch ring context");
+    set_test_window(ui);
+    for (frame = 0; frame < 3; ++frame) (void)draw_ring_pair(ui, 0.0);
+    nk_ui_focus(ui, 81u);
+    CHECK(draw_ring_pair(ui, 0.0) != INT_MIN, "keys and pads: the focused control has a ring");
+    memset(&prefs, 0, sizeof(prefs));
+    prefs.touch = true;
+    nk_ui_set_prefs(ui, &prefs);
+    CHECK(draw_ring_pair(ui, 0.0) == INT_MIN && nk_ui_focused(ui) == 81u,
+          "touch: no ring, and the focus stays where it was");
+    prefs.high_contrast_focus = true;
+    nk_ui_set_prefs(ui, &prefs);
+    {
+        const NkUiDrawList *list;
+        uint32_t i;
+        bool white = false;
+        nk_ui_begin(ui, 0.0);
+        (void)nk_ui_button(ui, 81u, "One", 0u);
+        list = nk_ui_end(ui);
+        for (i = 0u; list != NULL && i < list->ncmd; ++i) {
+            if (list->cmd[i].kind == NK_UI_DRAW_BORDER && list->cmd[i].rgba_pm == 0xFFFFFFFFu) {
+                white = true;
+            }
+        }
+        CHECK(list != NULL && !white, "touch: no high-contrast ring either");
+        prefs.touch = false;
+        nk_ui_set_prefs(ui, &prefs);
+        nk_ui_begin(ui, 0.0);
+        (void)nk_ui_button(ui, 81u, "One", 0u);
+        list = nk_ui_end(ui);
+        for (i = 0u; list != NULL && i < list->ncmd; ++i) {
+            if (list->cmd[i].kind == NK_UI_DRAW_BORDER && list->cmd[i].rgba_pm == 0xFFFFFFFFu) {
+                white = true;
+            }
+        }
+        CHECK(white, "a key after touch: the high-contrast ring is back");
+    }
+    prefs.high_contrast_focus = false;
+    nk_ui_set_prefs(ui, &prefs);
+    for (frame = 0; frame < 2; ++frame) (void)draw_ring_pair(ui, 1.0);
+    CHECK(draw_ring_pair(ui, 1.0) != INT_MIN, "a key after touch: the ring is back");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* A prompt bar of Move, Confirm, Find (Options), Settings (Menu) and Back, at the bottom
+   of a 640 x 400 window. */
+static const NkUiPromptItem k_touch_prompts[] = {
+    {NK_UI_PROMPT_ACT_MOVE, "Move"},
+    {NK_UI_PROMPT_ACT_CONFIRM, "Open"},
+    {NK_UI_PROMPT_ACT_OPTIONS, "Find"},
+    {NK_UI_PROMPT_ACT_MENU, "Settings"},
+    {NK_UI_PROMPT_ACT_BACK, "Back"}
+};
+
+static void draw_prompt_page(NkUi *ui) {
+    NkUiLayout page;
+    memset(&page, 0, sizeof(page));
+    page.width = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+    page.height = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+    page.direction = NK_UI_LAYOUT_COLUMN;
+    nk_ui_begin(ui, 0.0);
+    if (nk_ui_begin_container(ui, 70u, &page, NULL)) {
+        NkUiLayout body = page;
+        if (nk_ui_begin_container(ui, 71u, &body, NULL)) {
+            (void)nk_ui_button(ui, 72u, "Game", 0u);
+            nk_ui_end_container(ui);
+        }
+        nk_ui_prompt_bar(ui, 73u, "", k_touch_prompts,
+                         sizeof(k_touch_prompts) / sizeof(k_touch_prompts[0]));
+        nk_ui_end_container(ui);
+    }
+    (void)nk_ui_end(ui);
+}
+
+/* The prompt item i's own container, and its glyph (nk_ui_prompt_bar's ids). */
+static NkUiId prompt_item(size_t i) { return nk_ui_child_id(73u, 16u + (uint32_t)i * 4u); }
+
+static void tap_at_middle(NkUi *ui, const NkUiRect *r) {
+    push_pointer(ui, r->x + r->w * 0.5f, r->y + r->h * 0.5f, true);
+    push_pointer(ui, r->x + r->w * 0.5f, r->y + r->h * 0.5f, false);
+}
+
+/* With touch only, nothing in the prompt bar could be tapped: every prompt was a key's
+   glyph. In touch mode each action but Confirm and Move is a labelled button, and a tap
+   does what its key does: Settings is the next frame's Menu event, and Back is the host's
+   (nk_ui_take_prompt_back). */
+static int test_prompt_bar_is_tappable_in_touch_mode(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiPrefs prefs;
+    NkUiRect menu;
+    NkUiRect back;
+    NkUiRect glyph;
+    NkUi *ui;
+    char dump[16384];
+    int frame;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create prompt bar context");
+    set_test_window(ui);
+    memset(&prefs, 0, sizeof(prefs));
+    prefs.prompt_style = NK_UI_PROMPT_KEYCAPS;
+    nk_ui_set_prefs(ui, &prefs);
+    for (frame = 0; frame < 3; ++frame) draw_prompt_page(ui);
+    CHECK(nk_ui_element_rect(ui, nk_ui_child_id(prompt_item(3u), 1u), &glyph) && glyph.w > 0.0f,
+          "keys: SETTINGS has its key's glyph");
+    CHECK(nk_ui_element_rect(ui, prompt_item(3u), &menu), "keys: SETTINGS is laid out");
+    tap_at_middle(ui, &menu);
+    draw_prompt_page(ui);
+    nk_ui_begin(ui, 0.0);
+    CHECK(!nk_ui_take_event(ui, NK_UI_EV_MENU, NULL), "keys: a click on a glyph does nothing");
+    (void)nk_ui_end(ui);
+
+    prefs.touch = true;
+    nk_ui_set_prefs(ui, &prefs);
+    for (frame = 0; frame < 3; ++frame) draw_prompt_page(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"FIND\"") != NULL && strstr(dump, "\"SETTINGS\"") != NULL &&
+              strstr(dump, "\"BACK\"") != NULL && strstr(dump, "\"MOVE\"") == NULL &&
+              strstr(dump, "\"OPEN\"") == NULL,
+          "touch: the actions are labelled, and Move and Open are left out");
+    CHECK(!nk_ui_element_rect(ui, nk_ui_child_id(prompt_item(3u), 1u), &glyph),
+          "touch: no key glyph is drawn");
+    CHECK(nk_ui_element_rect(ui, prompt_item(3u), &menu) && menu.h >= NK_UI_CONTROL_HEIGHT &&
+              menu.y + menu.h <= 400.0f,
+          "touch: SETTINGS is a full-size button in the window");
+    CHECK(nk_ui_element_rect(ui, prompt_item(4u), &back), "touch: BACK is laid out");
+    nk_ui_focus(ui, 72u);
+    draw_prompt_page(ui);
+    tap_at_middle(ui, &menu);
+    draw_prompt_page(ui);
+    CHECK(nk_ui_wait_s(ui, 0.0, 0.05) == 0.0, "the tapped action is drawn at once");
+    nk_ui_begin(ui, 0.0);
+    CHECK(nk_ui_take_event(ui, NK_UI_EV_MENU, NULL), "a tap on SETTINGS is the next frame's Menu");
+    (void)nk_ui_end(ui);
+    nk_ui_begin(ui, 0.0);
+    CHECK(!nk_ui_take_event(ui, NK_UI_EV_MENU, NULL), "once");
+    (void)nk_ui_end(ui);
+    for (frame = 0; frame < 2; ++frame) draw_prompt_page(ui);
+    CHECK(!nk_ui_take_prompt_back(ui), "no Back was tapped");
+    tap_at_middle(ui, &back);
+    draw_prompt_page(ui);
+    CHECK(nk_ui_take_prompt_back(ui) && !nk_ui_take_prompt_back(ui),
+          "a tap on BACK is the host's Back, once");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 /* The ring eases from the control focus leaves to the one it reaches, over
    NK_UI_MOTION_FAST, and nk_ui says so while it moves, so the host keeps
    drawing. Reduce motion makes the move a cut. */
@@ -3442,7 +3605,8 @@ int main(int argc, char **argv) {
         !test_pointer_respects_clip() || !test_scroll_container() ||
         !test_draw_clips_nest() || !test_draw_text_runs_reused() ||
         !test_modal_card_floats() || !test_focus_ring_floats() ||
-        !test_focus_ring_moves() || !test_hover_fill_eases() || !test_tab_rule_slides() ||
+        !test_focus_ring_moves() || !test_focus_ring_waits_for_keys_after_touch() ||
+        !test_prompt_bar_is_tappable_in_touch_mode() || !test_hover_fill_eases() || !test_tab_rule_slides() ||
         !test_wait_follows_motion() || !test_art_fades_in() ||
         !test_backdrop_rests_and_fades() ||
         !test_layout_debug() || !test_pointer_state_once_a_frame() ||

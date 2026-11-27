@@ -189,6 +189,12 @@ struct NkUi {
     NkUiTextBlock *text_block;     /* the block being filled this frame */
     size_t (*display_text)(const char *in, char *out, size_t out_size);
     const NkUiPromptImages *prompt_images;
+    /* Prompt-bar actions tapped this frame (nk_ui_prompt_tap): the next frame's first
+       events, and a tapped Back for the host (nk_ui_take_prompt_back). */
+    NkUiEvent taps[4];
+    size_t tap_count;
+    bool taps_queued;
+    bool tapped_back;
 };
 
 void *nk_ui_clay_create(size_t arena_bytes, float width, float height,
@@ -674,6 +680,8 @@ void nk_ui_begin(NkUi *ui, double now_s) {
         }
     }
     ui->input_held = first_spatial < ui->event_count;
+    ui->taps_queued = false;
+    ui->tapped_back = false;
     if (ui->input_held) {
         ui->held_count = ui->event_count - first_spatial;
         memcpy(ui->held_events, &ui->events[first_spatial],
@@ -1490,8 +1498,9 @@ static void nk_ui_ring_band(NkUi *ui, NkUiId id, uint32_t part, float expand, fl
    on the focused control, the container open now. */
 void nk_ui_focus_ring(NkUi *ui, NkUiId id, float corner_radius) {
     float radius;
+    /* Touch moves no focus a person would follow, so the ring waits for a key or a pad. */
     if (ui == NULL || !ui->frame_open || id == 0u || id != ui->focused ||
-        ui->container_depth == 0u) {
+        ui->container_depth == 0u || ui->prefs.touch) {
         return;
     }
     radius = isfinite(corner_radius) && corner_radius > 0.0f ? corner_radius : 0.0f;
@@ -1525,6 +1534,40 @@ void nk_ui_set_theme(NkUi *ui, const NkUiTheme *theme) {
 
 NkUiPromptStyle nk_ui_prompt_style(const NkUi *ui) {
     return ui != NULL ? ui->prefs.prompt_style : NK_UI_PROMPT_NEUTRAL;
+}
+
+bool nk_ui_touch_input(const NkUi *ui) {
+    return ui != NULL && ui->prefs.touch;
+}
+
+void nk_ui_prompt_tap(NkUi *ui, NkUiPromptAction action) {
+    NkUiEvent event;
+    if (ui == NULL) return;
+    if (action == NK_UI_PROMPT_ACT_BACK) {
+        ui->tapped_back = true;
+        return;
+    }
+    memset(&event, 0, sizeof(event));
+    event.down = true;
+    switch (action) {
+    case NK_UI_PROMPT_ACT_OPTIONS: event.type = NK_UI_EV_OPTIONS; break;
+    case NK_UI_PROMPT_ACT_DETAILS: event.type = NK_UI_EV_DETAILS; break;
+    case NK_UI_PROMPT_ACT_TAB_PREV: event.type = NK_UI_EV_TAB; event.dir = NK_UI_DIR_LEFT; break;
+    case NK_UI_PROMPT_ACT_TAB_NEXT: event.type = NK_UI_EV_TAB; event.dir = NK_UI_DIR_RIGHT; break;
+    case NK_UI_PROMPT_ACT_MENU: event.type = NK_UI_EV_MENU; break;
+    default: return; /* Confirm and Move are the tapped control itself */
+    }
+    if (ui->tap_count < sizeof(ui->taps) / sizeof(ui->taps[0])) {
+        ui->taps[ui->tap_count++] = event;
+    }
+}
+
+bool nk_ui_take_prompt_back(NkUi *ui) {
+    bool tapped;
+    if (ui == NULL) return false;
+    tapped = ui->tapped_back;
+    ui->tapped_back = false;
+    return tapped;
 }
 
 static NkUiCustomSlot *nk_ui_custom_slot(NkUi *ui) {
@@ -2027,6 +2070,10 @@ const NkUiDrawList *nk_ui_end(NkUi *ui) {
     ui->frame_open = false;
     ui->event_count = 0;
     ui->graph_unplaced = ui->layout_pending;
+    memcpy(ui->events, ui->taps, ui->tap_count * sizeof(ui->events[0]));
+    ui->event_count = ui->tap_count;
+    ui->taps_queued = ui->tap_count > 0u;
+    ui->tap_count = 0u;
     nk_ui_restore_held_events(ui);
     return ui->frame_ok ? &ui->draw.list : NULL;
 }
@@ -2061,7 +2108,9 @@ double nk_ui_wait_s(const NkUi *ui, double now_s, double idle_s) {
     if (ui == NULL || !isfinite(idle_s) || idle_s < 0.0) {
         return 0.0;
     }
-    if (nk_ui_in_motion(ui)) {
+    if (ui->taps_queued) {
+        wait = 0.0;
+    } else if (nk_ui_in_motion(ui)) {
         wait = NK_UI_MOTION_FRAME;
     } else if (isfinite(now_s) && nk_ui_next_wake(ui, &wake)) {
         wait = wake - now_s;

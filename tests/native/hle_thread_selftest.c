@@ -31,6 +31,10 @@
  * protection, so it is a hard requirement rather than an option.
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #ifndef _WIN32
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -223,6 +227,7 @@ extern uint32_t sr_hle_test_io_read(CpuState *s);
 extern uint32_t hle_io_umd_read_us(uint64_t bytes);   /* the UMD drive's read time (hle_io.c) */
 extern int sr_hle_test_io_disc_fetches_in_flight(void);
 extern uint32_t sr_hle_test_io_write(CpuState *s);
+extern FILE *sr_hle_test_io_replace_host(uint32_t fd, FILE *host);
 extern uint32_t sr_hle_test_io_lseek(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek32(CpuState *s);
 extern uint32_t sr_hle_test_io_dopen(CpuState *s);
@@ -231,6 +236,7 @@ extern uint32_t sr_hle_test_io_dclose(CpuState *s);
 extern uint32_t sr_hle_test_vfs_initial_find_error(unsigned long error, int *found);
 extern uint32_t sr_hle_test_io_ioctl(CpuState *s);
 extern void sr_hle_test_register_iofilemgr(void);
+extern void sr_hle_test_io_write_fault(uint32_t fd, uint32_t limit, int refuse_seek);
 extern uint32_t sr_hle_test_io_devctl_callback_count(void);
 extern uint32_t sr_hle_test_io_devctl_callback_at(uint32_t index);
 extern uint32_t sr_hle_test_io_devctl_refusal_log_count(void);
@@ -5353,6 +5359,175 @@ static void test_io_assign_through_syscall(void) {
            "fatms0 assigns a third time");
 }
 
+enum {
+    PROGRESS_OPEN = 0x109f50bcu,
+    PROGRESS_READ = 0x6a638d83u,
+    PROGRESS_WRITE = 0x42ec03acu,
+    PROGRESS_SEEK = 0x68963324u,
+    PROGRESS_CLOSE = 0x810c4bc3u,
+    PROGRESS_CREATE_TRUNC = 0x0603u,
+    PROGRESS_IO_ERROR = 0x80010005u
+};
+
+static uint32_t fd_progress_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+#if defined(__GLIBC__)
+/* The fake stream can accept an exact prefix and report a host error. It is
+ * bounded to a few bytes of test memory and never opens a host device. */
+typedef struct {
+    uint8_t bytes[16];
+    size_t size, position, write_limit;
+    int read_error;
+} FdProgressStream;
+
+static ssize_t fd_progress_read(void *opaque, char *out, size_t count) {
+    FdProgressStream *stream = opaque;
+    if (stream->read_error) {
+        errno = EIO;
+        return -1;
+    }
+    size_t available = stream->position < stream->size ? stream->size - stream->position : 0u;
+    if (count > available) count = available;
+    memcpy(out, stream->bytes + stream->position, count);
+    stream->position += count;
+    return (ssize_t)count;
+}
+
+static ssize_t fd_progress_write(void *opaque, const char *in, size_t count) {
+    FdProgressStream *stream = opaque;
+    size_t amount = count < stream->write_limit ? count : stream->write_limit;
+    if (amount > sizeof(stream->bytes) - stream->position) amount = sizeof(stream->bytes) - stream->position;
+    memcpy(stream->bytes + stream->position, in, amount);
+    stream->position += amount;
+    if (stream->size < stream->position) stream->size = stream->position;
+    if (amount != count) errno = EIO;
+    return (ssize_t)amount;
+}
+
+static int fd_progress_seek(void *opaque, off64_t *offset, int whence) {
+    FdProgressStream *stream = opaque;
+    off64_t base = whence == SEEK_END ? (off64_t)stream->size :
+                   whence == SEEK_CUR ? (off64_t)stream->position : 0;
+    if ((whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) ||
+        *offset < -base || *offset > (off64_t)sizeof(stream->bytes) - base) {
+        errno = EINVAL;
+        return -1;
+    }
+    *offset += base;
+    stream->position = (size_t)*offset;
+    return 0;
+}
+
+static void test_fd_progress_stream(uint32_t fd, uint32_t src, uint32_t dst) {
+    const cookie_io_functions_t handlers = {
+        .read = fd_progress_read, .write = fd_progress_write, .seek = fd_progress_seek,
+    };
+    /* This is the original buffered writer's ambiguity: fwrite can report
+     * the whole request even though a failed flush accepted only a prefix. */
+    FdProgressStream delayed = { .write_limit = 2u };
+    FILE *buffered = fopencookie(&delayed, "w", handlers);
+    expect(buffered != NULL, "can build the bounded delayed-flush counterexample");
+    if (buffered) {
+        const size_t reported = fwrite("XYZ", 1, 3u, buffered);
+        const int flush_error = fflush(buffered);
+        expect(reported == 3u && flush_error != 0 && delayed.size == 2u &&
+               memcmp(delayed.bytes, "XY", 2u) == 0,
+               "a failed flush can follow full buffered credit and leave a real prefix");
+        fclose(buffered);
+    }
+    FdProgressStream stream = { .bytes = "abcde", .size = 5u };
+    FILE *fake = fopencookie(&stream, "r+", handlers);
+    const int ready = fake && setvbuf(fake, NULL, _IONBF, 0u) == 0;
+    expect(ready, "can install a bounded counted I/O fake");
+    if (!ready) {
+        if (fake) fclose(fake);
+        return;
+    }
+    FILE *original = sr_hle_test_io_replace_host(fd, fake);
+    expect(original != NULL, "file-progress test has a real opened backing stream");
+    if (!original) {
+        fclose(fake);
+        return;
+    }
+    expect(fd_progress_call(PROGRESS_SEEK, fd, 1u, 0u) == 1u, "file-progress seek before a failed host write");
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src, 3u) == PROGRESS_IO_ERROR &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 1u &&
+           memcmp(stream.bytes, "abcde", 5u) == 0 && stream.size == 5u,
+           "zero-progress stream error preserves cursor, size and data");
+    stream.write_limit = 2u;
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src, 3u) == 2u &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 3u &&
+           memcmp(stream.bytes, "aXYde", 5u) == 0 && stream.size == 5u,
+           "error after a real partial overwrite returns the accepted prefix and advances by it");
+    stream.write_limit = sizeof(stream.bytes);
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src + 2u, 1u) == 1u &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 4u &&
+           memcmp(stream.bytes, "aXYZe", 5u) == 0,
+           "same stream accepts only the remaining suffix after the earlier error");
+    expect(fd_progress_call(PROGRESS_SEEK, fd, 0u, 0u) == 0u, "seek to the beginning for read recovery");
+    MEM_W8(dst, 0xccu);
+    stream.read_error = 1;
+    expect(fd_progress_call(PROGRESS_READ, fd, dst, 5u) == PROGRESS_IO_ERROR &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 0u && MEM_R8(dst) == 0xccu,
+           "zero-progress read error is distinct from EOF and leaves cursor and data unchanged");
+    stream.read_error = 0;
+    expect(fd_progress_call(PROGRESS_READ, fd, dst, 5u) == 5u &&
+           MEM_R8(dst) == 'a' && MEM_R8(dst + 3u) == 'Z' && MEM_R8(dst + 4u) == 'e' &&
+           fd_progress_call(PROGRESS_READ, fd, dst, 1u) == 0u,
+           "same stream reads again and returns an ordinary EOF");
+    (void)sr_hle_test_io_replace_host(fd, original);
+    fclose(fake);
+}
+#endif
+
+static void test_fd_host_progress(void) {
+    const uint32_t path_addr = 0x09010000u, src = 0x09011000u;
+    static const char guest[] = "ms0:/NAKAGAWA_SYNTHETIC_HOST_PROGRESS.BIN";
+    static const char root[] = HLE_BUILD_ROOT "/hle_io_host_progress_ms";
+    static const char host[] = HLE_BUILD_ROOT "/hle_io_host_progress_ms/NAKAGAWA_SYNTHETIC_HOST_PROGRESS.BIN";
+    const char *old = getenv("SR_MEMSTICK");
+    char *previous_root = old ? (char *)malloc(strlen(old) + 1u) : NULL;
+    if (old && !previous_root) { expect(0, "save the original synthetic root setting"); return; }
+    if (old) memcpy(previous_root, old, strlen(old) + 1u);
+    nk_platform_mkdir_p(root);
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", root);
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    expect(sr_hle_test_is_registered(PROGRESS_WRITE) && sr_hle_test_is_registered(PROGRESS_READ),
+           "the production IoFileMgr read and write NIDs are registered");
+    fd_guest_copy(path_addr, guest, sizeof(guest));
+    fd_guest_copy(src, "XYZ", 3u);
+    fd_guest_copy(src + 8u, "abcde?", 6u);
+    uint32_t fd = fd_progress_call(PROGRESS_OPEN, path_addr, PROGRESS_CREATE_TRUNC, 0u);
+    expect(fd < 64u, "open a real contained file for progress controls");
+    if (fd >= 64u) goto done;
+    expect(fd_progress_call(PROGRESS_WRITE, fd, src + 8u, 5u) == 5u,
+           "ordinary nonappend write stores the initial file");
+#if defined(__GLIBC__)
+    test_fd_progress_stream(fd, src, 0x09011100u);
+#endif
+    expect(fd_progress_call(PROGRESS_SEEK, fd, 1u, 0u) == 1u, "ordinary write begins before EOF");
+    sr_hle_test_io_write_fault(fd, 2u, 0);
+    uint32_t short_write = fd_progress_call(PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    expect(short_write == 2u && fd_progress_call(PROGRESS_SEEK, fd, 0u, 1u) == 3u &&
+           fd_progress_call(PROGRESS_SEEK, fd, 0u, 2u) == 5u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"aXYde", 5u),
+           "normal short overwrite keeps the real size and advances by the bytes written");
+    expect(fd_progress_call(PROGRESS_CLOSE, fd, 0u, 0u) == 0u, "close normal write control");
+
+done:
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", previous_root);
+    free(previous_root);
+}
+
 static void test_fd_namespace(void) {
     enum {
         FD_KIND_STD = 1,
@@ -5545,6 +5720,50 @@ static void test_fd_namespace(void) {
         expect(sr_hle_test_io_close(&cpu) == 0u &&
                    fd_host_bytes_equal(flags_host, (const uint8_t *)"abcde", 5u),
                "APPEND without PSP_O_CREAT appends to the existing file");
+        /* The host stream of a PSP_O_APPEND descriptor writes at the end of the file whatever
+         * the position, so the descriptor's position and size must follow where the bytes went:
+         * the position is the file's end after the write (PPSSPP's sceIoWrite seeks an append
+         * descriptor to the end before each write, as POSIX O_APPEND does), and the bytes it
+         * wrote read back through it. */
+        {
+            fd_set_path(&cpu, path_addr, flags_guest);
+            cpu.r[5] = 0x0103u;   /* RDWR | APPEND */
+            uint32_t rw_append_fd = sr_hle_test_io_open(&cpu);
+            expect(rw_append_fd < 64u, "RDWR|APPEND opens the existing five-byte file");
+            fd_guest_copy(payload_addr, "fg", 2u);
+            fd_set_write(&cpu, rw_append_fd, payload_addr, 2u);
+            expect(sr_hle_test_io_write(&cpu) == 2u, "the read-write append descriptor takes bytes");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = 0u; cpu.r[6] = 1u;   /* SEEK_CUR */
+            uint32_t append_cur = sr_hle_test_io_lseek32(&cpu);
+            expect(append_cur == 7u,
+                   "after an append write the position is the end of the file it wrote at");
+            if (append_cur != 7u)
+                fprintf(stderr, "  append position after write: %u (want 7)\n", append_cur);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = 0u; cpu.r[6] = 2u;   /* SEEK_END */
+            uint32_t append_end = sr_hle_test_io_lseek32(&cpu);
+            expect(append_end == 7u, "an append write grows the size a seek to the end sees");
+            if (append_end != 7u)
+                fprintf(stderr, "  append SEEK_END after write: %u (want 7)\n", append_end);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = 5u; cpu.r[6] = 0u;   /* SEEK_SET 5 */
+            (void)sr_hle_test_io_lseek32(&cpu);
+            fd_guest_copy(payload_addr + 0x40u, "\0\0", 2u);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd; cpu.r[5] = payload_addr + 0x40u; cpu.r[6] = 2u;
+            uint32_t append_read = sr_hle_test_io_read(&cpu);
+            expect(append_read == 2u && MEM_R8(payload_addr + 0x40u) == 'f' &&
+                       MEM_R8(payload_addr + 0x41u) == 'g',
+                   "the bytes an append descriptor wrote read back through it");
+            if (append_read != 2u)
+                fprintf(stderr, "  append read-back: 0x%08x (want 2)\n", append_read);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = rw_append_fd;
+            expect(sr_hle_test_io_close(&cpu) == 0u &&
+                       fd_host_bytes_equal(flags_host, (const uint8_t *)"abcdefg", 7u),
+                   "the read-write append descriptor appended at the end");
+        }
         fd_set_path(&cpu, path_addr, flags_guest);
         cpu.r[5] = 0x0402u;
         uint32_t trunc_fd = sr_hle_test_io_open(&cpu);
@@ -6468,6 +6687,98 @@ static void test_fd_namespace(void) {
 }
 
 /* sceIoLseek takes its 64-bit offset in a2:a3 and whence in t0 and returns the high word in v1. */
+enum {
+    APPEND_PROGRESS_OPEN = 0x109f50bcu,
+    APPEND_PROGRESS_WRITE = 0x42ec03acu,
+    APPEND_PROGRESS_SEEK = 0x68963324u,
+    APPEND_PROGRESS_CLOSE = 0x810c4bc3u,
+    APPEND_PROGRESS_CREATE_TRUNC = 0x0603u,
+    APPEND_PROGRESS_APPEND = 0x0103u,
+    APPEND_PROGRESS_IO_ERROR = 0x80010005u
+};
+
+static uint32_t fd_append_progress_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+static void test_fd_append_progress(void) {
+    const uint32_t path_addr = 0x09010000u, src = 0x09011000u;
+    static const char guest[] = "ms0:/NAKAGAWA_SYNTHETIC_APPEND_PROGRESS.BIN";
+    static const char root[] = HLE_BUILD_ROOT "/hle_io_append_progress_ms";
+    static const char host[] = HLE_BUILD_ROOT "/hle_io_append_progress_ms/NAKAGAWA_SYNTHETIC_APPEND_PROGRESS.BIN";
+    const char *old = getenv("SR_MEMSTICK");
+    char *previous_root = old ? (char *)malloc(strlen(old) + 1u) : NULL;
+    if (old && !previous_root) { expect(0, "save the original synthetic root setting"); return; }
+    if (old) memcpy(previous_root, old, strlen(old) + 1u);
+    nk_platform_mkdir_p(root);
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", root);
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    expect(sr_hle_test_is_registered(APPEND_PROGRESS_WRITE) && sr_hle_test_is_registered(APPEND_PROGRESS_SEEK),
+           "the production IoFileMgr write and seek NIDs are registered");
+    fd_guest_copy(path_addr, guest, sizeof(guest));
+    fd_guest_copy(src, "XYZ", 3u);
+    fd_guest_copy(src + 8u, "abcde?", 6u);
+    uint32_t fd = fd_append_progress_call(APPEND_PROGRESS_OPEN, path_addr, APPEND_PROGRESS_CREATE_TRUNC, 0u);
+    expect(fd < 64u, "open a real contained file for progress controls");
+    if (fd >= 64u) goto done;
+    expect(fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src + 8u, 5u) == 5u,
+           "ordinary nonappend write stores the initial file");
+    expect(fd_append_progress_call(APPEND_PROGRESS_CLOSE, fd, 0u, 0u) == 0u, "close the initial ordinary control");
+
+    fd = fd_append_progress_call(APPEND_PROGRESS_OPEN, path_addr, APPEND_PROGRESS_APPEND, 0u);
+    expect(fd < 64u && fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 1u, 0u) == 1u,
+           "open append descriptor and move before EOF");
+    if (fd >= 64u) goto done;
+    uint32_t other = fd_append_progress_call(APPEND_PROGRESS_OPEN, path_addr, APPEND_PROGRESS_APPEND, 0u);
+    expect(other < 64u, "open another descriptor to grow the actual host file");
+    if (other < 64u) {
+        expect(fd_append_progress_call(APPEND_PROGRESS_WRITE, other, src + 13u, 1u) == 1u &&
+               fd_host_bytes_equal(host, (const uint8_t *)"abcde?", 6u),
+               "second descriptor grows the real host file beyond the first descriptor's cached size");
+        expect(fd_append_progress_call(APPEND_PROGRESS_CLOSE, other, 0u, 0u) == 0u, "close the second descriptor");
+    }
+    sr_hle_test_io_write_fault(fd, UINT32_MAX, 1);
+    uint32_t refused = fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    uint32_t cursor = fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u);
+    uint32_t size = fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u);
+    expect(refused == APPEND_PROGRESS_IO_ERROR && cursor == 1u && size == 5u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?", 6u),
+           "refused append seek must preserve the earlier guest cursor and cached size");
+    expect(fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 1u, 0u) == 1u, "reset the position before a no-progress append");
+    sr_hle_test_io_write_fault(fd, 0u, 0);
+    uint32_t refused_write = fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    expect(refused_write == APPEND_PROGRESS_IO_ERROR &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u) == 1u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u) == 5u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?", 6u),
+           "zero accepted bytes preserve the earlier append cursor and cached size");
+    expect(fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 1u, 0u) == 1u, "reset the position before short append");
+    sr_hle_test_io_write_fault(fd, 2u, 0);
+    uint32_t short_write = fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src, 3u);
+    sr_hle_test_io_write_fault(UINT32_MAX, 0u, 0);
+    expect(short_write == 2u && fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u) == 8u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u) == 8u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?XY", 8u),
+           "short append publishes actual EOF plus only the accepted prefix");
+    expect(fd_append_progress_call(APPEND_PROGRESS_WRITE, fd, src + 2u, 1u) == 1u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 1u) == 9u &&
+           fd_append_progress_call(APPEND_PROGRESS_SEEK, fd, 0u, 2u) == 9u &&
+           fd_host_bytes_equal(host, (const uint8_t *)"abcde?XYZ", 9u),
+           "append retry sends only the suffix and leaves no duplicated bytes");
+    expect(fd_append_progress_call(APPEND_PROGRESS_CLOSE, fd, 0u, 0u) == 0u, "close recovered append control");
+done:
+    nk_remove_utf8(host);
+    hle_test_setenv("SR_MEMSTICK", previous_root);
+    free(previous_root);
+}
+
 static uint32_t umd_test_seek64(uint32_t fd, int64_t offset, uint32_t whence, uint32_t *high) {
     CpuState cpu;
     memset(&cpu, 0, sizeof(cpu));
@@ -19759,6 +20070,62 @@ static void test_audio_regular_contract_safety(void) {
            "the negative queue sentinel takes the open-loop path after one query");
 }
 
+/* sceAudioChReserve with a negative channel. Two evidence tiers, asserted apart:
+ * - All eight free, and all eight held (the first block): PSPAutotests
+ *   tests/audio/sceaudio/reserve.expected at ea71108f00933712c4662276261b39cd42249b1e (reference
+ *   output recorded on a PSP; corroborative here) gives 7 for channels -9, -7, -2, -1 and
+ *   0x80000000 with every channel free, and 0x80260005 once all eight are reserved.
+ * - Partly occupied (the second block): the downward search order is
+ *   PPSSPP-derived, not PSP-measured (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
+ *   Core/HLE/sceAudio.cpp, GetFreeChannel runs from PSP_AUDIO_CHANNEL_MAX - 1 down); reserve.expected
+ *   records no such cell.
+ * A game that reserves one channel with -1 and another by number then gets both. */
+static void test_audio_reserve_auto_channel_order(void) {
+    CpuState cpu;
+    int reserved = -1;
+
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    /* Recorded tier: each channel value of reserve.expected's "Channel values" block with every
+     * channel free, released after each call as the test program does. */
+    static const uint32_t recorded_auto[] = {0xfffffff7u, 0xfffffff9u, 0xfffffffeu, 0xffffffffu,
+                                             0x80000000u};
+    for (unsigned i = 0; i < sizeof(recorded_auto) / sizeof(recorded_auto[0]); i++) {
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, recorded_auto[i], 1024u, 0u) == 7u,
+               "recorded: AudioChReserve(negative) with every channel free takes channel 7");
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 7u, 0u, 0u);
+    }
+    for (uint32_t ch = 0u; ch < 8u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, ch, 1024u, 0u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 0x80260005u,
+           "recorded: AudioChReserve(-1) with all eight reserved returns 0x80260005");
+    for (uint32_t ch = 0u; ch < 8u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, ch, 0u, 0u);
+    /* PPSSPP-derived tier: the search order once some channels are held. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 7u,
+           "AudioChReserve(-1) with every channel free takes channel 7, the highest");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 1024u, 0u) == 0u,
+           "after an auto reserve, channel 0 is still free to reserve by number");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0x80000000u, 1024u, 0u) == 6u,
+           "AudioChReserve(0x80000000) takes the highest channel still free (6)");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 7u, 0u, 0u) == 0u,
+           "the auto-reserved channel 7 releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xfffffff7u, 1024u, 0u) == 7u,
+           "AudioChReserve(-9) takes channel 7 again once it is free");
+    for (uint32_t ch = 1u; ch <= 5u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, ch, 1024u, 0u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) ==
+               0x80260005u,
+           "AudioChReserve(-1) with all eight reserved returns 0x80260005");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 3u, 0u, 0u) == 0u,
+           "a middle channel releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 3u &&
+               sr_hle_test_audio_state(3u, &reserved, NULL, NULL) && reserved == 1,
+           "AudioChReserve(-1) takes the only free channel (3)");
+    sr_hle_test_audio_reset();
+}
+
 /* Regular output and release refuse a channel that is out of range or not reserved, and
  * sceAudioOutputPanned is the non-blocking form (audit 2026-11-17). The refusal codes and the
  * busy rule are PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
@@ -20088,6 +20455,36 @@ static void test_audio_output2_release_refuses_while_queued(void) {
            "release succeeds once Output2 is drained");
     sr_hle_test_audio_reset();
     audio_fixture_reset();
+}
+
+/* sceAudioOutput2Reserve's argument codes. PSPAutotests tests/audio/sceaudio/reserve.expected at
+ * ea71108f00933712c4662276261b39cd42249b1e (recorded on a PSP; corroborative here) records
+ * 0x80268002 for a second Output2Reserve over a held one, and 0x80000104 for every sample count
+ * outside 17..4111 (0, 16, 4112, 65472 and the negative ones). PPSSPP agrees (hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp, sceAudioOutput2Reserve:
+ * SCE_KERNEL_ERROR_INVALID_SIZE and SCE_ERROR_AUDIO_CHANNEL_ALREADY_RESERVED). A refused call
+ * leaves Output2 as it was. */
+static void test_audio_output2_reserve_codes(void) {
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    s_audio_queue_result = 0;
+    static const uint32_t bad[] = {0u, 16u, 4112u, 65472u, 0xffffffc0u};
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, bad[i], 0u, 0u) ==
+                   0x80000104u,
+               "Output2Reserve refuses a sample count outside 17..4111 with 0x80000104");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0x80260008u,
+           "a refused Output2Reserve leaves nothing reserved");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 17u, 0u, 0u) == 0u,
+           "Output2Reserve accepts 17 samples");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 1024u, 0u, 0u) == 0x80268002u,
+           "a second Output2Reserve over a held one returns 0x80268002");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "the first reservation is still held and releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 4111u, 0u, 0u) == 0u &&
+               audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "Output2Reserve accepts 4111 samples");
 }
 
 /* The Output2/SRC blocking outputs accept volumes up to 0xFFFFF (PPSSPP-derived, unmeasured
@@ -27410,6 +27807,12 @@ static void wsv_cb_coro_body(void *arg) {
     selftest_park_on_scheduler();
 }
 
+/* A callback body for section 7 of the WaitSemaCB probe: it deletes the semaphore its
+ * thread is waiting on. */
+static void wsv_cb_delete_sema(void) {
+    wsv_delete(s_wsv_cb_sema);
+}
+
 /* PSP-B1-01: project-authored synthetic probe run on a PSP-3000, firmware 6.61. */
 static void b1_expect(uint32_t actual, uint32_t expected, const char *scenario) {
     char msg[256];
@@ -27747,6 +28150,50 @@ static void test_trylock600_cells(void) {
     expect(MEM_R32(wa) == 0x7fffffffu, "T600 overflow leaves the level unchanged");
     b1_expect(b1_call(N, wa, 0u, 0u, 0u), 0x800201bdu, "T600 recursive count 0 returns 800201BD");
     b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "T600 recursive delete");
+    /* sceKernelLockLwMutex on a self-held recursive mutex whose level would pass INT_MAX:
+     * pspautotests tests/threads/lwmutex/lock.expected (reference output) "Lock 1 => INT_MAX
+     * (recursive): Failed (800201CD)" with current=1 after it, "Lock 1 => INT_MAX - 1
+     * (recursive): OK" with current=2147483647, and "Lock INT_MAX => INT_MAX (recursive):
+     * Failed (800201CD)". A wrapped level would read negative, so no Unlock could release it. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 1u), 0u, "Lock overflow: create recursive held");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0x800201cdu,
+              "Lock 1 => INT_MAX (recursive) returns 800201CD");
+    expect(MEM_R32(wa) == 1u, "Lock 1 => INT_MAX (recursive) leaves the level at 1");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0x7ffffffeu, 0u, 0u), 0u,
+              "Lock 1 => INT_MAX - 1 (recursive) succeeds");
+    expect(MEM_R32(wa) == 0x7fffffffu, "Lock 1 => INT_MAX - 1 (recursive) reaches level INT_MAX");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0x800201cdu,
+              "Lock INT_MAX => INT_MAX (recursive) returns 800201CD");
+    expect(MEM_R32(wa) == 0x7fffffffu, "Lock INT_MAX => INT_MAX (recursive) leaves the level unchanged");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0u,
+              "Lock overflow: the owner unlocks its INT_MAX level");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock overflow: the mutex is free again");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock overflow: delete");
+    /* The original sceKernelTryLockLwMutex export shares the acquisition loop: pspautotests
+     * tests/threads/lwmutex/try.expected (reference output) "Lock 1 => INT_MAX (recursive):
+     * Failed (800201C4)" and "Lock 1 => INT_MAX - 1 (recursive): OK". */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 1u), 0u, "TryLock overflow: create recursive held");
+    b1_expect(b1_call(NID_B1_TRYLOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0x800201c4u,
+              "TryLock 1 => INT_MAX (recursive) returns 800201C4");
+    expect(MEM_R32(wa) == 1u, "TryLock 1 => INT_MAX (recursive) leaves the level at 1");
+    b1_expect(b1_call(NID_B1_TRYLOCK_LWMUTEX, wa, 0x7ffffffeu, 0u, 0u), 0u,
+              "TryLock 1 => INT_MAX - 1 (recursive) succeeds");
+    expect(MEM_R32(wa) == 0x7fffffffu, "TryLock 1 => INT_MAX - 1 (recursive) reaches level INT_MAX");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 0x7fffffffu, 0u, 0u), 0u, "TryLock overflow: unlock");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "TryLock overflow: delete");
+    /* sceKernelLockLwMutex with count 0 or -1: pspautotests tests/threads/lwmutex/lock.expected
+     * (reference output) "Lock 0 => 0: Failed (800201BD)" and "Lock 0 => -1: Failed (800201BD)",
+     * for a non-recursive and a recursive mutex alike, with the mutex left free. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 0u), 0u, "Lock count: create free");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0u, 0u, 0u), 0x800201bdu, "Lock 0 => 0 returns 800201BD");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0xffffffffu, 0u, 0u), 0x800201bdu, "Lock 0 => -1 returns 800201BD");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock count: rejected counts leave the mutex free");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock count: delete");
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 0u), 0u, "Lock count: create recursive free");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 0xffffffffu, 0u, 0u), 0x800201bdu,
+              "Lock 0 => -1 (recursive) returns 800201BD");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "Lock count: the recursive mutex stays free");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Lock count: recursive delete");
     s_cur = -1;
 }
 
@@ -27914,6 +28361,83 @@ static void test_wait_sema_count_validation(void) {
 
         if (self->coro) { sr_coro_destroy(self->coro); self->coro = NULL; }
         wsv_delete(sema);
+        s_oracle_mode = 0;
+        s_oracle_callback_calls = 0;
+        s_cur = -1;
+    }
+
+    /* ---- 7. a CB wait whose semaphore is deleted outside a waking delete ---- */
+    /* The semaphore existed when the wait began, so a wait that finds it gone ends as a
+     * deleted one (WAIT_DELETE), never with the generic 0x80020000. PPSSPP-derived, not
+     * PSP-measured (hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+     * Core/HLE/KernelWaitHelpers.h, HLEKernel::WaitEndCallback). This is separate from the
+     * CancelSema negative-count cells below, which have their own evidence.
+     * MUTANT: return 0x80020000 again in sceKernelWaitSemaCB -- (a) and (b) fail.
+     * (a) the pending callback the wait runs before it
+     * blocks deletes the semaphore; (b) a blocked waiter readied by a callback notification
+     * finds its semaphore deleted before it runs, so the delete woke nobody. */
+    {
+        TCB *self = wsv_begin();
+        s_oracle_mode = 1;
+        s_oracle_callback_calls = 0;
+        static const char cbname[] = "wsv-cb-del";
+        for (size_t k = 0; k < sizeof cbname; k++)
+            MEM_W8(WSV_NAMEBUF + (uint32_t)k, (uint8_t)cbname[k]);
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = WSV_NAMEBUF; cpu.r[5] = ORACLE_CALLBACK_ENTRY; cpu.r[6] = 0x55u;
+        uint32_t cb = sr_syscall(&cpu, NID_WSV_CREATE_CALLBACK);
+        expect(cb > 0 && sr_callback_is_valid(cb), "WaitSemaCB delete: callback registered");
+
+        /* (a) */
+        s_wsv_cb_sema = wsv_create(0, 1);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = cb; cpu.r[5] = 1u;
+        (void)sr_syscall(&cpu, NID_WSV_NOTIFY_CALLBACK);
+        s_kernel_nested_callback = wsv_cb_delete_sema;
+        s_wsv_cb_ret = 0xFFFFFFFFu;
+        s_wsv_cb_returned = 0;
+        self->coro = sr_coro_create(wsv_cb_coro_body, NULL, (size_t)4 << 20);
+        if (self->coro) sr_coro_switch(self->coro);
+        s_kernel_nested_callback = NULL;
+        expect(s_oracle_callback_calls == 1, "WaitSemaCB delete (a): the pending callback ran");
+        expect(wsv_count(s_wsv_cb_sema) == -1,
+               "WaitSemaCB delete (a): the callback deleted the semaphore");
+        {
+            char msg[160];
+            snprintf(msg, sizeof msg, "WaitSemaCB delete (a): a semaphore its callback deleted ends "
+                                      "the wait with WAIT_DELETE (got 0x%08x)", s_wsv_cb_ret);
+            expect(s_wsv_cb_returned == 1 && s_wsv_cb_ret == 0x800201b5u, msg);
+        }
+        if (self->coro) { sr_coro_destroy(self->coro); self->coro = NULL; }
+
+        /* (b) */
+        s_cur = (int)(self - s_tcb);
+        self->state = TH_RUNNING;
+        s_oracle_callback_calls = 0;
+        s_wsv_cb_sema = wsv_create(0, 1);
+        s_wsv_cb_ret = 0xFFFFFFFFu;
+        s_wsv_cb_returned = 0;
+        self->coro = sr_coro_create(wsv_cb_coro_body, NULL, (size_t)4 << 20);
+        if (self->coro) sr_coro_switch(self->coro);
+        expect(self->state == TH_WAIT_OBJ && self->wait_obj == s_wsv_cb_sema &&
+               s_wsv_cb_returned == 0, "WaitSemaCB delete (b): the waiter blocked on the semaphore");
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = cb; cpu.r[5] = 2u;
+        (void)sr_syscall(&cpu, NID_WSV_NOTIFY_CALLBACK);
+        expect(self->state == TH_READY, "WaitSemaCB delete (b): the notification readied the waiter");
+        wsv_delete(s_wsv_cb_sema);
+        if (self->state == TH_READY && self->coro) {
+            s_cur = (int)(self - s_tcb);
+            sr_coro_switch(self->coro);
+        }
+        {
+            char msg[160];
+            snprintf(msg, sizeof msg, "WaitSemaCB delete (b): a readied waiter whose semaphore was "
+                                      "deleted ends with WAIT_DELETE (got 0x%08x)", s_wsv_cb_ret);
+            expect(s_wsv_cb_returned == 1 && s_wsv_cb_ret == 0x800201b5u, msg);
+        }
+        if (self->coro) { sr_coro_destroy(self->coro); self->coro = NULL; }
         s_oracle_mode = 0;
         s_oracle_callback_calls = 0;
         s_cur = -1;
@@ -28807,6 +29331,73 @@ static void test_lwmutex_waiter_order(void) {
     }
 }
 
+/* ---- DeleteLwMutex lets a stronger waiter it releases run before it returns ---------
+ * Higher-priority cell: PSP-recorded. pspautotests tests/threads/lwmutex/delete.expected
+ * "Delete same: A1B1C2D1E2F1 (thread=800201B5, main=00000000)" (2ed7c9c5, recorded on a
+ * PSP; waiter 0x12, caller 0x20): when DeleteLwMutex releases a waiter of higher priority
+ * than the caller, the waiter runs (D) with WAIT_DELETE before the caller's call returns 0
+ * (E). The recorded waiter blocks in sceKernelLockLwMutexCB with a 1 us timeout, retried in
+ * a loop (tests/threads/lwmutex/shared.h scheduleTestFunc); this test's waiter uses an
+ * untimed sceKernelLockLwMutex. The record supports the order (waiter before the delete
+ * returns) and the WAIT_DELETE result; "D1" shows no timeout retry ran between C and the
+ * delete, so the timeout plays no part in that order. It does not cover the timeout or
+ * callback handling of a deleted wait.
+ * Equal- and lower-priority cells: the runtime's strict-priority rule in sched_preempt
+ * (the waiter is readied but does not run before the call returns), not PSP-measured for
+ * this call; PPSSPP 38d92884 sceKernelDeleteLwMutex (hleReSchedule) agrees. Same rule as
+ * DeleteMutex (#3145).
+ * Order inside the call: the workarea is poisoned (level 0, owner and uid 0xFFFFFFFF)
+ * before the reschedule, so the released waiter already sees a deleted workarea when it
+ * runs; PPSSPP clears the workarea before hleReSchedule as well. The PSP order a waiter
+ * observes is not measured.
+ * MUTANT: drop the scheduling point in h_DeleteLwMutex -- the higher-priority waiter has
+ * not run when the call returns. MUTANT: reschedule before the waiters are woken -- the
+ * waiter is not ready yet, so it does not run inside the call either. MUTANT: reschedule
+ * before the workarea is poisoned -- the waiter runs while the workarea still names the
+ * caller as owner and the live uid. */
+static void test_lwmutex_delete_schedules_released_waiter(int waiter_priority) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    const char *rank = waiter_priority < 32 ? "higher" : waiter_priority == 32 ? "equal" : "lower";
+    char msg[192];
+    TCB *self = wsv_begin();
+    snprintf(msg, sizeof msg, "DeleteLwMutex %s-priority fixture: CreateLwMutex held by the caller",
+             rank);
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 1u), 0u, msg);
+    RvCall cw = { NID_B1_LOCK_LWMUTEX, { wa, 1u, 0u, 0u }, 0u, 0 };
+    TCB *w = rv_spawn(&cw, 0x1f7u, waiter_priority);
+    snprintf(msg, sizeof msg, "DeleteLwMutex: a %s-priority thread waits on the held LwMutex", rank);
+    expect(!cw.returned && w->state == TH_WAIT_OBJ, msg);
+
+    RvCall cd = { NID_B1_DELETE_LWMUTEX, { wa, 0u, 0u, 0u }, 0u, 0 };
+    cd.ret = 0xFFFFFFFFu;
+    self->coro = sr_coro_create(rv_call_body, &cd, (size_t)1 << 20);
+    expect(self->coro != NULL, "DeleteLwMutex: caller coroutine created");
+    if (!self->coro) { rv_end(w); s_cur = -1; return; }
+    rv_resume(self);
+    if (waiter_priority < 32) {
+        expect(!cd.returned && !cw.returned && w->state == TH_READY,
+               "DeleteLwMutex yields to the higher-priority waiter it releases before returning");
+        expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0xffffffffu
+               && MEM_R32(wa + 16u) == 0xffffffffu,
+               "DeleteLwMutex poisons the workarea before the released waiter runs");
+    } else {
+        snprintf(msg, sizeof msg,
+                 "DeleteLwMutex returns 0 before the %s-priority waiter it releases runs", rank);
+        expect(cd.returned && cd.ret == 0u && !cw.returned && w->state == TH_READY, msg);
+    }
+    if (!cw.returned) rv_resume(w);
+    snprintf(msg, sizeof msg, "DeleteLwMutex releases the %s-priority waiter with WAIT_DELETE", rank);
+    expect(cw.returned && cw.ret == 0x800201b5u, msg);
+    if (!cd.returned) rv_resume(self);
+    snprintf(msg, sizeof msg, "DeleteLwMutex then returns 0 to its caller (%s-priority waiter)",
+             rank);
+    expect(cd.returned && cd.ret == 0u, msg);
+    snprintf(msg, sizeof msg, "DeleteLwMutex removed the LwMutex (%s-priority waiter)", rank);
+    expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u) == 0x800201cau, msg); /* NOT_FOUND */
+    rv_end(w); rv_end(self);
+    s_cur = -1;
+}
+
 /* ---- LockLwMutexCB runs the thread's callbacks while it waits ----------------------
  * PPSSPP-derived, not PSP-measured: a callback pending when the lock would block runs
  * before the block, the wait is callback-capable, and the lock is still granted after.
@@ -28852,6 +29443,62 @@ static void test_lock_lwmutex_cb_runs_callbacks(void) {
            "LockLwMutexCB: the waiter takes the LwMutex after its callbacks");
     s_cur = (int)(w - s_tcb);
     (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+    s_cur = (int)(self - s_tcb);
+    (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+    (void)b1_call(NID_RV_DELETE_CALLBACK, cb, 0u, 0u, 0u);
+    rv_end(w);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
+}
+
+/* ---- LockLwMutexCB: a callback that takes the mutex cannot wrap the level -----------
+ * Issue #3063 review: the recursion bound must hold where the wait loop adds the count,
+ * not only at entry. The waiter calls LockLwMutexCB(INT_MAX) while another thread holds the
+ * recursive mutex, so the entry sees no self-held level. Its pending callback runs on the
+ * waiter's thread before the lock blocks: the holder unlocks and the callback locks once,
+ * so when the loop tries again the waiter holds level 1. lock.expected (reference output)
+ * "Lock 1 => INT_MAX (recursive): Failed (800201CD)" with the level unchanged is the answer
+ * for that state. MUTANT: drop the bound in the wait loop -- the level wraps to 0x80000000
+ * and the call returns 0. */
+static TCB *s_rv_lw_holder;
+static uint32_t s_rv_lw_cb_unlock, s_rv_lw_cb_lock;
+static unsigned s_rv_lw_cb_calls_take;
+static void rv_cb_take_lwmutex_fn(CpuState *cpu) {
+    const int waiter = s_cur;
+    s_cur = (int)(s_rv_lw_holder - s_tcb);
+    s_rv_lw_cb_unlock = b1_call(NID_B1_UNLOCK_LWMUTEX, B1_LW_WORKAREA, 1u, 0u, 0u);
+    s_cur = waiter;
+    s_rv_lw_cb_lock = b1_call(NID_B1_LOCK_LWMUTEX, B1_LW_WORKAREA, 1u, 0u, 0u);
+    s_rv_lw_cb_calls_take++;
+    cpu->r[2] = 0u;
+}
+static void test_lock_lwmutex_cb_overflow_after_callback(void) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    TCB *self = wsv_begin();
+    s_rv_lw_holder = self;
+    s_rv_lw_cb_calls_take = 0;
+    s_rv_lw_cb_unlock = s_rv_lw_cb_lock = 0xffffffffu;
+    sr_test_register_guest_fn(RV_CB_ENTRY, rv_cb_take_lwmutex_fn);
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 1u), 0u,
+              "LockLwMutexCB overflow: recursive LwMutex held by another thread");
+    RvCall c = { NID_RV_LOCK_LWMUTEX_CB, { wa, 0x7fffffffu, 0u, 0u }, 0u, 0 };
+    TCB *w = fixture_thread(0x1f7u, TH_READY, 40);
+    w->started = 1;
+    const uint32_t cb = rv_make_pending_callback(w);
+    w->coro = sr_coro_create(rv_call_body, &c, (size_t)1 << 20);
+    expect(w->coro != NULL, "LockLwMutexCB overflow: waiter coroutine created");
+    if (!w->coro) { sr_test_guest_fn_reset(); s_cur = -1; return; }
+    rv_resume(w);
+    expect(s_rv_lw_cb_calls_take == 1u && s_rv_lw_cb_unlock == 0u && s_rv_lw_cb_lock == 0u,
+           "LockLwMutexCB overflow: the callback ran, the holder unlocked and the callback locked once");
+    expect(c.returned && c.ret == 0x800201cdu,
+           "LockLwMutexCB overflow: the retried lock answers 800201CD after the callback took level 1");
+    expect(MEM_R32(wa) == 1u && MEM_R32(wa + 4u) == w->uid,
+           "LockLwMutexCB overflow: the refusal leaves the waiter's level 1 unchanged");
+    s_cur = (int)(w - s_tcb);
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+              "LockLwMutexCB overflow: one Unlock releases the level the callback took");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "LockLwMutexCB overflow: the mutex is free");
     s_cur = (int)(self - s_tcb);
     (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
     (void)b1_call(NID_RV_DELETE_CALLBACK, cb, 0u, 0u, 0u);
@@ -29465,6 +30112,41 @@ static void test_b23_second_round(void) {
                "PSP-B2-01: CancelSema(-1) restores the initial count (2), not zero");
         wsv_delete(sema);
         s_cur = -1;
+    }
+
+    /* ---- CancelSema with a negative count other than -1 restores init -- */
+    /* Separate from the WaitSemaCB deleted-semaphore cells. Init-0 leg: pspautotests
+     * tests/threads/semaphores/cancel.expected (reference output recorded on a PSP): "Negative
+     * -3: OK" and the following refer reads cur=0 on a semaphore created with init 0, so a
+     * negative count is never stored as the count. Init-2 leg (restore the initial count, not
+     * clamp to 0): PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+     * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelSemaphore.cpp,
+     * sceKernelCancelSema: newCount < 0 restores initCount), consistent with the measured -1
+     * rule above. MUTANT: clamp a negative count other than -1 to 0 -- the init-2 leg fails. */
+    {
+        static const int inits[2] = {0, 2};
+        for (int k = 0; k < 2; k++) {
+            reset_fixture();
+            sr_hle_init();
+            TCB *main_t = fixture_thread(0x1e1u, TH_RUNNING, 32);
+            s_cur = (int)(main_t - s_tcb);
+            main_t->started = 1;
+            uint32_t sema = wsv_create(inits[k], 3);
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = sema; cpu.r[5] = 1u;
+            (void)sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA);
+            MEM_W32(WCR_NUMWAIT, 0xFFFFFFFFu);
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = sema; cpu.r[5] = 0xFFFFFFFDu; cpu.r[6] = WCR_NUMWAIT;
+            snprintf(msg, sizeof msg, "CancelSema(-3) with init %d succeeds", inits[k]);
+            expect(sr_syscall(&cpu, NID_WCR_CANCEL_SEMA) == 0u, msg);
+            snprintf(msg, sizeof msg, "CancelSema(-3) with init %d restores the initial count "
+                                      "(count %d)", inits[k], wsv_count(sema));
+            expect(wsv_count(sema) == inits[k], msg);
+            expect(MEM_R32(WCR_NUMWAIT) == 0u, "CancelSema(-3) reports no waiter");
+            wsv_delete(sema);
+            s_cur = -1;
+        }
     }
 
     /* ---- DeleteSema with a waiter: delete 0, waiter WAIT_DELETE --------- */
@@ -30918,6 +31600,48 @@ static void run_worker(TCB *worker) {
     s_cur = -1;
 }
 
+/* A thread in sceKernelSleepThread reports waitType 1 (sleep) and waitId 0: PSPAutotests
+ * tests/threads/threads/refer.expected, recorded on a PSP ("slumber after start: ... wait=1 for
+ * 0", in both SDK layouts); PPSSPP sleeps with WAITTYPE_SLEEP and wait id 0. The scheduler's
+ * own sleep marker (the thread's uid as its wait object) is not the guest-visible waitId. */
+static void test_refer_thread_status_sleep_wait_id(void) {
+    extern uint32_t sr_hle_test_refer_thread_run_status(CpuState *s);
+    enum {
+        NID_REFER_THREAD_STATUS = 0x17c1684eu,
+        SLEEPER = 0x13cu,
+        INFO = 0x08302000u,
+        RUN_INFO = 0x08303000u,
+    };
+    reset_fixture();
+    sr_hle_init();
+    TCB *sleeper = fixture_thread(SLEEPER, TH_WAIT_OBJ, 32);
+    sleeper->started = 1;
+    sleeper->sleeping = 1;
+    sleeper->wait_obj = sleeper->uid;   /* what sched_thread_sleep records */
+    sleeper->wake = SCHED_WAIT_FOREVER;
+
+    MEM_W32(INFO, (uint32_t)sizeof(SrThreadInfo));
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = SLEEPER;
+    cpu.r[5] = INFO;
+    expect(sr_syscall(&cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(INFO + 0x28u) == PSP_THREAD_WAITING &&
+               MEM_R32(INFO + 0x44u) == PSP_WAIT_SLEEP,
+           "ReferThreadStatus reports a sleeping thread as waiting in sleep");
+    expect(MEM_R32(INFO + 0x48u) == 0u,
+           "ReferThreadStatus reports waitId 0 for a sleeping thread (refer.expected)");
+
+    MEM_W32(RUN_INFO, 0x2cu);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = SLEEPER;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u &&
+               MEM_R32(RUN_INFO + 0x0cu) == PSP_WAIT_SLEEP && MEM_R32(RUN_INFO + 0x10u) == 0u,
+           "ReferThreadRunStatus reports waitId 0 for a sleeping thread");
+    reset_fixture();
+}
+
 static void test_exit_thread_does_not_wake_launcher(int launcher_wakeups) {
     reset_fixture();
 
@@ -30956,7 +31680,7 @@ static void test_exit_thread_does_not_wake_launcher(int launcher_wakeups) {
            "launcher status remains queryable");
     expect(launcher_status.status == PSP_THREAD_WAITING &&
            launcher_status.waitType == PSP_WAIT_SLEEP &&
-           launcher_status.waitId == launcher->uid,
+           launcher->wait_obj == launcher->uid && launcher_status.waitId == 0u,
            "unrelated sleeping launcher stays asleep on its own wait object");
     expect(launcher_status.wakeupCount == (uint32_t)launcher_wakeups,
            "ExitThread preserves the launcher's existing wakeup count exactly");
@@ -31922,6 +32646,86 @@ static void test_refer_run_and_callback_status_check_their_span(void) {
            "ReferCallbackStatus answers ILLEGAL_ADDR for an unmapped info pointer");
     (void)b1_call(0xedba5844u, cb, 0u, 0u, 0u);
     s_cur = -1;
+}
+
+/* sceKernelCancelWakeupThread and sceKernelReferThreadRunStatus name a thread, so a UID that
+ * names none answers UNKNOWN_THID (0x80020198), the code every other thread call returns
+ * (sched.c) and the one PPSSPP's kernelObjects.Get<PSPThread> gives both calls
+ * (Core/HLE/sceKernelThread.cpp). 0x800201A0 is UNKNOWN_TEID, the thread-event-handler code.
+ * Not PSP-measured here.
+ * Error precedence (#3071 review): the thread is looked up before the output pointer, so an
+ * unknown UID answers UNKNOWN_THID with a null output and with an unwritable one, and a known
+ * thread with a null output still answers 0. PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, sceKernelReferThreadRunStatus).
+ * This selftest build leaves both NIDs unregistered (SR_HLE_THREAD_SELFTEST compiles out
+ * hle_register_init_kernel_thread_1, which registers 0xfccfad26 and 0xffc36a14), so the cells
+ * call the production handlers through the test-build-only wrappers
+ * sr_hle_test_cancel_wakeup_thread and sr_hle_test_refer_thread_run_status that
+ * hle_kernel_thread.c exports under SR_HLE_THREAD_SELFTEST, not through sr_syscall; the
+ * dispatch path itself is not exercised here.
+ * MUTANT: look the thread up only inside the non-null output branch -- an unknown UID with a
+ * null output answers 0. */
+extern uint32_t sr_hle_test_cancel_wakeup_thread(CpuState *s);
+static void test_cancel_wakeup_and_run_status_unknown_thread(void) {
+    enum {
+        RUN_INFO = 0x08302000u,
+        TEST_UNKNOWN_THID = 0x80020198u,
+    };
+    TCB *self = wsv_begin();
+    TCB *other = fixture_thread(0x1e1u, TH_READY, 40);
+    other->started = 1;
+    other->wakeups = 2;
+    CpuState cpu;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == 2u && other->wakeups == 0,
+           "CancelWakeupThread returns and clears a thread's banked wakeups");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == TEST_UNKNOWN_THID,
+           "CancelWakeupThread answers UNKNOWN_THID for a UID that names no thread");
+    other->deleted = 1;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == TEST_UNKNOWN_THID,
+           "CancelWakeupThread answers UNKNOWN_THID for a deleted thread");
+
+    MEM_W32(RUN_INFO, 0xa5a5a5a5u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID &&
+               MEM_R32(RUN_INFO) == 0xa5a5a5a5u,
+           "ReferThreadRunStatus answers UNKNOWN_THID for a UID that names no thread");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus answers UNKNOWN_THID for an unknown UID with a null output");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = 0x0c000000u;          /* unmapped */
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus checks the UID before an unwritable output pointer");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus answers UNKNOWN_THID for a deleted thread with a null output");
+    other->deleted = 0;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u,
+           "ReferThreadRunStatus with a known thread and a null output still answers 0");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0x0c000000u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0x80000103u,
+           "ReferThreadRunStatus with a known thread and an unwritable output is ILLEGAL_ADDR");
+    (void)self;
+    reset_fixture();
 }
 
 /* -------------------------------------------------------------------------
@@ -40094,6 +40898,142 @@ static void test_ge_sync_ids_match_psp(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* sceGeListEnQueue refuses a list or stall address that is not word-aligned with
+ * SCE_ERROR_INVALID_POINTER (0x80000103) and queues nothing (uofw src/kd/ge/ge.c
+ * _sceGeListEnQueue; PPSSPP GPUCommon::EnqueueList agrees; UNMEASURED on a PSP). A
+ * misaligned stall address is never reached by the word-stepping list walker, so a list
+ * accepted with one ran past the fence the guest set into words it had not written. */
+static void test_ge_enqueue_refuses_misaligned_addresses(void) {
+    const uint32_t dl = 0x08927000u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(dl, 0xcd000011u);        /* FOG1 0x11 */
+    MEM_W32(dl + 4u, 0x0f000000u);   /* FINISH */
+    MEM_W32(dl + 8u, 0x0c000000u);   /* END */
+    const uint32_t first = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect(first == 0x35000000u && gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x11u,
+           "an aligned list runs to its END and takes the first slot's id");
+
+    MEM_W32(dl + 16u, 0xcd000022u);  /* FOG1 0x22: the guest has not released this word */
+    MEM_W32(dl + 20u, 0x0f000000u);
+    MEM_W32(dl + 24u, 0x0c000000u);
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 16u, dl + 18u, 0xffffffffu, 0u) == 0x80000103u,
+           "sceGeListEnQueue with a stall address that is not word-aligned is 0x80000103");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x11u,
+           "the refused list ran no command past its misaligned stall address");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 18u, 0u, 0xffffffffu, 0u) == 0x80000103u,
+           "sceGeListEnQueue with a list address that is not word-aligned is 0x80000103");
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u &&
+               gsw_call(NID_SCE_GE_DRAW_SYNC, 1u, 0u, 0u, 0u) == 0u,
+           "a refused enqueue takes no list slot and leaves the GE idle");
+    sr_hle_test_ge_lists_reset();
+}
+
+/* A title compiled with SDK 2.00 or later that enqueues a list whose address is already on
+ * the GE's active queue (queued, stalled or paused, ignoring the uncached mirror) gets
+ * SCE_ERROR_BUSY (0x80000021) and nothing is queued (uofw src/kd/ge/ge.c _sceGeListEnQueue
+ * compares UCACHED addresses; PPSSPP GPUCommon::EnqueueList returns 0x80000021 for SDK
+ * > 0x01FFFFFF; UNMEASURED on a PSP). An older title's duplicate is queued as before. Once the
+ * list has run to its END it has left the active queue, and the same address enqueues again. */
+static void test_ge_enqueue_busy_on_active_list(void) {
+    const uint32_t dl = 0x08928000u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(dl, 0x0f000000u);       /* FINISH */
+    MEM_W32(dl + 4u, 0x0c000000u);  /* END */
+
+    sr_hle_test_set_compiled_sdk_version(0x02080000u);
+    const uint32_t a = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl, 0xffffffffu, 0u);
+    expect(a == 0x35000000u && gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 3u,
+           "a list enqueued with an empty ring stalls at its start");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "SDK 2.00+: enqueueing the address of a stalled list is 0x80000021");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl | 0x40000000u, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "SDK 2.00+: the same list through the uncached mirror is 0x80000021 too");
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u,
+           "a refused duplicate takes no list slot");
+
+    expect(gsw_call(NID_SCE_GE_LIST_UPDATE_STALL_ADDR, a, dl + 8u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 0u,
+           "the stalled list runs to its END once its stall address moves");
+    const uint32_t b = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect((b & 0xff000000u) == 0x35000000u && b != a,
+           "a completed list has left the active queue: its address enqueues again");
+
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+    const uint32_t c = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl, 0xffffffffu, 0u);
+    const uint32_t d = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect(c == 0x35000000u && d == 0x35000040u && gsw_call(NID_SCE_GE_LIST_SYNC, d, 1u, 0u, 0u) == 1u,
+           "before SDK 2.00 a duplicate address is queued behind the stalled list");
+    sr_hle_test_ge_lists_reset();
+}
+
+/* Which address the duplicate check compares once a list has advanced and been paused (#3073
+ * review). uofw src/kd/ge/ge.c (28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9) compares the driver's
+ * SceGeDisplayList.list, which sceGeBreak(0) replaces with the saved resume address (one word
+ * back after a SIGNAL or FINISH, two after an END); UNMEASURED on a PSP. So after the pause the
+ * resume address is BUSY and the original enqueue address queues a new list. Each refusal is
+ * checked to run nothing (the GE's FOG1 register keeps its value) and to take no slot.
+ * MUTANT: compare start_pc -- the resume address is accepted and the enqueue address refused.
+ * MUTANT: drop the FINISH/SIGNAL step-back -- the address of the FINISH is accepted. */
+static void test_ge_enqueue_busy_uses_the_paused_resume_address(void) {
+    const uint32_t dl = 0x08929000u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0x02080000u);
+    MEM_W32(dl, 0xcd000011u);         /* FOG1 0x11 */
+    MEM_W32(dl + 4u, 0xcd000012u);    /* FOG1 0x12 */
+    MEM_W32(dl + 8u, 0xcd000013u);    /* FOG1 0x13: past the stall address */
+    MEM_W32(dl + 12u, 0x0f000000u);   /* FINISH */
+    MEM_W32(dl + 16u, 0x0c000000u);   /* END */
+    const uint32_t a = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl + 8u, 0xffffffffu, 0u);
+    expect(a == 0x35000000u && gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x12u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 3u,
+           "paused duplicate: the list runs two commands and stalls at dl+8");
+    expect(gsw_call(NID_SCE_GE_BREAK, 0u, 0u, 0u, 0u) == a &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 4u,
+           "paused duplicate: sceGeBreak(0) pauses the stalled list");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 8u, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "paused duplicate: the saved resume address dl+8 is BUSY (0x80000021)");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, (dl + 8u) | 0x40000000u, 0u, 0xffffffffu, 0u) ==
+               0x80000021u,
+           "paused duplicate: the resume address through the uncached mirror is BUSY too");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x12u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u,
+           "paused duplicate: the refusals ran no command and took no slot");
+    const uint32_t b = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, 0u, 0xffffffffu, 0u);
+    expect(b == 0x35000040u && gsw_call(NID_SCE_GE_LIST_SYNC, b, 1u, 0u, 0u) == 1u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x12u,
+           "paused duplicate: the original enqueue address no longer matches; it queues behind "
+           "the paused list without running");
+    expect(gsw_call(NID_SCE_GE_CONTINUE, 0u, 0u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_UPDATE_STALL_ADDR, a, 0u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, b, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x13u,
+           "paused duplicate: once continued and released both lists run to their END");
+    sr_hle_test_ge_lists_reset();
+
+    /* Stalled between a FINISH and its END: the saved address steps back over the FINISH. */
+    MEM_W32(dl, 0xcd000021u);         /* FOG1 0x21 */
+    MEM_W32(dl + 4u, 0x0f000000u);    /* FINISH */
+    MEM_W32(dl + 8u, 0x0c000000u);    /* END */
+    const uint32_t c = gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl, dl + 8u, 0xffffffffu, 0u);
+    expect(c == 0x35000000u && gsw_call(NID_SCE_GE_LIST_SYNC, c, 1u, 0u, 0u) == 3u &&
+               gsw_call(NID_SCE_GE_BREAK, 0u, 0u, 0u, 0u) == c,
+           "paused after FINISH: the list stalls before its END and pauses");
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, dl + 4u, 0u, 0xffffffffu, 0u) == 0x80000021u,
+           "paused after FINISH: the saved address is the FINISH's (dl+4), BUSY");
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, 0x35000040u, 1u, 0u, 0u) == 0x80000100u,
+           "paused after FINISH: the refusal took no slot");
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+}
+
 /* A SIGNAL whose behaviour is JUMP (0x10), CALL (0x11), RET (0x12) or their relative (0x13,
  * 0x14) and origin (0x15, 0x16) forms, with the END after it, moves the list: the GE driver's
  * interrupt handler jumps, or saves the caller on the list's stack and calls, or returns
@@ -41707,6 +42647,49 @@ static void test_ge_timing_blocking_sync_cannot_wait(void) {
     expect(s_ge_tim_calls == 1u && ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 0u) == 0u &&
                ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 0u, 0u) == 0u,
            "GE timing: once the completion is delivered both blocking forms return 0");
+    sr_hle_test_ge_lists_reset();
+    ge_tim_teardown();
+}
+
+/* A list that ran to its END but is still drawing in the timing model has not left the
+ * driver's active queue: its address is BUSY for an SDK 2.00+ title until the completion is
+ * delivered (#3073 review; uofw src/kd/ge/ge.c 28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9: only
+ * the END interrupt removes a list from g_AwQueue; UNMEASURED on a PSP). The refused enqueue
+ * re-runs nothing (FOG1 keeps the first run's value although the guest rewrote the word) and
+ * fires no callback; once the list completes, the same address enqueues and runs the new word.
+ * MUTANT: leave DRAWING out of the duplicate check -- the duplicate is accepted while drawing. */
+static void test_ge_enqueue_busy_while_drawing(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_timing(1);
+    sr_hle_test_set_compiled_sdk_version(0x02080000u);
+    MEM_W32(GE_TIM_DL, 0xcd000031u);                                  /* FOG1 0x31 */
+    MEM_W32(GE_TIM_DL + 4u, 0x0f000000u | ge_tim_finish_id(GE_TIM_DL)); /* FINISH id */
+    MEM_W32(GE_TIM_DL + 8u, 0x0c000000u);                             /* END */
+    s_vtime_us = 1000u;
+    memset(&cpu, 0, sizeof(cpu));
+    const uint32_t qid = ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 2u && s_ge_tim_calls == 0u &&
+               ge_tim_sync(&cpu, NID_SCE_GE_GET_CMD, 0xcdu, 0u) == 0x31u,
+           "drawing duplicate: the list ran to its END and is still drawing");
+    MEM_W32(GE_TIM_DL, 0xcd000032u);                                  /* FOG1 0x32 */
+    expect(ge_tim_enqueue(&cpu, GE_TIM_DL) == 0x80000021u,
+           "drawing duplicate: its address is BUSY (0x80000021) before the completion");
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_GET_CMD, 0xcdu, 0u) == 0x31u && s_ge_tim_calls == 0u &&
+               ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 2u,
+           "drawing duplicate: the refusal ran no command and completed nothing");
+    s_vtime_us = 1100u;
+    scheduler_service_pending();
+    expect(s_ge_tim_calls == 1u && ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u,
+           "drawing duplicate: the list completes once its drawing time has passed");
+    const uint32_t again = ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect((again & 0xff000000u) == 0x35000000u &&
+               ge_tim_sync(&cpu, NID_SCE_GE_GET_CMD, 0xcdu, 0u) == 0x32u,
+           "drawing duplicate: after the completion the same address enqueues and runs");
+    s_vtime_us = 1200u;
+    scheduler_service_pending();
+    sr_hle_test_set_compiled_sdk_version(0u);
     sr_hle_test_ge_lists_reset();
     ge_tim_teardown();
 }
@@ -47186,16 +48169,27 @@ static void test_sas_noise_restarts_on_guest_reset(void) {
 }
 
 /* #2135: __sceSasCoreWithMix's two volumes scale the caller's PCM already in the buffer, not the
- * SAS voice mix, and no value is refused: out = clamp_s16(in * vol >> 12 + voices). This is the
- * reference behaviour (PPSSPP, hrydgard/ppsspp 0b30638e6571: Core/HLE/sceSas.cpp
- * _sceSasCoreWithMix checks no volume; Core/HW/SasAudio.cpp WriteMixedOutput scales inp by
- * leftVol/rightVol). It is unmeasured on a PSP. */
+ * SAS voice mix: out = clamp_s16(in * vol >> 12 + voices), the scaling of PPSSPP (hrydgard/ppsspp
+ * 0b30638e6571: Core/HW/SasAudio.cpp WriteMixedOutput scales inp by leftVol/rightVol). PPSSPP checks
+ * no volume; the PSP refuses one below 0 or above 0x1000 with 0x80420018 and leaves the buffer
+ * untouched (PSP-SAS-003, #2807; test_sas_mix_psp_sas_003_withmix_cells replays the measured cells).
+ * Of the four bounds that record isolates only the right side's lower one, at (0, -0x1000). The
+ * refusals of 0x1001 and -1 on one side alone, and (0x1000, 0) accepted, are cells of the
+ * 2026-11-26 extension capture: CAPTURED on the same console, not a manifest record
+ * (test_sas_core_with_mix_capture_20261126_cells replays that capture).
+ *
+ * MUTANT: drop the left side's lower bound -- (-1, 0x1000) is accepted.
+ * MUTANT: drop the right side's upper bound -- (0x1000, 0x1001) is accepted. */
 static void test_sas_core_with_mix_scales_caller_pcm(void) {
     CpuState cpu;
     const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
     int16_t bgm[SAS_TEST_GRAIN * 2], got[SAS_TEST_GRAIN * 2], voice_only[SAS_TEST_GRAIN * 2];
-    static const int32_t gains[][2] = {
-        { 0x800, 0x800 }, { 0, -0x1000 }, { 0x2000, 0x3000 }, { -0x1800, 0x1001 },
+    static const struct { int32_t l, r; uint32_t rc; } gains[] = {
+        { 0x800, 0x800, 0u }, { 0, 0x1000, 0u },
+        { 0, -0x1000, 0x80420018u }, { 0x2000, 0x3000, 0x80420018u },        /* PSP-SAS-003 */
+        { 0x1001, 0x1000, 0x80420018u }, { 0x1000, -1, 0x80420018u },        /* CAPTURED 2026-11-26 */
+        { -1, 0x1000, 0x80420018u }, { 0x1000, 0x1001, 0x80420018u },        /* CAPTURED 2026-11-26 */
+        { 0x1000, 0, 0u },                                                   /* CAPTURED 2026-11-26 */
     };
     reset_fixture(); sr_hle_init(); sas_test_init(&cpu, core, 0);
     for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
@@ -47204,14 +48198,22 @@ static void test_sas_core_with_mix_scales_caller_pcm(void) {
     }
     for (size_t g = 0; g < sizeof(gains) / sizeof(gains[0]); g++) {
         sas_write_pcm(out, bgm, SAS_TEST_GRAIN);
-        cpu.r[4] = core; cpu.r[5] = out; cpu.r[6] = (uint32_t)gains[g][0]; cpu.r[7] = (uint32_t)gains[g][1];
+        cpu.r[4] = core; cpu.r[5] = out; cpu.r[6] = (uint32_t)gains[g].l; cpu.r[7] = (uint32_t)gains[g].r;
         uint32_t rc = sr_syscall(&cpu, NID_SAS_CORE_WITH_MIX);
         sas_read_pcm(out, got, SAS_TEST_GRAIN);
+        if (gains[g].rc != 0u) {
+            expect(rc == gains[g].rc && memcmp(got, bgm, sizeof(got)) == 0,
+                   "__sceSasCoreWithMix refuses a volume below 0 or above 0x1000 with 0x80420018 and leaves "
+                   "the buffer untouched (#2807)");
+            continue;
+        }
         int exact = 1;
-        for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++)
-            if (got[i] != sas_clamp16((int32_t)(((int64_t)bgm[i] * gains[g][i & 1u]) >> 12))) exact = 0;
+        for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) {
+            const int32_t gain = (i & 1u) ? gains[g].r : gains[g].l;
+            if (got[i] != sas_clamp16((int32_t)(((int64_t)bgm[i] * gain) >> 12))) exact = 0;
+        }
         expect(rc == 0 && exact,
-               "__sceSasCoreWithMix accepts any volume and scales the caller PCM by vol >> 12 (#2135)");
+               "__sceSasCoreWithMix scales the caller PCM by vol >> 12 for a volume in 0..0x1000 (#2135)");
     }
 
     /* The volumes leave the voices alone: at 0/0 the output is the voice mix and nothing else. */
@@ -47231,6 +48233,111 @@ static void test_sas_core_with_mix_scales_caller_pcm(void) {
     for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) if (voice_only[i]) audible = 1;
     expect(audible && memcmp(got, voice_only, sizeof(got)) == 0,
            "__sceSasCoreWithMix at 0/0 drops the caller PCM and keeps the voices at their own volume (#2135)");
+}
+
+/* #2807: a refused __sceSasCoreWithMix is reported by name, once per process for each kind of
+ * refusal (volume, raw mode), and an accepted call reports nothing. A bad volume in raw mode is a
+ * volume refusal: the volume check comes first. A refused call advances no voice: the grain after
+ * it is the voice's first. HOST_TESTED: the notes are this runtime's. PSP-SAS-003 does not measure
+ * the order of the two checks, raw mode set by __sceSasSetOutputmode, or what a refused call does
+ * to a playing voice; the 2026-11-26 extension capture shows all three (CAPTURED, not a manifest
+ * record; test_sas_core_with_mix_capture_20261126_cells).
+ *
+ * MUTANT: drop the raw-mode refusal's once flag -- its note appears twice.
+ * MUTANT: mix the grain before the volume check -- the voice advances and the next grain differs.
+ * MUTANT: check raw mode before the volumes -- (0x2000, 0x3000) in raw mode returns 0x80000004 and
+ * the raw-mode note names those volumes. */
+#define NID_SAS_SET_OUTPUTMODE 0xe855bf76u
+static void sas_with_mix_note_voice(CpuState *cpu, uint32_t core, uint32_t vag) {
+    sas_test_init(cpu, core, 0);   /* clears the once-per-process notes too */
+    sas_test_vag(vag, 4u, 0u);
+    cpu->r[4] = core; cpu->r[5] = 0; cpu->r[6] = vag; cpu->r[7] = 64; cpu->r[8] = 0;
+    expect(sr_syscall(cpu, NID_SAS_SET_VOICE) == 0, "WithMix note fixture sets voice 0");
+    cpu->r[4] = core; cpu->r[5] = 0;
+    expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "WithMix note fixture keys voice 0 on");
+}
+
+static uint32_t sas_with_mix_note_call(CpuState *cpu, uint32_t core, uint32_t out, int32_t left, int32_t right) {
+    cpu->r[4] = core; cpu->r[5] = out; cpu->r[6] = (uint32_t)left; cpu->r[7] = (uint32_t)right;
+    return sr_syscall(cpu, NID_SAS_CORE_WITH_MIX);
+}
+
+static void test_sas_core_with_mix_reports_each_refusal_once(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
+    static const char gain_note[] = "HLE: __sceSasCoreWithMix refuses volumes ";
+    static const char raw_note[] = "HLE: __sceSasCoreWithMix refuses raw output mode ";
+    int16_t first_grain[SAS_TEST_GRAIN * 2], got[SAS_TEST_GRAIN * 2];
+    char log[4096];
+    FILE *capture = NULL;
+    int saved_fd = -1;
+
+    /* The voice's first grain, with no WithMix call before it. */
+    reset_fixture(); sr_hle_init();
+    sas_with_mix_note_voice(&cpu, core, vag);
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu.r[4] = core; cpu.r[5] = out;
+    expect(sr_syscall(&cpu, NID_SAS_CORE) == 0, "WithMix note fixture mixes the voice's first grain");
+    sas_read_pcm(out, first_grain, SAS_TEST_GRAIN);
+    int audible = 0;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) if (first_grain[i]) audible = 1;
+    expect(audible, "WithMix note fixture: the voice's first grain is audible");
+
+    /* Two refusals of each kind, then the next grain. */
+    sas_with_mix_note_voice(&cpu, core, vag);
+    if (!hle_data_stderr_capture_begin(&capture, &saved_fd)) {
+        expect(0, "WithMix refusal notes: stderr can be captured");
+        return;
+    }
+    const uint32_t neg_left = sas_with_mix_note_call(&cpu, core, out, -1, 0x1000);
+    const uint32_t over_right = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1001);
+    cpu.r[4] = core; cpu.r[5] = 1;
+    const uint32_t raw_set = sr_syscall(&cpu, NID_SAS_SET_OUTPUTMODE);
+    const uint32_t raw_over = sas_with_mix_note_call(&cpu, core, out, 0x2000, 0x3000);
+    const uint32_t raw_first = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1000);
+    const uint32_t raw_second = sas_with_mix_note_call(&cpu, core, out, 0x800, 0x800);
+    cpu.r[4] = core; cpu.r[5] = 0;
+    const uint32_t normal_set = sr_syscall(&cpu, NID_SAS_SET_OUTPUTMODE);
+    (void)hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    fputs(log, stderr);
+    expect(neg_left == 0x80420018u && over_right == 0x80420018u,
+           "__sceSasCoreWithMix refuses (-1, 0x1000) and (0x1000, 0x1001) with 0x80420018 (#2807)");
+    expect(raw_over == 0x80420018u,
+           "__sceSasCoreWithMix in raw output mode refuses (0x2000, 0x3000) with 0x80420018: the volume check "
+           "comes before the raw-mode check (#2807)");
+    expect(raw_set == 0u && normal_set == 0u && raw_first == 0x80000004u && raw_second == 0x80000004u,
+           "__sceSasCoreWithMix refuses raw output mode set by __sceSasSetOutputmode with 0x80000004 (#2807)");
+    expect(count_occurrences(log, gain_note) == 1,
+           "the first volume refusal of a process is reported once by name, later ones not again (#2807)");
+    expect(count_occurrences(log, raw_note) == 1,
+           "the first raw-mode refusal of a process is reported once by name, the second not again (#2807)");
+    expect(strstr(log, "refuses volumes 0xffffffff, 0x00001000 with 0x80420018") != NULL,
+           "the volume refusal note names the offending volumes and the code (#2807)");
+    expect(strstr(log, "refuses raw output mode with 0x80000004 (volumes 0x00001000, 0x00001000)") != NULL,
+           "the raw-mode refusal note names the code and the volumes (#2807)");
+    expect(count_occurrences(log, "the grain is not mixed") == 2,
+           "each refusal note says the grain is not mixed (#2807)");
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu.r[4] = core; cpu.r[5] = out;
+    expect(sr_syscall(&cpu, NID_SAS_CORE) == 0, "WithMix note fixture mixes the grain after the refusals");
+    sas_read_pcm(out, got, SAS_TEST_GRAIN);
+    expect(memcmp(got, first_grain, sizeof(got)) == 0,
+           "a refused __sceSasCoreWithMix advances no voice: the next grain is the voice's first (#2807)");
+
+    /* An accepted call, in a run with no refusal yet, reports nothing. */
+    sas_with_mix_note_voice(&cpu, core, vag);
+    if (!hle_data_stderr_capture_begin(&capture, &saved_fd)) {
+        expect(0, "WithMix accepted call: stderr can be captured");
+        return;
+    }
+    const uint32_t unity = sas_with_mix_note_call(&cpu, core, out, 0x1000, 0x1000);
+    const uint32_t silent = sas_with_mix_note_call(&cpu, core, out, 0, 0);
+    (void)hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    fputs(log, stderr);
+    expect(unity == 0u && silent == 0u, "__sceSasCoreWithMix accepts (0x1000, 0x1000) and (0, 0)");
+    expect(strstr(log, "__sceSasCoreWithMix refuses") == NULL,
+           "an accepted __sceSasCoreWithMix reports no refusal (#2807)");
+    sr_hle_test_sas_reset();
 }
 
 /* pspsascore.h: "On real hardware, the end flags are refreshed only AFTER __sceSasCore is
@@ -48049,6 +49156,635 @@ static void test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule(void) {
             heights[g] = sas_adsr_height(&cpu);
         }
         expect(heights[0] == controls[i].held && heights[1] == controls[i].held, controls[i].what);
+    }
+}
+
+/* ---- PSP-SAS-003 (sas-mix): the probe's WithMix, voice-volume and pitch cells through production dispatch
+ * (#2807) ----
+ *
+ * The record is one acceptance-eligible launch of the probe built from 3872796c on a PSP-3000 (system software
+ * 6.61), boot 197, in the game context, on 2026-11-12 (UTC): 204 cells and the done record, all PASS, with the
+ * same result and out words as the boot 146 and boot 191 captures (tools/psp_oracle/manifest.json PSP-SAS-003;
+ * docs/HARDWARE_ORACLE.md, "PSP-SAS-003 capture 2026-11-07", which publishes the values). These cells replay
+ * run_sas_mix in tests/fixtures/psp_oracle/probe.c with its arguments and in its order: one core (grain 256, 32
+ * voices, 44100 Hz) initialised again for every cell, output mode 0 unless a cell is raw (mode 1: four planes,
+ * dry L, dry R, send L, send R), and voice 0's envelope held at its top (every curve linear, attack 0x40000000,
+ * decay 0x00100000, sustain rate 0, release 0x00040000, sustain level 0x40000000). Voice 0 plays one of three
+ * synthetic sources: a looping VAG whose every sample is 0x0700 (full scale 0x06fe after the envelope), a looping
+ * VAG whose block b holds ((b % 15) - 7) << 8, or the PCM ramp 8 * i. Each call the probe records enters its
+ * NID through sr_syscall with a named constant.
+ *
+ * The document publishes these values, and the cells assert them as measured:
+ * - __sceSasCoreWithMix, output mode 0, caller PCM (i - 256) * 97 in shorts 0..511, no voice keyed:
+ *   (0x1000, 0x1000) returns 0 and leaves the buffer unchanged; (0x800, 0x800) returns 0 and halves it (0x9f00
+ *   becomes 0xcf80); (0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return 0x80420018 and leave it
+ *   untouched. With voice 0 keyed at 0x1000/0x1000/0/0, (0, 0) returns 0 and leaves the voice alone (0x06fe),
+ *   and (0x1000, 0x1000) gives the sum (0x9f61 + 0x06fe = 0xa65f). In output mode 1, (0x1000, 0x1000) returns
+ *   0x80000004 and leaves the buffer untouched. The probe reads the buffer in three windows (shorts 0..31,
+ *   240..271 and 480..511), so "unchanged" and "untouched" are asserted there; the whole buffer is also
+ *   checked as this runtime's own property.
+ * - __sceSasSetVolume (the grain after four warm-up grains): with no SetVolume after __sceSasInit every plane
+ *   peaks at 0x06fe (mode 0 and raw mode 1); 0 on all four sides is silent; 0x800 gives 0x037f; (0, 0, 0x1000,
+ *   0x1000) in raw mode leaves the dry planes 0 and the send planes at 0x06fe; -0x1000 on any side returns 0
+ *   and plays that side inverted; +0x1001 and -0x1001 on any side return 0x80420018 and keep the previous
+ *   volume (0x800, so 0x037f on every plane); a second __sceSasInit after SetVolume 0x800 restores 0x06fe.
+ * - Pitch: every __sceSasCore returns 0, the envelope height is 0x3ff00000 and __sceSasGetEndFlag returns
+ *   0xfffffffe; the stepped VAG gives 28 output samples per block at pitch 0x1000 and 10 or 11 at 0x2a00, and
+ *   the PCM ramp rises 8 per output sample at 0x2000.
+ *
+ * Published values this runtime does not reproduce. The cells print each as a named KNOWN DEVIATION line and
+ * do not assert it; all of them belong to the mixer (__sceSasCore), which is not reviewed here:
+ * - -0x1000 on a side plays 0xf901 (-1791) on the PSP and 0xf902 (-1790) here: this mixer applies the envelope
+ *   to the sample first (0x0700 * 0x3ff00000 >> 30 = 1790) and the volume after it, where the PSP's value is
+ *   what the floor of -1790.25 gives.
+ * - The PSP's output starts with 33 zero samples after KeyOn; this runtime has no key-on delay (#1296).
+ * - At pitch 0x1800 the PSP plays an in-between sample at some block ends (-1663 between -1791 and -1535);
+ *   this mixer holds each sample (zero-order hold) and never plays one.
+ * - The PCM ramp rises 4 per output sample on average at pitch 0x0800 on the PSP; this mixer plays a PCM voice
+ *   at one sample per output sample whatever its pitch, so it rises 8. */
+#define NID_SAS_MIX_CORE_WITH_MIX 0x50a14dfcu
+#define NID_SAS_MIX_SET_VOLUME    0x440ca7d8u
+#define NID_SAS_MIX_SET_VOICE     0x99944089u
+#define NID_SAS_MIX_SET_VOICE_PCM 0xe1cd9561u
+#define NID_SAS_MIX_SET_PITCH     0xad84d37fu
+#define NID_SAS_MIX_GET_END       0x68a46b95u
+#define SAS_MIX_CORE        0x08030000u
+#define SAS_MIX_OUT         0x08010000u
+#define SAS_MIX_FLAT        0x08020000u
+#define SAS_MIX_STEPS       0x08020400u
+#define SAS_MIX_PCM         0x08040000u
+#define SAS_MIX_GRAIN       256u
+#define SAS_MIX_VAG_BLOCKS  64u
+#define SAS_MIX_PCM_SAMPLES 2048u
+#define SAS_MIX_WARM        4u
+#define SAS_MIX_SHORTS      (SAS_MIX_GRAIN * 8u)
+#define SAS_MIX_SENTINEL    0x5a5au
+#define SAS_MIX_FULL        0x06feu      /* the flat voice at volume 0x1000 */
+#define SAS_MIX_HALF        0x037fu      /* the flat voice at volume 0x800 */
+#define SAS_MIX_INVERTED    0xf901u      /* the flat voice at volume -0x1000 on the PSP */
+#define SAS_MIX_VOLUME_VAL  0x80420018u
+#define SAS_MIX_RAW_REFUSED 0x80000004u
+#define SAS_MIX_TOP_HEIGHT  0x3ff00000u
+#define SAS_MIX_PSP_ZEROS   33u          /* zero samples after KeyOn on the PSP (no key-on delay here, #1296) */
+/* The envelope helpers of the PSP-SAS-002 cells above address this core and voice 0. */
+_Static_assert(SAS_MIX_CORE == SAS_ADSR_CORE, "the sas-mix cells share the sas-adsr envelope helpers' core");
+
+/* The probe's two VAGs and PCM ramp (run_sas_mix), written once per test. */
+static void sas_mix_cell_begin(CpuState *cpu) {
+    reset_fixture(); sr_hle_init(); sr_hle_test_sas_reset();
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    for (uint32_t b = 0; b < SAS_MIX_VAG_BLOCKS; b++) {
+        const uint8_t flag = b == 0u ? 0x06u : (b + 1u == SAS_MIX_VAG_BLOCKS ? 0x03u : 0x00u);
+        const uint8_t nibble = (uint8_t)(((int)(b % 15u) - 7) & 0xf);
+        MEM_W8(SAS_MIX_FLAT + b * 16u, 0x04u);
+        MEM_W8(SAS_MIX_FLAT + b * 16u + 1u, flag);
+        MEM_W8(SAS_MIX_STEPS + b * 16u, 0x04u);
+        MEM_W8(SAS_MIX_STEPS + b * 16u + 1u, flag);
+        for (uint32_t i = 2; i < 16u; i++) {
+            MEM_W8(SAS_MIX_FLAT + b * 16u + i, 0x77u);
+            MEM_W8(SAS_MIX_STEPS + b * 16u + i, (uint8_t)(nibble | (nibble << 4)));
+        }
+    }
+    for (uint32_t i = 0; i < SAS_MIX_PCM_SAMPLES; i++) MEM_W16(SAS_MIX_PCM + i * 2u, (uint16_t)(8u * i));
+}
+
+static uint32_t sas_mix_init(CpuState *cpu, uint32_t raw) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = SAS_MIX_GRAIN; cpu->r[6] = 32u; cpu->r[7] = raw; cpu->r[8] = 44100u;
+    return sr_syscall(cpu, NID_SAS_INIT);
+}
+
+static uint32_t sas_mix_set_voice(CpuState *cpu, uint32_t vag) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = vag;
+    cpu->r[7] = SAS_MIX_VAG_BLOCKS * 16u; cpu->r[8] = 1u;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_VOICE);
+}
+
+static uint32_t sas_mix_set_voice_pcm(CpuState *cpu) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = SAS_MIX_PCM;
+    cpu->r[7] = SAS_MIX_PCM_SAMPLES; cpu->r[8] = 0xffffffffu;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_VOICE_PCM);
+}
+
+static uint32_t sas_mix_set_volume(CpuState *cpu, int32_t l, int32_t r, int32_t sl, int32_t sr) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = (uint32_t)l; cpu->r[7] = (uint32_t)r;
+    cpu->r[8] = (uint32_t)sl; cpu->r[9] = (uint32_t)sr;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_VOLUME);
+}
+
+static uint32_t sas_mix_set_pitch(CpuState *cpu, int32_t pitch) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = 0u; cpu->r[6] = (uint32_t)pitch;
+    return sr_syscall(cpu, NID_SAS_MIX_SET_PITCH);
+}
+
+static uint32_t sas_mix_core(CpuState *cpu) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = SAS_MIX_OUT;
+    return sr_syscall(cpu, NID_SAS_CORE);
+}
+
+static uint32_t sas_mix_with_mix(CpuState *cpu, int32_t l, int32_t r) {
+    cpu->r[4] = SAS_MIX_CORE; cpu->r[5] = SAS_MIX_OUT; cpu->r[6] = (uint32_t)l; cpu->r[7] = (uint32_t)r;
+    return sr_syscall(cpu, NID_SAS_MIX_CORE_WITH_MIX);
+}
+
+static uint32_t sas_mix_end_flag(CpuState *cpu) {
+    cpu->r[4] = SAS_MIX_CORE;
+    return sr_syscall(cpu, NID_SAS_MIX_GET_END);
+}
+
+/* The probe's sas_mix_envelope: the first answer that is not 0, or 0. */
+static uint32_t sas_mix_envelope(CpuState *cpu) {
+    uint32_t rc = sas_adsr_set_mode(cpu, SAS_ADSR_EVERYTHING, SAS_ADSR_CURVE_LINEAR_INC, SAS_ADSR_CURVE_LINEAR_DEC,
+                                    SAS_ADSR_CURVE_LINEAR_DEC, SAS_ADSR_CURVE_LINEAR_DEC);
+    if (rc == 0u) rc = sas_adsr_set_rates(cpu, SAS_ADSR_EVERYTHING, 0x40000000u, 0x00100000u, 0u, 0x00040000u);
+    if (rc == 0u) rc = sas_adsr_set_level(cpu, 0x40000000u);
+    return rc;
+}
+
+static void sas_mix_fill(uint16_t value) {
+    for (uint32_t i = 0; i < SAS_MIX_SHORTS; i++) MEM_W16(SAS_MIX_OUT + i * 2u, value);
+}
+
+static int16_t sas_mix_short(uint32_t i) {
+    return (int16_t)MEM_R16(SAS_MIX_OUT + i * 2u);
+}
+
+/* Plane p's sample s: interleaved stereo in mode 0 (planes 0 and 1), four planes of a grain each in raw mode. */
+static int16_t sas_mix_plane(uint32_t raw, uint32_t p, uint32_t s) {
+    return sas_mix_short(raw ? p * SAS_MIX_GRAIN + s : 2u * s + p);
+}
+
+/* k_sas_mix_volume in probe.c. vol_set: 0 none, 1 SetVolume(l, r, sl, sr), 2 SetVolume(0x800 x4) then the edge
+ * call SetVolume(l, r, sl, sr), 3 SetVolume(0x800 x4), __sceSasInit again, SetVoice, no SetVolume. `want` is the
+ * peak the document publishes for every plane the mode has (SAS_MIX_ANY: none published), `inverted` the side
+ * the edge call inverts (-1: none), and `edge` the edge call's published answer. */
+#define SAS_MIX_ANY 0xffffffffu
+static const struct {
+    const char *name;
+    uint32_t raw, vol_set;
+    int32_t l, r, sl, sr;
+    uint32_t want_dry, want_send, edge;
+    int inverted;
+} k_sas_mix_volume_cells[] = {
+    {"def-m0", 0u, 0u, 0, 0, 0, 0, SAS_MIX_FULL, SAS_MIX_FULL, 0u, -1},
+    {"def-m1", 1u, 0u, 0, 0, 0, 0, SAS_MIX_FULL, SAS_MIX_FULL, 0u, -1},
+    {"zero", 0u, 1u, 0, 0, 0, 0, 0u, 0u, 0u, -1},
+    {"half", 0u, 1u, 0x800, 0x800, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, 0u, -1},
+    {"full-m1", 1u, 1u, 0x1000, 0x1000, 0x1000, 0x1000, SAS_MIX_ANY, SAS_MIX_ANY, 0u, -1},
+    {"send-only-m1", 1u, 1u, 0, 0, 0x1000, 0x1000, 0u, SAS_MIX_FULL, 0u, -1},
+    {"e-l-m1000", 0u, 2u, -0x1000, 0x800, 0x800, 0x800, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 0},
+    {"e-r-m1000", 0u, 2u, 0x800, -0x1000, 0x800, 0x800, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 1},
+    {"e-sl-m1000", 1u, 2u, 0x800, 0x800, -0x1000, 0x800, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 2},
+    {"e-sr-m1000", 1u, 2u, 0x800, 0x800, 0x800, -0x1000, SAS_MIX_ANY, SAS_MIX_ANY, 0u, 3},
+    {"e-l-1001", 0u, 2u, 0x1001, 0x800, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-r-1001", 0u, 2u, 0x800, 0x1001, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sl-1001", 1u, 2u, 0x800, 0x800, 0x1001, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sr-1001", 1u, 2u, 0x800, 0x800, 0x800, 0x1001, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-l-m1001", 0u, 2u, -0x1001, 0x800, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-r-m1001", 0u, 2u, 0x800, -0x1001, 0x800, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sl-m1001", 1u, 2u, 0x800, 0x800, -0x1001, 0x800, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"e-sr-m1001", 1u, 2u, 0x800, 0x800, 0x800, -0x1001, SAS_MIX_HALF, SAS_MIX_HALF, SAS_MIX_VOLUME_VAL, -1},
+    {"reinit", 0u, 3u, 0, 0, 0, 0, SAS_MIX_FULL, SAS_MIX_FULL, 0u, -1},
+};
+#define SAS_MIX_VOLUME_CELL_COUNT (sizeof(k_sas_mix_volume_cells) / sizeof(k_sas_mix_volume_cells[0]))
+
+static void test_sas_mix_psp_sas_003_volume_cells(void) {
+    CpuState cpu;
+    char what[160];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_MIX_VOLUME_CELL_COUNT; i++) {
+        const uint32_t raw = k_sas_mix_volume_cells[i].raw, vol_set = k_sas_mix_volume_cells[i].vol_set;
+        const int32_t l = k_sas_mix_volume_cells[i].l, r = k_sas_mix_volume_cells[i].r;
+        const int32_t sl = k_sas_mix_volume_cells[i].sl, sr = k_sas_mix_volume_cells[i].sr;
+        const char *name = k_sas_mix_volume_cells[i].name;
+        /* Runtime preconditions: the calls whose answers the document does not publish. */
+        int setup = sas_mix_init(&cpu, raw) == 0u && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u;
+        uint32_t edge = 0u;
+        if (vol_set == 1u) {
+            setup = setup && sas_mix_set_volume(&cpu, l, r, sl, sr) == 0u;
+        } else if (vol_set == 2u) {
+            setup = setup && sas_mix_set_volume(&cpu, 0x800, 0x800, 0x800, 0x800) == 0u;
+            edge = sas_mix_set_volume(&cpu, l, r, sl, sr);
+        } else if (vol_set == 3u) {
+            setup = setup && sas_mix_set_volume(&cpu, 0x800, 0x800, 0x800, 0x800) == 0u;
+            setup = setup && sas_mix_init(&cpu, raw) == 0u && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u;
+        }
+        setup = setup && sas_mix_envelope(&cpu) == 0u && sas_adsr_key_on(&cpu) == 0u;
+        for (uint32_t g = 0; g < SAS_MIX_WARM; g++) setup = setup && sas_mix_core(&cpu) == 0u;
+        sas_mix_fill(SAS_MIX_SENTINEL);
+        setup = setup && sas_mix_core(&cpu) == 0u;
+        snprintf(what, sizeof(what), "sas-mix-v-%s: init, voice, envelope, KeyOn and __sceSasCore return 0 "
+                 "(runtime precondition)", name);
+        expect(setup, what);
+        uint32_t peak[4] = {0u, 0u, 0u, 0u};
+        const uint32_t planes = raw ? 4u : 2u;
+        for (uint32_t p = 0; p < planes; p++)
+            for (uint32_t s = 0; s < SAS_MIX_GRAIN; s++) {
+                const int v = sas_mix_plane(raw, p, s);
+                const uint32_t mag = (uint32_t)(v < 0 ? -v : v);
+                if (mag > peak[p]) peak[p] = mag;
+            }
+        if (vol_set == 2u) {
+            snprintf(what, sizeof(what), "sas-mix-v-%s-calls: the edge __sceSasSetVolume returns 0x%08x",
+                     name, (unsigned)k_sas_mix_volume_cells[i].edge);
+            expect(edge == k_sas_mix_volume_cells[i].edge, what);
+        }
+        for (uint32_t p = 0; p < planes; p++) {
+            const uint32_t want = p < 2u ? k_sas_mix_volume_cells[i].want_dry : k_sas_mix_volume_cells[i].want_send;
+            if (want == SAS_MIX_ANY) continue;
+            snprintf(what, sizeof(what), "sas-mix-v-%s-out: plane %u peaks at 0x%04x", name, (unsigned)p,
+                     (unsigned)want);
+            expect(peak[p] == want, what);
+        }
+        const int side = k_sas_mix_volume_cells[i].inverted;
+        if (side >= 0) {
+            const int16_t at64 = sas_mix_plane(raw, (uint32_t)side, 64u);
+            snprintf(what, sizeof(what), "sas-mix-v-%s-out: plane %d plays inverted", name, side);
+            expect(at64 < 0 && peak[side] >= SAS_MIX_FULL && peak[side] <= SAS_MIX_FULL + 1u, what);
+            if ((uint16_t)at64 != SAS_MIX_INVERTED)
+                printf("sas-mix: KNOWN DEVIATION -0x1000 volume (%s plane %d) sample 64 got=0x%04x want=0x%04x "
+                       "(PSP-SAS-003 sas-mix-v-%s-out; the envelope is applied before the volume here)\n",
+                       name, side, (unsigned)(uint16_t)at64, (unsigned)SAS_MIX_INVERTED, name);
+        }
+    }
+}
+
+/* k_sas_mix_withmix in probe.c, with the answer the document publishes for each. */
+static const struct {
+    const char *name;
+    uint32_t raw, keyed;
+    int32_t l, r;
+    uint32_t result;
+} k_sas_mix_withmix_cells[] = {
+    {"unity", 0u, 0u, 0x1000, 0x1000, 0u},
+    {"half", 0u, 0u, 0x800, 0x800, 0u},
+    {"zero-neg", 0u, 0u, 0, -0x1000, SAS_MIX_VOLUME_VAL},
+    {"over", 0u, 0u, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    {"extreme", 0u, 0u, 0x7fffffff, (int32_t)0x80000000u, SAS_MIX_VOLUME_VAL},
+    {"keyed-zero", 0u, 1u, 0, 0, 0u},
+    {"keyed-unity", 0u, 1u, 0x1000, 0x1000, 0u},
+    {"raw-unity", 1u, 0u, 0x1000, 0x1000, SAS_MIX_RAW_REFUSED},
+};
+#define SAS_MIX_WITHMIX_CELL_COUNT (sizeof(k_sas_mix_withmix_cells) / sizeof(k_sas_mix_withmix_cells[0]))
+static const uint32_t k_sas_mix_windows[3] = {0u, 240u, 480u};   /* 32 shorts each */
+
+static void test_sas_mix_psp_sas_003_withmix_cells(void) {
+    CpuState cpu;
+    char what[160];
+    static int16_t before[SAS_MIX_SHORTS];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_MIX_WITHMIX_CELL_COUNT; i++) {
+        const char *name = k_sas_mix_withmix_cells[i].name;
+        int setup = sas_mix_init(&cpu, k_sas_mix_withmix_cells[i].raw) == 0u;
+        if (k_sas_mix_withmix_cells[i].keyed) {
+            setup = setup && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u &&
+                    sas_mix_set_volume(&cpu, 0x1000, 0x1000, 0, 0) == 0u && sas_mix_envelope(&cpu) == 0u &&
+                    sas_adsr_key_on(&cpu) == 0u;
+            for (uint32_t g = 0; g < SAS_MIX_WARM; g++) setup = setup && sas_mix_core(&cpu) == 0u;
+        }
+        snprintf(what, sizeof(what), "sas-mix-w-%s: the core (and keyed voice) set up (runtime precondition)", name);
+        expect(setup, what);
+        sas_mix_fill(SAS_MIX_SENTINEL);
+        for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++)
+            MEM_W16(SAS_MIX_OUT + s * 2u, (uint16_t)(int16_t)(((int)s - 256) * 97));
+        for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) before[s] = sas_mix_short(s);
+        const uint32_t rc = sas_mix_with_mix(&cpu, k_sas_mix_withmix_cells[i].l, k_sas_mix_withmix_cells[i].r);
+        snprintf(what, sizeof(what), "sas-mix-w-%s-calls: __sceSasCoreWithMix(0x%x, 0x%x) returns 0x%08x", name,
+                 (unsigned)k_sas_mix_withmix_cells[i].l, (unsigned)k_sas_mix_withmix_cells[i].r,
+                 (unsigned)k_sas_mix_withmix_cells[i].result);
+        expect(rc == k_sas_mix_withmix_cells[i].result, what);
+        /* The three windows the probe records (sas-mix-w-<name>-s0..s2). */
+        int unchanged = 1, halved = 1, voice_alone = 1, summed = 1;
+        for (uint32_t w = 0; w < 3u; w++)
+            for (uint32_t k = 0; k < 32u; k++) {
+                const uint32_t s = k_sas_mix_windows[w] + k;
+                const int16_t got = sas_mix_short(s), was = before[s];
+                if (got != was) unchanged = 0;
+                if ((was & 1) == 0 && got != was / 2) halved = 0;   /* odd samples' rounding is unpublished */
+                if (got != (int16_t)SAS_MIX_FULL) voice_alone = 0;
+                if (got != (int16_t)(was + (int16_t)SAS_MIX_FULL)) summed = 0;
+            }
+        int whole = 1;
+        for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) if (sas_mix_short(s) != before[s]) whole = 0;
+        const int unity = strcmp(name, "unity") == 0;
+        if (k_sas_mix_withmix_cells[i].result != 0u || unity) {
+            snprintf(what, sizeof(what), "sas-mix-w-%s-s0..s2: the call leaves the caller's buffer %s", name,
+                     unity ? "unchanged" : "untouched");
+            expect(unchanged, what);
+            snprintf(what, sizeof(what), "sas-mix-w-%s: no short of the buffer changes (runtime property beyond "
+                     "the three windows)", name);
+            expect(whole, what);
+        } else if (strcmp(name, "half") == 0) {
+            expect(sas_mix_short(0u) == (int16_t)0xcf80 && halved,
+                   "sas-mix-w-half-s0..s2: (0x800, 0x800) halves the caller's PCM (0x9f00 becomes 0xcf80)");
+        } else if (strcmp(name, "keyed-zero") == 0) {
+            expect(voice_alone, "sas-mix-w-keyed-zero-s0..s2: (0, 0) leaves the keyed voice alone (0x06fe)");
+        } else if (strcmp(name, "keyed-unity") == 0) {
+            expect(sas_mix_short(1u) == (int16_t)0xa65f && summed,
+                   "sas-mix-w-keyed-unity-s0..s2: (0x1000, 0x1000) adds the voice to the caller's PCM "
+                   "(0x9f61 + 0x06fe = 0xa65f)");
+        }
+    }
+}
+
+/* ---- __sceSasCoreWithMix: the 2026-11-26 extension capture, cell by cell through production dispatch (#2807)
+ * ----
+ *
+ * CAPTURED, not PSP-SAS-003 and not a manifest record: one run, on one boot of the same PSP-3000 (system software
+ * 6.61, game context), of a sas-mix probe extension that is not in tests/fixtures/psp_oracle/probe.c yet
+ * (docs/HARDWARE_ORACLE.md, "PSP-SAS-003 extension capture 2026-11-26", publishes the values). The public stream
+ * registers none of these cells, so each is named here by what it passes and none is a case id. Like the measured
+ * cells, each starts from a fresh core of grain 256 and 32 voices; the caller's ramp is (i - 256) * 97, whose
+ * shorts 0, 254 and 480 are the three samples the capture publishes (-24832, -194, 21728).
+ *
+ * What the capture shows, and these cells assert:
+ * - One bad side refuses the call with 0x80420018 and leaves the buffer untouched; each of the four bounds alone.
+ * - An accepted call scales each side to floor(in * volume / 4096), odd samples included.
+ * - In raw output mode a bad volume answers 0x80420018 and a good one 0x80000004: volumes first.
+ * - Raw mode set by __sceSasSetOutputmode(1) is refused like raw mode set at init, and mode 0 set that way mixes.
+ * - With a voice playing, (0x800, 0x800) gives floor(in / 2) plus the voice's sample and (0x2000, 0x3000) is
+ *   refused. The voice here is the measured keyed cells' (flat VAG, four warm-up grains, 0x06fe = 1790).
+ * The untouched and scaled claims are the capture's in the three windows it reads; over the rest of the buffer
+ * they are this runtime's own property.
+ *
+ * MUTANT: check raw mode before the volumes -- the two raw-mode cells with a bad volume return 0x80000004. */
+enum { SAS_CAPTURE_PLAIN, SAS_CAPTURE_RAW, SAS_CAPTURE_KEYED, SAS_CAPTURE_SET_RAW, SAS_CAPTURE_SET_STEREO };
+static const struct {
+    const char *name;
+    uint32_t setup;
+    int32_t l, r;
+    uint32_t result;
+} k_sas_withmix_capture_cells[] = {
+    {"left -0x1000", SAS_CAPTURE_PLAIN, -0x1000, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"left -1", SAS_CAPTURE_PLAIN, -1, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right -1", SAS_CAPTURE_PLAIN, 0x1000, -1, SAS_MIX_VOLUME_VAL},
+    {"left -0xfff", SAS_CAPTURE_PLAIN, -0xfff, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right -0x2000", SAS_CAPTURE_PLAIN, 0, -0x2000, SAS_MIX_VOLUME_VAL},
+    {"left 0x1001", SAS_CAPTURE_PLAIN, 0x1001, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right 0x1001", SAS_CAPTURE_PLAIN, 0x1000, 0x1001, SAS_MIX_VOLUME_VAL},
+    {"right 0x1fff", SAS_CAPTURE_PLAIN, 0x1000, 0x1fff, SAS_MIX_VOLUME_VAL},
+    {"left 0x2000", SAS_CAPTURE_PLAIN, 0x2000, 0x1000, SAS_MIX_VOLUME_VAL},
+    {"right 0x2000", SAS_CAPTURE_PLAIN, 0x1000, 0x2000, SAS_MIX_VOLUME_VAL},
+    {"odd volumes", SAS_CAPTURE_PLAIN, 0x555, 0xfff, 0u},
+    {"volume 1", SAS_CAPTURE_PLAIN, 1, 0xaab, 0u},
+    {"left only", SAS_CAPTURE_PLAIN, 0x1000, 0, 0u},
+    {"raw mode, half", SAS_CAPTURE_RAW, 0x800, 0x800, SAS_MIX_RAW_REFUSED},
+    {"raw mode, zero", SAS_CAPTURE_RAW, 0, 0, SAS_MIX_RAW_REFUSED},
+    {"raw mode, both over", SAS_CAPTURE_RAW, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    {"raw mode, right -0x1000", SAS_CAPTURE_RAW, 0, -0x1000, SAS_MIX_VOLUME_VAL},
+    {"voice playing, half", SAS_CAPTURE_KEYED, 0x800, 0x800, 0u},
+    {"voice playing, both over", SAS_CAPTURE_KEYED, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    {"SetOutputmode(1), unity", SAS_CAPTURE_SET_RAW, 0x1000, 0x1000, SAS_MIX_RAW_REFUSED},
+    {"SetOutputmode(0), unity", SAS_CAPTURE_SET_STEREO, 0x1000, 0x1000, 0u},
+};
+#define SAS_WITHMIX_CAPTURE_CELL_COUNT \
+    (sizeof(k_sas_withmix_capture_cells) / sizeof(k_sas_withmix_capture_cells[0]))
+
+static void sas_mix_write_ramp(int16_t *before) {
+    sas_mix_fill(SAS_MIX_SENTINEL);
+    for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++)
+        MEM_W16(SAS_MIX_OUT + s * 2u, (uint16_t)(int16_t)(((int)s - 256) * 97));
+    for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) before[s] = sas_mix_short(s);
+}
+
+static int sas_mix_buffer_is(const int16_t *want) {
+    for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) if (sas_mix_short(s) != want[s]) return 0;
+    return 1;
+}
+
+static void test_sas_core_with_mix_capture_20261126_cells(void) {
+    CpuState cpu;
+    char what[200];
+    static int16_t before[SAS_MIX_SHORTS];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_WITHMIX_CAPTURE_CELL_COUNT; i++) {
+        const char *name = k_sas_withmix_capture_cells[i].name;
+        const uint32_t kind = k_sas_withmix_capture_cells[i].setup;
+        const int32_t l = k_sas_withmix_capture_cells[i].l, r = k_sas_withmix_capture_cells[i].r;
+        const uint32_t want = k_sas_withmix_capture_cells[i].result;
+        int setup = sas_mix_init(&cpu, kind == SAS_CAPTURE_RAW || kind == SAS_CAPTURE_SET_STEREO) == 0u;
+        if (kind == SAS_CAPTURE_KEYED) {
+            setup = setup && sas_mix_set_voice(&cpu, SAS_MIX_FLAT) == 0u &&
+                    sas_mix_set_volume(&cpu, 0x1000, 0x1000, 0, 0) == 0u && sas_mix_envelope(&cpu) == 0u &&
+                    sas_adsr_key_on(&cpu) == 0u;
+            for (uint32_t g = 0; g < SAS_MIX_WARM; g++) setup = setup && sas_mix_core(&cpu) == 0u;
+        }
+        if (kind == SAS_CAPTURE_SET_RAW || kind == SAS_CAPTURE_SET_STEREO) {
+            const uint32_t mode = kind == SAS_CAPTURE_SET_RAW ? 1u : 0u;
+            cpu.r[4] = SAS_MIX_CORE; cpu.r[5] = mode;
+            const uint32_t set = sr_syscall(&cpu, NID_SAS_SET_OUTPUTMODE);
+            cpu.r[4] = SAS_MIX_CORE;
+            const uint32_t get = sr_syscall(&cpu, NID_SAS_GET_OUTPUTMODE);
+            snprintf(what, sizeof(what), "WithMix capture, %s: __sceSasSetOutputmode(%u) returns 0 and "
+                     "__sceSasGetOutputmode %u", name, (unsigned)mode, (unsigned)mode);
+            expect(set == 0u && get == mode, what);
+        }
+        snprintf(what, sizeof(what), "WithMix capture, %s: the core (and voice) set up (runtime precondition)",
+                 name);
+        expect(setup, what);
+        sas_mix_write_ramp(before);
+        const uint32_t rc = sas_mix_with_mix(&cpu, l, r);
+        snprintf(what, sizeof(what), "WithMix capture, %s: __sceSasCoreWithMix(0x%x, 0x%x) returns 0x%08x", name,
+                 (unsigned)l, (unsigned)r, (unsigned)want);
+        expect(rc == want, what);
+        if (want != 0u) {
+            snprintf(what, sizeof(what), "WithMix capture, %s: the refused call leaves the caller's buffer "
+                     "untouched", name);
+            expect(sas_mix_buffer_is(before), what);
+            continue;
+        }
+        /* An accepted call: floor(in * volume / 4096) per side, plus the playing voice's sample. */
+        const int32_t voice = kind == SAS_CAPTURE_KEYED ? (int32_t)SAS_MIX_FULL : 0;
+        int scaled = 1;
+        for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++) {
+            const int32_t in = before[s], volume = (s & 1u) ? r : l;
+            int32_t floored = in * volume / 4096;
+            if (in * volume % 4096 < 0) floored--;
+            if (sas_mix_short(s) != sas_clamp16(floored + voice)) scaled = 0;
+        }
+        snprintf(what, sizeof(what), "WithMix capture, %s: every sample is floor(in * volume / 4096) for its "
+                 "side%s", name, voice ? " plus the voice's 1790" : "");
+        expect(scaled, what);
+        if (strcmp(name, "volume 1") == 0)
+            expect(sas_mix_short(0u) == -7 && sas_mix_short(254u) == -1 && sas_mix_short(480u) == 5,
+                   "WithMix capture, volume 1: -24832 gives -7, -194 gives -1 and 21728 gives 5");
+    }
+    sr_hle_test_sas_reset();
+}
+
+/* The 2026-11-26 capture's voice-advance cells (CAPTURED, as above): a voice playing, two __sceSasCore grains,
+ * one __sceSasCoreWithMix, then one more __sceSasCore. An accepted call gives the ramp plus the voice's grain 2
+ * and the next grain is grain 3; after a refusal for a volume (mode 0) or for raw mode (mode 1, good volumes)
+ * the buffer is untouched and the next grain is grain 2. The capture's last cell here, a bad volume in raw mode,
+ * was captured without a voice; that it advances none is this runtime's property and follows from the other two.
+ * The grains are this mixer's own (it has no key-on delay, #1296), taken from a control run in the same mode:
+ * the stepped VAG at pitch 0x1000, so each grain differs from the next.
+ *
+ * MUTANT: check raw mode before the volumes -- in raw mode (0x2000, 0x3000) returns 0x80000004. */
+static int sas_capture_voice_begin(CpuState *cpu, uint32_t raw) {
+    return sas_mix_init(cpu, raw) == 0u && sas_mix_set_voice(cpu, SAS_MIX_STEPS) == 0u &&
+           sas_mix_set_volume(cpu, 0x1000, 0x1000, 0, 0) == 0u && sas_mix_set_pitch(cpu, 0x1000) == 0u &&
+           sas_mix_envelope(cpu) == 0u && sas_adsr_key_on(cpu) == 0u;
+}
+
+static uint32_t sas_capture_grain(CpuState *cpu, int16_t *grain) {
+    sas_mix_fill(SAS_MIX_SENTINEL);
+    const uint32_t rc = sas_mix_core(cpu);
+    for (uint32_t s = 0; s < SAS_MIX_SHORTS; s++) grain[s] = sas_mix_short(s);
+    return rc;
+}
+
+static void test_sas_core_with_mix_capture_20261126_voice_advance(void) {
+    CpuState cpu;
+    char what[200];
+    static int16_t control[2][4][SAS_MIX_SHORTS], before[SAS_MIX_SHORTS], next[SAS_MIX_SHORTS];
+    static const struct {
+        const char *name;
+        uint32_t raw;
+        int32_t l, r;
+        uint32_t result;
+    } cells[] = {
+        {"accepted (0x1000, 0x1000)", 0u, 0x1000, 0x1000, 0u},
+        {"volume refusal (0x2000, 0x3000)", 0u, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+        {"raw-mode refusal (0x1000, 0x1000)", 1u, 0x1000, 0x1000, SAS_MIX_RAW_REFUSED},
+        {"volume refusal in raw mode (0x2000, 0x3000)", 1u, 0x2000, 0x3000, SAS_MIX_VOLUME_VAL},
+    };
+    sas_mix_cell_begin(&cpu);
+    for (uint32_t raw = 0; raw < 2u; raw++) {
+        int ok = sas_capture_voice_begin(&cpu, raw);
+        for (uint32_t g = 0; g < 4u; g++) ok = ok && sas_capture_grain(&cpu, control[raw][g]) == 0u;
+        ok = ok && memcmp(control[raw][1], control[raw][2], sizeof(control[raw][1])) != 0 &&
+             memcmp(control[raw][2], control[raw][3], sizeof(control[raw][2])) != 0;
+        expect(ok, raw ? "WithMix capture, voice advance: the raw-mode control run gives four grains that differ"
+                       : "WithMix capture, voice advance: the mode-0 control run gives four grains that differ");
+    }
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
+        const uint32_t raw = cells[i].raw;
+        int ok = sas_capture_voice_begin(&cpu, raw);
+        for (uint32_t g = 0; g < 2u; g++) ok = ok && sas_capture_grain(&cpu, next) == 0u;
+        snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the voice plays grains 0 and 1 (runtime "
+                 "precondition)", cells[i].name);
+        expect(ok && memcmp(next, control[raw][1], sizeof(next)) == 0, what);
+        sas_mix_write_ramp(before);
+        const uint32_t rc = sas_mix_with_mix(&cpu, cells[i].l, cells[i].r);
+        snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the call returns 0x%08x", cells[i].name,
+                 (unsigned)cells[i].result);
+        expect(rc == cells[i].result, what);
+        if (cells[i].result != 0u) {
+            snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the buffer is untouched",
+                     cells[i].name);
+            expect(sas_mix_buffer_is(before), what);
+            snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the envelope height is still "
+                     "0x3ff00000", cells[i].name);
+            expect(sas_adsr_height(&cpu) == SAS_MIX_TOP_HEIGHT, what);
+        } else {
+            int summed = 1;
+            for (uint32_t s = 0; s < 2u * SAS_MIX_GRAIN; s++)
+                if (sas_mix_short(s) != sas_clamp16((int32_t)before[s] + control[raw][2][s])) summed = 0;
+            snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the buffer is the ramp plus the "
+                     "voice's grain 2", cells[i].name);
+            expect(summed, what);
+        }
+        const uint32_t expected = cells[i].result != 0u ? 2u : 3u;
+        const uint32_t core_rc = sas_capture_grain(&cpu, next);
+        snprintf(what, sizeof(what), "WithMix capture, voice advance, %s: the next __sceSasCore grain is grain %u",
+                 cells[i].name, (unsigned)expected);
+        expect(core_rc == 0u && memcmp(next, control[raw][expected], sizeof(next)) == 0, what);
+    }
+    sr_hle_test_sas_reset();
+}
+
+/* k_sas_mix_pitch in probe.c: the stepped VAG (pcm 0) or the PCM ramp (pcm 1) at one pitch, the left channel of
+ * the first `grains` grains after KeyOn. */
+static const struct {
+    const char *name;
+    uint32_t pcm;
+    int32_t pitch;
+    uint32_t grains;
+} k_sas_mix_pitch_cells[] = {
+    {"vag-1000", 0u, 0x1000, 4u},
+    {"vag-1800", 0u, 0x1800, 4u},
+    {"vag-2a00", 0u, 0x2a00, 4u},
+    {"pcm-2000", 1u, 0x2000, 2u},
+    {"pcm-0800", 1u, 0x0800, 2u},
+};
+#define SAS_MIX_PITCH_CELL_COUNT (sizeof(k_sas_mix_pitch_cells) / sizeof(k_sas_mix_pitch_cells[0]))
+
+static void test_sas_mix_psp_sas_003_pitch_cells(void) {
+    CpuState cpu;
+    char what[160];
+    static int16_t left[4u * SAS_MIX_GRAIN];
+    sas_mix_cell_begin(&cpu);
+    for (size_t i = 0; i < SAS_MIX_PITCH_CELL_COUNT; i++) {
+        const char *name = k_sas_mix_pitch_cells[i].name;
+        const uint32_t grains = k_sas_mix_pitch_cells[i].grains, n = grains * SAS_MIX_GRAIN;
+        int setup = sas_mix_init(&cpu, 0u) == 0u &&
+                    (k_sas_mix_pitch_cells[i].pcm ? sas_mix_set_voice_pcm(&cpu)
+                                                  : sas_mix_set_voice(&cpu, SAS_MIX_STEPS)) == 0u &&
+                    sas_mix_set_volume(&cpu, 0x1000, 0x1000, 0, 0) == 0u &&
+                    sas_mix_set_pitch(&cpu, k_sas_mix_pitch_cells[i].pitch) == 0u &&
+                    sas_mix_envelope(&cpu) == 0u && sas_adsr_key_on(&cpu) == 0u;
+        snprintf(what, sizeof(what), "sas-mix-p-%s: the voice sets up (runtime precondition)", name);
+        expect(setup, what);
+        int cores = 1;
+        for (uint32_t g = 0; g < grains; g++) {
+            if (sas_mix_core(&cpu) != 0u) cores = 0;
+            for (uint32_t f = 0; f < SAS_MIX_GRAIN; f++) left[g * SAS_MIX_GRAIN + f] = sas_mix_short(2u * f);
+        }
+        const uint32_t height = sas_adsr_height(&cpu), end_flag = sas_mix_end_flag(&cpu);
+        snprintf(what, sizeof(what), "sas-mix-p-%s-calls: every __sceSasCore returns 0, the height is 0x3ff00000 "
+                 "and the end flag 0xfffffffe", name);
+        expect(cores && height == SAS_MIX_TOP_HEIGHT && end_flag == 0xfffffffeu, what);
+        /* Counted on the VAG cells only: the PCM ramp's own first sample is 0. */
+        uint32_t zeros = 0;
+        while (zeros < n && left[zeros] == 0) zeros++;
+        if (!k_sas_mix_pitch_cells[i].pcm && zeros != SAS_MIX_PSP_ZEROS)
+            printf("sas-mix: KNOWN DEVIATION %s starts with %u zero samples, the PSP with %u "
+                   "(PSP-SAS-003 sas-mix-p-%s-g00; no key-on delay, #1296)\n",
+                   name, (unsigned)zeros, (unsigned)SAS_MIX_PSP_ZEROS, name);
+        if (!k_sas_mix_pitch_cells[i].pcm) {
+            /* Runs of one value between two value changes, from the second sample of the voice on (its first
+             * sample is the envelope's first step), so the runs cut by the start and the end are left out. */
+            uint32_t runs = 0, shortest = n, longest = 0, prev = 0, in_between = 0;
+            int have = 0;
+            for (uint32_t s = zeros + 2u; s < n; s++) {
+                if (left[s] == left[s - 1u]) continue;
+                if (have) {
+                    const uint32_t len = s - prev;
+                    runs++;
+                    if (len < shortest) shortest = len;
+                    if (len > longest) longest = len;
+                }
+                if (s + 1u < n && left[s] == -1663 && left[s - 1u] == -1791 && left[s + 1u] == -1535)
+                    in_between++;
+                prev = s;
+                have = 1;
+            }
+            if (k_sas_mix_pitch_cells[i].pitch == 0x1000) {
+                expect(runs > 0u && shortest == 28u && longest == 28u,
+                       "sas-mix-p-vag-1000-g*: the stepped VAG gives 28 output samples per block at pitch 0x1000");
+            } else if (k_sas_mix_pitch_cells[i].pitch == 0x2a00) {
+                expect(runs > 0u && shortest >= 10u && longest <= 11u,
+                       "sas-mix-p-vag-2a00-g*: the stepped VAG gives 10 or 11 output samples per block at pitch "
+                       "0x2a00");
+            } else if (in_between == 0u) {
+                printf("sas-mix: KNOWN DEVIATION %s plays no in-between sample at a block end (the PSP plays -1663 "
+                       "between -1791 and -1535; this mixer holds each sample) (PSP-SAS-003 sas-mix-p-%s-g*)\n",
+                       name, name);
+            }
+        } else {
+            /* The mean rise per output sample over the second grain, after any start-up. */
+            const int rise = left[2u * SAS_MIX_GRAIN - 1u] - left[SAS_MIX_GRAIN];
+            const int per_sample = (rise + (int)(SAS_MIX_GRAIN - 1u) / 2) / (int)(SAS_MIX_GRAIN - 1u);
+            if (k_sas_mix_pitch_cells[i].pitch == 0x2000) {
+                expect(per_sample == 8, "sas-mix-p-pcm-2000-g*: the PCM ramp 8 * i rises 8 per output sample at "
+                       "pitch 0x2000");
+            } else if (per_sample != 4) {
+                printf("sas-mix: KNOWN DEVIATION %s rises %d per output sample, the PSP 4 on average "
+                       "(PSP-SAS-003 sas-mix-p-%s-g*; this mixer plays a PCM voice at one sample per output "
+                       "sample)\n", name, per_sample, name);
+            }
+        }
     }
 }
 
@@ -52821,6 +54557,8 @@ typedef struct {
     int      is_cb;
     uint32_t ret;
     int      returned;
+    uint32_t status_ptr;
+    uint32_t status_result;
 } SelftestPoolWaiterCtx;
 
 int s_pool_parks = 0;
@@ -52847,6 +54585,16 @@ static void selftest_vpl_waiter_fiber_body(void *arg) {
     cpu.r[6] = ctx->outptr;
     cpu.r[7] = ctx->toptr;
     ctx->ret = sr_syscall(&cpu, ctx->is_cb ? NID_VPL_ALLOCATE_CB : NID_VPL_ALLOCATE);
+    if (ctx->ret == 0u && ctx->status_ptr) {
+        CpuState probe = {0};
+        uint32_t intr = sr_syscall(&probe, NID_SCE_KERNEL_CPU_SUSPEND_INTR);
+        MEM_W32(ctx->status_ptr, 52u);
+        probe.r[4] = ctx->pool_uid;
+        probe.r[5] = ctx->status_ptr;
+        ctx->status_result = sr_syscall(&probe, NID_VPL_REFER);
+        probe.r[4] = intr;
+        (void)sr_syscall(&probe, NID_SCE_KERNEL_CPU_RESUME_INTR);
+    }
     ctx->returned = 1;
     s_pool_parks++;
     selftest_park_on_scheduler();
@@ -54217,6 +55965,66 @@ static void test_fpl_free_bounds_do_not_wrap(void) {
     (void)selftest_fpl_delete(pool);
 }
 
+/* One FreeVpl that frees room for two queued waiters must serve both. FreeVpl wakes one waiter;
+ * once that waiter has its block, the next one whose request fits the space left must be woken
+ * too, not left blocked beside free memory until some later free. Code-derived (the space is
+ * free and the waiter is next in the queue); PPSSPP's sceKernelFreeVpl likewise serves every
+ * waiter that fits in queue order. */
+static void test_vpl_free_serves_every_waiter_that_fits(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x6a20u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t held_out = 0x00271050u, out1 = 0x00271054u, out2 = 0x00271058u;
+    /* PSP-B1-01 accounting: a 0x200-byte pool hands out 0x1e0 bytes, all of them to one
+     * 0x1d8-byte block, and two 0x40-byte blocks cost 0x48 each. */
+    uint32_t vpool = selftest_vpl_create(0x200u);
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL free serves all: the pool is created");
+    expect(selftest_vpl_try_allocate(vpool, 0x1d8u, held_out) == 0u,
+           "VPL free serves all: one block takes the whole pool");
+    const uint32_t held = MEM_R32(held_out);
+
+    SelftestPoolWaiterCtx w1; memset(&w1, 0, sizeof w1);
+    w1.uid = 0x6a21u; w1.tcb = fixture_thread(w1.uid, TH_READY, 40); w1.tcb->started = 1;
+    w1.pool_uid = vpool; w1.req_size = 0x40u; w1.outptr = out1;
+    w1.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &w1, (size_t)4 << 20);
+    SelftestPoolWaiterCtx w2; memset(&w2, 0, sizeof w2);
+    w2.uid = 0x6a22u; w2.tcb = fixture_thread(w2.uid, TH_READY, 40); w2.tcb->started = 1;
+    w2.pool_uid = vpool; w2.req_size = 0x40u; w2.outptr = out2;
+    w2.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &w2, (size_t)4 << 20);
+    MEM_W32(out1, 0xfeedfaceu);
+    MEM_W32(out2, 0xfeedfaceu);
+    s_cur = (int)(w1.tcb - s_tcb); sr_coro_switch(w1.tcb->coro);
+    s_cur = (int)(w2.tcb - s_tcb); sr_coro_switch(w2.tcb->coro);
+    expect(!w1.returned && !w2.returned && w1.tcb->state == TH_WAIT_OBJ &&
+               w2.tcb->state == TH_WAIT_OBJ,
+           "VPL free serves all: both waiters block on the full pool");
+
+    s_cur = (int)(cur - s_tcb);
+    expect(selftest_vpl_free(vpool, held) == 0u, "VPL free serves all: the owner frees the pool");
+    expect(w1.tcb->state == TH_READY, "VPL free serves all: the first waiter is woken");
+    s_cur = (int)(w1.tcb - s_tcb); sr_coro_switch(w1.tcb->coro);
+    expect(w1.returned && w1.ret == 0u && MEM_R32(out1) != 0xfeedfaceu,
+           "VPL free serves all: the first waiter gets its block");
+    expect(w2.tcb->state == TH_READY,
+           "VPL free serves all: the second waiter, whose request fits what is left, is woken");
+    if (w2.tcb->state == TH_READY) {
+        s_cur = (int)(w2.tcb - s_tcb); sr_coro_switch(w2.tcb->coro);
+    }
+    expect(w2.returned && w2.ret == 0u && MEM_R32(out2) != 0xfeedfaceu &&
+               MEM_R32(out2) != MEM_R32(out1),
+           "VPL free serves all: the second waiter gets its own block from the same free");
+
+    sr_coro_destroy(w1.tcb->coro); w1.tcb->coro = NULL;
+    sr_coro_destroy(w2.tcb->coro); w2.tcb->coro = NULL;
+    s_cur = (int)(cur - s_tcb);
+    (void)selftest_vpl_delete(vpool);
+    s_cur = -1;
+}
+
 /* Audit 2026-11-17 (F-5e96c5e7): an FPL or VPL wait that ends with a latched result
  * (sceKernelReleaseWaitThread's WAIT_RELEASE here) leaves the pool's queue. The entry used to
  * stay, so ReferStatus counted a thread that no longer waits and a zero-timeout allocate on a
@@ -54857,6 +56665,7 @@ static void test_pool_priority_attribute_orders_waiters(void) {
             if (vpl) (void)selftest_vpl_delete(pool);
             else (void)selftest_fpl_delete(pool);
             for (int i = 0; i < 2; i++) {
+                if (vpl) sched_release_thread_resources(w[i].tcb);
                 sr_coro_destroy(w[i].tcb->coro);
                 w[i].tcb->coro = NULL;
             }
@@ -55347,6 +57156,316 @@ static void test_mbx_send_wakes_a_blocked_receiver(void) {
         if (ctxs[i]->tcb->coro) { sr_coro_destroy(ctxs[i]->tcb->coro); ctxs[i]->tcb->coro = NULL; }
     }
     s_cur = -1;
+}
+
+/* ---- A thread-priority mailbox (attr 0x100) serves its best-priority receiver ------
+ * Three receivers block in the order A (priority 40), B (20), C (20). With attr 0x100 each
+ * send goes to the waiter of best current priority, the earliest among equals: B, C, then A.
+ * Without the attribute the same queue is served in arrival order: A first.
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelMbx.cpp, sceKernelSendMbx (SCE_KERNEL_MBA_THPRI picks
+ * HLEKernel::FindBestPriorityWaiter).
+ * MUTANT: serve waiters[0] whatever the attribute -- A takes the first message.
+ *
+ * #3066: the packet a send gives a blocked receiver is that receiver's from the send on. The
+ * sender here has the best priority, so it keeps the CPU after every send; before the readied
+ * receiver runs, the mailbox reports no message and the sender's own PollMbx finds none. The
+ * receiver then returns 0 with exactly that packet. mbx_handoff_assigned_packet_cases adds a
+ * priority changed while the receiver waits, the sends no blocked receiver can take (the queue
+ * keeps those), and the timed and callback receives.
+ * Project model for the cells no measurement covers: the public PSPAutotests priority transcript
+ * shows which receiver a send serves, not what a poll between the send and the receiver sees.
+ * MUTANT: queue the packet in h_SendMbx and only ready the receiver -- the sender's PollMbx
+ *   takes the packet and the readied receiver waits again. */
+#define MBX_HANDOFF_OUT (MBX_BULK_BASE + 0x1a00u)
+#define MBX_HANDOFF_MSG (MBX_BULK_BASE + 0x1b00u)
+
+/* Run a receiver until it blocks in ReceiveMbx[CB], or resume one that was readied. */
+static void mbx_handoff_run(SelftestMbxWaiterCtx *w, TCB *cur) {
+    s_cur = (int)(w->tcb - s_tcb);
+    w->tcb->state = TH_RUNNING;
+    sr_coro_switch(w->tcb->coro);
+    s_cur = (int)(cur - s_tcb);
+}
+
+static void mbx_handoff_block(SelftestMbxWaiterCtx *w, TCB *cur, uint32_t uid, int priority,
+                              uint32_t mbx, uint32_t outptr, uint32_t toptr, int is_cb) {
+    memset(w, 0, sizeof *w);
+    w->uid = uid;
+    w->mbx_uid = mbx;
+    w->outptr = outptr;
+    w->toptr = toptr;
+    w->is_cb = is_cb;
+    MEM_W32(outptr, 0xfeedfaceu);
+    w->tcb = fixture_thread(uid, TH_READY, priority);
+    w->tcb->started = 1;
+    w->tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, w, (size_t)1 << 20);
+    mbx_handoff_run(w, cur);
+}
+
+static void mbx_handoff_finish(SelftestMbxWaiterCtx *w, TCB *cur) {
+    if (!w->tcb) return;
+    if (!w->returned && w->tcb->state == TH_READY) mbx_handoff_run(w, cur);
+    if (w->tcb->coro) { sr_coro_destroy(w->tcb->coro); w->tcb->coro = NULL; }
+}
+
+/* After a SendMbx that readied a receiver, and before that receiver runs: the sender is still
+ * the running thread, `waiting` receivers remain on the mailbox, and it has no message. */
+static void mbx_handoff_expect_assigned(TCB *cur, uint32_t mbx, uint32_t waiting, const char *what) {
+    char msg[280];
+    snprintf(msg, sizeof msg, "MBX handoff: %s: the sender is still the running thread", what);
+    expect(cur->state == TH_RUNNING && s_cur == (int)(cur - s_tcb), msg);
+    const uint32_t referred = selftest_mbx_refer(mbx, MBX_INFO);
+    snprintf(msg, sizeof msg, "MBX handoff: %s: the mailbox holds no message before the readied "
+                              "receiver runs (waiting=%u messages=%u first=0x%x)", what,
+             MEM_R32(MBX_INFO + 40u), MEM_R32(MBX_INFO + 44u), MEM_R32(MBX_INFO + 48u));
+    expect(referred == 0u && MEM_R32(MBX_INFO + 40u) == waiting && MEM_R32(MBX_INFO + 44u) == 0u &&
+               MEM_R32(MBX_INFO + 48u) == 0u, msg);
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    const uint32_t polled = selftest_mbx_poll(mbx, MBX_OUTPTR);
+    snprintf(msg, sizeof msg, "MBX handoff: %s: the sender's PollMbx finds no message and writes "
+                              "none (rc=0x%x out=0x%x)", what, polled, MEM_R32(MBX_OUTPTR));
+    expect(polled == MBX_EMPTY_ERR && MEM_R32(MBX_OUTPTR) == 0xfeedfaceu, msg);
+}
+
+static void mbx_handoff_assigned_packet_cases(void) {
+    char msg[280];
+
+    /* A priority changed while the receiver waits, by the production
+     * sceKernelChangeThreadPriority. A (priority 40) blocks before B (30). With attr 0x100, A
+     * raised to 20 is served first: the send reads the priority A has now, not the one it
+     * blocked with. Without the attribute, raising B to 20 changes nothing: A arrived first. */
+    for (int prio_attr = 1; prio_attr >= 0; prio_attr--) {
+        const uint32_t attr = prio_attr ? 0x100u : 0u;
+        reset_fixture();
+        sr_hle_init();
+        TCB *cur = fixture_thread(0x1d0u, TH_RUNNING, 8);
+        s_cur = (int)(cur - s_tcb);
+        cur->started = 1;
+        const uint32_t mbx = selftest_mbx_create(attr);
+        SelftestMbxWaiterCtx w[2];
+        static const int prios[2] = {40, 30};
+        for (int i = 0; i < 2; i++)
+            mbx_handoff_block(&w[i], cur, 0x1d1u + (uint32_t)i, prios[i], mbx,
+                              MBX_HANDOFF_OUT + 4u * (uint32_t)i, 0u, 0);
+        expect(w[0].tcb->state == TH_WAIT_OBJ && w[1].tcb->state == TH_WAIT_OBJ,
+               "MBX handoff: two receivers block before the priority change");
+        const int raised = prio_attr ? 0 : 1;
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = w[raised].uid;
+        cpu.r[5] = 20u;
+        const uint32_t changed = sr_syscall(&cpu, 0x71bc9871u);   /* sceKernelChangeThreadPriority */
+        snprintf(msg, sizeof msg, "MBX handoff: attr 0x%x: sceKernelChangeThreadPriority raises "
+                                  "receiver %c to 20 while it waits (rc=0x%x priority=%d)", attr,
+                 'A' + raised, changed, w[raised].tcb->priority);
+        expect(changed == 0u && w[raised].tcb->priority == 20 &&
+                   w[raised].tcb->state == TH_WAIT_OBJ && w[raised].tcb->wait_kind == 5 &&
+                   cur->state == TH_RUNNING && s_cur == (int)(cur - s_tcb), msg);
+        for (int k = 0; k < 2; k++) {
+            const uint32_t packet = MBX_HANDOFF_MSG + 0x10u * (uint32_t)k;
+            mbx_init_packet(packet, 0u);
+            const uint32_t sent = selftest_mbx_send(mbx, packet);
+            snprintf(msg, sizeof msg, "MBX handoff: attr 0x%x, receiver %c raised: send %d readies "
+                                      "receiver %c only", attr, 'A' + raised, k, 'A' + k);
+            expect(sent == 0u && w[k].tcb->state == TH_READY &&
+                       (k == 1 || w[1].tcb->state == TH_WAIT_OBJ), msg);
+            snprintf(msg, sizeof msg, "attr 0x%x, receiver %c raised, send %d", attr, 'A' + raised, k);
+            mbx_handoff_expect_assigned(cur, mbx, (uint32_t)(1 - k), msg);
+            if (w[k].tcb->state == TH_READY) mbx_handoff_run(&w[k], cur);
+            snprintf(msg, sizeof msg, "MBX handoff: attr 0x%x, receiver %c raised: receiver %c "
+                                      "returns 0 with packet %d (ret=0x%x out=0x%x)", attr,
+                     'A' + raised, 'A' + k, k, (unsigned)w[k].ret, MEM_R32(w[k].outptr));
+            expect(w[k].returned && w[k].ret == 0u && MEM_R32(w[k].outptr) == packet, msg);
+            if (k == 0)
+                expect(!w[1].returned && w[1].tcb->state == TH_WAIT_OBJ &&
+                           MEM_R32(w[1].outptr) == 0xfeedfaceu,
+                       "MBX handoff: the receiver the send did not serve still waits, with nothing "
+                       "written for it");
+        }
+        (void)selftest_mbx_delete(mbx);
+        for (int i = 0; i < 2; i++) mbx_handoff_finish(&w[i], cur);
+        s_cur = -1;
+    }
+
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x1e0u, TH_RUNNING, 8);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t mbx = selftest_mbx_create(0u);
+    const uint32_t queued = MBX_HANDOFF_MSG + 0x40u;
+    const uint32_t passed = MBX_HANDOFF_MSG + 0x50u;
+    const uint32_t for_cb = MBX_HANDOFF_MSG + 0x60u;
+    const uint32_t for_timed = MBX_HANDOFF_MSG + 0x70u;
+
+    /* No receiver at all: the queue keeps the packet, and the sender can poll it back. */
+    mbx_init_packet(queued, 0u);
+    expect(selftest_mbx_send(mbx, queued) == 0u, "MBX handoff: SendMbx with no receiver succeeds");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 40u) == 0u &&
+               MEM_R32(MBX_INFO + 44u) == 1u && MEM_R32(MBX_INFO + 48u) == queued,
+           "MBX handoff: with no receiver the packet is the queue's first message");
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    expect(selftest_mbx_poll(mbx, MBX_OUTPTR) == 0u && MEM_R32(MBX_OUTPTR) == queued,
+           "MBX handoff: with no receiver the sender's PollMbx takes the queued packet");
+    expect(selftest_mbx_poll(mbx, MBX_OUTPTR) == MBX_EMPTY_ERR,
+           "MBX handoff: the queued packet is taken once");
+
+    /* A receiver still on the wait queue but not blocked (its timed wait ran out and it has not
+     * run yet) cannot be handed a packet: the queue keeps it, the sender can poll it back, and
+     * the receiver then returns its timeout with nothing written. */
+    SelftestMbxWaiterCtx late;
+    MEM_W32(MBX_TIMEOUT_PTR, 500000u);
+    mbx_handoff_block(&late, cur, 0x1e1u, 40, mbx, MBX_HANDOFF_OUT + 0x10u, MBX_TIMEOUT_PTR, 0);
+    expect(late.tcb->state == TH_WAIT_OBJ, "MBX handoff: the timed receiver blocks");
+    late.tcb->state = TH_READY;
+    late.tcb->wake_cause = SCHED_WAKE_TIMEOUT;
+    mbx_init_packet(passed, 0u);
+    expect(selftest_mbx_send(mbx, passed) == 0u &&
+               cur->state == TH_RUNNING && s_cur == (int)(cur - s_tcb),
+           "MBX handoff: SendMbx past a timed-out receiver succeeds and the sender keeps running");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 44u) == 1u &&
+               MEM_R32(MBX_INFO + 48u) == passed && MEM_R32(late.outptr) == 0xfeedfaceu,
+           "MBX handoff: with no blocked receiver the queue keeps the packet and no receiver is "
+           "written");
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    expect(selftest_mbx_poll(mbx, MBX_OUTPTR) == 0u && MEM_R32(MBX_OUTPTR) == passed,
+           "MBX handoff: the sender's PollMbx takes the packet no blocked receiver was given");
+    mbx_handoff_run(&late, cur);
+    snprintf(msg, sizeof msg, "MBX handoff: the timed-out receiver returns WAIT_TIMEOUT, time left "
+                              "0, no packet (ret=0x%x left=%u out=0x%x)", (unsigned)late.ret,
+             MEM_R32(MBX_TIMEOUT_PTR), MEM_R32(late.outptr));
+    expect(late.returned && late.ret == MBX_WAIT_TIMEOUT_ERR && MEM_R32(MBX_TIMEOUT_PTR) == 0u &&
+               MEM_R32(late.outptr) == 0xfeedfaceu, msg);
+
+    /* A receiver blocked in ReceiveMbxCB is handed the packet. A CancelReceiveMbx made before it
+     * runs finds no waiter and does not take the packet back (project model). */
+    SelftestMbxWaiterCtx cbw;
+    mbx_handoff_block(&cbw, cur, 0x1e2u, 40, mbx, MBX_HANDOFF_OUT + 0x14u, 0u, 1);
+    expect(cbw.tcb->state == TH_WAIT_OBJ && cbw.tcb->wait_kind == 5,
+           "MBX handoff: the ReceiveMbxCB receiver blocks with no callback pending");
+    mbx_init_packet(for_cb, 0u);
+    expect(selftest_mbx_send(mbx, for_cb) == 0u && cbw.tcb->state == TH_READY,
+           "MBX handoff: SendMbx readies the ReceiveMbxCB receiver");
+    mbx_handoff_expect_assigned(cur, mbx, 0u, "ReceiveMbxCB receiver");
+    MEM_W32(MBX_NUMWAIT_PTR, 0xdeadbeefu);
+    expect(selftest_mbx_cancel(mbx, MBX_NUMWAIT_PTR) == 0 && MEM_R32(MBX_NUMWAIT_PTR) == 0u,
+           "MBX handoff: CancelReceiveMbx counts no waiter once the receiver has its packet");
+    if (cbw.tcb->state == TH_READY) mbx_handoff_run(&cbw, cur);
+    snprintf(msg, sizeof msg, "MBX handoff: the ReceiveMbxCB receiver returns 0 with its packet "
+                              "(ret=0x%x out=0x%x)", (unsigned)cbw.ret, MEM_R32(cbw.outptr));
+    expect(cbw.returned && cbw.ret == 0u && MEM_R32(cbw.outptr) == for_cb, msg);
+
+    /* A blocked timed receiver is handed the packet and is told the time it had left, 50 ms
+     * into a 500 ms wait. A DeleteMbx made before it runs does not take the packet back either
+     * (project model). */
+    SelftestMbxWaiterCtx timed;
+    MEM_W32(MBX_TIMEOUT_PTR, 500000u);
+    mbx_handoff_block(&timed, cur, 0x1e3u, 40, mbx, MBX_HANDOFF_OUT + 0x18u, MBX_TIMEOUT_PTR, 0);
+    expect(timed.tcb->state == TH_WAIT_OBJ, "MBX handoff: a second timed receiver blocks");
+    s_vtime_us += 50000u;
+    mbx_init_packet(for_timed, 0u);
+    expect(selftest_mbx_send(mbx, for_timed) == 0u && timed.tcb->state == TH_READY,
+           "MBX handoff: SendMbx readies the blocked timed receiver");
+    mbx_handoff_expect_assigned(cur, mbx, 0u, "timed receiver");
+    expect(selftest_mbx_delete(mbx) == 0u,
+           "MBX handoff: DeleteMbx succeeds before the readied timed receiver runs");
+    if (timed.tcb->state == TH_READY) mbx_handoff_run(&timed, cur);
+    snprintf(msg, sizeof msg, "MBX handoff: the timed receiver returns 0 with its packet and the "
+                              "time left, 0 < left < 500000 (ret=0x%x out=0x%x left=%u)",
+             (unsigned)timed.ret, MEM_R32(timed.outptr), MEM_R32(MBX_TIMEOUT_PTR));
+    expect(timed.returned && timed.ret == 0u && MEM_R32(timed.outptr) == for_timed &&
+               MEM_R32(MBX_TIMEOUT_PTR) > 0u && MEM_R32(MBX_TIMEOUT_PTR) < 500000u, msg);
+
+    (void)selftest_mbx_delete(mbx);
+    mbx_handoff_finish(&late, cur);
+    mbx_handoff_finish(&cbw, cur);
+    mbx_handoff_finish(&timed, cur);
+    s_cur = -1;
+}
+
+static void test_mbx_thread_priority_serves_best_receiver(void) {
+    for (int prio_attr = 1; prio_attr >= 0; prio_attr--) {
+        reset_fixture();
+        sr_hle_init();
+        TCB *cur = fixture_thread(0x1c0u, TH_RUNNING, 8);
+        s_cur = (int)(cur - s_tcb);
+        cur->started = 1;
+        uint32_t mbx = selftest_mbx_create(prio_attr ? 0x100u : 0u);
+        SelftestMbxWaiterCtx w[3];
+        static const int prios[3] = {40, 20, 20};
+        memset(w, 0, sizeof w);
+        for (int i = 0; i < 3; i++) {
+            w[i].uid = 0x1c1u + (uint32_t)i;
+            w[i].mbx_uid = mbx;
+            w[i].outptr = MBX_BULK_BASE + 0x1900u + 4u * (uint32_t)i;
+            MEM_W32(w[i].outptr, 0xfeedfaceu);
+            w[i].tcb = fixture_thread(w[i].uid, TH_READY, prios[i]);
+            w[i].tcb->started = 1;
+            w[i].tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, &w[i], (size_t)1 << 20);
+            s_cur = (int)(w[i].tcb - s_tcb);
+            w[i].tcb->state = TH_RUNNING;
+            sr_coro_switch(w[i].tcb->coro);
+            s_cur = (int)(cur - s_tcb);
+        }
+        expect(w[0].tcb->state == TH_WAIT_OBJ && w[1].tcb->state == TH_WAIT_OBJ &&
+                   w[2].tcb->state == TH_WAIT_OBJ,
+               "MBX priority: three receivers block on the empty mailbox");
+        const int order[2][3] = {{0, 1, 2}, {1, 2, 0}};
+        for (int k = 0; k < 3; k++) {
+            const int want = order[prio_attr][k];
+            const uint32_t msg_addr = MBX_MSG_BASE + 0x10u * (uint32_t)k;
+            mbx_init_packet(msg_addr, 0u);
+            const uint32_t original_link = 0x5a5a5a5au;
+            MEM_W32(msg_addr, original_link);
+            expect(selftest_mbx_send(mbx, msg_addr) == 0u, "MBX priority: SendMbx succeeds");
+            int ready = -1, readied = 0;
+            for (int i = 0; i < 3; i++)
+                if (!w[i].returned && w[i].tcb->state == TH_READY) { ready = i; readied++; }
+            char msg[200];
+            snprintf(msg, sizeof msg, "MBX priority: attr 0x%x send %d wakes receiver %c "
+                                      "(woke %c, %d readied)", prio_attr ? 0x100u : 0u, k,
+                     'A' + want, ready < 0 ? '-' : 'A' + ready, readied);
+            expect(readied == 1 && ready == want, msg);
+            /* #3066: the sender (priority 8) keeps the CPU, and the packet is already the
+             * readied receiver's: the two receivers not yet served still wait. */
+            snprintf(msg, sizeof msg, "attr 0x%x send %d", prio_attr ? 0x100u : 0u, k);
+            mbx_handoff_expect_assigned(cur, mbx, (uint32_t)(2 - k), msg);
+            expect(MEM_R32(msg_addr) == original_link,
+                   "MBX handoff: a directly delivered packet keeps its original link");
+            if (ready >= 0) {
+                s_cur = (int)(w[ready].tcb - s_tcb);
+                w[ready].tcb->state = TH_RUNNING;
+                sr_coro_switch(w[ready].tcb->coro);
+                s_cur = (int)(cur - s_tcb);
+                snprintf(msg, sizeof msg, "MBX priority: attr 0x%x receiver %c takes message %d",
+                         prio_attr ? 0x100u : 0u, 'A' + ready, k);
+                expect(w[ready].returned && w[ready].ret == 0u &&
+                           MEM_R32(w[ready].outptr) == msg_addr, msg);
+            }
+            int others_untouched = 1;
+            for (int i = 0; i < 3; i++)
+                if (!w[i].returned)
+                    others_untouched &= w[i].tcb->state == TH_WAIT_OBJ &&
+                                        MEM_R32(w[i].outptr) == 0xfeedfaceu;
+            snprintf(msg, sizeof msg, "MBX priority: attr 0x%x send %d leaves every receiver it did "
+                                      "not serve waiting, with nothing written for it",
+                     prio_attr ? 0x100u : 0u, k);
+            expect(others_untouched, msg);
+        }
+        (void)selftest_mbx_delete(mbx);
+        for (int i = 0; i < 3; i++) {
+            if (!w[i].returned && w[i].tcb->state == TH_READY) {
+                s_cur = (int)(w[i].tcb - s_tcb);
+                w[i].tcb->state = TH_RUNNING;
+                sr_coro_switch(w[i].tcb->coro);
+                s_cur = (int)(cur - s_tcb);
+            }
+            if (w[i].tcb->coro) { sr_coro_destroy(w[i].tcb->coro); w[i].tcb->coro = NULL; }
+        }
+        s_cur = -1;
+    }
+    mbx_handoff_assigned_packet_cases();
 }
 
 /* ---- ReceiveMbxCB takes a message its own callback sent ----------------------------
@@ -55884,6 +58003,395 @@ static void test_mutex_departure_schedules_released_waiter(int cancel, int waite
     }
     if (thread->coro) { sr_coro_destroy(thread->coro); thread->coro = NULL; }
     if (owner->coro) { sr_coro_destroy(owner->coro); owner->coro = NULL; }
+    s_cur = -1;
+}
+
+/* A pool CB waiter that runs a callback while it waits, whose body frees the block the waiter
+ * is queued for. FreeFpl / FreeVpl dequeue the first waiter and wake it; the waiter is running
+ * its callback, not parked, so the wake finds no one. After the callback the waiter must take
+ * the freed block (it was the one chosen for it) rather than park again with no queue entry and
+ * a free block nobody will ever hand it. Code-derived: the pool's own FreeFpl/FreeVpl hand-off
+ * contract and fpl_requeue_waiter_head's comment; PSP callback-wait policy is not measured here. */
+static uint32_t s_pool_cb_free_nid, s_pool_cb_free_pool, s_pool_cb_free_addr;
+static uint32_t s_pool_cb_free_result;
+static int s_pool_cb_free_ran;
+static void pool_cb_free_callback(void) {
+    CpuState cpu = {0};
+    cpu.r[4] = s_pool_cb_free_pool;
+    cpu.r[5] = s_pool_cb_free_addr;
+    s_pool_cb_free_result = sr_syscall(&cpu, s_pool_cb_free_nid);
+    s_pool_cb_free_ran = 1;
+}
+
+static void test_pool_cb_waiter_takes_block_freed_by_its_callback(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int vpl = 0; vpl < 2; ++vpl) {
+        const char *what = vpl ? "VPL" : "FPL";
+        char msg[192];
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *owner = fixture_thread(0x6a10u + (uint32_t)vpl * 4u, TH_RUNNING, 32);
+        TCB *thread = fixture_thread(0x6a11u + (uint32_t)vpl * 4u, TH_READY, 40);
+        owner->started = thread->started = 1;
+        s_cur = (int)(owner - s_tcb);
+        const uint32_t held_out = 0x00271040u, wait_out = 0x00271044u;
+        uint32_t pool = vpl ? selftest_vpl_create(0x100u) : selftest_fpl_create(64u, 1u);
+        expect(pool != 0u && pool < 0x80000000u, "pool CB free: the pool is created");
+        uint32_t rc = vpl ? selftest_vpl_try_allocate(pool, 0xc0u, held_out)
+                          : selftest_fpl_try_allocate(pool, held_out);
+        expect(rc == 0u, "pool CB free: the owner takes the pool's only block");
+        const uint32_t held = MEM_R32(held_out);
+
+        SelftestPoolWaiterCtx w; memset(&w, 0, sizeof w);
+        w.uid = thread->uid; w.tcb = thread; w.pool_uid = pool; w.outptr = wait_out;
+        w.req_size = 0xc0u; w.is_cb = 1;
+        MEM_W32(wait_out, 0xfeedfaceu);
+        thread->coro = sr_coro_create(vpl ? selftest_vpl_waiter_fiber_body
+                                          : selftest_fpl_waiter_fiber_body, &w, (size_t)4 << 20);
+        expect(thread->coro != NULL, "pool CB free: the waiter coroutine is created");
+        if (!thread->coro) return;
+        kernel_nested_resume(thread);
+        snprintf(msg, sizeof msg, "pool CB free: the %s CB waiter blocks on the empty pool", what);
+        expect(!w.returned && thread->state == TH_WAIT_OBJ && thread->wait_obj == pool, msg);
+
+        s_oracle_mode = 1;
+        s_kernel_nested_callback = pool_cb_free_callback;
+        s_pool_cb_free_nid = vpl ? NID_VPL_FREE : NID_FPL_FREE;
+        s_pool_cb_free_pool = pool;
+        s_pool_cb_free_addr = held;
+        s_pool_cb_free_ran = 0;
+        s_pool_cb_free_result = 0xffffffffu;
+        s_cur = (int)(thread - s_tcb);
+        uint32_t callback = issue339_create_pending_callback();
+        kernel_nested_resume(thread);
+        expect(s_pool_cb_free_ran && s_pool_cb_free_result == 0u,
+               "pool CB free: the waiter's callback frees the held block");
+        snprintf(msg, sizeof msg,
+                 "pool CB free: the %s CB waiter returns 0 with the block its callback freed", what);
+        expect(w.returned && w.ret == 0u && MEM_R32(wait_out) == held, msg);
+        if (!w.returned)
+            fprintf(stderr, "pool CB free: %s waiter state=%d wait_obj=0x%x out=0x%08x\n", what,
+                    (int)thread->state, thread->wait_obj, MEM_R32(wait_out));
+
+        CpuState cpu = {0}; cpu.r[4] = callback;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_CALLBACK);
+        s_kernel_nested_callback = NULL;
+        s_oracle_mode = 0;
+        if (thread->coro) { sr_coro_destroy(thread->coro); thread->coro = NULL; }
+        s_cur = (int)(owner - s_tcb);
+        (void)(vpl ? selftest_vpl_delete(pool) : selftest_fpl_delete(pool));
+        s_cur = -1;
+    }
+}
+
+static uint32_t s_vpl_inner_sema, s_vpl_inner_result;
+static int s_vpl_inner_returned;
+
+static void vpl_wait_on_semaphore_callback(void) {
+    CpuState cpu = {0};
+    cpu.r[4] = s_vpl_inner_sema;
+    cpu.r[5] = 1u;
+    s_vpl_inner_result = sr_syscall(&cpu, NID_CNW_WAIT_SEMA);
+    s_vpl_inner_returned = 1;
+}
+
+static void destroy_vpl_fixture_waiter(TCB *thread) {
+    if (!thread || !thread->coro) return;
+    sched_release_thread_resources(thread);
+    sr_coro_destroy(thread->coro);
+    thread->coro = NULL;
+}
+
+/* Synthetic scheduler interleave, not a PSP callback ordering measurement. */
+static void test_vpl_free_serves_waiter_behind_parked_callback(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *owner = fixture_thread(0x6a30u, TH_RUNNING, 32);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+    const uint32_t held_out = 0x00271200u, first_out = held_out + 4u;
+    const uint32_t next_out = held_out + 8u;
+    uint32_t pool = selftest_vpl_create(0x200u);
+    expect(selftest_vpl_try_allocate(pool, 0x1d8u, held_out) == 0u,
+           "VPL callback skip: owner takes the whole pool");
+    uint32_t held = MEM_R32(held_out);
+    CpuState cpu = {0};
+    cpu.r[7] = 1u;
+    s_vpl_inner_sema = sr_syscall(&cpu, NID_CNW_CREATE_SEMA);
+    expect(s_vpl_inner_sema != 0u && s_vpl_inner_sema < 0x80000000u,
+           "VPL callback skip: creates a separate empty semaphore");
+
+    SelftestPoolWaiterCtx first = {
+        .uid = 0x6a31u, .pool_uid = pool, .outptr = first_out, .req_size = 0x40u, .is_cb = 1,
+    };
+    SelftestPoolWaiterCtx next = {
+        .uid = 0x6a32u, .pool_uid = pool, .outptr = next_out, .req_size = 0x1d8u,
+    };
+    first.tcb = fixture_thread(first.uid, TH_READY, 40);
+    next.tcb = fixture_thread(next.uid, TH_READY, 41);
+    first.tcb->started = next.tcb->started = 1;
+    first.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &first, (size_t)4 << 20);
+    next.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &next, (size_t)4 << 20);
+    expect(first.tcb->coro && next.tcb->coro, "VPL callback skip: creates both coroutines");
+    if (!first.tcb->coro || !next.tcb->coro) goto done;
+    MEM_W32(first_out, 0xfeedfaceu);
+    MEM_W32(next_out, 0xfeedfaceu);
+    kernel_nested_resume(first.tcb);
+    kernel_nested_resume(next.tcb);
+    expect(first.tcb->state == TH_WAIT_OBJ && first.tcb->wait_obj == pool &&
+               next.tcb->state == TH_WAIT_OBJ && next.tcb->wait_obj == pool,
+           "VPL callback skip: both allocations really block on the pool");
+
+    s_oracle_mode = 1;
+    s_kernel_nested_callback = vpl_wait_on_semaphore_callback;
+    s_vpl_inner_returned = 0;
+    s_vpl_inner_result = ~0u;
+    s_cur = (int)(first.tcb - s_tcb);
+    (void)issue339_create_pending_callback();
+    kernel_nested_resume(first.tcb);
+    expect(!s_vpl_inner_returned && first.tcb->state == TH_WAIT_OBJ &&
+               first.tcb->wait_obj == s_vpl_inner_sema,
+           "VPL callback skip: the first waiter parks on a different object inside its callback");
+
+    s_cur = (int)(owner - s_tcb);
+    expect(selftest_vpl_free(pool, held) == 0u, "VPL callback skip: owner frees the only block");
+    expect(first.tcb->state == TH_WAIT_OBJ && first.tcb->wait_obj == s_vpl_inner_sema,
+           "VPL callback skip: FreeVpl does not wake or satisfy the inner semaphore wait");
+    expect(next.tcb->state == TH_READY,
+           "VPL callback skip: the next eligible waiter becomes ready during the same FreeVpl");
+    if (next.tcb->state == TH_READY) kernel_nested_resume(next.tcb);
+    expect(next.returned && next.ret == 0u && MEM_R32(next_out) == held,
+           "VPL callback skip: the eligible waiter receives the whole freed block");
+    if (next.returned && next.ret == 0u) {
+        s_cur = (int)(owner - s_tcb);
+        cpu.r[4] = s_vpl_inner_sema; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u,
+               "VPL callback skip: progress makes the callback's semaphore ready");
+        if (first.tcb->state == TH_READY) kernel_nested_resume(first.tcb);
+        expect(s_vpl_inner_returned && s_vpl_inner_result == 0u && !first.returned &&
+                   first.tcb->state == TH_WAIT_OBJ && first.tcb->wait_obj == pool,
+               "VPL callback skip: the outer wait remains live after the callback returns");
+        s_cur = (int)(owner - s_tcb);
+        expect(selftest_vpl_free(pool, MEM_R32(next_out)) == 0u,
+               "VPL callback skip: the second block return can serve the callback waiter");
+        if (first.tcb->state == TH_READY) kernel_nested_resume(first.tcb);
+        expect(first.returned && first.ret == 0u && MEM_R32(first_out) != 0xfeedfaceu,
+               "VPL callback skip: the first waiter receives its block when it fits");
+    }
+
+done:
+    destroy_vpl_fixture_waiter(first.tcb);
+    destroy_vpl_fixture_waiter(next.tcb);
+    s_cur = (int)(owner - s_tcb);
+    (void)selftest_vpl_delete(pool);
+    cpu.r[4] = s_vpl_inner_sema;
+    (void)sr_syscall(&cpu, NID_WSV_DELETE_SEMA);
+    s_kernel_nested_callback = NULL;
+    s_oracle_mode = 0;
+    s_cur = -1;
+}
+
+/* PSPAutotests tests/threads/vpl/priority.{c,expected}, e37443a681c6, PRIORITY / half.
+ * The strongest thread observes the next block already charged even though that thread
+ * has yet to run. Check the pool through ReferVplStatus in each resumed guest invocation. */
+static void test_vpl_priority_reserves_blocks_before_waiters_run(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *owner = fixture_thread(0x6a40u, TH_RUNNING, 8);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+    const uint32_t held_out = 0x00271400u;
+    CpuState cpu = {0};
+    cpu.r[5] = 2u; cpu.r[6] = 0x100u; cpu.r[7] = 0x1020u;
+    uint32_t pool = sr_syscall(&cpu, NID_VPL_CREATE);
+    expect(selftest_vpl_try_allocate(pool, 0x780u, held_out) == 0u &&
+               selftest_vpl_try_allocate(pool, 0x780u, held_out + 4u) == 0u,
+           "VPL priority half: the two original blocks occupy 0xf10 pool bytes");
+    SelftestPoolWaiterCtx waiters[7] = {0};
+    for (size_t i = 0; i < 7u; ++i) {
+        SelftestPoolWaiterCtx *w = &waiters[i];
+        w->uid = 0x6a41u + (uint32_t)i;
+        w->tcb = fixture_thread(w->uid, TH_READY, 0x18 - (int)i);
+        w->tcb->started = 1;
+        w->pool_uid = pool;
+        w->req_size = 0x800u - (uint32_t)i * 0x100u;
+        w->outptr = held_out + 8u + (uint32_t)i * 4u;
+        w->status_ptr = 0x00271500u + (uint32_t)i * 0x40u;
+        w->status_result = ~0u;
+        MEM_W32(w->outptr, 0xfeedfaceu);
+        w->tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, w, (size_t)4 << 20);
+        expect(w->tcb->coro != NULL, "VPL priority half: creates a real waiter coroutine");
+        if (!w->tcb->coro) goto done;
+        kernel_nested_resume(w->tcb);
+        expect(w->tcb->state == TH_WAIT_OBJ && w->tcb->wait_obj == pool,
+               "VPL priority half: each request blocks in arrival order");
+    }
+
+    s_cur = (int)(owner - s_tcb);
+    expect(selftest_vpl_free(pool, MEM_R32(held_out + 4u)) == 0u,
+           "VPL priority half: free the second original block");
+    expect(waiters[6].tcb->state == TH_READY && waiters[5].tcb->state == TH_READY,
+           "VPL priority half: both fitting priority waiters are ready before either runs");
+
+    const uint32_t free_sizes[7] = {0x70u, 0x170u, 0x270u, 0x370u, 0x470u, 0x570u, 0x368u};
+    const uint32_t wait_counts[7] = {0u, 1u, 2u, 3u, 4u, 5u, 5u};
+    for (size_t remaining = 7u; remaining > 0u; --remaining) {
+        size_t i = remaining - 1u;
+        SelftestPoolWaiterCtx *w = &waiters[i];
+        expect(w->tcb->state == TH_READY, "VPL priority half: the PSP-observed recipient is ready");
+        if (w->tcb->state != TH_READY) break;
+        kernel_nested_resume(w->tcb);
+        expect(w->returned && w->ret == 0u && MEM_R32(w->outptr) != 0xfeedfaceu,
+               "VPL priority half: the recipient receives its own block");
+        expect(w->status_result == 0u && MEM_R32(w->status_ptr + 40u) == 0x1000u &&
+                   MEM_R32(w->status_ptr + 44u) == free_sizes[i] &&
+                   MEM_R32(w->status_ptr + 48u) == wait_counts[i],
+               "VPL priority half: the recipient observes PSP free size and wait count");
+        if (!w->returned || w->ret) break;
+        s_cur = (int)(owner - s_tcb);
+        expect(selftest_vpl_free(pool, MEM_R32(w->outptr)) == 0u,
+               "VPL priority half: returning the recipient's block can admit the next priority");
+    }
+
+done:
+    for (size_t i = 0; i < 7u; ++i) destroy_vpl_fixture_waiter(waiters[i].tcb);
+    s_cur = (int)(owner - s_tcb);
+    (void)selftest_vpl_delete(pool);
+    s_cur = -1;
+}
+
+/* PSPAutotests e37443a681c6, PRIORITY / whole and FIFO / whole. In the priority
+ * case only the first three arrivals are needed to reproduce the observation
+ * before unblocking. The FIFO control also checks the first resumed receiver. */
+static void test_vpl_whole_pool_priority_arrival(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int priority = 0; priority < 2; ++priority) {
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *owner = fixture_thread(0x6a60u, TH_RUNNING, 8);
+        owner->started = 1;
+        s_cur = (int)(owner - s_tcb);
+        const uint32_t held_out = 0x00271900u;
+        CpuState cpu = {0};
+        cpu.r[5] = 2u; cpu.r[6] = priority ? 0x100u : 0u; cpu.r[7] = 0x1020u;
+        uint32_t pool = sr_syscall(&cpu, NID_VPL_CREATE);
+        expect(selftest_vpl_try_allocate(pool, 0x980u, held_out) == 0u,
+               "VPL whole arrival: the original allocation leaves 0x678 free bytes");
+
+        SelftestPoolWaiterCtx waiters[7] = {0};
+        size_t count = priority ? 3u : 7u;
+        for (size_t i = 0; i < count; ++i) {
+            SelftestPoolWaiterCtx *w = &waiters[i];
+            w->uid = 0x6a61u + (uint32_t)i;
+            w->tcb = fixture_thread(w->uid, TH_READY, 0x18 - (int)i);
+            w->tcb->started = 1;
+            w->pool_uid = pool;
+            w->req_size = 0x800u - (uint32_t)i * 0x100u;
+            w->outptr = held_out + 4u + (uint32_t)i * 4u;
+            w->status_ptr = 0x00271a00u + (uint32_t)i * 0x40u;
+            w->status_result = ~0u;
+            MEM_W32(w->outptr, 0xfeedfaceu);
+            w->tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, w, (size_t)4 << 20);
+            expect(w->tcb->coro != NULL, "VPL whole arrival: creates a real waiter coroutine");
+            if (!w->tcb->coro) goto done;
+            kernel_nested_resume(w->tcb);
+        }
+
+        expect(waiters[0].tcb->state == TH_WAIT_OBJ && waiters[1].tcb->state == TH_WAIT_OBJ,
+               "VPL whole arrival: the two oldest requests do not fit initially");
+        SelftestPoolWaiterCtx *third = &waiters[2];
+        if (priority) {
+            expect(third->returned && third->ret == 0u && MEM_R32(third->outptr) != 0xfeedfaceu,
+                   "VPL priority whole: the stronger fitting arrival returns before the first free");
+            expect(third->status_result == 0u && MEM_R32(third->status_ptr + 44u) == 0x70u &&
+                       MEM_R32(third->status_ptr + 48u) == 2u,
+                   "VPL priority whole: the arrival observes PSP free size 0x70 and two waiters");
+        } else {
+            expect(!third->returned && third->tcb->state == TH_WAIT_OBJ &&
+                       third->tcb->wait_obj == pool && MEM_R32(third->outptr) == 0xfeedfaceu,
+                   "VPL FIFO whole: the same fitting arrival cannot pass the older non-fitting requests");
+            s_cur = (int)(owner - s_tcb);
+            expect(selftest_vpl_free(pool, MEM_R32(held_out)) == 0u &&
+                       waiters[0].tcb->state == TH_READY &&
+                       waiters[1].tcb->state == TH_READY && third->tcb->state == TH_WAIT_OBJ,
+                   "VPL FIFO whole: the explicit free grants the first two requests in queue order");
+            SelftestPoolWaiterCtx *second = &waiters[1];
+            if (second->tcb->state == TH_READY) kernel_nested_resume(second->tcb);
+            expect(second->returned && second->ret == 0u && second->status_result == 0u &&
+                       MEM_R32(second->status_ptr + 44u) == 0xf0u &&
+                       MEM_R32(second->status_ptr + 48u) == 5u,
+                   "VPL FIFO whole: the stronger of those two sees PSP free size 0xf0 and five waiters");
+        }
+
+done:
+        for (size_t i = 0; i < count; ++i) destroy_vpl_fixture_waiter(waiters[i].tcb);
+        s_cur = (int)(owner - s_tcb);
+        (void)selftest_vpl_delete(pool);
+        s_cur = -1;
+    }
+}
+
+/* A reservation belongs to the invocation until it returns to guest code. */
+static void test_vpl_abandoned_reservation_serves_next_waiter(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *owner = fixture_thread(0x6a50u, TH_RUNNING, 32);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+    const uint32_t held_out = 0x00271800u, info = held_out + 0x40u;
+    uint32_t pool = selftest_vpl_create(0x200u);
+    expect(selftest_vpl_try_allocate(pool, 0x1d8u, held_out) == 0u,
+           "VPL abandoned grant: owner exhausts the pool");
+    SelftestPoolWaiterCtx waiters[2] = {0};
+    for (size_t i = 0; i < 2u; ++i) {
+        SelftestPoolWaiterCtx *w = &waiters[i];
+        w->uid = 0x6a51u + (uint32_t)i;
+        w->tcb = fixture_thread(w->uid, TH_READY, 40);
+        w->tcb->started = 1;
+        w->pool_uid = pool;
+        w->req_size = 0x1d8u;
+        w->outptr = held_out + 4u + (uint32_t)i * 4u;
+        MEM_W32(w->outptr, 0xfeedfaceu);
+        w->tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, w, (size_t)4 << 20);
+        expect(w->tcb->coro != NULL, "VPL abandoned grant: creates the waiter coroutine");
+        if (!w->tcb->coro) goto done;
+        kernel_nested_resume(w->tcb);
+        expect(w->tcb->state == TH_WAIT_OBJ && w->tcb->wait_obj == pool,
+               "VPL abandoned grant: waiter parks on the full pool");
+    }
+
+    s_cur = (int)(owner - s_tcb);
+    expect(selftest_vpl_free(pool, MEM_R32(held_out)) == 0u &&
+               waiters[0].tcb->state == TH_READY && waiters[1].tcb->state == TH_WAIT_OBJ,
+           "VPL abandoned grant: one released whole block reserves for the first waiter");
+    CpuState cpu = {0};
+    MEM_W32(info, 52u);
+    cpu.r[4] = pool; cpu.r[5] = info;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(info + 44u) == 0u &&
+               MEM_R32(info + 48u) == 1u,
+           "VPL abandoned grant: the unconsumed reservation is already charged");
+    cpu.r[4] = waiters[0].uid;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TERMINATE_THREAD) == 0u,
+           "VPL abandoned grant: terminate the first waiter before it can receive the pointer");
+    expect(MEM_R32(waiters[0].outptr) == 0xfeedfaceu && waiters[1].tcb->state == TH_READY,
+           "VPL abandoned grant: the same allocation becomes available to the second waiter");
+    if (waiters[1].tcb->state == TH_READY) kernel_nested_resume(waiters[1].tcb);
+    expect(waiters[1].returned && waiters[1].ret == 0u &&
+               MEM_R32(waiters[1].outptr) == MEM_R32(held_out),
+           "VPL abandoned grant: the second waiter receives the reclaimed block");
+
+done:
+    for (size_t i = 0; i < 2u; ++i) destroy_vpl_fixture_waiter(waiters[i].tcb);
+    s_cur = (int)(owner - s_tcb);
+    (void)selftest_vpl_delete(pool);
     s_cur = -1;
 }
 
@@ -56557,7 +59065,7 @@ static void check_coroutine_lifecycle(void) {
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
         extern int s_rv_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + 2 /* WaitSemaCB delete bodies */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1536];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -56576,6 +59084,7 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 flight thread-snapshot waiters "
                  "+ 6 semaphore service-order waiters + 1 released LwMutex waiter "
                  "+ 4 unwritable-timeout call bodies + 2 released sleepers + 2 released delayers "
+                 "+ 2 WaitSemaCB delete bodies "
                  "+ %d single-call bodies + %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
                  "+ %d Message Pipe waiter/owner legs + %d volatile-memory Lock waiters "
                  "+ %d controller read waiters = %d, observed %lu)",
@@ -69100,13 +71609,206 @@ static void test_mp3_error_paths(void) {
     expect(mp3t_call(NID_MP3_DECODE, h, 0u, 0, 0) == MP3_TONE_FRAME_SAMPLES * 4u,
            "errors: sceMp3Decode accepts a NULL out-pointer");
 
-    /* The low-level pair is not modelled: a named refusal, not success. */
-    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, 0, 0, 0, 0) == 0x80010086u &&
-               mp3t_call(NID_MP3_LOW_LEVEL_DECODE, 0, 0, 0, 0) == 0x80010086u,
-           "errors: sceMp3LowLevelInit/Decode are refused by name");
     expect(mp3t_call(NID_MP3_TERM_RESOURCE, 0, 0, 0, 0) == 0u, "errors: sceMp3TermResource");
     expect(mp3t_call(NID_MP3_TERM_RESOURCE, 0, 0, 0, 0) == 0u,
            "errors: a second sceMp3TermResource is harmless");
+}
+
+/* sceMp3LowLevelInit/sceMp3LowLevelDecode (#2640), PPSSPP-derived, not PSP-measured
+ * (hrydgard/ppsspp 0028f30da6784570264a41ef6cce1c3963692ea7, Core/HLE/sceMp3.cpp). The expected
+ * values follow that contract and the fixture: the caller picks the handle number; each decode
+ * reads at most 4096 source bytes, skips leading zero bytes, decodes the frame that starts there
+ * into interleaved stereo s16, and writes the source bytes used (the zeros and the frame) and the
+ * PCM bytes (1152 samples * 4 = 4608 for these frames). The bytes-used rule is the one PPSSPP's
+ * bundled FFmpeg (libavcodec 57.24.102, mpegaudiodec_template.c decode_frame) and JPCSP share. */
+#define MP3LL_SRC 0x08b40000u
+#define MP3LL_SRC_SPAN 0x10000u
+#define MP3LL_PCM 0x08b50000u
+#define MP3LL_USED 0x08b52000u
+#define MP3LL_BYTES 0x08b52004u
+#define MP3LL_WINDOW 4096u
+#define MP3LL_FRAME_PCM (MP3_TONE_FRAME_SAMPLES * 4u)
+
+static uint32_t mp3ll_decode(uint32_t h, uint32_t src, uint32_t used, uint32_t pcm, uint32_t bytes) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = h;
+    cpu.r[5] = src;
+    cpu.r[6] = used;
+    cpu.r[7] = pcm;
+    cpu.r[8] = bytes; /* the fifth argument travels in $t0 */
+    return sr_syscall(&cpu, NID_MP3_LOW_LEVEL_DECODE);
+}
+
+/* Clear the source area, then place `len` bytes of the test file at offset `at`. */
+static void mp3ll_place(uint32_t at, uint32_t len) {
+    for (uint32_t i = 0; i < MP3LL_SRC_SPAN; i++) MEM_W8(MP3LL_SRC + i, 0u);
+    for (uint32_t i = 0; i < len; i++) MEM_W8(MP3LL_SRC + at + i, s_mp3t_file[i]);
+}
+
+static void mp3ll_sentinels(void) {
+    MEM_W32(MP3LL_USED, 0xdeadbeefu);
+    MEM_W32(MP3LL_BYTES, 0xdeadbeefu);
+    MEM_W8(MP3LL_PCM + MP3LL_FRAME_PCM, 0xa5u);
+}
+
+static void test_mp3_low_level(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_mp3_reset();
+    const uint32_t h = 7u; /* a number sceMp3ReserveMp3Handle never hands out */
+
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a decode on a number without sceMp3LowLevelInit is INVALID_HANDLE and writes nothing");
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, h, 0, 0, 0) == 0u,
+           "low-level: sceMp3LowLevelInit takes a caller-chosen number without sceMp3InitResource");
+
+    /* Ten zero bytes, then 12 stereo frames, then zeros. Each call decodes one frame; the game
+     * advances by the bytes used, which for the first call include the zeros before the sync. */
+    const uint32_t frames = 12u, lead = 10u;
+    uint32_t len = mp3t_build_file(0, 0, frames);
+    mp3ll_place(lead, len);
+    uint32_t pos = 0, good = 0, bad = 0;
+    for (uint32_t call = 0; call < frames; call++) {
+        mp3ll_sentinels();
+        uint32_t ret = mp3ll_decode(h, MP3LL_SRC + pos, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES);
+        uint32_t used = MEM_R32(MP3LL_USED), bytes = MEM_R32(MP3LL_BYTES);
+        uint32_t want_used = MP3_TONE_FRAME_BYTES + (call == 0u ? lead : 0u);
+        if (ret != 0u || used != want_used || bytes != MP3LL_FRAME_PCM ||
+            MEM_R8(MP3LL_PCM + MP3LL_FRAME_PCM) != 0xa5u) {
+            if (bad++ == 0u)
+                fprintf(stderr, "low-level: call %u returned 0x%08x, used %u, bytes %u\n", call, ret,
+                        used, bytes);
+            break;
+        }
+        for (uint32_t i = 0; i < 2u * MP3_TONE_FRAME_SAMPLES; i++)
+            s_mp3t_pcm[good * 2u * MP3_TONE_FRAME_SAMPLES + i] = (int16_t)MEM_R16(MP3LL_PCM + i * 2u);
+        good++;
+        pos += used;
+    }
+    expect(bad == 0u && good == frames,
+           "low-level: each call decodes one frame, reports its bytes (the leading zeros included first) "
+           "and 4608 PCM bytes, and writes nothing past them; the last frame decodes before the zeros");
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC + pos, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_BYTES) == 0u && MEM_R32(MP3LL_USED) == 0u,
+           "low-level: a window of zero bytes returns 0 with no bytes used and no PCM bytes");
+
+    /* Non-zero bytes that are not a frame header (an ID3v2 tag) are not skipped: PPSSPP's
+     * decoder fails, nothing is used, no PCM, result 0 (JPCSP returns 0x80672001 here). */
+    len = mp3t_build_file(0, 1, 3u);
+    mp3ll_place(0u, len);
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_USED) == 0u && MEM_R32(MP3LL_BYTES) == 0u &&
+               MEM_R8(MP3LL_PCM + MP3LL_FRAME_PCM) == 0xa5u,
+           "low-level: an ID3v2 tag at the start is no frame: 0 bytes used, no PCM, result 0");
+    /* An ID3v1 tag ("TAG") after the zeros is discarded with the rest of the window. */
+    len = mp3t_build_file(0, 0, 3u);
+    mp3ll_place(5u, len);
+    MEM_W8(MP3LL_SRC + 5u, 'T');
+    MEM_W8(MP3LL_SRC + 6u, 'A');
+    MEM_W8(MP3LL_SRC + 7u, 'G');
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_USED) == MP3LL_WINDOW - 5u && MEM_R32(MP3LL_BYTES) == 0u,
+           "low-level: an ID3v1 tag after 5 zero bytes is discarded: 4091 bytes used, no PCM");
+
+    /* The PCM is the fixture's tone: interleaved L/R, 995 Hz left at peak 4096 and 1991 Hz right
+     * at peak 2048, measured past the first frame. */
+    const double left_hz = MP3_TONE_LEFT_LINE * (double)MP3_TONE_SAMPLE_RATE / 1152.0;
+    const double right_hz = MP3_TONE_RIGHT_LINE * (double)MP3_TONE_SAMPLE_RATE / 1152.0;
+    const uint32_t first = MP3_TONE_FRAME_SAMPLES, count = (frames - 1u) * MP3_TONE_FRAME_SAMPLES;
+    if (good == frames) {
+        expect(mp3t_tone(s_mp3t_pcm, first, count, 0, left_hz) > 50.0 * mp3t_tone(s_mp3t_pcm, first, count, 0, right_hz) &&
+                   mp3t_tone(s_mp3t_pcm, first, count, 1, right_hz) > 50.0 * mp3t_tone(s_mp3t_pcm, first, count, 1, left_hz),
+               "low-level: the left channel carries the 995 Hz tone and the right the 1991 Hz one");
+        double l_rms = mp3t_rms(s_mp3t_pcm, first, count, 0), r_rms = mp3t_rms(s_mp3t_pcm, first, count, 1);
+        expect(fabs(l_rms - 4096.0 / sqrt(2.0)) < 0.03 * 4096.0 / sqrt(2.0) &&
+                   fabs(r_rms - 2048.0 / sqrt(2.0)) < 0.03 * 2048.0 / sqrt(2.0),
+               "low-level: both tones have the fixture's amplitudes");
+    }
+
+    /* At most 4096 source bytes: a frame that starts 50 bytes before the window's end would be
+     * decoded truncated by the reference, which is not modelled: a named stop, nothing written.
+     * From its sync the frame decodes. */
+    const uint32_t late = MP3LL_WINDOW - 50u;
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, h, 0, 0, 0) == 0u, "low-level: Init again on the same number");
+    len = mp3t_build_file(0, 0, 3u);
+    mp3ll_place(late, len);
+    mp3ll_sentinels();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a frame that crosses the 4096-byte window stops by name and writes nothing");
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC + late, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_BYTES) == MP3LL_FRAME_PCM && MEM_R32(MP3LL_USED) == MP3_TONE_FRAME_BYTES,
+           "low-level: from its sync the frame decodes");
+
+    /* A mono frame comes out as stereo, the one channel on both sides. */
+    len = mp3t_build_file(1, 0, 3u);
+    mp3ll_place(0u, len);
+    uint32_t mono_bytes = 0, mono_split = 0, mono_silent = 1;
+    for (uint32_t call = 0, at = 0; call < 2u; call++, at += MP3_TONE_FRAME_BYTES) {
+        mp3ll_sentinels();
+        (void)mp3ll_decode(h, MP3LL_SRC + at, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES);
+        mono_bytes = MEM_R32(MP3LL_BYTES);
+    }
+    for (uint32_t i = 0; i < MP3_TONE_FRAME_SAMPLES; i++) {
+        uint16_t l = MEM_R16(MP3LL_PCM + i * 4u), r = MEM_R16(MP3LL_PCM + i * 4u + 2u);
+        if (l != r) mono_split++;
+        if (l) mono_silent = 0;
+    }
+    expect(mono_bytes == MP3LL_FRAME_PCM && mono_split == 0u && !mono_silent,
+           "low-level: a mono frame is written as 4608 bytes of stereo with equal channels");
+
+    /* An unmapped or NULL argument pointer is -1 and nothing is written. */
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, 0u) == 0xffffffffu &&
+               mp3ll_decode(h, 0u, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0xffffffffu &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a NULL out-word or source pointer returns -1 and writes nothing");
+    /* The whole 4096-byte source and 4608-byte PCM spans must be mapped: either one starting 16
+     * bytes before the end of guest memory is -1 and nothing is written. */
+    const uint32_t mem_tail = 0x0c000000u - 16u;
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, mem_tail, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0xffffffffu &&
+               mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, mem_tail, MP3LL_BYTES) == 0xffffffffu &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a source or PCM span that runs past guest memory returns -1 and writes nothing");
+
+    /* One handle namespace with the reserved handles: Init replaces a reserved context under its
+     * number, a reserve passes over a number in low-level use, release and TermResource free
+     * low-level contexts. */
+    expect(mp3t_call(NID_MP3_RELEASE, h, 0, 0, 0) == 0u &&
+               mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE,
+           "low-level: sceMp3ReleaseMp3Handle frees a low-level context");
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u, "low-level: sceMp3InitResource");
+    expect(mp3t_reserve(mp3t_build_file(0, 0, 4u)) == 0u, "low-level: a reserve takes handle 0");
+    /* Both references decode on a reserved handle with that handle's own decoder. */
+    len = mp3t_build_file(0, 0, 3u);
+    mp3ll_place(0u, len);
+    mp3ll_sentinels();
+    expect(mp3ll_decode(0u, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_USED) == MP3_TONE_FRAME_BYTES && MEM_R32(MP3LL_BYTES) == MP3LL_FRAME_PCM,
+           "low-level: a decode on a reserved handle without low-level Init uses that handle's decoder");
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, 0u, 0, 0, 0) == 0u &&
+               mp3t_call(NID_MP3_CHECK_NEEDED, 0u, 0, 0, 0) == MP3_ERR_UNRESERVED,
+           "low-level: Init on a reserved number replaces the reserved context");
+    expect(mp3t_reserve(mp3t_build_file(0, 0, 4u)) == 1u,
+           "low-level: a reserve passes over a number in low-level use");
+    expect(mp3t_call(NID_MP3_RELEASE, 0u, 0, 0, 0) == 0u &&
+               mp3ll_decode(0u, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE,
+           "low-level: releasing that number frees the low-level context");
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, 5u, 0, 0, 0) == 0u &&
+               mp3t_call(NID_MP3_TERM_RESOURCE, 0, 0, 0, 0) == 0u &&
+               mp3ll_decode(5u, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE,
+           "low-level: sceMp3TermResource frees low-level contexts");
+    sr_hle_test_mp3_reset();
 }
 
 /* sceKernelGetThreadmanIdList(type, readbuf, readbufsize, idcount), issue #1288. The
@@ -71335,6 +74037,13 @@ static int hle_selftest_main(int argc, char **argv) {
     }
 #endif
 
+    if (argc > 1 && strcmp(argv[1], "--io-host-progress") == 0) {
+        test_fd_host_progress();
+        fprintf(stderr, "io-host-progress: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--flash0-font") == 0) {
         test_flash0_font_device();
         fprintf(stderr, "flash0-font: %d checks, %d failures\n", s_checks, s_failures);
@@ -71345,6 +74054,32 @@ static int hle_selftest_main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--flash0-font-index") == 0) {
         test_flash0_latin_index_resolution();
         fprintf(stderr, "flash0-font-index: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--pool-waiters") == 0) {
+        test_fpl_blocking_waits();
+        test_vpl_nonblocking_roundtrip();
+        test_vpl_block_count_bounded_by_pool_size();
+        test_vpl_blocking_waits();
+        test_pool_cb_waiter_takes_block_freed_by_its_callback();
+        test_pool_released_waiter_leaves_queue();
+        test_vpl_free_serves_every_waiter_that_fits();
+        test_vpl_free_serves_waiter_behind_parked_callback();
+        test_vpl_priority_reserves_blocks_before_waiters_run();
+        test_vpl_whole_pool_priority_arrival();
+        test_vpl_abandoned_reservation_serves_next_waiter();
+        test_pool_delete_tears_down_before_waking();
+        test_pool_priority_attribute_orders_waiters();
+        fprintf(stderr, "pool-waiters: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--io-append-progress") == 0) {
+        test_fd_append_progress();
+        fprintf(stderr, "io-append-progress: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
     }
@@ -71419,7 +74154,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_prx_export_relocation_behavior();
     test_module_identity_is_its_export_table();
     test_variable_import_linker();
+    test_fd_append_progress();
     test_fd_namespace();
+    test_fd_host_progress();
     test_main_function_exports_link_from_boot();
     test_umd_io_console_model();
     test_ms0_unified_namespace();
@@ -71482,6 +74219,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_savedata_thread_ended_inside_a_parked_save();
     test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
+    test_ge_enqueue_refuses_misaligned_addresses();
+    test_ge_enqueue_busy_on_active_list();
+    test_ge_enqueue_busy_uses_the_paused_resume_address();
     test_ge_signal_jump_call_ret();
     test_ge_list_call_ret_faults_and_long_runs();
     test_ge_block_transfer_unmeasured_stride_is_named();
@@ -71495,6 +74235,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_finish_callback_waits_for_interrupts();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
+    test_ge_enqueue_busy_while_drawing();
     test_volatile_mem_output_preflight();
     test_osk_parameter_sizes();
     test_osk_update_and_shutdown_init_states();
@@ -71530,6 +74271,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_netconf_calls_with_no_dialog_started();
     test_gamedata_install_calls_with_no_dialog_started();
     test_game_sharing_calls_with_no_dialog_started();
+    test_refer_thread_status_sleep_wait_id();
     test_exit_thread_does_not_wake_launcher(0);
     test_exit_thread_does_not_wake_launcher(2);
     test_explicit_exit_status_exact((int32_t)0x800201acu, 0x800200d2u);
@@ -71551,10 +74293,12 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_thread_end_blocking_and_resume();
     test_wait_thread_end_cb_execution();
     test_audio_regular_contract_safety();
+    test_audio_reserve_auto_channel_order();
     test_audio_regular_output_refuses_bad_channels();
     test_audio_regular_output_refuses_bad_volumes();
     test_audio_output_panned_blocking_unreserved_channel();
     test_audio_output2_release_refuses_while_queued();
+    test_audio_output2_reserve_codes();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
     test_audio_output2_and_src_accept_volumes_to_0xfffff();
@@ -71623,6 +74367,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_check_thread_stack_contract();
     test_refer_thread_status();
     test_refer_run_and_callback_status_check_their_span();
+    test_cancel_wakeup_and_run_status_unknown_thread();
     test_change_current_thread_attr();
     test_suspend_resume_errors_and_ready_thread();
     test_change_thread_priority_contract();
@@ -71753,7 +74498,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_terminate_from_interrupt_handler();
     test_sema_timed_wait_writes_time_left();
     test_lwmutex_waiter_order();
+    test_lwmutex_delete_schedules_released_waiter(18); /* stronger */
+    test_lwmutex_delete_schedules_released_waiter(32); /* equal */
+    test_lwmutex_delete_schedules_released_waiter(40); /* weaker */
     test_lock_lwmutex_cb_runs_callbacks();
+    test_lock_lwmutex_cb_overflow_after_callback();
     test_umd_cancel_wait_drive_stat();
     test_evf_cb_immediate();
     test_evf_cancel_outputs();
@@ -71777,6 +74526,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mp3_stream_lifecycle();
     test_mp3_loop_and_mono();
     test_mp3_error_paths();
+    test_mp3_low_level();
     test_at3_synthetic_decode_bookkeeping();
     test_at3_set_data_delay_2048_1096();
     test_atrac_set_entry_points_1379();
@@ -71810,6 +74560,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_voice_volume_defaults();
     test_sas_noise_restarts_on_guest_reset();
     test_sas_core_with_mix_scales_caller_pcm();
+    test_sas_core_with_mix_reports_each_refusal_once();
     test_sas_band_limited_resampling();
     test_sas_end_flags_refresh_per_cycle();
     test_sas_reinit_is_a_fresh_init();
@@ -71819,6 +74570,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_adsr_mode_psp_sas_002_table();
     test_sas_adsr_psp_sas_002_curve_runs();
     test_sas_envelope_nonlinear_decay_keeps_ppsspp_rule();
+    test_sas_mix_psp_sas_003_withmix_cells();
+    test_sas_core_with_mix_capture_20261126_cells();
+    test_sas_core_with_mix_capture_20261126_voice_advance();
+    test_sas_mix_psp_sas_003_volume_cells();
+    test_sas_mix_psp_sas_003_pitch_cells();
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();
@@ -71861,8 +74617,14 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_highmem_pool();
     test_psp_measured_safe_scalar_tls_20261117();
     test_vpl_blocking_waits();
+    test_pool_cb_waiter_takes_block_freed_by_its_callback();
     test_fpl_create_size_product_does_not_wrap();
     test_pool_released_waiter_leaves_queue();
+    test_vpl_free_serves_every_waiter_that_fits();
+    test_vpl_free_serves_waiter_behind_parked_callback();
+    test_vpl_priority_reserves_blocks_before_waiters_run();
+    test_vpl_whole_pool_priority_arrival();
+    test_vpl_abandoned_reservation_serves_next_waiter();
     test_pool_uids_come_from_the_shared_pool();
     test_partition_alloc_size_zero_refused();
     test_partition_low_refused_when_block_records_full();
@@ -71881,6 +74643,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mbx_lifecycle_and_ordering();
     test_mbx_has_no_host_table_limits();
     test_mbx_send_wakes_a_blocked_receiver();
+    test_mbx_thread_priority_serves_best_receiver();
     test_mbx_receive_cb_takes_callback_message();
     test_mbx_refer_honours_size_word();
     test_intr_context_conformance();

@@ -358,6 +358,12 @@ void fpl_remove_waiter(FplPool *p, uint32_t thread_uid) {
     }
 }
 
+static int fpl_waiter_queued(const FplPool *p, uint32_t thread_uid) {
+    for (int i = 0; i < p->nwaiters; i++)
+        if (p->waiters[i].thread_uid == thread_uid) return 1;
+    return 0;
+}
+
 /* Appends the thread at the tail; a thread already queued keeps its one entry. 0 when full. */
 static int fpl_enqueue_waiter(FplPool *p, uint32_t thread_uid) {
     for (int i = 0; i < p->nwaiters; i++)
@@ -540,6 +546,20 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
             p = fpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
             sched_vtime_refresh();
+            /* A FreeFpl made while the callbacks ran picked this thread and dequeued it, but its
+             * wake found the thread running, not parked: take the freed block now, or go back to
+             * the head of the queue, rather than park with no entry for any FreeFpl to wake. */
+            if (!fpl_waiter_queued(p, cur_thid)) {
+                if (fpl_try_allocate_internal(p, &addr) == 0) {
+                    if (out) MEM_W32(out, addr);
+                    if (has_timeout) {
+                        uint64_t now = sched_vtime_us();
+                        MEM_W32(toptr, now < end_time ? (uint32_t)(end_time - now) : 0u);
+                    }
+                    return 0;
+                }
+                fpl_requeue_waiter_head(p, cur_thid);
+            }
             continue;
         }
 
@@ -776,41 +796,22 @@ static void vpl_insert_free(VplPool *p, uint32_t addr, uint32_t size) {
     }
 }
 
-/* Same contract as fpl_requeue_waiter_head(). */
-static void vpl_requeue_waiter_head(VplPool *p, uint32_t thread_uid, uint32_t size) {
-    for (int i = 0; i < p->nwaiters; i++)
-        if (p->waiters[i].thread_uid == thread_uid) return;
-    if (p->nwaiters >= VPL_MAX_WAITERS) return;
-    for (int j = p->nwaiters; j > 0; j--) p->waiters[j] = p->waiters[j - 1];
-    p->waiters[0] = (VplWaiter){thread_uid, size};
-    p->nwaiters++;
+static void vpl_erase_waiter(VplPool *p, int index) {
+    p->nwaiters--;
+    memmove(&p->waiters[index], &p->waiters[index + 1],
+            (size_t)(p->nwaiters - index) * sizeof *p->waiters);
 }
 
-void vpl_remove_waiter(VplPool *p, uint32_t thread_uid) {
-    for (int i = 0; i < p->nwaiters; i++) {
-        if (p->waiters[i].thread_uid == thread_uid) {
-            for (int j = i; j + 1 < p->nwaiters; j++) {
-                p->waiters[j] = p->waiters[j + 1];
-            }
-            p->nwaiters--;
-            break;
-        }
-    }
+static int vpl_reservation_index(const VplPool *p, SrWaitHandle invocation) {
+    for (int i = 0; i < p->nallocs; ++i)
+        if (p->allocs[i].reservation == invocation) return i;
+    return -1;
 }
 
-/* Same contracts as fpl_enqueue_waiter() and fpl_wait_ended(). */
-static int vpl_enqueue_waiter(VplPool *p, uint32_t thread_uid, uint32_t size) {
-    for (int i = 0; i < p->nwaiters; i++)
-        if (p->waiters[i].thread_uid == thread_uid) return 1;
-    if (p->nwaiters >= VPL_MAX_WAITERS) return 0;
-    p->waiters[p->nwaiters++] = (VplWaiter){thread_uid, size};
-    return 1;
-}
-
-static uint32_t vpl_wait_ended(uint32_t uid, uint32_t thread_uid, uint32_t result) {
-    VplPool *p = vpl_lookup(uid);
-    if (p) vpl_remove_waiter(p, thread_uid);
-    return result;
+static void vpl_free_allocation(VplPool *p, int index) {
+    VplAlloc block = p->allocs[index];
+    p->allocs[index] = p->allocs[--p->nallocs];
+    vpl_insert_free(p, block.addr - VPL_BLOCK_HEADER, block.size);
 }
 
 /* The bytes a pool hands out, which ReferVplStatus reports as poolSize. */
@@ -847,7 +848,8 @@ static uint32_t h_CreateVpl(CpuState *s) {
     return p->uid;
 }
 
-static uint32_t vpl_try_allocate_internal(VplPool *p, uint32_t request, uint32_t *addr_out) {
+static uint32_t vpl_try_allocate_internal(VplPool *p, uint32_t request,
+                                          SrWaitHandle reservation, uint32_t *addr_out) {
     if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
     /* PSP-B1-01: roundup(request, 8) + 8 bytes, carved from the top (the span choice is
      * UNMEASURED, above) of the highest span that
@@ -862,12 +864,73 @@ static uint32_t vpl_try_allocate_internal(VplPool *p, uint32_t request, uint32_t
                 --p->nfree;
             }
             p->allocs = vpl_reserve(p->allocs, &p->allocs_cap, p->nallocs + 1, sizeof *p->allocs);
-            p->allocs[p->nallocs++] = (VplAlloc){addr, need};
+            p->allocs[p->nallocs++] = (VplAlloc){addr, need, reservation};
             *addr_out = addr;
             return 0;
         }
     }
     return VPL_NO_SPACE;
+}
+
+/* Current FIFO/priority policy among eligible invocations. An outer CB wait
+ * cannot use a VPL wake while its callback is waiting on another object.
+ * Its own allocation reenters this selection after the callback returns.
+ * This exclusion is code-derived, separately from the measured non-CB order. */
+static int vpl_pick_eligible_waiter(const VplPool *p, SrWaitHandle executing) {
+    uint32_t uids[VPL_MAX_WAITERS];
+    int indices[VPL_MAX_WAITERS];
+    int count = 0;
+    for (int i = 0; i < p->nwaiters; ++i) {
+        SrWaitHandle invocation = p->waiters[i].invocation;
+        SrWaitState state;
+        uint32_t owner;
+        if (sched_wait_state(invocation, &state, &owner) &&
+            (state == SR_WAIT_BLOCKED ||
+             (invocation == executing && state == SR_WAIT_EXECUTING))) {
+            uids[count] = owner;
+            indices[count++] = i;
+        }
+    }
+    return count ? indices[pool_pick_waiter(uids, count, p->attr)] : -1;
+}
+
+/* PSPAutotests e37443a681c6 tests/threads/vpl/priority.expected, PRIORITY / half:
+ * the first recipient observes both fitting blocks already charged, with five
+ * of the seven requests still queued. Charge every fitting grant before the
+ * release can preempt into a recipient. */
+static int vpl_grant_waiters(VplPool *p, SrWaitHandle executing) {
+    int granted = 0;
+    for (int pick; (pick = vpl_pick_eligible_waiter(p, executing)) >= 0;) {
+        VplWaiter waiter = p->waiters[pick];
+        uint32_t addr;
+        if (vpl_try_allocate_internal(p, waiter.size, waiter.invocation, &addr) != 0u) break;
+        vpl_erase_waiter(p, pick);
+        if (sched_wait_complete(waiter.invocation, 0u)) {
+            granted |= waiter.invocation != executing;
+        } else {
+            /* No guest dispatch happened since the append. */
+            vpl_free_allocation(p, p->nallocs - 1);
+        }
+    }
+    return granted;
+}
+
+/* The wait can leave the queue without receiving a block. If it already owns
+ * a reservation but its syscall never consumes it, return that block too.
+ * Detach can run during thread teardown, so only its caller may preempt. */
+static int vpl_detach_wait(SrWaitHandle invocation, uint32_t uid) {
+    VplPool *p = vpl_lookup(uid);
+    if (!p) return 0;
+    for (int i = 0; i < p->nwaiters; ++i) {
+        if (p->waiters[i].invocation == invocation) {
+            vpl_erase_waiter(p, i);
+            break;
+        }
+    }
+    int index = vpl_reservation_index(p, invocation);
+    if (index < 0) return 0;
+    vpl_free_allocation(p, index);
+    return vpl_grant_waiters(p, 0u);
 }
 
 static uint32_t h_TryAllocateVpl(CpuState *s) {
@@ -877,7 +940,7 @@ static uint32_t h_TryAllocateVpl(CpuState *s) {
     if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
     if (out && !sr_guest_span_writable(out, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     uint32_t addr = 0;
-    uint32_t err = vpl_try_allocate_internal(p, request, &addr);
+    uint32_t err = vpl_try_allocate_internal(p, request, 0u, &addr);
     if (err) return err;
     if (out) MEM_W32(out, addr);
     return 0;
@@ -899,7 +962,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
         uint32_t usec = MEM_R32(toptr);
         if (usec == 0) {
             uint32_t addr = 0;
-            if (p->nwaiters == 0 && vpl_try_allocate_internal(p, request, &addr) == 0) {
+            if (p->nwaiters == 0 && vpl_try_allocate_internal(p, request, 0u, &addr) == 0) {
                 if (out) MEM_W32(out, addr);
                 return 0;
             }
@@ -911,85 +974,80 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
     }
 
     uint32_t addr = 0;
-    if (p->nwaiters == 0 && vpl_try_allocate_internal(p, request, &addr) == 0) {
+    if (p->nwaiters == 0 && vpl_try_allocate_internal(p, request, 0u, &addr) == 0) {
         if (out) MEM_W32(out, addr);
         return 0;
     }
 
     uint32_t cur_thid = sched_current_uid();
-    if (cur_thid == 0) {
-        return VPL_EXHAUSTED;
-    }
+    if (cur_thid == 0) return VPL_EXHAUSTED;
+    if (p->nwaiters >= VPL_MAX_WAITERS) return HLE_KERNEL_ERROR_NO_MEMORY;
+    SrWaitHandle invocation = sched_wait_begin(uid, end_time, is_cb, vpl_detach_wait);
+    if (!invocation) return HLE_KERNEL_ERROR_NO_MEMORY;
+    p->waiters[p->nwaiters++] = (VplWaiter){invocation, request};
+    /* A stronger arrival can already be eligible with free bytes beside a
+     * non-fitting lower-priority wait (PSPAutotests PRIORITY / whole).
+     * Keep the callback-first path when there is a callback to dispatch. */
+    if ((!is_cb || !sr_thread_has_pending_callbacks(cur_thid)) &&
+        vpl_grant_waiters(p, invocation)) sched_preempt();
 
-    if (!vpl_enqueue_waiter(p, cur_thid, request)) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
-
+    uint32_t result;
+    int timed_out = 0;
     for (;;) {
+        if (sched_wait_take_result(invocation, &result)) break;
+        if (timed_out) {
+            result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            break;
+        }
         if (is_cb && sr_thread_has_pending_callbacks(cur_thid)) {
+            sched_wait_callback(invocation, 1);
             sr_thread_dispatch_callbacks();
+            sched_wait_callback(invocation, 0);
             p = vpl_lookup(uid);
-            if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
             sched_vtime_refresh();
+            if (p && (!has_timeout || sched_vtime_us() < end_time) &&
+                vpl_grant_waiters(p, invocation)) sched_preempt();
             continue;
         }
 
-        /* PSP waitType 6 = VPL */
-        sched_set_current_wait_kind(6);
-
+        uint32_t remaining = 0u;
         if (has_timeout) {
             sched_vtime_refresh();
             uint64_t now = sched_vtime_us();
             if (now >= end_time) {
-                p = vpl_lookup(uid);
-                if (p) vpl_remove_waiter(p, cur_thid);
-                MEM_W32(toptr, 0u);
-                return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+                result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+                break;
             }
-            uint32_t remaining = (uint32_t)(end_time - now);
-            if (is_cb) sched_set_current_cb_wait(1);
-            int timed_out = sched_block_on_timeout(uid, remaining);
-            if (is_cb) sched_set_current_cb_wait(0);
-
-            uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return vpl_wait_ended(uid, cur_thid, woken);
-
-            p = vpl_lookup(uid);
-            if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
-
-            if (vpl_try_allocate_internal(p, request, &addr) == 0) {
-                if (out) MEM_W32(out, addr);
-                sched_vtime_refresh();
-                now = sched_vtime_us();
-                uint32_t rem = (now < end_time) ? (uint32_t)(end_time - now) : 0u;
-                MEM_W32(toptr, rem);
-                return 0;
-            }
-
-            if (timed_out) {
-                vpl_remove_waiter(p, cur_thid);
-                MEM_W32(toptr, 0u);
-                return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
-            }
-
-            vpl_requeue_waiter_head(p, cur_thid, request);
-        } else {
-            if (is_cb) sched_set_current_cb_wait(1);
-            sched_block_on(uid);
-            if (is_cb) sched_set_current_cb_wait(0);
-
-            uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return vpl_wait_ended(uid, cur_thid, woken);
-
-            p = vpl_lookup(uid);
-            if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
-
-            if (vpl_try_allocate_internal(p, request, &addr) == 0) {
-                if (out) MEM_W32(out, addr);
-                return 0;
-            }
-
-            vpl_requeue_waiter_head(p, cur_thid, request);
+            remaining = (uint32_t)(end_time - now);
         }
+        sched_set_current_wait_kind(6); /* PSP waitType 6 = VPL. */
+        timed_out = sched_wait_block(invocation, remaining, has_timeout);
     }
+
+    if (result == 0u) {
+        p = vpl_lookup(uid);
+        int index = p ? vpl_reservation_index(p, invocation) : -1;
+        if (index < 0) {
+            result = SCE_KERNEL_ERROR_WAIT_DELETE;
+        } else if ((out && !sr_guest_span_writable(out, 4u)) ||
+                   (toptr && !sr_guest_span_writable(toptr, 4u))) {
+            result = SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+        } else {
+            addr = p->allocs[index].addr;
+            p->allocs[index].reservation = 0u;
+            if (out) MEM_W32(out, addr);
+            if (has_timeout) {
+                sched_vtime_refresh();
+                uint64_t now = sched_vtime_us();
+                MEM_W32(toptr, now < end_time ? (uint32_t)(end_time - now) : 0u);
+            }
+        }
+    } else if (result == SCE_KERNEL_ERROR_WAIT_TIMEOUT && has_timeout) {
+        if (sr_guest_span_writable(toptr, 4u)) MEM_W32(toptr, 0u);
+        else result = SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    }
+    if (sched_wait_finish(invocation)) sched_preempt();
+    return result;
 }
 
 static uint32_t h_AllocateVpl(CpuState *s) {
@@ -1004,22 +1062,10 @@ static uint32_t h_FreeVpl(CpuState *s) {
     VplPool *p = vpl_lookup(A0);
     uint32_t addr = A1;
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
-    for (int i = 0; i < p->nallocs; ++i) if (p->allocs[i].addr == addr) {
-        vpl_insert_free(p, addr - VPL_BLOCK_HEADER, p->allocs[i].size);
-        p->allocs[i] = p->allocs[--p->nallocs];
-        /* Wake one waiter, chosen by the pool's queue order (pool_pick_waiter). */
-        if (p->nwaiters > 0) {
-            uint32_t uids[VPL_MAX_WAITERS];
-            for (int j = 0; j < p->nwaiters; j++) uids[j] = p->waiters[j].thread_uid;
-            const int pick = pool_pick_waiter(uids, p->nwaiters, p->attr);
-            uint32_t next_thread = p->waiters[pick].thread_uid;
-            for (int j = pick; j + 1 < p->nwaiters; j++) {
-                p->waiters[j] = p->waiters[j + 1];
-            }
-            p->nwaiters--;
-            sched_wake_one_object_waiter(A0, next_thread);
-            sched_preempt();
-        }
+    for (int i = 0; i < p->nallocs; ++i) {
+        if (p->allocs[i].addr != addr || p->allocs[i].reservation) continue;
+        vpl_free_allocation(p, i);
+        if (vpl_grant_waiters(p, 0u)) sched_preempt();
         return 0;
     }
     return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
@@ -1033,10 +1079,9 @@ static uint32_t h_DeleteVpl(CpuState *s) {
     uint32_t uid = A0;
     vpl_release(p);
     const uint32_t rc = free_block(block_uid); /* exactly once; unknown/double delete frees nothing */
-    if (sched_count_waiters(uid)) {
-        sched_wake_with_result(uid, SCE_KERNEL_ERROR_WAIT_DELETE);
-        sched_preempt();
-    }
+    int parked = sched_count_waiters(uid);
+    sched_wait_cancel_object(uid, SCE_KERNEL_ERROR_WAIT_DELETE);
+    if (parked) sched_preempt();
     return rc;
 }
 

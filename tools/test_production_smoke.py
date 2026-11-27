@@ -925,7 +925,7 @@ class TestProductionSmokePackage(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
             return real_run(command, *args, **kwargs)
 
-        def record_options(environment):
+        def record_options(environment, staged_symbol_map=None):
             option_environments.append(dict(environment))
             return {}
 
@@ -986,8 +986,10 @@ class TestProductionSmokePackage(unittest.TestCase):
         self.assertEqual(hook_sidecars, [True] * len(make_calls))
         self.assertTrue(option_environments)
         for environment in option_environments:
+            # Every Ace declaration is snapshotted into the build's own stage, under
+            # _stage_for_make's "<label>_<name>" form, so the key names that copy.
             self.assertEqual(Path(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"]).name,
-                             "enhancement_package.cull.json", environment)
+                             "code-hook_package_enhancement_package.cull.json", environment)
 
     def test_spaced_enhancement_data_root_uses_short_form_or_is_refused(self):
         """#2281: the data root is read in place and interpolated into the codegen
@@ -4609,9 +4611,17 @@ class TestProductStatusCopy(unittest.TestCase):
     def test_wizard_states_the_open_boundaries(self):
         wizard = launcher_c_source(ROOT / "src/player/ui/scr_wizard.c")
         english = launcher_english_catalog(ROOT)
+        # The note names the host: "this PC" on a desktop, "this device" on Android.
+        self.assertEqual(
+            english["WIZARD_PRIVACY_NOTE"],
+            '"Your games stay on this PC. Nakagawa never uploads anything, and '
+            'downloads only the build tools you approve. It decrypts your own disc '
+            'here and never touches firmware."',
+        )
         self._assert_ui_copy(
-            wizard, r"\bwizard_text\(ui,\s*6u,", "WIZARD_PRIVACY_NOTE",
-            "Your games stay on this PC. Nakagawa never uploads anything, and "
+            wizard, r"\bwizard_text\(ui,\s*6u,\s*pc\s*\?\s*NK_UI_STR\(WIZARD_PRIVACY_NOTE\)\s*:",
+            "WIZARD_PRIVACY_NOTE_DEVICE",
+            "Your games stay on this device. Nakagawa never uploads anything, and "
             "downloads only the build tools you approve. It decrypts your own disc "
             "here and never touches firmware.", english,
         )

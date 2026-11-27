@@ -8349,7 +8349,7 @@
       "group": "audio",
       "source": "tests/fixtures/psp_oracle/probe.c",
       "prx": "nakagawa_psp_oracle.prx",
-      "apis": ["__sceSasSetVolume", "__sceSasSetVoice", "__sceSasSetPitch", "__sceSasSetMix", "__sceSasCore"],
+      "apis": ["__sceSasSetVolume", "__sceSasSetVoice", "__sceSasSetPitch", "__sceSasCoreWithMix", "__sceSasCore"],
       "diagnostic_case_ids": ["sas-mix"],
       "case_ids": ["sas-mix-*"],
       "invariant": "Synthetic VAG and PCM inputs drive fixed-shape voice-volume, WithMix and pitch records; no returned value is asserted as a PSP result.",

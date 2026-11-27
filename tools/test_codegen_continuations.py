@@ -1072,6 +1072,91 @@ class StraightLineEndTests(unittest.TestCase):
                 self.emit(words, start=base)                       # the slot check holds
 
 
+def first_word_after(text, label):
+    """The guest PC of the first word the C runs when the block before ``label`` falls through.
+
+    That block's last line either jumps to a label or runs on into ``label``; either way the
+    next ``sr_begin`` from there names the word.
+    """
+    lines = text.splitlines()
+    at = lines.index(f"  L_{label:08x}: ;")
+    jump = re.match(r"goto L_([0-9a-f]{8});", lines[at - 1].strip())
+    if jump:
+        at = lines.index(f"  L_{jump.group(1)}: ;")
+    for line in lines[at:]:
+        begin = re.search(r"sr_begin\(s, 0x([0-9a-f]{8})u,", line)
+        if begin:
+            return int(begin.group(1), 16)
+    return None
+
+
+class EntryOnDelaySlotTests(unittest.TestCase):
+    """#3163: a body entered at the delay slot of a transfer it loops back to.
+
+    The entry word at 0x1004 is the body's first word and, on every later pass, the delay
+    slot of the transfer at 0x1000. That transfer runs the slot inline (or annuls it), so
+    its fall-through goes on at 0x1008: falling into the entry label runs the slot again.
+    """
+
+    RANGES = [(0x1000, 0x101C), (0x2000, 0x2008)]
+    #: Every transfer that can fall through past its delay slot.
+    OWNERS = (
+        ("bne", bne(4, 0, 0x1000, 0x1014)),
+        ("beql", beql(4, 0, 0x1000, 0x1014)),
+        ("jal", jal(0x2000)),
+        ("jalr", jalr(31, 25)),
+        ("bgezal", regimm(0x11, 4, 0x1000, 0x2000)),
+    )
+
+    @staticmethod
+    def words(owner):
+        return {0x1000: owner,
+                0x1004: addiu(2, 2, 1),                 # the entry, and the owner's delay slot
+                0x1008: addiu(5, 5, -1),
+                0x100C: bne(5, 0, 0x100C, 0x1000),      # back to the owner
+                0x1010: NOP,
+                0x1014: JR_RA, 0x1018: NOP,
+                0x2000: JR_RA, 0x2004: NOP}
+
+    def emit(self, words, start, threshold=None):
+        known = {start, 0x2000}
+        with region_split_threshold(threshold) as options:
+            return "\n".join(codegen.emit_function(
+                FakeElf(words), start, self.RANGES, known, options=options))
+
+    def test_fall_through_past_the_owner_goes_on_after_the_entry_word(self):
+        for name, owner in self.OWNERS:
+            for threshold in (None, 0):
+                with self.subTest(owner=name, threshold=threshold):
+                    text = self.emit(self.words(owner), 0x1004, threshold)
+                    self.assertIn("    goto L_00001004;\n  L_00001000: ;", text)
+                    self.assertEqual(first_word_after(text, 0x1004), 0x1008)
+                    self.assertIn("  L_00001008: ;", text)
+                    # The entry still starts at its own word, and the slot is still emitted
+                    # once inline at the owner and once under the entry label.
+                    entry = text.index("  L_00001004: ;")
+                    self.assertTrue(text[entry:].startswith(
+                        "  L_00001004: ;\n    sr_begin(s, 0x00001004u, 0x24420001u);"))
+                    self.assertEqual(text.count("sr_begin(s, 0x00001004u, 0x24420001u);"), 2)
+
+    def test_the_same_words_entered_at_the_owner_plan_no_skip(self):
+        # Entered at 0x1000 the slot has no label: there is no copy to skip, as before.
+        for name, owner in self.OWNERS:
+            with self.subTest(owner=name):
+                text = self.emit(self.words(owner), 0x1000)
+                self.assertNotIn("skip its labelled duplicate", text)
+                self.assertNotIn("L_00001008", text)
+                self.assertEqual(text.count("sr_begin(s, 0x00001004u, 0x24420001u);"), 1)
+
+    def test_an_entry_on_the_slot_of_jr_or_j_plans_no_skip(self):
+        # `jr` and `j` leave after their slot, so nothing falls into the entry label.
+        for name, owner in (("jr", JR_T9), ("j", j(0x1014))):
+            with self.subTest(owner=name):
+                text = self.emit(self.words(owner), 0x1004)
+                self.assertNotIn("skip its labelled duplicate", text)
+                self.assertNotIn("L_00001008", text)
+
+
 class StateResumeTests(unittest.TestCase):
     """``--state-resume`` (#2172): resume points for direct save states.
 

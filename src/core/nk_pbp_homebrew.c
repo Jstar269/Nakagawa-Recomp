@@ -1913,6 +1913,92 @@ static void hb_record(HbText *record, const char *hex, const char *rel)
     hb_text_add(record, "\n", NULL, NULL);
 }
 
+typedef struct {
+    const char *expected;
+    bool alias;
+} HbSlotSpelling;
+
+static unsigned char hb_fold_ascii(unsigned char ch)
+{
+    return ch >= 'A' && ch <= 'Z' ? (unsigned char)(ch + ('a' - 'A')) : ch;
+}
+
+static bool hb_other_spelling(const char *name, bool is_dir, void *opaque)
+{
+    (void)is_dir;
+    HbSlotSpelling *slot = opaque;
+    if (!strcmp(slot->expected, name)) return true;
+    const char *a = slot->expected, *b = name;
+    while (*a && hb_fold_ascii((unsigned char)*a) == hb_fold_ascii((unsigned char)*b)) {
+        ++a;
+        ++b;
+    }
+    slot->alias = *a == *b;
+    return !slot->alias;
+}
+
+NkPbpHomebrewStickOwner nk_pbp_homebrew_stick_owner(const char *iso_path, const char *folder,
+                                                   const char *memstick_root)
+{
+    char game[HB_PATH_MAX], target[HB_PATH_MAX], boot[HB_PATH_MAX];
+    if (!iso_path || !folder || !memstick_root || !hb_name_valid(folder, strlen(folder)) ||
+        !hb_game_dir(memstick_root, game, sizeof(game)) ||
+        !hb_join(target, sizeof(target), game, folder) ||
+        !hb_join(boot, sizeof(boot), target, "EBOOT.PBP"))
+        return NK_PBP_HB_STICK_UNREADABLE;
+    if (hb_state(game) == HB_FOLDER) {
+        HbSlotSpelling spelling = {folder, false};
+        size_t skipped = 0u;
+        if (!nk_platform_list_dir_counted(game, hb_other_spelling, &spelling, &skipped) ||
+            (skipped && nk_platform_path_missing(target)))
+            return NK_PBP_HB_STICK_UNREADABLE;
+        if (spelling.alias) return NK_PBP_HB_STICK_OTHER_PROGRAM;
+    }
+    HbState state = hb_state(boot);
+    if (state == HB_MISSING) return NK_PBP_HB_STICK_EMPTY;
+    if (state != HB_FILE) return NK_PBP_HB_STICK_UNREADABLE;
+
+    char stick_real[HB_PATH_MAX], target_real[HB_PATH_MAX];
+    char seed_dir[HB_PATH_MAX], seed_path[HB_PATH_MAX], root[HB_PATH_MAX];
+    uint8_t digest[32];
+    int64_t size = nk_platform_get_file_size(boot);
+    if (size < 0 || !nk_platform_real_path(memstick_root, stick_real, sizeof(stick_real)) ||
+        !nk_platform_real_path(target, target_real, sizeof(target_real)) ||
+        !hb_path_within(target_real, stick_real) || !hb_real_within(boot, target_real) ||
+        !hb_beside_image(iso_path, ".seeded", seed_dir, sizeof(seed_dir)) ||
+        !hb_seeded_record_path(seed_dir, target_real, seed_path, sizeof(seed_path)) ||
+        !hb_read_file(boot, (uint64_t)size, NULL, digest, NULL, 0u))
+        return NK_PBP_HB_STICK_UNREADABLE;
+
+    char hex[HB_HEX_LEN + 1u];
+    hb_hex(digest, hex);
+    char *text = NULL, **lines = NULL;
+    size_t count = 0u;
+    bool read = hb_seeded_read(seed_path, target_real, &text, &lines, &count);
+    const char *seeded = read ? hb_seeded_digest(lines, count, "EBOOT.PBP") : NULL;
+    bool owned = seeded && !strncmp(seeded, hex, HB_HEX_LEN);
+    free(lines);
+    free(text);
+    if (!read) return NK_PBP_HB_STICK_UNREADABLE;
+    if (owned) return NK_PBP_HB_STICK_SEEDED;
+
+    HbManifest manifest;
+    if (!nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
+        !hb_manifest_read(root, &manifest)) return NK_PBP_HB_STICK_UNREADABLE;
+    bool identical = false;
+    if (!strcmp(manifest.folder, folder)) {
+        for (size_t i = 0; i < manifest.count; ++i) {
+            const HbEntry *entry = &manifest.items[i];
+            if (entry->kind == 'F' && !strcmp(entry->rel, "EBOOT.PBP")) {
+                identical = !strcmp(entry->hex, hex);
+                break;
+            }
+        }
+    }
+    hb_manifest_free(&manifest);
+    return identical ? NK_PBP_HB_STICK_SAME_PROGRAM : NK_PBP_HB_STICK_OTHER_PROGRAM;
+}
+
 /* Make path, a folder below root, one missing folder at a time: each folder on the way, made or
    found, must really be inside root_real before the next is made in it, so a link or junction
    on the way is refused before anything is made through it (review of #2426, m1). */

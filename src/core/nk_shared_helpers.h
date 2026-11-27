@@ -91,14 +91,19 @@ void nk_shared_boot_event_vwrite(FILE *stderr_stream, uint64_t timestamp_ns,
                                  const char *format,
                                  va_list args);
 
+/* The generated main image reports its verified timing inputs after startup registration. */
+void nk_shared_timing_run_observed(bool timing, const char *disc_id, const char *disc_version,
+                                   const char *executable_sha256, const char *declaration_id,
+                                   const char *declaration_sha256, const char *symbol_map_sha256);
+
 /* Formats the player's process/sequence-specific event pathname. Failure clears out. */
 int nk_shared_boot_event_format_path(char *out, size_t out_capacity,
                                     const char *cache_dir, char separator,
                                     unsigned long process_id, unsigned int sequence);
 
 /* How a game's picture is drawn, as the runtime set it up (#2151): which presenter shows it,
- * whether the GPU GE renderer draws it, and the slower path taken, if any, because what was
- * asked for did not start. The runtime reports it once as a boot event,
+ * whether the Vulkan GE renderer draws it, and the slower path taken, if any. The runtime
+ * reports it once as a boot event,
  *   BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<name>
  * and the player reads that line; both sides use the names below. */
 typedef enum NkRenderFallback {
@@ -107,6 +112,7 @@ typedef enum NkRenderFallback {
                                           software-drawn picture */
     NK_RENDER_FALLBACK_SOFTWARE_GE,    /* the GPU GE renderer did not start: the Vulkan window
                                           shows a software-drawn picture */
+    NK_RENDER_FALLBACK_VULKAN_CPU,     /* the selected Vulkan device uses the CPU */
     NK_RENDER_FALLBACK_COUNT
 } NkRenderFallback;
 
@@ -117,12 +123,12 @@ typedef struct NkRenderPath {
 } NkRenderPath;
 
 /* The path from what the runtime asked for and what started. A presenter or renderer that was
- * not asked for (SR_VIDEO=gdi, SR_GPU_GE unset) is no fallback. */
+ * not asked for (SR_VIDEO=gdi, SR_GPU_GE unset) is no fallback. A running Vulkan
+ * CPU device takes precedence over a software GE fallback. */
 NkRenderPath nk_render_path_from_init(bool vulkan_asked, bool vulkan_started,
-                                      bool gpu_ge_asked, bool gpu_ge_started);
+                                      bool gpu_ge_asked, bool gpu_ge_started, bool vulkan_cpu);
 
-/* The fallback's name in the event ("none", "gdi_presenter", "software_ge"); NULL when out of
- * range. */
+/* The fallback's name in the event, or NULL when out of range. */
 const char *nk_render_fallback_name(NkRenderFallback fallback);
 
 /* Formats the event's text (without "t_ns"); returns its length, or 0 with out cleared when it

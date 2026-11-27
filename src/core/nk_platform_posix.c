@@ -31,6 +31,7 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
@@ -140,6 +141,16 @@ bool nk_platform_path_missing(const char *path) {
     if (!path || !*path) return false;
     if (lstat(path, &st) == 0) return false;
     return errno == ENOENT || errno == ENOTDIR;
+}
+
+bool nk_platform_available_disk_bytes(const char *path, uint64_t *available) {
+    struct statvfs volume;
+    if (!path || !available || statvfs(path, &volume) != 0) return false;
+    uint64_t block = volume.f_frsize ? volume.f_frsize : volume.f_bsize;
+    if (!block) return false;
+    uint64_t count = (uint64_t)volume.f_bavail;
+    *available = count > UINT64_MAX / block ? UINT64_MAX : count * block;
+    return true;
 }
 
 static bool tree_size_posix(const char *path, uint64_t *bytes) {
@@ -1970,12 +1981,68 @@ void nk_platform_close_process(NkProcessHandle *process) {
 }
 
 /* stdout and stderr of an app process go nowhere; copy them, line by line, to the system log
-   (and to the run log when the launcher named one, as the desktop child's streams are). */
+   and to a file: the run log when the launcher named one (NK_ANDROID_LOG_FILE, as the desktop
+   child's streams are), else the process's own log in the logs folder
+   (nk_platform_setup_standard_streams). Some devices' system logs keep no verbose or info lines
+   at all, so the file is the record that always has them. */
 static int s_android_log_pipe[2] = { -1, -1 };
 static char s_android_log_tag[32] = "nakagawa";
+/* The file and the three below are shared by the pump thread and the thread that opens the
+   process's own log, so they change only under the lock. */
+static pthread_mutex_t s_android_log_lock = PTHREAD_MUTEX_INITIALIZER;
 static FILE *s_android_log_file;
+/* The process's own log, which it rotates; empty for a run log the launcher named and reads. */
+static char s_android_log_path[NK_MAX_PATH];
+static long s_android_log_bytes;
+/* A write to the file failed and was reported; cleared by the next one that succeeds. */
+static bool s_android_log_write_failed;
 static pthread_t s_android_log_thread;
 static bool s_android_log_thread_running;
+
+/* A file of the process's own log is set aside at this size, so the log stays bounded: the
+   current file and NK_ANDROID_LOG_KEEP earlier copies. */
+#define NK_ANDROID_LOG_MAX_BYTES (1L << 20)
+#define NK_ANDROID_LOG_KEEP 4u
+
+static void android_log_line(const char *line) {
+    __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, line);
+    pthread_mutex_lock(&s_android_log_lock);
+    if (s_android_log_file) {
+        int n = fprintf(s_android_log_file, "%s\n", line);
+        bool wrote = n > 0;
+        if (fflush(s_android_log_file) != 0) wrote = false;
+        if (wrote) {
+            s_android_log_bytes += n;
+            s_android_log_write_failed = false;
+        } else if (!s_android_log_write_failed) {
+            /* Said once, until a line is written again (a full disk would fail every line). */
+            int error = errno;
+            s_android_log_write_failed = true;
+            __android_log_print(ANDROID_LOG_ERROR, s_android_log_tag,
+                                "NK_LOG_WRITE_FAILED %s (%s): lines are missing from the file "
+                                "until a write succeeds; the system log still has them",
+                                s_android_log_path[0] ? s_android_log_path : "the run log",
+                                strerror(error));
+        }
+        if (s_android_log_path[0] && s_android_log_bytes >= NK_ANDROID_LOG_MAX_BYTES) {
+            fclose(s_android_log_file);
+            if (!nk_platform_rotate_log_files(s_android_log_path, NK_ANDROID_LOG_KEEP)) {
+                __android_log_print(ANDROID_LOG_ERROR, s_android_log_tag,
+                                    "NK_LOG_ROTATE_FAILED %s: an earlier copy was not set aside",
+                                    s_android_log_path);
+            }
+            s_android_log_file = fopen(s_android_log_path, "we");
+            s_android_log_bytes = 0;
+            if (!s_android_log_file) {
+                __android_log_print(ANDROID_LOG_ERROR, s_android_log_tag,
+                                    "NK_LOG_FILE_UNAVAILABLE %s (%s): output goes to the system "
+                                    "log only", s_android_log_path, strerror(errno));
+                s_android_log_path[0] = '\0';
+            }
+        }
+    }
+    pthread_mutex_unlock(&s_android_log_lock);
+}
 
 static void *android_log_pump(void *arg) {
     (void)arg;
@@ -1990,37 +2057,75 @@ static void *android_log_pump(void *arg) {
         for (size_t i = 0; i < used; i++) {
             if (buf[i] != '\n') continue;
             buf[i] = '\0';
-            __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf + start);
-            if (s_android_log_file) {
-                fprintf(s_android_log_file, "%s\n", buf + start);
-                fflush(s_android_log_file);
-            }
+            android_log_line(buf + start);
             start = i + 1u;
         }
         if (start < used) memmove(buf, buf + start, used - start);
         used -= start;
         if (used == sizeof(buf) - 1u) {   /* an overlong line: emit what there is */
             buf[used] = '\0';
-            __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf);
+            android_log_line(buf);
             used = 0;
         }
     }
     if (used > 0) {   /* a last line with no newline */
         buf[used] = '\0';
-        __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf);
-        if (s_android_log_file) {
-            fprintf(s_android_log_file, "%s\n", buf);
-            fflush(s_android_log_file);
-        }
+        android_log_line(buf);
     }
     return NULL;
+}
+
+/* The process's own log, <logs folder>/<name>, for a process the launcher gave no run log (the
+   launcher itself): earlier runs' files are set aside first (name.1.ext, name.2.ext and on),
+   and the file is set aside again whenever it reaches NK_ANDROID_LOG_MAX_BYTES. It is written
+   only in the app's own files folder. */
+static void android_open_own_log(const char *name) {
+    char dir[NK_MAX_PATH];
+    char path[NK_MAX_PATH];
+    if (!name || !name[0] || !s_android_log_thread_running) return;
+    pthread_mutex_lock(&s_android_log_lock);
+    bool has_file = s_android_log_file != NULL;
+    pthread_mutex_unlock(&s_android_log_lock);
+    if (has_file) return;   /* the run log the launcher named, and reads */
+    if (!nk_platform_get_path(NK_PATH_LOGS, dir, sizeof(dir)) || !nk_platform_mkdir_p(dir)) {
+        __android_log_print(ANDROID_LOG_ERROR, s_android_log_tag,
+                            "NK_LOG_FILE_UNAVAILABLE: no logs folder; output goes to the system "
+                            "log only");
+        return;
+    }
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return;
+    if (!nk_platform_rotate_log_files(path, NK_ANDROID_LOG_KEEP)) {
+        __android_log_print(ANDROID_LOG_ERROR, s_android_log_tag,
+                            "NK_LOG_ROTATE_FAILED %s: an earlier copy was not set aside", path);
+    }
+    FILE *file = fopen(path, "we");
+    if (!file) {
+        __android_log_print(ANDROID_LOG_ERROR, s_android_log_tag,
+                            "NK_LOG_FILE_UNAVAILABLE %s (%s): output goes to the system log only",
+                            path, strerror(errno));
+        return;
+    }
+    pthread_mutex_lock(&s_android_log_lock);
+    s_android_log_file = file;
+    snprintf(s_android_log_path, sizeof(s_android_log_path), "%s", path);
+    s_android_log_bytes = 0;
+    pthread_mutex_unlock(&s_android_log_lock);
+    printf("[PLAYER] Log file: %s (earlier ones beside it, up to %u)\n", path,
+           NK_ANDROID_LOG_KEEP);
 }
 
 bool nk_platform_host_startup(const char *log_tag) {
     const char *app_dir = getenv("NK_ANDROID_APP_DIR");
     if (log_tag && log_tag[0]) snprintf(s_android_log_tag, sizeof(s_android_log_tag), "%s", log_tag);
     const char *log_path = getenv("NK_ANDROID_LOG_FILE");
-    if (log_path && log_path[0]) s_android_log_file = fopen(log_path, "a");
+    if (log_path && log_path[0]) {
+        FILE *file = fopen(log_path, "ae");
+        pthread_mutex_lock(&s_android_log_lock);
+        s_android_log_file = file;
+        s_android_log_path[0] = '\0';
+        pthread_mutex_unlock(&s_android_log_lock);
+    }
     /* O_CLOEXEC: a child the runtime starts keeps no copy of the pipe's own write end, which would
        hold off the end of file nk_platform_host_shutdown waits for. The standard streams it gets
        are dup2() copies, inherited as on the desktop. */
@@ -2062,10 +2167,14 @@ void nk_platform_host_shutdown(void) {
     close(s_android_log_pipe[1]);
     s_android_log_pipe[1] = -1;
     (void)pthread_join(s_android_log_thread, NULL);
+    pthread_mutex_lock(&s_android_log_lock);
     if (s_android_log_file) {
         fclose(s_android_log_file);
         s_android_log_file = NULL;
     }
+    s_android_log_path[0] = '\0';
+    s_android_log_write_failed = false;
+    pthread_mutex_unlock(&s_android_log_lock);
 }
 #else
 bool nk_platform_android_import_environment(void *jni_env) {
@@ -2298,8 +2407,46 @@ bool nk_platform_init_utf8_main(int *argc, char ***argv) {
 }
 
 void nk_platform_setup_standard_streams(const char *fallback_log_name) {
+#if defined(__ANDROID__)
+    /* The streams reach the system log (nk_platform_host_startup); a process the launcher
+       gave no run log also keeps its own file of them. */
+    android_open_own_log(fallback_log_name);
+#else
     /* The streams already reach the terminal, or the log the launcher gave the child. */
     (void)fallback_log_name;
+#endif
+}
+
+/* `path` with ".<n>" before its extension (from the last '.' of its last component, unless
+   that component starts with it), else at its end. */
+static bool numbered_log_path(const char *path, unsigned n, char *out, size_t out_size) {
+    const char *slash = strrchr(path, '/');
+    const char *leaf = slash ? slash + 1 : path;
+    const char *dot = strrchr(leaf, '.');
+    if (dot == leaf) dot = NULL;
+    size_t stem = dot ? (size_t)(dot - path) : strlen(path);
+    int written = snprintf(out, out_size, "%.*s.%u%s", (int)stem, path, n, dot ? dot : "");
+    return written > 0 && (size_t)written < out_size;
+}
+
+bool nk_platform_rotate_log_files(const char *path, unsigned keep) {
+    char from[NK_MAX_PATH];
+    char to[NK_MAX_PATH];
+    bool ok = true;
+    if (!path || !path[0] || strlen(path) >= NK_MAX_PATH) return false;
+    if (keep == 0u) return unlink(path) == 0 || errno == ENOENT;
+    if (!numbered_log_path(path, keep, to, sizeof(to))) return false;
+    if (unlink(to) != 0 && errno != ENOENT) ok = false;
+    for (unsigned n = keep; n > 1u; n--) {
+        if (!numbered_log_path(path, n - 1u, from, sizeof(from)) ||
+            !numbered_log_path(path, n, to, sizeof(to))) {
+            return false;
+        }
+        if (rename(from, to) != 0 && errno != ENOENT) ok = false;
+    }
+    if (!numbered_log_path(path, 1u, to, sizeof(to))) return false;
+    if (rename(path, to) != 0 && errno != ENOENT) ok = false;
+    return ok;
 }
 
 #endif /* !_WIN32 */

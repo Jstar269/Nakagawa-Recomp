@@ -84,10 +84,14 @@ static size_t nk_ui_input_emit(NkUiEvent *out, size_t cap, size_t used, NkUiEven
     return used;
 }
 
-/* Emits NK_UI_EV_DEVICE when the source of input changed. */
+/* Emits NK_UI_EV_DEVICE when the source of input changed. Any press noted here is not a
+   touch, so it ends touch input, even on the device touch shares. */
 static size_t nk_ui_input_note_device(NkUiInput *input, int device, NkUiPadFamily family,
                                       NkUiEvent *out, size_t cap, size_t used) {
-    if (input->have_device && input->last_device == device && input->last_family == family) {
+    bool was_touch = input->touch;
+    input->touch = false;
+    if (input->have_device && input->last_device == device && input->last_family == family &&
+        !was_touch) {
         return used;
     }
     input->have_device = true;
@@ -339,8 +343,8 @@ size_t nk_ui_input_stick(NkUiInput *input, float x, float y, int device,
     return used;
 }
 
-size_t nk_ui_input_pointer(NkUiInput *input, float x, float y, bool down,
-                           NkUiEvent *out, size_t cap) {
+static size_t nk_ui_input_pointer_from(NkUiInput *input, float x, float y, bool down,
+                                       bool touch, NkUiEvent *out, size_t cap) {
     size_t used = 0u;
     NkUiEvent event;
     if (input == NULL || !isfinite(x) || !isfinite(y)) {
@@ -350,10 +354,11 @@ size_t nk_ui_input_pointer(NkUiInput *input, float x, float y, bool down,
         input->pointer_down == down) {
         return 0u;
     }
-    /* A click makes the mouse the active device; motion alone does not. */
+    /* A click or a tap makes the mouse's device the active one; motion alone does not. */
     if (down != input->pointer_down) {
         used = nk_ui_input_note_device(input, NK_UI_DEVICE_KEYBOARD_MOUSE, NK_UI_PAD_KEYBOARD,
                                        out, cap, used);
+        input->touch = touch;
     }
     input->have_pointer = true;
     input->pointer_x = x;
@@ -365,6 +370,33 @@ size_t nk_ui_input_pointer(NkUiInput *input, float x, float y, bool down,
     event.y = y;
     event.down = down;
     return nk_ui_input_emit(out, cap, used, event);
+}
+
+size_t nk_ui_input_pointer(NkUiInput *input, float x, float y, bool down,
+                           NkUiEvent *out, size_t cap) {
+    return nk_ui_input_pointer_from(input, x, y, down, false, out, cap);
+}
+
+size_t nk_ui_input_touch(NkUiInput *input, float x, float y, bool down,
+                         NkUiEvent *out, size_t cap) {
+    return nk_ui_input_pointer_from(input, x, y, down, true, out, cap);
+}
+
+size_t nk_ui_input_system_back(NkUiInput *input, bool down, double now_s,
+                               NkUiEvent *out, size_t cap) {
+    NkUiEvent event;
+    if (input == NULL || !isfinite(now_s) || input->down[NK_UI_BTN_BACK] == down) {
+        return 0u;
+    }
+    input->down[NK_UI_BTN_BACK] = down;
+    if (!down) {
+        return 0u;
+    }
+    event = nk_ui_input_make_event(NK_UI_EV_BACK, nk_ui_input_last_device(input),
+                                   input->have_device ? input->last_family
+                                                      : NK_UI_PAD_KEYBOARD);
+    event.down = true;
+    return nk_ui_input_emit(out, cap, 0u, event);
 }
 
 size_t nk_ui_input_pointer_leave(NkUiInput *input, NkUiEvent *out, size_t cap) {
@@ -448,6 +480,7 @@ size_t nk_ui_input_device_change(NkUiInput *input, int device, NkUiPadFamily fam
         input->have_device = true;
         input->last_device = device;
         input->last_family = family;
+        input->touch = false;
     } else if (input->have_device && input->last_device == device) {
         input->have_device = false;
     }
@@ -503,6 +536,10 @@ NkUiPromptStyle nk_ui_input_prompt_style(const NkUiInput *input) {
         return nk_ui_prompt_style_for_family(input->pad_families[input->pad_count - 1u]);
     }
     return NK_UI_PROMPT_KEYCAPS;
+}
+
+bool nk_ui_input_touch_active(const NkUiInput *input) {
+    return input != NULL && input->touch;
 }
 
 bool nk_ui_input_pad_connected(const NkUiInput *input) {

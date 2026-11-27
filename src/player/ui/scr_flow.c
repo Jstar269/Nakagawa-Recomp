@@ -128,7 +128,7 @@ float scr_flow_begin(NkUi *ui, float width, float height, float card_width) {
     if (!nk_ui_begin_container(ui, FLOW_ID_ROOT, &layout, NULL)) {
         return 0.0f;
     }
-    (void)nk_ui_top_bar(ui, FLOW_ID_TOP, NULL, 0u, nk_ui_input_label(nk_ui_prompt_style(ui)),
+    (void)nk_ui_top_bar(ui, FLOW_ID_TOP, NULL, 0u, nk_ui_input_chip_label(ui),
                         nk_ui_prompt_style(ui) != NK_UI_PROMPT_KEYCAPS);
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
     layout.align_x = NK_UI_ALIGN_CENTER;

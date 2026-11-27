@@ -67,6 +67,13 @@ project-authored, and don't replace its licence identifier. Some questions about
 provenance are still under qualified review, so don't bring in code derived from a third party until you
 know exactly where it came from and under which licence.
 
+### Importing compatible source
+
+Read this before vendoring or adapting upstream source ([AGENTS.md section 4](AGENTS.md#4-provenance-and-publication)).
+Source under a GPL-3.0-or-later compatible licence may be vendored or adapted without a per-import decision only
+when it is: pinned to an exact upstream revision, listed in a `PROVENANCE.md` manifest as byte-identical or LOCAL
+DELTA, notices kept (adapted files add a modification note), credited in `CREDITS.md`, and admitted.
+
 ## Provenance controls
 
 Run `make contrib-refresh`, or leave this to a maintainer. Two files,
@@ -167,7 +174,7 @@ maintainer adds the `ci-full-matrix` label
 | Hygiene and security | pre-commit hooks: Ruff, whitespace and encoding, publication safety, secret scanning; then, as later steps of the same job, markdownlint when Markdown changed and, on pushes to `main`, manual runs and merge-queue groups, the main smoke | Run `python -m pre_commit run --files <your files>` locally; for the Markdown step, `npx --yes markdownlint-cli2@0.24.1 <file>` |
 | Python tooling gates (0–3) | The `tools/` unit tests, split into four shards | Run the failing test module with `python -m unittest tools.<module>` |
 | Native and translation gates | Strict C builds (`-std=c99`/`c11 -Werror`) and runtime selftests on Linux | Compile the changed C file with the flags shown in the log |
-| Windows runtime compile gate (smoke, routes, ladder-fuzz, selftests) | The runtime builds with MSYS2 UCRT64 on Windows; each of the four jobs runs its parts one after another | Check Windows-only APIs and headers; the failing step names the part |
+| Windows runtime compile gate (smoke-ladder-fuzz, player, homebrew, routes, cosim, selftests) | The runtime builds with MSYS2 UCRT64 on Windows; each of the six jobs runs its parts one after another | Check Windows-only APIs and headers; the failing step names the part |
 | Trusted provenance attestation | Your change against the private trusted ledger | Provenance mismatches are handled by a maintainer |
 | Fork provenance check | Runs only in a fork, in place of the attestation: the trusted publication audit and public-ledger self-consistency on your exact tree ([docs/FORKING.md](docs/FORKING.md)) | Read the listed findings; the fork's maintainer admits new paths |
 | dependency-review, OSV, CodeQL | Dependency and static security scans | Read the finding; ask if unsure |
@@ -297,6 +304,15 @@ line. It finishes in minutes, and a documentation
 change usually takes seconds. It is a *subset*: `make check` and `make readiness` remain the
 authoritative gates, and CI still runs the hosted matrix.
 
+The Python test modules run in one `unittest` process, whose time limit is six times their
+measured seconds in `tools/ci_test_weights.json`, and never less than 30 minutes. A process that
+takes longer is stopped and reported as a `FAIL` naming `UNITTEST_TIME_LIMIT` and its modules. Set
+`CONTRIB_TEST_JOBS` to a larger number to run up to that many processes in parallel, packed by
+those measured seconds as the hosted shards are (one process per 300 measured seconds at most).
+The modules that change tracked files (that file's `separate` groups) then run afterwards in a
+process of their own. Each process gets its own scaled limit. Parallel processes share your
+checkout and memory, so use them only when nothing else is running.
+
 It is a local pre-push helper with its own smaller gate set — not a representation of the hosted
 matrix, and not evidence that a pull request is ready to merge. A green `contrib-check` does **not**
 stand in for:
@@ -357,7 +373,7 @@ focused gate for each changed surface first:
 | FPU/VFPU conversion | relevant `tools/test_*fpu*.py` plus `fp-convert-selftest`/`vfpu-interp-selftest` |
 | publication/provenance | `tools/policy_sync.py`, both publication-audit legs (the command above, with and without `--worktree`), and `tools/modified_file_notice_audit.py` |
 | docs and agent policy | `python -m unittest tools.test_lint_docs tools.test_dco_policy`, markdownlint (below), and `python tools/audit_public_issue_links.py` |
-| workflow/configuration | `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted matrix |
+| workflow/configuration | `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted matrix on its own head; while `NK_CI_TIERS` is `on`, its reviewer adds the `ci-full-matrix` label for that |
 | LLE CPU / domain modes | `tools/test_cpu_lle.py`, `tools/test_domain_mode.py`, then `mingw32-make native-core-tests` |
 
 The whole Python suite

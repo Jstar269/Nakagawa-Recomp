@@ -535,6 +535,52 @@ int main(int argc, char *argv[]) {
         printf("[PROCESS_TEST] nk_platform_env_utf8 reads unset, empty, non-ASCII, too long and invalid values\n");
     }
 
+    {
+        /* nk_platform_rotate_log_files, as on POSIX (tests/native/test_posix_process.c,
+           subtest 17): newest first, the oldest beyond keep dropped, a gap skipped, the
+           number before the extension of the last component (either separator). */
+        char dir[MAX_PATH];
+        char path[MAX_PATH];
+        char copy[MAX_PATH];
+        assert(GetFullPathNameA(SR_SELFTEST_BUILD_ROOT "\\win32_log_rotation", MAX_PATH, dir, NULL) > 0);
+        (void)CreateDirectoryA(dir, NULL);
+        snprintf(path, sizeof(path), "%s\\player-output.txt", dir);
+        const char *runs[] = { "run 1", "run 2", "run 3" };
+        for (size_t i = 0; i < 3u; i++) {
+            FILE *f = fopen(path, "wb");
+            assert(f != NULL);
+            fputs(runs[i], f);
+            fclose(f);
+            assert(nk_platform_rotate_log_files(path, 2u));
+            assert(GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES);
+        }
+        const char *expect[] = { "player-output.1.txt", "run 3", "player-output.2.txt", "run 2" };
+        for (size_t i = 0; i < 4u; i += 2u) {
+            char text[16] = { 0 };
+            snprintf(copy, sizeof(copy), "%s\\%s", dir, expect[i]);
+            FILE *f = fopen(copy, "rb");
+            assert(f != NULL);
+            (void)fread(text, 1u, sizeof(text) - 1u, f);
+            fclose(f);
+            assert(strcmp(text, expect[i + 1u]) == 0);
+            assert(DeleteFileA(copy));
+        }
+        snprintf(copy, sizeof(copy), "%s\\player-output.3.txt", dir);
+        assert(GetFileAttributesA(copy) == INVALID_FILE_ATTRIBUTES);
+        /* A name with no extension takes the number at its end. */
+        snprintf(path, sizeof(path), "%s\\log", dir);
+        FILE *f = fopen(path, "wb");
+        assert(f != NULL);
+        fclose(f);
+        assert(nk_platform_rotate_log_files(path, 1u));
+        snprintf(copy, sizeof(copy), "%s\\log.1", dir);
+        assert(GetFileAttributesA(copy) != INVALID_FILE_ATTRIBUTES);
+        assert(DeleteFileA(copy));
+        assert(!nk_platform_rotate_log_files("", 2u));
+        assert(RemoveDirectoryA(dir));
+        printf("[PROCESS_TEST] nk_platform_rotate_log_files keeps the newest copies\n");
+    }
+
     printf("[PROCESS_TEST] Process & quoting test PASSED successfully!\n");
 #else
     printf("[PROCESS_TEST] Skipping Windows-specific tests on non-Windows host.\n");
