@@ -1039,9 +1039,13 @@ class PackageCacheTests(unittest.TestCase):
                         package_cache._llvm_tool_identity("clang", environment, "-v")
 
     def test_enhancement_package_location_is_shared_by_guard_and_cache_key(self) -> None:
-        import enhancement_package
-
         package_path = self.root / "synthetic-enhancement.json"
+        package_path.write_text(json.dumps({
+            "schema_version": 1, "id": "synthetic.enhancement",
+            "display_name": "Synthetic Frame Rate Overlay", "version": "1.0.0",
+            "category": "presentation_only", "target_title_id": "*",
+            "capabilities": ["hud_overlay", "fps_counter"],
+        }), encoding="utf-8")
         environments = (
             ({"MAKEFLAGS": f"-j3 ENHANCEMENT_PACKAGE={package_path}"},
              "MAKEFLAGS ENHANCEMENT_PACKAGE"),
@@ -1050,26 +1054,16 @@ class PackageCacheTests(unittest.TestCase):
             ({"CODEGEN_USER_ARGS": f"--enhancement-package={package_path}"},
              "CODEGEN_USER_ARGS --enhancement-package"),
         )
-        with (
-            mock.patch.object(
-                enhancement_package,
-                "load_and_validate_package",
-                return_value={"id": "synthetic.enhancement"},
-            ),
-            mock.patch.object(
-                enhancement_package, "compute_package_digest", return_value="a" * 64
-            ),
-        ):
-            for environment, expected_source in environments:
-                with self.subTest(environment=environment):
-                    self.assertEqual(
-                        package_cache.ambient_enhancement_package(environment),
-                        expected_source,
-                    )
-                    options = package_cache.enhancement_package_options(environment)
-                    self.assertEqual(
-                        options["enhancement_package_id"], "synthetic.enhancement"
-                    )
+        for environment, expected_source in environments:
+            with self.subTest(environment=environment):
+                self.assertEqual(
+                    package_cache.ambient_enhancement_package(environment),
+                    expected_source,
+                )
+                options = package_cache.enhancement_package_options(environment)
+                self.assertEqual(
+                    options["enhancement_package_id"], "synthetic.enhancement"
+                )
 
     def test_completion_manifest_checks_aot_key_components_once(self) -> None:
         package_dir, key, _ = self._new_package_dir("single-aot-key-check")

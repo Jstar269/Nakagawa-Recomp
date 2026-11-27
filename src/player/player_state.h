@@ -1881,10 +1881,10 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
 /* The library's package status check: validates with an info struct, so the runtime
  * source commit is read back and a package whose paths the player cannot hold is
  * INCOMPATIBLE here, not first at launch. */
-NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
-                                                           const GameRecord *game,
-                                                           NkRuntimePackageInfo *info,
-                                                           char *reason, size_t reason_size);
+NkRuntimePackageStatus player_runtime_package_status_check(
+    const char *user_data_root, const GameRecord *game,
+    const NkLaunchEnhancementSources *sources, NkRuntimePackageInfo *info,
+    char *reason, size_t reason_size);
 /* Records the runtime source commit the validated package records (#2875) for the entry
  * stored at game_index: commit and origin as NkRuntimePackageInfo holds them. Called
  * only after a validation ran; an empty origin (a package from before the record)
@@ -2102,6 +2102,7 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
  * (<source>/assets/enhancements, the tree package_builder_find_cli finds
  * tools/nk_cli.py in). False when there is no source tree. */
 bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size);
+void player_app_enhancement_sources(const PlayerApp *app, NkLaunchEnhancementSources *out);
 /* Re-reads every title's enhancement package and sets each GameRecord's
  * enhancement_package_id. player_app_sync_library calls it. */
 void player_app_refresh_title_enhancements(PlayerApp *app);
@@ -2421,6 +2422,7 @@ typedef struct {
     GameRecord game;
     char package_root[MAX_PATH_LEN];
     bool has_package_root;
+    NkLaunchEnhancementSources enhancement_sources;
     PlayerSettings settings;
     bool launch_headless;
     uint32_t headless_accept_presented_frames;

@@ -12,6 +12,8 @@
 #include "nk_platform.h"
 #include "nk_shared_helpers.h"
 #include <ctype.h>
+#include <float.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -3054,6 +3056,32 @@ static bool package_join_path(char *out, size_t out_size,
                                NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+bool nk_title_manifest_enhancement_declaration_path(
+    const char *user_root, const char *shipped_root, const char *disc_id,
+    bool code_hook, char *out, size_t out_size, bool *out_shipped
+) {
+    if (out_shipped) *out_shipped = false;
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    char disc_key[10];
+    if (!nk_manifest_normalize_disc_id(disc_id, disc_key)) return false;
+    for (size_t i = 0; disc_key[i]; i++) disc_key[i] = (char)nk_ascii_lower(disc_key[i]);
+    char leaf[24];
+    snprintf(leaf, sizeof(leaf), "%s-%s.json", disc_key, code_hook ? "cull" : "60hz");
+    char user_folder[NK_MAX_PATH];
+    if (package_join_path(user_folder, sizeof(user_folder), user_root, "enhancements") &&
+        package_join_path(out, out_size, user_folder, leaf) &&
+        nk_platform_file_exists(out)) {
+        return true;
+    }
+    if (package_join_path(out, out_size, shipped_root, leaf) && nk_platform_file_exists(out)) {
+        if (out_shipped) *out_shipped = true;
+        return true;
+    }
+    out[0] = '\0';
+    return false;
+}
+
 static bool package_resolved_path(const char *path, char *out, size_t out_size) {
     if (!path || !out || out_size == 0) return false;
 #if defined(_WIN32) || defined(_WIN64)
@@ -3830,6 +3858,131 @@ static void package_identity_update_u64(NkSha256 *ctx, uint64_t value) {
         bytes[i] = (uint8_t)(value >> (i * 8));
     }
     nk_sha256_update(ctx, bytes, sizeof(bytes));
+}
+
+static void declaration_tag(NkSha256 *hash, uint8_t tag) {
+    nk_sha256_update(hash, &tag, 1);
+}
+
+static void declaration_string(NkSha256 *hash, const char *text) {
+    size_t length = strlen(text);
+    declaration_tag(hash, 's');
+    package_identity_update_u64(hash, length);
+    nk_sha256_update(hash, (const uint8_t *)text, length);
+}
+
+static int compare_declaration_members(const void *left, const void *right) {
+    const JsonMember *const *first = left;
+    const JsonMember *const *second = right;
+    return strcmp((*first)->key, (*second)->key);
+}
+
+/* v1 typed source fingerprint. Keep the tags and payload encodings in sync
+ * with enhancement_declaration_fingerprint in tools/nk_core/package_cache.py. */
+static bool declaration_hash_node(NkSha256 *hash, const JsonNode *node) {
+    switch (node->type) {
+        case JSON_NULL:
+            declaration_tag(hash, 'n');
+            return true;
+        case JSON_BOOL:
+            declaration_tag(hash, node->u.bool_val ? 't' : 'f');
+            return true;
+        case JSON_NUMBER:
+            if (node->u.num.is_integer) {
+                if (node->u.num.integer_overflow) return false;
+                declaration_tag(hash, 'i');
+                package_identity_update_u64(hash, (uint64_t)node->u.num.int_val);
+            } else {
+                uint64_t bits;
+                if (FLT_RADIX != 2 || DBL_MANT_DIG != 53 || DBL_MAX_EXP != 1024 ||
+                    sizeof(bits) != sizeof(node->u.num.num_val) ||
+                    !isfinite(node->u.num.num_val)) return false;
+                memcpy(&bits, &node->u.num.num_val, sizeof(bits));
+                declaration_tag(hash, 'd');
+                package_identity_update_u64(hash, bits);
+            }
+            return true;
+        case JSON_STRING:
+            declaration_string(hash, node->u.str_val);
+            return true;
+        case JSON_ARRAY:
+            declaration_tag(hash, 'a');
+            package_identity_update_u64(hash, node->u.arr.count);
+            for (size_t i = 0; i < node->u.arr.count; i++) {
+                if (!declaration_hash_node(hash, node->u.arr.items[i])) return false;
+            }
+            return true;
+        case JSON_OBJECT: {
+            declaration_tag(hash, 'o');
+            size_t count = node->u.obj.count;
+            package_identity_update_u64(hash, count);
+            if (count == 0) return true;
+            const JsonMember **order = malloc(count * sizeof(*order));
+            if (!order) return false;
+            for (size_t i = 0; i < count; i++) order[i] = &node->u.obj.members[i];
+            qsort(order, count, sizeof(*order), compare_declaration_members);
+            bool ok = true;
+            for (size_t i = 0; ok && i < count; i++) {
+                declaration_string(hash, order[i]->key);
+                ok = declaration_hash_node(hash, order[i]->val);
+            }
+            free(order);
+            return ok;
+        }
+    }
+    return false;
+}
+
+static bool declaration_symbol_map(const char *path, char out[65]) {
+    const size_t length = strlen(path);
+    if (length < 5 || strcmp(path + length - 5, ".json") != 0) return false;
+    char sidecar[NK_MAX_PATH + sizeof(".symbols.json")];
+    int written = snprintf(sidecar, sizeof(sidecar), "%.*s.symbols.json", (int)(length - 5), path);
+    if (written < 0 || (size_t)written >= sizeof(sidecar)) return false;
+    return !nk_platform_file_exists(sidecar) || package_hash_file(sidecar, out);
+}
+
+bool nk_title_manifest_enhancement_declaration_identity(
+    const char *path, const char *id, const char *title_id, bool read_symbol_map,
+    NkEnhancementDeclarationIdentity *out
+) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!id || !title_id) return false;
+    char *source = NULL;
+    size_t length = 0;
+    if (!package_read_json(path, NK_ACE_DECLARATION_MAX_BYTES, NULL, &source, &length, NULL, 0)) {
+        return false;
+    }
+    /* nk_json exposes C strings, so refuse decoded NULs before parsing can
+     * discard their suffix. Skip escaped backslashes as a single escape. */
+    for (size_t i = 0; i + 1 < length; i++) {
+        if (source[i] != '\\') continue;
+        i++;
+        if (length - i >= 5 && memcmp(source + i, "u0000", 5) == 0) {
+            free(source);
+            return false;
+        }
+    }
+    JsonNode *root = nk_json_parse_number_limit(source, length, NK_ACE_DECLARATION_MAX_BYTES,
+                                                NULL, 0);
+    free(source);
+    const char *recorded_id = NULL;
+    const char *recorded_title = NULL;
+    bool matches = package_string(obj_get(root, "id"), &recorded_id) &&
+                   strcmp(recorded_id, id) == 0 &&
+                   package_string(obj_get(root, "target_title_id"), &recorded_title) &&
+                   strcmp(recorded_title, title_id) == 0;
+    NkSha256 hash;
+    nk_sha256_init(&hash);
+    static const uint8_t domain[] = "nakagawa-ace-declaration-v1";
+    nk_sha256_update(&hash, domain, sizeof(domain));
+    bool use_sidecar = read_symbol_map && obj_get(root, "published_package") == NULL;
+    bool ok = matches && declaration_hash_node(&hash, root);
+    json_free(root);
+    if (!ok || (use_sidecar && !declaration_symbol_map(path, out->symbol_map_sha256))) return false;
+    package_identity_finish(&hash, out->fingerprint);
+    return true;
 }
 
 static void package_identity_update_file(NkSha256 *ctx, const char *relative,
@@ -5649,14 +5802,31 @@ static bool package_catalog_identity_matches(const char *disc_id,
    (code_hook_package_id, section 9.9), and an authentic build records neither,
    so an enhanced build copied into the authentic folder, or one built from
    other packages, never launches as the variant the user chose. */
+static bool package_optional_digest(const JsonNode *node, char out[65]) {
+    if (!node) return true;
+    const char *digest = NULL;
+    if (!package_sha256(node, &digest)) return false;
+    memcpy(out, digest, 65);
+    return true;
+}
+
 static bool package_validate_variant(const JsonNode *package,
                                      const char *enhancement_package_id,
+                                     NkRuntimePackageInfo *info,
                                      char *error, size_t error_size) {
     const JsonNode *options = obj_get(obj_get(package, "cache"), "codegen_options");
     const JsonNode *recorded = obj_get(options, "enhancement_package_id");
     const JsonNode *recorded_hook = obj_get(options, "code_hook_package_id");
+    const JsonNode *declaration = obj_get(options, "enhancement_declaration_sha256_v1");
+    const JsonNode *hook_declaration = obj_get(options, "code_hook_declaration_sha256_v1");
+    const JsonNode *symbol_map = obj_get(options, "enhancement_symbol_map_sha256");
+    const JsonNode *hook_symbol_map = obj_get(options, "code_hook_symbol_map_sha256");
+    const JsonNode *explicit_symbol_map = obj_get(options, "enhancement_explicit_symbol_map");
+    const JsonNode *explicit_map_digest = obj_get(options, "enhancement_explicit_symbol_map_sha256");
     if (!enhancement_package_id || !enhancement_package_id[0]) {
-        if (recorded || recorded_hook || obj_get(options, "enhancement_package_epoch")) {
+        if (recorded || recorded_hook || declaration || hook_declaration ||
+            symbol_map || hook_symbol_map || explicit_symbol_map || explicit_map_digest ||
+            obj_get(options, "enhancement_package_epoch")) {
             snprintf(error, error_size,
                      "The package in the authentic package folder is an enhanced build.");
             return false;
@@ -5683,6 +5853,20 @@ static bool package_validate_variant(const JsonNode *package,
                  enhancement_package_id);
         return false;
     }
+    const char *map_digest = NULL;
+    if ((!plus && (hook_declaration || hook_symbol_map)) ||
+        ((explicit_symbol_map != NULL) != (explicit_map_digest != NULL)) ||
+        (explicit_map_digest && !package_sha256(explicit_map_digest, &map_digest)) ||
+        (explicit_symbol_map && (explicit_symbol_map->type != JSON_BOOL ||
+                                 !explicit_symbol_map->u.bool_val || symbol_map || hook_symbol_map)) ||
+        !package_optional_digest(declaration, info->enhancement_declaration.fingerprint) ||
+        !package_optional_digest(hook_declaration, info->code_hook_declaration.fingerprint) ||
+        !package_optional_digest(symbol_map, info->enhancement_declaration.symbol_map_sha256) ||
+        !package_optional_digest(hook_symbol_map, info->code_hook_declaration.symbol_map_sha256)) {
+        snprintf(error, error_size, "The enhanced package records an invalid declaration identity.");
+        return false;
+    }
+    info->enhancement_explicit_symbol_map = explicit_symbol_map != NULL;
     return true;
 }
 
@@ -5968,7 +6152,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         json_free(package);
         return status;
     }
-    if (!package_validate_variant(package, enhancement_package_id, parse_error,
+    if (!package_validate_variant(package, enhancement_package_id, &resolved_info, parse_error,
                                   sizeof(parse_error))) {
         package_rebuild_reason(reason, reason_size, parse_error);
         json_free(package);
