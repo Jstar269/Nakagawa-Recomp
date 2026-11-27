@@ -2298,6 +2298,48 @@ static int sdl3vk_capture_selftest_body(void) {
     }
     if (!ok) return 1;
 
+    /* ---- physical-device preference (#3187); no Vulkan needed ----------------------- */
+    /* sdl3vk_init picks among presentable devices with pick_device_index: discrete, then
+     * integrated, then virtual, then other, then CPU (llvmpipe, lavapipe, SwiftShader), the
+     * earliest of equal rank. A loader that lists a software device first must not win. */
+    {
+        const VkPhysicalDeviceType cpu = VK_PHYSICAL_DEVICE_TYPE_CPU;
+        const VkPhysicalDeviceType dgpu = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        const VkPhysicalDeviceType igpu = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+        const VkPhysicalDeviceType vgpu = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
+        const VkPhysicalDeviceType other = VK_PHYSICAL_DEVICE_TYPE_OTHER;
+        const VkPhysicalDeviceType cpu_then_dgpu[2] = { cpu, dgpu };
+        const VkPhysicalDeviceType cpu_only[1] = { cpu };
+        const VkPhysicalDeviceType two_igpu_cpu[3] = { cpu, igpu, igpu };
+        const VkPhysicalDeviceType two_cpu[2] = { cpu, cpu };
+        const VkPhysicalDeviceType ladder[5] = { cpu, other, vgpu, igpu, dgpu };
+        const VkPhysicalDeviceType igpu_then_dgpu[2] = { igpu, dgpu };
+        if (pick_device_index(cpu_then_dgpu, 2u) != 1) {
+            fprintf(stderr, "device pick: a discrete GPU listed after a CPU device must win\n");
+            ok = 0;
+        }
+        if (pick_device_index(cpu_only, 1u) != 0) {
+            fprintf(stderr, "device pick: a CPU device alone must still be taken\n"); ok = 0;
+        }
+        if (pick_device_index(two_igpu_cpu, 3u) != 1 || pick_device_index(two_cpu, 2u) != 0) {
+            fprintf(stderr, "device pick: equal-rank devices must keep enumeration order\n");
+            ok = 0;
+        }
+        if (pick_device_index(ladder, 5u) != 4 || pick_device_index(ladder, 4u) != 3 ||
+            pick_device_index(ladder, 3u) != 2 || pick_device_index(ladder, 2u) != 1) {
+            fprintf(stderr, "device pick: rank must be discrete > integrated > virtual > other > "
+                            "CPU\n");
+            ok = 0;
+        }
+        if (pick_device_index(igpu_then_dgpu, 2u) != 1) {
+            fprintf(stderr, "device pick: a discrete GPU must beat an integrated one\n"); ok = 0;
+        }
+        if (pick_device_index(cpu_only, 0u) != -1) {
+            fprintf(stderr, "device pick: no candidate must pick none\n"); ok = 0;
+        }
+    }
+    if (!ok) return 1;
+
     /* ---- cap_test_verify_ppm closes a file it refuses, so the removal that follows works
      * (on Windows an open file cannot be removed) ------------------------------------- */
     {
