@@ -2404,6 +2404,18 @@ class NativePlayerUiTests(unittest.TestCase):
                 self.assertEqual([view for view, _ in self.screens(run)],
                                  ["settings", "library"])
 
+    def test_next_ui_touch_opens_settings_and_android_back_returns(self) -> None:
+        """With touch only, the library's prompt bar has a SETTINGS button to tap (at the
+        bar's right end, 1156-1248 x 670-714 at 1280 x 720; a first tap on the bar's empty
+        left end makes touch the active input), and Android's back button (SDLK_AC_BACK) is
+        Back: it returns to the library."""
+        run = self.next_ui_run("library", ("WAIT_MS=200", "MOUSE_MOVE=100,692", "TOUCH_DOWN",
+                                           "TOUCH_UP", "WAIT_MS=200", "MOUSE_MOVE=1202,692",
+                                           "TOUCH_DOWN", "TOUCH_UP", "WAIT_MS=300",
+                                           "KEY_AC_BACK", "WAIT_MS=200"))
+        self.assertEqual([view for view, _ in self.screens(run)],
+                         ["library", "settings", "library"])
+
     def test_next_ui_home_and_end_reach_the_first_and_last_game(self) -> None:
         """Home and End in a library of several pages: End focuses the last game on
         the last page, Home the first game on the first."""

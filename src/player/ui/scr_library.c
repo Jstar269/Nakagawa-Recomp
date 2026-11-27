@@ -385,7 +385,8 @@ static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *mod
 
 /* The empty library: one card that says what to do, with the one action. It
    leaves out its icon when TEST THIS PC needs the room below it. */
-static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
+static PlayerUiAction library_empty(NkUi *ui, bool with_icon, NkHostKind host) {
+    const bool pc = player_ui_host_is_pc(host);
     static const NkUiShape disc[] = {
         {NK_UI_SHAPE_CIRCLE, 0x6B9FF0FFu, 0.0f, 0u, {32.0f, 32.0f, 16.5f}},
         {NK_UI_SHAPE_CIRCLE, 0x18202BFFu, 0.0f, 0u, {32.0f, 32.0f, 13.5f}},
@@ -418,7 +419,8 @@ static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
         nk_ui_text_role(ui, LIBRARY_ID_EMPTY_TITLE, NK_UI_STR(LIBRARY_EMPTY_TITLE),
                         NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, LIBRARY_ID_EMPTY_TEXT,
-                        NK_UI_STR(LIBRARY_EMPTY_SETUP_HELP),
+                        pc ? NK_UI_STR(LIBRARY_EMPTY_SETUP_HELP)
+                           : NK_UI_STR(LIBRARY_EMPTY_SETUP_HELP_DEVICE),
                         NK_UI_TYPE_BODY, theme->muted);
         {
             NkUiLayout actions = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
@@ -438,9 +440,12 @@ static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
                 nk_ui_end_container(ui);
             }
         }
-        nk_ui_text_role(ui, LIBRARY_ID_EMPTY_NOTE,
-                        NK_UI_STR(LIBRARY_DROP_DISC_HINT),
-                        NK_UI_TYPE_CAPTION, theme->dim);
+        /* Only a PC's window takes a dropped disc image. */
+        if (pc) {
+            nk_ui_text_role(ui, LIBRARY_ID_EMPTY_NOTE,
+                            NK_UI_STR(LIBRARY_DROP_DISC_HINT),
+                            NK_UI_TYPE_CAPTION, theme->dim);
+        }
         nk_ui_end_container(ui);
     }
     nk_ui_end_container(ui);
@@ -554,7 +559,10 @@ static PlayerUiAction library_demos(NkUi *ui, const PlayerUiLibraryModel *model,
             label.align_y = NK_UI_ALIGN_CENTER;
             if (nk_ui_begin_container(ui, LIBRARY_ID_DEMOS_LABEL, &label, NULL)) {
                 NkUiTextStyle lead = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
-                nk_ui_eyebrow(ui, LIBRARY_ID_DEMOS_EYEBROW, NK_UI_STR(LIBRARY_DEMOS_HEADING));
+                nk_ui_eyebrow(ui, LIBRARY_ID_DEMOS_EYEBROW,
+                              player_ui_host_is_pc(model->host)
+                                  ? NK_UI_STR(LIBRARY_DEMOS_HEADING)
+                                  : NK_UI_STR(LIBRARY_DEMOS_HEADING_DEVICE));
                 nk_ui_text(ui, LIBRARY_ID_DEMOS_LEAD,
                            nk_ui_text_clamp(ui,
                                             NK_UI_STR(LIBRARY_DEMOS_HELP),
@@ -874,7 +882,8 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                          library_heading_row_height(nk_ui_text_scale(ui)) - NK_UI_SPACE_4 -
                          (has_notice ? LIBRARY_NOTICE_ROW_HEIGHT : 0.0f) -
                          library_demos_height(demo_count, columns, nk_ui_text_scale(ui));
-            PlayerUiAction empty = library_empty(ui, room >= LIBRARY_EMPTY_CARD_HEIGHT);
+            PlayerUiAction empty = library_empty(ui, room >= LIBRARY_EMPTY_CARD_HEIGHT,
+                                                  model->host);
             if (empty.kind != PLAYER_UI_ACTION_NONE) result = empty;
         } else {
             start = model->page_index > SIZE_MAX / page_size
