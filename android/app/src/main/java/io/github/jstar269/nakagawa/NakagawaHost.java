@@ -3,14 +3,19 @@
 
 package io.github.jstar269.nakagawa;
 
+import android.app.Activity;
 import android.content.Context;
 import android.hardware.Sensor;
 import android.content.pm.PackageInfo;
 import android.content.res.AssetManager;
+import android.os.Build;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
+import android.view.KeyEvent;
+import android.window.OnBackInvokedDispatcher;
 
+import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLSurface;
 
 import java.io.BufferedInputStream;
@@ -71,6 +76,25 @@ final class NakagawaHost {
             if (sensor == null) return;
             super.enableSensor(sensortype, enabled);
         }
+    }
+
+    /**
+     * Gives the system's Back to SDL on Android 16 and newer (#3220). An app that targets API 36
+     * or higher gets predictive back there: Android dispatches no KEYCODE_BACK and calls no
+     * onBackPressed, and with no callback registered it finishes the activity itself. SDL 3.4
+     * registers none, so Back ended a running title unsaved and never reached the launcher's UI.
+     * This callback sends SDL the key Android 15 and older still dispatch, so the player and the
+     * runtime see SDLK_AC_BACK on every version. On Android 13 to 15 the app does not opt in to
+     * predictive back (no android:enableOnBackInvokedCallback), so the key arrives as before and
+     * no callback is registered. Call after SDL's onCreate has loaded its library.
+     */
+    static void sendBackToSdl(Activity activity) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return;
+        activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT, () -> {
+                    SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_BACK);
+                    SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_BACK);
+                });
     }
 
     /** The user data folder. Every host names it Nakagawa, with the same layout inside. */
