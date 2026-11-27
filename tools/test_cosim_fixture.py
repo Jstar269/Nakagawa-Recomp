@@ -356,7 +356,8 @@ class FixtureLayoutTests(unittest.TestCase):
         Most cells end in `jr $ra`. A few do not, for reasons that are part of
         what they test, so each is named here rather than blanket-exempted:
 
-          jrtail    ends in `jr $rs` and relinquishes control through its
+          jrtail, jrlowtail
+                    end in `jr $rs` and relinquish control through the
                     callee's `jr $ra`;
           xtail, xsibtail
                     the same, into the omitted middle of a cross-tier chain;
@@ -375,7 +376,7 @@ class FixtureLayoutTests(unittest.TestCase):
         Anything else without a defined exit has no synchronization point in
         either lane.
         """
-        register_tail = {"jrtail", "xtail", "xsibtail"}
+        register_tail = {"jrtail", "jrlowtail", "xtail", "xsibtail"}
         jump_tail = {"xtailmid", "jthunk", "xsibmid", "rs_tail"}
         for name, (_offset, words) in self.layout.items():
             if name in cosim.NON_PROGRAM_CELLS or name in cosim.AOT_ORACLE_ONLY_CELLS:

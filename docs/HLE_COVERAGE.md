@@ -23,12 +23,12 @@ Classes are listed strongest first. A path takes the first class whose source na
 
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
-| `hardware-measured` | 64 | 74 |
+| `hardware-measured` | 64 | 77 |
 | `ppsspp-derived` | 192 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 396 | 189 |
+| `synthetic` | 396 | 187 |
 | `unverified` | 68 | 22 |
-| total | 720 | 373 |
+| total | 720 | 374 |
 
 The VFPU census also lists 301 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -47,7 +47,7 @@ them, so they carry no class; `python tools/vfpu_coverage_report.py` lists them.
   `tools/psp_oracle/manifest.json` links them (its `case_apis` cells); a row ending `unlinked hardware
   note` carries such a note, and a row ending `PSP-measured cells only` names the exact cells measured,
   not the whole function.
-- Measured VFPU oracle rows that no census form cites yet: `PSP-VFPU-CONSTANTS-001`, `PSP-VFPU-MFVMTV-001`, `PSP-VFPU-PREFIX-001`, `PSP-VFPU-ROUNDSEP-001`, `PSP-VFPU-UNMODELED-001`, `PSP-VFPU-WIDEROPS-001`. Their forms keep the class
+- Measured VFPU oracle rows that no census form cites yet: `PSP-VFPU-CONSTANTS-001`, `PSP-VFPU-MFVMTV-001`, `PSP-VFPU-ROUNDSEP-001`, `PSP-VFPU-UNMODELED-001`. Their forms keep the class
   their census row gives until the census links them.
 
 At run time `sr_syscall` logs one line the first time each `unverified` NID with a handler is
@@ -866,7 +866,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-19-66000000-1e6d66f9fff4` | `0x19` | `0x66000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-19-66008000-0d636b33954a` | `0x19` | `0x66008008` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-a, issue-40-group-b |
 | `vfpu-19-66008000-438352e68b6e` | `0x19` | `0x66008088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
-| `vfpu-19-66808000-0c9d9ba97632` | `0x19` | `0x66808001` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-b |
+| `vfpu-19-66808000-3fa57998d4ff` | `0x19` | `0x66808001` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-b |
 | `vfpu-19-67010100-a5e808c8d281` | `0x19` | `0x6701018f` | 2 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_pspautotests_vdet` |
 | `vfpu-19-67038100-7233b2807171` | `0x19` | `0x6703810f` | 3 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_pspautotests_vdet` |
 | `vfpu-19-67058100-c940cc74b7f7` | `0x19` | `0x67058181` | 4 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_pspautotests_vdet` |
@@ -1042,10 +1042,10 @@ a title that translates none has generated code unchanged.
 | `vfpu-34-d03f0000-e78ad9932eff` | `0x34` | `0xd03f0000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d03f8000-a9f423550f5f` | `0x34` | `0xd03f8084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d03f8000-c17e8d52cda8` | `0x34` | `0xd03f8004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0440000-43a479f884c1` | `0x34` | `0xd0440000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0440000-a5e816dfe20e` | `0x34` | `0xd0440084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0448000-7a4fb93af934` | `0x34` | `0xd0448004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0448000-9ca02b934046` | `0x34` | `0xd0448084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0440000-6b66cb78f426` | `0x34` | `0xd0440084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0440000-e01586f1ea6d` | `0x34` | `0xd0440000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEROPS-001 |
+| `vfpu-34-d0448000-be8e9522f6a3` | `0x34` | `0xd0448004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0448000-fdfe44897f18` | `0x34` | `0xd0448084` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEROPS-001 |
 | `vfpu-34-d0450000-6b85266691e1` | `0x34` | `0xd0450000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS-001 |
 | `vfpu-34-d0450100-d11658a3e0f7` | `0x34` | `0xd0450180` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS-001 |
 | `vfpu-34-d0468000-ac69ea1bf731` | `0x34` | `0xd046807f` | 3 | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-FUNNEL-001 |
@@ -1090,6 +1090,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-37-dd000000-fc234082344e` | `0x37` | `0xdd000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-37-de000000-7caa71cf79ea` | `0x37` | `0xde000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-37-df000000-bb5f76d2c6f9` | `0x37` | `0xdf000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-37-df800000-0b1754e6832a` | `0x37` | `0xdf800000` | - | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-PREFIX-001 |
 | `vfpu-3a-e8000000-660eb05aa6f6` | `0x3a` | `0xe8000000` | - | `aot-direct` | `unverified` | no recorded evidence |
 | `vfpu-3a-e8018100-fdbb9ee1712e` | `0x3a` | `0xe801810f` | - | `aot-direct` | `unverified` | no recorded evidence |
 | `vfpu-3a-e8050100-3ea357128bd4` | `0x3a` | `0xe8050101` | - | `aot-direct` | `unverified` | no recorded evidence |

@@ -232,9 +232,12 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 				// runtime interpreter's decode requires. A computed target of 0 is a null code
 				// pointer (#1375): it stops at the transfer, before the link write and the delay
 				// slot, as a memory fault at address 0, where the production lanes refuse it.
+				// The PSP ignores bits 1:0 of the target (pspautotests e37443a6
+				// tests/cpu/jump/unaligned.expected, recorded on a PSP), so the latched target
+				// is the aligned one, as in the production lanes.
 				case 0x08: {  // jr
 					if ((op & 0x001FFFC0u) != 0u) return StopReason::kUnimplemented;
-					const uint32_t target = s->r[Rs(op)];
+					const uint32_t target = s->r[Rs(op)] & ~3u;
 					if (target == 0u) return StopReason::kMemoryFault;
 					s->next_pc = target;
 					s->in_delay_slot = true;
@@ -242,7 +245,7 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 				}
 				case 0x09: {  // jalr
 					if ((op & 0x001F07C0u) != 0u) return StopReason::kUnimplemented;
-					const uint32_t target = s->r[Rs(op)];
+					const uint32_t target = s->r[Rs(op)] & ~3u;
 					if (target == 0u) return StopReason::kMemoryFault;
 					SetR(s, Rd(op), branch_pc + 8);
 					s->next_pc = target;
@@ -454,10 +457,10 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 					return StopReason::kRunning;
 				case 0x04: s->fi[fs] = s->r[ft]; return StopReason::kRunning;     // mtc1
 				case 0x06:
-					// ctc1 stores the guest FCSR except bits 25..31, which the
-					// PSP FPU does not implement (PSP-FPU-CC-001: a ctc1 of
-					// 0xFE800000 reads back 0x00800000). The cached fpcond
-					// mirror resyncs so FCC0 stays architectural in fcr31.
+					// ctc1 stores the guest FCSR except the bits the PSP does
+					// not store (SR_FCR31_CTC1_UNWRITABLE: 18..22 and 25..31).
+					// The cached fpcond mirror resyncs so FCC0 stays
+					// architectural in fcr31.
 					if (fs == 31) {
 						s->fcr31 = s->r[ft] & ~SR_FCR31_CTC1_UNWRITABLE;
 						s->fpcond = (s->fcr31 >> 23) & 1u;

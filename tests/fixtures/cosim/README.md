@@ -319,6 +319,7 @@ returns through its callee's `jr $ra` instead.
 | `eslot_call` | the same entry on the delay slot of a `jal`: the entry word runs as the entry, then as the call's slot, and not again when leaf A returns |
 | `link` / `linkr` | `jal` and `jalr` link semantics with a conventional `$ra`-preserving frame |
 | `jrslot` / `jrtail` | a computed call and a computed tail call whose delay slots rewrite the target register |
+| `jrlow` / `jrlowx` / `jrlowtail` | a `jalr` to an entry + 2 (and + 1 into an interpreted callee, lane MIXED) whose callee returns to its resume PC + 3, and a `jr` to an entry + 3: the PSP clears bits 1:0 of the target (pspautotests e37443a6 `tests/cpu/jump/unaligned.expected`, recorded on a PSP), which the harness checks in both lanes |
 | `cslot_call` / `cslot_branch` / `cslot_dst` | a branch onto the delay slot of a `jal`, and of a conditional branch, whose next word is another entry: the slot runs once as an ordinary word and the guest goes on into that entry (the conditional form stops at the entry only in the split lane) |
 | `hilo` | `HI`/`LO` through signed and unsigned multiply (they differ in the high word only) |
 | `llsc` | `ll`/`sc` and the link bit: an unlinked `sc` fails, a linked one stores and reports 1, `sc` leaves the link set, `ll $zero` links, an atomic-increment retry loop, and `sc` whose `rt` is its own base |

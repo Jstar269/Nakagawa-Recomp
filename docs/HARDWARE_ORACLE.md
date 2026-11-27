@@ -697,7 +697,9 @@ One console is one data point; see §11. Nothing here closes issue #70
     as FCC0 in `tools/codegen.py` and `src/ref/interp.cpp`; refusing a nonzero code, as
     discussed for PR #934, would have rejected encodings the console executes. `ctc1` stored
     the whole guest word, so `cfc1` returned bits 25..31; it now drops them
-    (`SR_FCR31_CTC1_UNWRITABLE` in `src/rt/fp_convert.h`).
+    (`SR_FCR31_CTC1_UNWRITABLE` in `src/rt/fp_convert.h`). That word also drops bits 18..22, which
+    pspautotests e37443a6 `tests/cpu/fpu/fcr.expected` (recorded on a PSP) reads back as 0; this
+    probe did not write them.
   - *VFPU set-compares (`PSP-VFPU-CMP-001`, issue #326).* Raw result words for
     `vscmp.s`/`vsge.s`/`vslt.s S002, S000, S001`:
 

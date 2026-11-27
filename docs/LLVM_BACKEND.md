@@ -108,7 +108,8 @@ the C body. What the C path leaves to a C compiler is explicit here:
   `sr_tail_record` for every TAIL transfer (#855), the return capture of `jr $ra`, the HLE
   syscall boundary and `break`.
 - **Delay slots** are emitted at their owning transfer. A branch condition and a computed
-  `jr`/`jalr` target are read before the slot (PR #126); a branch-likely runs its slot only
+  `jr`/`jalr` target are read before the slot (PR #126), the target with bits 1:0 cleared as
+  the PSP runs it, as in C; a branch-likely runs its slot only
   on the taken path; a slot that is also a branch target is emitted again under its own
   label and skipped on fall-through, as in C.
 - **Memory** goes through the existing access helpers: bounds, VRAM coherence, watchpoints

@@ -231,7 +231,8 @@ typedef struct {
     uint32_t base;
     uint32_t cur;
     uint32_t end;
-    uint32_t bsize;
+    uint32_t bsize;        /* the blockSize the guest asked for, as ReferFplStatus reports it */
+    uint32_t stride;       /* bsize rounded up to the pool's alignment: the distance between blocks */
     int used;
     uint32_t block_uid;
     uint32_t attr;

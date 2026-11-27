@@ -271,6 +271,10 @@ needs route B.
   row below) the picture should come back, but no emulator or device has run it yet. Report
   whether the picture comes back after each return.
 - The same rotate, fold and background steps on the launcher.
+- **Back.** While the demo runs, press Back or swipe in from a side edge: the pause menu should
+  open, and the demo should keep its place. Back again in the menu goes back or resumes, as Esc
+  does on a PC. Before this change, Back could end the demo. Report what Back does on each device,
+  and its Android version.
 
 ### What to report
 

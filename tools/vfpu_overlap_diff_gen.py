@@ -68,6 +68,15 @@ WIDE_DOT_WORDS: tuple[tuple[str, int], ...] = (
 )
 
 
+# The vfim.s immediates whose PSP words check_vfim_measured() pins: the 14 halves of
+# pspautotests e37443a6 tests/cpu/vfpu/vfim.expected, then the 8 of PSP-VFPU-PREFIX-001.
+VFIM_HALVES: tuple[int, ...] = (
+    0x0000, 0x8000, 0x0001, 0x0090, 0x03FF, 0x8090, 0x0400, 0x3C00, 0x7BFF, 0x7C00, 0xFC00,
+    0x7C01, 0x7E00, 0xFDFF,
+)
+VFIM_PREFIX_HALVES: tuple[int, ...] = (0x0000, 0x3C00, 0xC000, 0x7C00, 0x7C01, 0x8000, 0x0400, 0x7BFF)
+
+
 def census_gap_size(word: int) -> int:
     """Vector size 1..4 from bit 7 (low) and bit 15 (high)."""
     return int(_decode_size_independent(word))
@@ -216,6 +225,18 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # destination at matrix 2.
     for name, word in WIDE_DOT_WORDS:
         cases.append((word, f"wide-{name}", census_gap_size(word)))
+
+    # vocp.s S200, S000, vocp.q C200, C000 and vcrs.t C200, C000, C010 at the probe words of
+    # PSP-VFPU-WIDEROPS-001 (PSP-3000, 2026-11-10, issue #326); vfim.s S000 with each half of
+    # pspautotests e37443a6 tests/cpu/vfpu/vfim.expected and vfim.s S200 with each half of
+    # PSP-VFPU-PREFIX-001. check_vocp_vcrs_measured() and check_vfim_measured() find them by name.
+    cases.append((0xD0440008, "wo-vocp-s", 1))
+    cases.append((0xD0448088, "wo-vocp-q", 4))
+    cases.append((0x66818008, "wo-vcrs-t", 3))
+    for half in VFIM_HALVES:
+        cases.append((0xDF800000 | half, f"vfim-s000-{half:04x}", 1))
+    for half in VFIM_PREFIX_HALVES:
+        cases.append((0xDF880000 | half, f"vfim-s200-{half:04x}", 1))
 
     # Census-gap forms (issue #326): supported VFPU3 compare/min/max and VFPU6 matrix forms
     # that the synthetic fuzz corpus (minimal registers) does not reach. Each is one

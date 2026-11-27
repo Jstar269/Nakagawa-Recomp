@@ -302,6 +302,11 @@ class FunctionLowering:
             self.call("sr_llvm_tail_record", self.s, target, fn, self.sp_entry, self.c32(1))
         self.ret()
 
+    def latched_target(self, reg):
+        """codegen.emit_latched_target: a jr/jalr target with bits 1:0 clear, as the PSP
+        runs it (pspautotests e37443a6 tests/cpu/jump/unaligned.expected, recorded on a PSP)."""
+        return self.builder.and_(self.R(reg), self.c32(0xFFFFFFFC), hint="target.")
+
     def code_pointer_check(self, target, transfer_pc):
         """codegen.emit_code_pointer_check: a computed target of 0 is a null code pointer
         (#1375). It stops before the transfer's link write and delay slot."""
@@ -601,7 +606,7 @@ class FunctionLowering:
                 call_target()
             then()
         elif t.kind in ("call-computed", "tail-computed"):     # jalr / jr rs
-            latched = self.R(t.target_reg)                     # PR #126: latched at the transfer
+            latched = self.latched_target(t.target_reg)        # PR #126: latched at the transfer
             self.code_pointer_check(latched, t.addr)
             self.begin(t.addr, t.word)
             if t.link_reg is not None:
@@ -615,7 +620,7 @@ class FunctionLowering:
                 self.tail_transfer(latched, None)
         elif t.kind == "return":                               # jr $ra
             if t.target_reg is not None:
-                self.call("sr_llvm_return_capture", self.s, self.R(t.target_reg))
+                self.call("sr_llvm_return_capture", self.s, self.latched_target(t.target_reg))
             self.begin(t.addr, t.word)
             self.end()
             if t.slot_syscall is not None:

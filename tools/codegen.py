@@ -1780,6 +1780,19 @@ def _sp_load_check(line, indent="    "):
             f"{indent}    _sp_named = sr_tail_release_bound(_sp_named, _sp_load, s->r[29]); }} }}")
 
 
+def emit_latched_target(reg):
+    """The target a jr/jalr latches from GPR ``reg`` at the transfer (PR #126), bits 1:0 clear.
+
+    The PSP ignores the low two bits of a register jump target: a jr or jalr to an aligned
+    address + 1, + 2 or + 3 runs the aligned word, links next+0, and the PC it then runs at
+    carries no low bits (pspautotests e37443a6 tests/cpu/jump/unaligned.expected, recorded on
+    a PSP: `ran=003`, `link=next+0`, `bal ra=next+0`). The null code pointer check, the
+    dispatch and the return capture all see the aligned value, as in the interpreter
+    (classify_control in src/rt/guest_interp.c). The register itself keeps its bits.
+    """
+    return f"({R(reg)} & ~3u)"
+
+
 def emit_code_pointer_check(target_expr, transfer_pc):
     """A computed jr/jalr refuses a null code pointer before its link write and slot (#1375).
 
@@ -2563,22 +2576,6 @@ def _vfpu_mem_interp_stmt(addr, w):
             "sr_end(s, 0u, 0); return; } }")
 
 
-def _half_to_f32_bits(h):
-    s = (h >> 15) & 1
-    e = (h >> 10) & 0x1F
-    m = h & 0x3FF
-    if e == 0:
-        if m == 0:
-            return s << 31
-        e2 = 127 - 15 + 1
-        while not (m & 0x400):
-            m <<= 1
-            e2 -= 1
-        return (s << 31) | (e2 << 23) | ((m & 0x3FF) << 13)
-    if e == 31:
-        return (s << 31) | (0xFF << 23) | (m << 13)
-    return (s << 31) | ((e - 15 + 127) << 23) | (m << 13)
-
 def _f32(x):
     return struct.unpack("<f", struct.pack("<f", x))[0]
 
@@ -2852,12 +2849,14 @@ def _vfpu37_immediate_register(addr, w, options, delay_branch_pc):
     vt = (w >> 16) & 0x7F
     imm = w & 0xFFFF
     if (w >> 23) & 1:
-        bits = _half_to_f32_bits(imm)
+        # vfim.s maps the half as vh2f does (sr_vfpu_h2f; pspautotests e37443a6
+        # tests/cpu/vfpu/vfim.expected and the PSP-VFPU-PREFIX-001 cells).
+        bits = f"sr_vfpu_h2f(0x{imm:04x}u)"
     else:
         iv = imm - 0x10000 if imm & 0x8000 else imm
-        bits = struct.unpack("<I", struct.pack("<f", float(iv)))[0]
+        bits = f"0x{struct.unpack('<I', struct.pack('<f', float(iv)))[0]:08x}u"
     i0 = vreg_indices(vt, 1)[0]
-    body = (f"uint32_t _bits=0x{bits:08x}u; float _d[1]; memcpy(_d,&_bits,4); "
+    body = (f"uint32_t _bits={bits}; float _d[1]; memcpy(_d,&_bits,4); "
             f"sr_vwrite(s,{_arr([i0])},_d,1,s->vfpuCtrl[2]);{_EAT}")
     return "{ " + body + " }", None, 0
 
@@ -2955,7 +2954,7 @@ def _vfpu4_vocp_direct(addr, w, options, delay_branch_pc):
     body = (f"float _s[4],_t[4],_d[4]; "
             f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]|0xF0000u); "
             f"sr_vread(_t,s,{_arr(si)},{n},(s->vfpuCtrl[1]&~0xFFu)|0x55u|0xF000u); "
-            f"for(int _i=0;_i<{n};_i++) _d[_i]=isnan(_s[_i])?fabsf(_s[_i]):_t[_i]+_s[_i]; "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]=isnan(_s[_i])?sr_vfpu_from_bits(0x7f800001u):_t[_i]+_s[_i]; "
             + _nanv(addr, "vocp.s", vd, "_d", n, "_s", n, "_t", n,
                     options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
@@ -3660,7 +3659,7 @@ def _vfpu_cross_effect(addr, w, options, delay_branch_pc):
     ti = vreg_indices(vt, n)
     di = vreg_indices(vd, n)
     ss, ts = (1, 2, 0, 3), (2, 0, 1, 3)
-    muls = " ".join(f"_d[{i}]=sr_vf_mul(_s[{ss[i]}],_t[{ts[i]}]);" for i in range(n))
+    muls = " ".join(f"_d[{i}]=sr_vfpu_mul(_s[{ss[i]}],_t[{ts[i]}]);" for i in range(n))
     body = (f"float _s[4],_t[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); {muls} "
             + _nanv(addr, "vcrs.t", vd, "_d", n, "_s", n, "_t", n, options=options)
@@ -3675,8 +3674,8 @@ def _vfpu_matrix_multiply_effect(addr, w, options, delay_branch_pc):
     for a in range(side):
         for b in range(side):
             # Accumulate into a local float one term at a time, in the same
-            # term order as sr_vfpu_interp's vmmul loop, through the sr_vf_*
-            # helpers: x86-64 SSE keeps the *first* NaN source on NaN+NaN and
+            # term order as sr_vfpu_interp's vmmul loop, through sr_vfpu_sop,
+            # which fixes the NaN word: x86-64 SSE keeps the *first* NaN source on NaN+NaN and
             # an optimiser may swap the operands of a plain + or *, so the two
             # paths could keep different NaN payloads for exotic inputs (issue
             # #40 at -O0, issue #326 at -O1/-O2). Finite results are unchanged.
@@ -3804,13 +3803,14 @@ def fpu_effect(addr, w, options=None):
     if fmt == 0x00: return wr(rt(w), f"s->fi[{fs}]"), None, 0          # mfc1
     if fmt == 0x02: return wr(rt(w), f"({fs} == 31 ? s->fcr31 : ({fs} == 0 ? 0x00003351u : 0u))"), None, 0  # cfc1
     if fmt == 0x04: return f"s->fi[{fs}] = {R(rt(w))};", None, 0       # mtc1
-    # ctc1 stores the guest FCSR except bits 25..31: the PSP FPU has FCC0 only, and
-    # a ctc1 of 0xFE800000 reads back 0x00800000 (PSP-FPU-CC-001, measured on a
-    # PSP-3000). No other bit was measured as unwritable, so no other bit is
-    # masked; src/rt/fp_convert.h names the word SR_FCR31_CTC1_UNWRITABLE. FCC0 is
-    # the architectural compare condition, so the cached fpcond mirror resyncs
-    # from the written bits.
-    if fmt == 0x06: return (f"if ({fs} == 31) {{ s->fcr31 = {R(rt(w))} & ~0xfe000000u; "
+    # ctc1 stores the guest FCSR except bits 18..22 and 25..31. The PSP FPU has FCC0
+    # only: a ctc1 of 0xFE800000 reads back 0x00800000 (PSP-FPU-CC-001, measured on
+    # a PSP-3000). A ctc1 of 0x00400000, 0x00200000 or 0x001C0000 reads back 0
+    # (pspautotests e37443a6 tests/cpu/fpu/fcr.expected, recorded on a PSP).
+    # src/rt/fp_convert.h names the word SR_FCR31_CTC1_UNWRITABLE. FCC0 is the
+    # architectural compare condition, so the cached fpcond mirror resyncs from
+    # the written bits.
+    if fmt == 0x06: return (f"if ({fs} == 31) {{ s->fcr31 = {R(rt(w))} & ~0xfe7c0000u; "
                             f"s->fpcond = (s->fcr31 >> 23) & 1u; }}"), None, 0
     if fmt == 0x10:
         fn = funct(w)
@@ -4993,7 +4993,7 @@ def _emit_jalr(ctx, out, addr, w, ds, dsw):
     # runs. Reading it after the slot lets a slot that writes the target
     # register redirect the call -- proven divergent against the
     # production interpreter by the `jrslot` cosim cell.
-    out.append(f"    {{ uint32_t _t = {R(a)};")
+    out.append(f"    {{ uint32_t _t = {emit_latched_target(a)};")
     out.append(f"      {emit_code_pointer_check('_t', addr)}")
     out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); {link}sr_end(s, 0u, 0);")
     out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
@@ -5019,7 +5019,7 @@ def _emit_jr(ctx, out, addr, w, ds, dsw):
     if a == 31:
         # Capture the architectural target at transfer, before a delay
         # slot (or syscall bridge) can rewrite the live register.
-        out.append(f"    {{ uint32_t _sr_return_target = {R(a)};")
+        out.append(f"    {{ uint32_t _sr_return_target = {emit_latched_target(a)};")
         out.append(f"      SR_AOT_RETURN_CAPTURE(s, _sr_return_target);")
         if ds_is_syscall and dsw is not None and not lle_cpu:
             out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
@@ -5051,7 +5051,7 @@ def _emit_jr(ctx, out, addr, w, ds, dsw):
     else:
         # Computed return/tail-call: same contract as jalr above -- the
         # target register is read at the transfer, not after the slot.
-        out.append(f"    {{ uint32_t _t = {R(a)};")
+        out.append(f"    {{ uint32_t _t = {emit_latched_target(a)};")
         out.append(f"      {emit_code_pointer_check('_t', addr)}")
         out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
         out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,

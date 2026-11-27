@@ -1250,15 +1250,19 @@ class PublicFixtureTest(unittest.TestCase):
     # #3128's cells (`cslot_call`, `cslot_branch`, `cslot_dst`) and their entry calls move the
     # other cells. They come with no codegen change: on the old and on the expanded inputs
     # main's codegen and this one write identical files.
+    # Every digest changes because a jr/jalr latches its target with bits 1:0 clear, as the PSP
+    # runs it (`_t = (s->r[N] & ~3u)`, codegen.emit_latched_target), and ctc1 drops FCR31 bits
+    # 18..22 as well as 25..31 (`& ~0xfe7c0000u`, #3197); nothing else in any output differs.
+    # The cosim guest also gains the jrlow cells.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "2dce80bd3c8cac19a0ebd407837dcb258e988f595e2b04957131c5c61efdf5f7",
-        ("cosim", "exec"): "ddf4c5ba3b0153f304080bfffc09775425b28f44162dc46c82041a894d459e81",
-        ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
-        ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
-        ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",
-        ("production_smoke", "exec"): "acbdb8137bd7571cb89a9e869887a5a0b23358bf2d2d66cc31debf08d2871cfe",
-        ("snapshot", "prx"): "de84e29d48cb0dc50af0e01b629164536e0891d9c92dbd9dfd41c7c8e9c91d17",
-        ("snapshot", "exec"): "690e7881258920bc57859594e9b8a1c119fbc830ac9466a849a55f40504e4fb2",
+        ("cosim", "prx"): "fc6910b20de5e3ba20ccab88df1b524fc40eb03cede69b0397a96344f764d2d7",
+        ("cosim", "exec"): "9347defaf5236f50382294471057c486db410a04f1e603a10782c205457981fe",
+        ("display_smoke", "prx"): "9d003fad6b10ceb2246b75b9fd15a1f9da009f9da2769e69b4c117c9dfa2dce2",
+        ("display_smoke", "exec"): "bf16654d5c6c04009194ebd52145c9392b773760e9e920fc7f08f1957d40201e",
+        ("production_smoke", "prx"): "d7708c6c84d4e8bf47988cce66ebee1223435360883b268e49d2feac7333197d",
+        ("production_smoke", "exec"): "77bb5eda3e87d99152eca0029c6eee04316bb7c74888c2519accc1c318e2b2cf",
+        ("snapshot", "prx"): "f8c8e950be519899c4af93669f577cf09ce9ea1e0fd9debaaca500132b3b8916",
+        ("snapshot", "exec"): "ee5e1de99992d161d56a98ea21c305ea457dfe4a6c463d7830efae1189e1d4b0",
     }
 
     def test_generated_output_is_byte_identical_to_main(self):

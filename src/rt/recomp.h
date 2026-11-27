@@ -165,7 +165,10 @@ static inline uint32_t sr_vfpu_rndf_step(uint32_t rcx[8], int two) {
 
 /* vh2f: one IEEE half to a float32 word. A half denormal becomes a zero of its sign;
  * exponent 31 keeps the 10-bit payload in the LOW mantissa bits (0x7c01 -> 0x7f800001,
- * 0x7e00 -> 0x7f800200), so infinities map to infinities; normals convert exactly. */
+ * 0x7e00 -> 0x7f800200), so infinities map to infinities; normals convert exactly.
+ * vfim.s uses the same mapping for its immediate. The raw words are pinned in pspautotests
+ * e37443a6 tests/cpu/vfpu/vfim.expected. PSP-VFPU-PREFIX-001 records the D-prefix behavior
+ * applied after conversion. */
 static inline uint32_t sr_vfpu_h2f(uint32_t h) {
     const uint32_t sign = (h & 0x8000u) << 16, e = (h >> 10) & 0x1fu, m = h & 0x3ffu;
     if (e == 0u) return sign;
@@ -1256,50 +1259,21 @@ static inline float sr_vfpu_det(const float *fs, const float *ft, int n) {
     return sr_vfpu_sop(fs, t, n);
 }
 
-/* VFPU lane arithmetic with the NaN result fixed by rule (issue #326). C leaves the NaN
- * that a NaN-producing operation returns to the host: x86-64 SSE keeps the first NaN
- * source, and an optimiser may swap the operands of a commutative + or *. So the
- * generated code and sr_vfpu_interp, each compiled on its own, kept different NaNs when
- * two met (the alias-edge sweep in tests/native/vfpu_interp_selftest.c, built at -O1 or
- * -O2). Both lanes call these helpers for every lane operation of vcrs (vadd, vsub, vmul,
- * vscl, vdiv and vmscl use the measured sr_vfpu_* rule below, and vdot, vhdp, vcrsp, vqmul,
- * vmmul and vtfm the sum-of-products adder above). The rule: the first NaN
- * operand, quieted, else the invalid-operation NaN 0xFFC00000 (Inf - Inf, 0 * Inf, 0 / 0,
- * Inf / Inf). That is what x86-64 SSE returns for the operands in source order, but it is a
- * change for default builds too: even at -O0 (RECOMP_OPT, the Makefile default) GCC may
- * evaluate a plain + or * with its operands swapped, as MSYS2 GCC 16.2 does for the old
- * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd and vmul now keep the first
- * source where they used to keep the second. Results without a NaN are unchanged.
- * It is project semantics, not PSP evidence: the PSP's NaN word for these forms is
- * unmeasured. The sum-of-products forms follow sr_vfpu_dot_bits above instead, which
- * returns the fixed 0x7F800001 for any NaN operand as the console did.
- * At -O0 GCC does not inline these static inline helpers, so an ad-hoc build makes one
- * call per lane operation; package builds (-O1, PACKAGE_RECOMP_OPT) inline them. */
-static inline float sr_vf_nan(float a, float b) {
-    uint32_t u;
-    float r;
-    if (a != a) memcpy(&u, &a, 4);
-    else if (b != b) memcpy(&u, &b, 4);
-    else u = 0xffc00000u;
-    u |= 0x00400000u;
-    memcpy(&r, &u, 4);
-    return r;
-}
-static inline float sr_vf_add(float a, float b) { const float r = a + b; return r == r ? r : sr_vf_nan(a, b); }
-static inline float sr_vf_sub(float a, float b) { const float r = a - b; return r == r ? r : sr_vf_nan(a, b); }
-static inline float sr_vf_mul(float a, float b) { const float r = a * b; return r == r ? r : sr_vf_nan(a, b); }
-
-/* vadd, vsub, vmul, vscl and vdiv lane arithmetic as a PSP-3000 returned it (unrecorded PSP
- * read, 2026-11-08, issue #326; probe case vfpu-basic-arith, 20 operand classes, all 400
- * ordered pairs, .s/.p/.t/.q identical). IEEE float32 with denormals flushed to a zero of
+/* vadd, vsub, vmul, vscl and vdiv lane arithmetic from PSP-VFPU-BASICARITH-001
+ * (PSP-3000, 2026-11-08, issue #326; 20 operand classes). C leaves the NaN that a NaN-producing operation
+ * returns to the host, so the generated code and sr_vfpu_interp, each compiled on its own,
+ * call these helpers for every lane operation. IEEE float32 with denormals flushed to a zero of
  * their sign on input. The output flush is measured only for vdiv (1 / 2^127 and 1 / FLT_MAX
  * give +0); the 20 classes reach no denormal result of vadd, vsub or vmul, so their output
  * flush extends the vdiv result by rule and is pinned by derived cells, not console ones. A NaN result
  * is never an input payload: vadd and vsub give 0x7f800001 for a NaN operand or Inf - Inf,
  * and vmul, vscl and vdiv give 0x7f800001 with the sign bit XOR of the two operand signs
  * for a NaN operand, 0 * Inf, 0 / 0 or Inf / Inf. vdiv was measured at .s only; the other
- * widths use the same lane rule. The other forms that call sr_vf_* keep the project rule
- * above until they are measured. */
+ * widths use the same lane rule. vmscl and the three products of vcrs.t use the vmul rule.
+ * PSP-VFPU-WIDEROPS-001 records a positive NaN, positive infinity and a denormal in the
+ * first vcrs.t source lane. pspautotests e37443a6 tests/cpu/vfpu/nan_gen.expected records
+ * 0x7f800001 for each +inf * +0 lane. XOR-sign NaNs outside those cases and output
+ * underflow for vcrs.t follow the vmul rule by extension. */
 static inline uint32_t sr_vfpu_bits(float x) {
     uint32_t u;
     memcpy(&u, &x, 4);

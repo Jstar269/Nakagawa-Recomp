@@ -66,6 +66,7 @@ public class LauncherActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
         String unpackFailure = NakagawaHost.bundledFilesError();
         if (unpackFailure != null && !mBrokenLibraries) showBundledFilesFailure(unpackFailure);
+        if (!mBrokenLibraries) NakagawaHost.sendBackToSdl(this);
         // Before onResume, where SDL starts its thread and so main().
         ToolchainArchive.Install install = NakagawaHost.startToolchain(this);
         sToolchain = install;
