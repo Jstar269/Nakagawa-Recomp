@@ -272,13 +272,15 @@ int  sdl3vk_wait_image(void *vk_image);
 
 /* 1 once the renderer has latched a terminal state: the device was lost, or a presentation
  * recovery sequence itself failed. Presentation is refused from then on, and a capture
- * armed for a refused present resolves as failed. */
+ * armed for a refused present resolves as failed. A lost window surface is not terminal: it is
+ * replaced (#360), and only a replacement that fails in the foreground is. */
 int  sdl3vk_renderer_terminal(void);
 
 /* A guest present's result when the presentation engine cannot take a frame now: every
  * swapchain image, or the present frame it would reuse, is still held by the display. The frame
- * is not shown and nothing failed; the window keeps the last frame it has. Returned only while
- * sdl3vk_set_present_nowait(1) is in force. */
+ * is not shown and nothing failed; the window keeps the last frame it has. Returned while
+ * sdl3vk_set_present_nowait(1) is in force, and by any present while the window has no surface
+ * (on Android, while the app is in the background; #360). */
 #define SDL3VK_PRESENT_DISPLAY_BUSY 2
 
 /* 1: a game-frame present (sdl3vk_present_rgba/_ex, sdl3vk_present_image/_ex,
@@ -372,14 +374,18 @@ int  sdl3vk_input_claimed(void);
 
 /* The pause presenter draws the window itself while the game is stopped: one image at the
  * swapchain's pixel size, composed by the caller. sdl3vk_overlay_extent gives that size and
- * its byte order (rgba 1: R,G,B,A in memory; 0: B,G,R,A); it returns 0 when no image can be
- * shown now (minimised, no swapchain, or a surface format with another layout). */
+ * its byte order (rgba 1: R,G,B,A in memory; 0: B,G,R,A); it returns 1 with the size, 0 when
+ * no image can be shown now (minimised, no swapchain, or a surface format with another layout),
+ * and -1 when the renderer is terminal, as when the lost window surface it replaces first
+ * cannot be replaced (#360). */
 int  sdl3vk_overlay_extent(int *w, int *h, int *rgba);
 /* Shows the overlay image. px (w*h pixels of `pitch` bytes per row, at the current extent)
  * replaces the uploaded image; NULL shows the last one again. These presents are not game
- * frames: no frame capture, perf count or HUD. Returns 1 when presented, 2 when the extent
- * changed and the image must be composed again, 0 when the window was closed and -1 on a
- * presentation failure. */
+ * frames: no frame capture, perf count or HUD. Returns 1 when presented; 2 when the image must be
+ * composed again (the extent changed, or a lost window surface was replaced with a new swapchain,
+ * #360); 0 when the window was closed; -1 when nothing was shown: a presentation failure, or no
+ * window surface now (the app in the background), which is not one. sdl3vk_renderer_terminal()
+ * tells a failure the renderer cannot go on from. */
 int  sdl3vk_present_overlay(const void *px, int pitch);
 /* Frees the overlay image when the pause ends. */
 void sdl3vk_overlay_release(void);
