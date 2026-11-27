@@ -1762,6 +1762,20 @@ the table and, for the source releases of the libraries built into the CPython r
 `codeload.github.com`), `www.sqlite.org`, `sourceware.org` and `www.bytereef.org`. The player
 never passes those options.
 
+#### Adding an opt-in host or feature
+
+This is the checklist [AGENTS.md section 5](../AGENTS.md#5-private-and-public-boundaries) points to; it binds every
+network change to the player or runtime. The maintainer approves opt-in network features in principle
+(#1139, #1316, #2632); that does not authorize an upload, or any connection before the player has opted in to the
+feature, each of which needs its own maintainer decision. A host that an approved opt-in feature needs may be
+added without a separate decision when all of this holds: it is contacted only after that feature's opt-in; it
+receives nothing beyond what the feature's consent text names; and the pull request names the host and lists it
+in the feature's public issue, its consent text, `docs/SETUP.md` Network use and the allowlist test
+`tools/test_prereq_fetcher.py`. A first-run question may offer a documented opt-in feature: nothing connects
+before the player answers, and no answer means off. Each feature's public issue must name its hosts, payload,
+consent and data boundaries; before it ships it is off by default, listed in `docs/SETUP.md` Network use and in
+the allowlist test.
+
 ### Build lifecycle and cleanup targets
 
 The build system provides scoped and explicit cleanup targets:

@@ -180,14 +180,9 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
 - **Offline by default.** The player and runtime connect only through a documented opt-in feature
   ([Network use](docs/SETUP.md#network-use)). The maintainer approves opt-in network features in principle
   (#1139, #1316, #2632); that does not authorize an upload, or any connection before the player has opted in to
-  the feature, each of which needs its own maintainer decision. A host that an approved opt-in feature needs may be
-  added without a separate decision when all of this holds: it is contacted only after that feature's opt-in; it
-  receives nothing beyond what the feature's consent text names; and the pull request names the host and lists it
-  in the feature's public issue, its consent text, `docs/SETUP.md` Network use and the allowlist test
-  `tools/test_prereq_fetcher.py`. A first-run question may offer a documented opt-in feature: nothing connects
-  before the player answers, and no answer means off. Each feature's public issue must name its hosts, payload,
-  consent and data boundaries; before it ships it is off by default, listed in `docs/SETUP.md` Network use and in
-  the allowlist test. The reserved `network_mode` setting accepts only `"offline"`.
+  the feature, each of which needs its own maintainer decision. Before adding a host, a first-run question or an
+  opt-in feature, read and meet [the opt-in checklist](docs/SETUP.md#adding-an-opt-in-host-or-feature); anything
+  outside it needs a maintainer decision. The reserved `network_mode` setting accepts only `"offline"`.
 - A user-started transfer may move their own packages and saves directly to their own devices, never through a
   server. Nothing uploads game code or data, decrypted modules, packages, saves or guest memory, or shares anything
   built from a user's game. No telemetry. Tests never touch the internet. Network HLE stays fail-closed; no setting
@@ -216,31 +211,13 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
 
 ## 7. Current execution contract
 
-Re-check live source before changing these; PR numbers are navigation, not evidence
-([details](docs/ARCHITECTURE.md)).
-
-- **PR #118:** the interpreter is a fail-closed floor: only analyzer-owned spans run, unsupported forms fail closed; not an all-Allegrex interpreter.
-- **PR #126:** a `jr`/`jalr` target is latched at transfer, before link writes and the delay slot.
-- **PR #127:** `dispatch_call` carries `target` and `resume_pc`; CALL and TAIL differ; live `$ra` is not a resume descriptor.
-- **PR #128:** cosimulation compares AOT/interpreter state, CALL/TAIL cells included; its negative corpus fails closed; a build-only mutant is not a valid semantic kill.
-- **Issue #2172:** resume at a PC is opt-in native re-entry
-  ([contract](docs/ARCHITECTURE.md#resume-at-a-pc-direct-save-states)): a parked thread's frames are read from its
-  return-boundary records, never from live `$ra` or host frames; anything not exactly describable or resumable is refused by name, and it does not extend
-  the interpreter floor.
-- Nested interpreted calls outside that floor are unproven; broader claims need a new contract and test.
-- `src/rt/recomp.h` is a load-bearing ABI: `$ra` is `r[31]`; `CpuState` is versioned by `SR_CPUSTATE_ABI_VERSION`.
-- Chunk count is dynamic; `FUNCS_PER_CHUNK` is not a fixed ABI.
-- LLE CPU and import seam are opt-in (`--lle-cpu`, `--lle-import-seam`; the seam implies `--lle-cpu`); default
-  output stays byte-identical.
-- An unmeasured cell normally stops by name. A limited second tier may use a public PPSSPP or JPCSP implementation
-  for a known, named cell whose exact behavior it supports, unless the issue prohibits emulator-derived work:
-  record the repository, exact upstream revision and symbol; classify adapted code `derived-translated`; label it
-  in code `PPSSPP-derived, not PSP-measured` or `JPCSP-derived, not PSP-measured`; add a production-path
-  regression; log first use once per run. A PSP measurement for the same scope supersedes it, and it proves
-  neither PSP behavior nor independence. It never fills an unknown NID or unowned dispatch, enables save-data and
-  flash writes whose behavior is unmeasured, or supplies behavior with no public reference; those stay named
-  fail-closed boundaries, and Section 3 still forbids device writes.
-- HLE arguments 1-4 are `A0`-`A3`, 5-8 `t0`-`t3` (`stack_arg`), 9+ the stack; never read past the public signature.
+Before changing the interpreter, dispatch, codegen, resume at a PC, the `src/rt/recomp.h` ABI, the LLE flags or HLE
+argument reads, read [Current execution contract](docs/ARCHITECTURE.md#current-execution-contract) and re-check
+live source; PR numbers are navigation, not evidence. Its rules bind: the interpreter floor is not broadened without
+a new contract and test; live `$ra` is never a resume descriptor; HLE code never reads past the public signature;
+an emulator-derived second-tier cell is allowed only under its conditions there and never fills an unknown NID or
+unowned dispatch, enables save-data and flash writes whose behavior is unmeasured, or supplies behavior with no
+public reference.
 
 ## 8. Workspace, branch, and worktree lifecycle
 
@@ -292,29 +269,6 @@ evidence; report each as `PASS`, `FAIL`, `SKIP`, `BLOCKED`, or `NOT_RUN`.
 
 ## 11. Reporting and cleanup
 
-End an implementation task with exact facts, not a play-by-play. Fields that do not apply say `N/A`; a
-contributor's agent puts its branch name in `LANE`.
-
-```text
-LANE:
-MISSION:
-BASE_SHA:
-HEAD_SHA:
-PR:
-STATUS: DRAFT / READY / BLOCKED
-RESULT:
-ROOT_CAUSE:
-CHANGED_FILES:
-NEW_PATH_PROVENANCE:
-FAILING_BEFORE:
-TESTS:
-PRIVATE_ACCEPTANCE:
-HARDWARE:
-UNRESOLVED:
-DISCOVERED_FOLLOWUPS:
-NOT_PERFORMED:
-READY_QUALITY: YES/NO
-```
-
-`NOT_PERFORMED` names each tag, release, asset, version, hardware or private-input operation intentionally not
-performed, or says `none`.
+End an implementation task with exact facts, not a play-by-play, in the
+[report template](docs/AI_USAGE.md#the-final-report) (read it before reporting). `NOT_PERFORMED` names each tag,
+release, asset, version, hardware or private-input operation intentionally not performed, or says `none`.

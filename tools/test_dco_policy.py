@@ -239,6 +239,22 @@ def _section(content: str, number: int) -> str:
     return content[start.start(): start.end() + end.start()] if end else content[start.start():]
 
 
+def _heading_section(content: str, heading: str) -> str:
+    """Return the section under the exact Markdown ``heading`` line, up to the next heading of its level or higher."""
+    start = re.search(rf"(?m)^{re.escape(heading)}\s*$", content)
+    if start is None:
+        raise AssertionError(f"no section headed {heading!r}")
+    level = len(heading) - len(heading.lstrip("#"))
+    end = re.search(rf"(?m)^#{{1,{level}}} ", content[start.end():])
+    return content[start.start(): start.end() + end.start()] if end else content[start.start():]
+
+
+def _execution_contract() -> str:
+    """The execution contract AGENTS.md section 7 points to, in docs/ARCHITECTURE.md."""
+    return _heading_section((ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8"),
+                            "## Current execution contract")
+
+
 def _blocks(section: str) -> list[str]:
     """Split a section into bullets and paragraphs, each with its wrapping collapsed.
 
@@ -312,7 +328,13 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             (127, ("`target`", "`resume_pc`", "`dispatch_call`", "CALL and TAIL", "not a resume descriptor")),
             (128, ("cosimulation", "CALL/TAIL", "negative corpus", "build-only mutant", "not a valid semantic kill")),
         )
-        section_7_blocks = _blocks(_section(content, 7))
+        # Section 7 keeps a pointer and its binding rules; the contract itself lives in docs/ARCHITECTURE.md.
+        self.assertRuleStated(
+            _blocks(_section(content, 7)),
+            ("docs/ARCHITECTURE.md#current-execution-contract", "re-check", "live source", "never a resume descriptor"),
+            "section 7's pointer to the execution contract",
+        )
+        section_7_blocks = _blocks(_execution_contract())
         last_position = -1
         for pr, terms in execution_contracts:
             with self.subTest(contract=pr):
@@ -322,8 +344,15 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
                 self.assertGreater(bullets[0], last_position, "the execution contracts stay in PR order")
                 last_position = bullets[0]
 
-        report = re.search(r"```text\n(.*?)```", _section(content, 11), re.S)
-        self.assertIsNotNone(report, "section 11 needs its report template block")
+        self.assertRuleStated(
+            _blocks(_section(content, 11)),
+            ("docs/AI_USAGE.md#the-final-report", "exact facts", "`NOT_PERFORMED`", "`none`"),
+            "section 11's pointer to the report template",
+        )
+        final_report = _heading_section((ROOT / "docs" / "AI_USAGE.md").read_text(encoding="utf-8"),
+                                        "### The final report")
+        report = re.search(r"```text\n(.*?)```", final_report, re.S)
+        self.assertIsNotNone(report, "docs/AI_USAGE.md's final report section needs its report template block")
         fields = [line.split(":", 1)[0] for line in report.group(1).splitlines() if line.strip()]
         self.assertEqual(
             fields,
@@ -339,6 +368,7 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
         content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         section_6 = " ".join(_blocks(_section(content, 6))).lower()
         section_7 = " ".join(_blocks(_section(content, 7))).lower()
+        contract = " ".join(_blocks(_execution_contract())).lower()
         for required in (
             "unknown nids and unowned dispatches stop visibly",
             "a modeled psp error may return to the guest",
@@ -359,6 +389,10 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "never fills an unknown nid",
             "production-path regression",
         ):
+            with self.subTest(section="docs/ARCHITECTURE.md execution contract", required=required):
+                self.assertIn(required, contract)
+        # The second tier's limits stay resident in AGENTS.md section 7 as well.
+        for required in ("never fills an unknown nid", "save-data and flash writes", "no public reference"):
             with self.subTest(section=7, required=required):
                 self.assertIn(required, section_7)
 
@@ -398,6 +432,17 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "offline by default",
             "approves opt-in network features in principle",
             "does not authorize an upload, or any connection before the player has opted in to the feature",
+            "docs/setup.md#adding-an-opt-in-host-or-feature",
+            "no setting makes a nid miss permissive",
+        ):
+            with self.subTest(surface="AGENTS.md section 5", required=required):
+                self.assertIn(required, section_5)
+        # The opt-in checklist section 5 points to lives in docs/SETUP.md Network use.
+        checklist = " ".join(_blocks(_heading_section(
+            (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8"), "#### Adding an opt-in host or feature"))).lower()
+        for required in (
+            "approves opt-in network features in principle",
+            "does not authorize an upload, or any connection before the player has opted in to the feature",
             "it is contacted only after that feature's opt-in",
             "receives nothing beyond what the feature's consent text names",
             "the pull request names the host and lists it in the feature's public issue, its consent text",
@@ -407,10 +452,9 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "off by default",
             "listed in `docs/setup.md` network use",
             "tools/test_prereq_fetcher.py",
-            "no setting makes a nid miss permissive",
         ):
-            with self.subTest(required=required):
-                self.assertIn(required, section_5)
+            with self.subTest(surface="docs/SETUP.md opt-in checklist", required=required):
+                self.assertIn(required, checklist)
 
     def test_release_safety_rule_is_present_and_not_contradicted(self):
         policy_text = "\n".join(
