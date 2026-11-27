@@ -315,6 +315,8 @@ returns through its callee's `jr $ra` instead.
 | `bjoin` | words after a `b` (`beq $zero, $zero`) that only a later backward branch reaches, beside a not-taken `beq` whose fall-through is the rest of the cell |
 | `bslot` / `jslot` | a branch into the delay slot of `b` / `j`: the slot runs as an ordinary word and the guest continues after it |
 | `bself` | `b` to its own delay slot: the slot runs twice |
+| `eslot` / `eslot_likely` | a body entered (by `jal`) at the delay slot of a `bne` / `bnel` it loops back to: the entry word runs as the entry, then as the not-taken branch's slot, or not again when annulled |
+| `eslot_call` | the same entry on the delay slot of a `jal`: the entry word runs as the entry, then as the call's slot, and not again when leaf A returns |
 | `link` / `linkr` | `jal` and `jalr` link semantics with a conventional `$ra`-preserving frame |
 | `jrslot` / `jrtail` | a computed call and a computed tail call whose delay slots rewrite the target register |
 | `jrlow` / `jrlowx` / `jrlowtail` | a `jalr` to an entry + 2 (and + 1 into an interpreted callee, lane MIXED) whose callee returns to its resume PC + 3, and a `jr` to an entry + 3: the PSP clears bits 1:0 of the target (pspautotests e37443a6 `tests/cpu/jump/unaligned.expected`, recorded on a PSP), which the harness checks in both lanes |
@@ -452,6 +454,9 @@ successor, and one drops the continuation after a delay slot that a branch lands
 with the emitter's own refusal removed so the kill is a divergence, not a build failure.
 The campaign counts any divergence as a kill; the first it reports for these is in
 `bjoin` (its not-taken `beq`) and in `bslot` respectively, the cells built for them.
+One generator mutant plans the skips over labelled delay slots before the body's own entry
+label exists (#3163), so a transfer whose slot is the entry falls into the entry label and
+runs the slot once more; `eslot`, `eslot_likely` and `eslot_call` must diverge.
 Making `beql $zero, $zero` a terminator too would be an equivalent mutant (its slot
 and target are the same either way when taken) and is not claimed.
 

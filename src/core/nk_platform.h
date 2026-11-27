@@ -144,6 +144,9 @@ bool nk_platform_remove_tree(const char *path, const char *skip_child);
  * it is not empty, missing, not a directory or cannot be removed. */
 bool nk_platform_remove_empty_dir(const char *path);
 int64_t nk_platform_get_file_size(const char *path);
+/* Bytes this user can still write on the volume holding `path`, an existing file or
+ * directory. False, leaving *available alone, when the volume cannot be asked. */
+bool nk_platform_available_disk_bytes(const char *path, uint64_t *available);
 bool nk_platform_mkdir_p(const char *dir_path);
 /* Create a directory tree and private files for user-owned source material.
  * POSIX uses owner-only permissions and refuses a final symlink; Win32 uses

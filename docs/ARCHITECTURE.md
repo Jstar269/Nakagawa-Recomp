@@ -746,7 +746,12 @@ reached it: on one compilation disc a module of about 100,000 instructions becam
 branch may also land on the delay slot of such a transfer; on that path the slot is an ordinary
 instruction, so the body owns the word after it too, whichever the walk meets first. The emitter
 refuses a body whose slot label has no owned successor. `cosim-selftest` covers both (`bjoin`,
-`bslot`, `jslot`, `bself`).
+`bslot`, `jslot`, `bself`). A labelled delay slot of a transfer that can fall through is
+translated twice, inline at the transfer and under its label, and the transfer's fall-through
+jumps over the labelled copy. The body's own entry counts as such a label when it lies above the
+body's lowest address (#3163): a body entered at the delay slot of a branch or call it loops back
+to runs that word once as its entry and then only as the slot (`eslot`, `eslot_likely`,
+`eslot_call`).
 
 **Entry splitting.** A body owns the code it reaches from its entry. Straight-line fall-through and
 `j` into another entry already leave through TAIL transfers, but a conditional branch, taken or not

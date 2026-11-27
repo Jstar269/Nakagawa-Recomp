@@ -573,6 +573,12 @@ static int render_notice_words(NkRenderFallback fallback, const char **head, con
                 "may run slower. Updating the graphics driver may help.";
         *hint = "Esc or Guide opens the menu and hides this";
         return 1;
+    case NK_RENDER_FALLBACK_VULKAN_CPU:
+        *head = "Drawn in software";
+        *text = "Vulkan is running on the CPU. The game may run slower. Selecting a graphics card "
+                "or updating its driver may help.";
+        *hint = "Esc or Guide opens the menu and hides this";
+        return 1;
     case NK_RENDER_FALLBACK_NONE:
     case NK_RENDER_FALLBACK_COUNT:
     default:
@@ -1674,9 +1680,9 @@ void gui_shutdown(void) {
  * path than the one asked for. */
 #if defined(SR_SDL3VK) || defined(_WIN32)
 static void gui_report_render_path(bool vulkan_asked, bool vulkan_started, bool gpu_ge_asked,
-                                   bool gpu_ge_started) {
+                                   bool gpu_ge_started, bool vulkan_cpu) {
     NkRenderPath path = nk_render_path_from_init(vulkan_asked, vulkan_started, gpu_ge_asked,
-                                                 gpu_ge_started);
+                                                 gpu_ge_started, vulkan_cpu);
     char line[128];
     if (nk_render_path_event_format(&path, line, sizeof(line)) > 0) {
         sr_gui_boot_event("%s", line);
@@ -1824,7 +1830,8 @@ void gui_init(const char *title) {
                     /* #2111: only the Vulkan GE reads movie notes; the software GE presents from the
                      * CPU, which the movie upscaler takes without them. */
                     if (!gpu_ge_started) sr_movie_set_tracking(0);
-                    gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
+                    gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started,
+                                           sdl3vk_uses_cpu());
                     /* Soft shadows (shadow=soft) are made only by the Vulkan GE renderer. */
                     if (!gpu_ge_started && g_ace_on && ace_effective()->shadow)
                         ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_SOFTWARE);
@@ -1927,7 +1934,7 @@ void gui_init(const char *title) {
         IsWindowVisible(s_hwnd), s_hwnd,
         sr_gui_raise_gdi_window, "gdi");
     /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
-    gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
+    gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false, false);
     /* This window has no in-game UI pass, so it cannot show the cheats marker (cheats.h). */
     sr_cheats_marker_unavailable("the GDI window has no in-game UI");
 #ifdef SR_SDL3VK
@@ -3018,7 +3025,11 @@ SrPauseFrame gui_pause_frame(void) {
     if (nk_overlay_host_due(s_pause_host, (double)now / 1e9)) s_pause_dirty = 1;
 
     int w = 0, h = 0, rgba = 0;
-    if (!sdl3vk_overlay_extent(&w, &h, &rgba)) return SR_PAUSE_FRAME_CONTINUE;
+    const int extent = sdl3vk_overlay_extent(&w, &h, &rgba);
+    /* A terminal renderer (a lost window surface that could not be replaced, #360) ends the
+     * pause as a failed overlay present below does: the game meets the same terminal renderer. */
+    if (extent < 0) return SR_PAUSE_FRAME_RESUME;
+    if (extent == 0) return SR_PAUSE_FRAME_CONTINUE;
     const void *px = NULL;
     int pitch = 0;
     if (s_pause_dirty) {
@@ -4456,8 +4467,13 @@ static void selftest_render_notice(void) {
         /* The player's heading for the same fact (player_render_notice_text), what happened,
          * what it costs and what may help; short enough for the chip's three lines. */
         assert(strcmp(head, "Drawn in software") == 0);
-        assert(strstr(text, "did not start on this PC") && strstr(text, "drawn in software") &&
-               strstr(text, "may run slower") && strstr(text, "graphics driver"));
+        if (f == NK_RENDER_FALLBACK_VULKAN_CPU) {
+            assert(strstr(text, "Vulkan is running on the CPU") && strstr(text, "graphics card"));
+        } else {
+            assert(strstr(text, "did not start on this PC") && strstr(text, "drawn in software") &&
+                   strstr(text, "graphics driver"));
+        }
+        assert(strstr(text, "may run slower") != NULL);
         assert(strlen(text) <= 160u && hint[0] && strstr(hint, "hides this"));
     }
     {

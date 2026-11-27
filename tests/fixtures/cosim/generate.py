@@ -628,6 +628,77 @@ def _cell_bself() -> list[int]:
     ]
 
 
+#: Offsets inside an entry-slot cell: its `jal`, the transfer the body loops back to, and
+#: the body entry that `jal` names, which is that transfer's delay slot.
+ENTRY_SLOT_CALL = 0x10
+ENTRY_SLOT_OWNER = 0x24
+ENTRY_SLOT_ENTRY = 0x28
+
+
+def _entry_slot_cell(body: list[int]) -> list[int]:
+    """A body entered at the delay slot of a transfer it loops back to (#3163).
+
+    The `jal` at 0x10 makes 0x28 an entry. The body it starts runs 0x28 as its first
+    word, loops back to the transfer at 0x24 and meets 0x28 again as that transfer's
+    delay slot. The transfer falls through, so the guest goes on at 0x2c: a body that
+    falls from the transfer into its own entry label runs 0x28 once more.
+    """
+    return [
+        _i(0x09, SP, SP, -16),              # 0x00 addiu sp, sp, -16
+        _i(0x2B, SP, RA, 12),               # 0x04 sw    ra, 12(sp)
+        _i(0x09, ZERO, V0, 0),              # 0x08 addiu v0, zero, 0
+        _i(0x09, ZERO, T1, 2),              # 0x0c addiu t1, zero, 2    (passes)
+        _j(0x03, 0),                        # 0x10 jal   0x28 (patched, then relocated)
+        _i(0x09, ZERO, T0, 0),              # 0x14 addiu t0, zero, 0    (slot)
+        _i(0x23, SP, RA, 12),               # 0x18 lw    ra, 12(sp)
+        JR_RA,                              # 0x1c
+        _i(0x09, SP, SP, 16),               # 0x20 addiu sp, sp, 16     (return slot)
+        *body,                              # 0x24 the transfer, 0x28 the entry
+    ]
+
+
+def _entry_slot_branch(owner: int) -> list[int]:
+    return [
+        owner,                              # 0x24 bne / bnel t0, zero, +4 (-> 0x38, not taken)
+        _i(0x09, V0, V0, 1),                # 0x28 addiu v0, v0, 1      (ENTRY, and the slot)
+        _i(0x09, T1, T1, -1),               # 0x2c addiu t1, t1, -1
+        _i(0x07, T1, ZERO, -4),             # 0x30 bgtz  t1, -4 (-> 0x24)
+        _i(0x09, V0, V0, 0x10),             # 0x34 addiu v0, v0, 16     (slot)
+        JR_RA,                              # 0x38
+        _i(0x09, V0, V0, 0x100),            # 0x3c addiu v0, v0, 256    (return slot)
+    ]
+
+
+def _cell_eslot() -> list[int]:
+    """Expected: $v0 = 0x122 (0x28 runs twice: as the entry, then as the slot)."""
+    return _entry_slot_cell(_entry_slot_branch(_i(0x05, T0, ZERO, 4)))    # bne  t0, zero, +4
+
+
+def _cell_eslot_likely() -> list[int]:
+    """Expected: $v0 = 0x121 (0x28 runs once: the not-taken `bnel` annuls it)."""
+    return _entry_slot_cell(_entry_slot_branch(_i(0x15, T0, ZERO, 4)))    # bnel t0, zero, +4
+
+
+def _cell_eslot_call() -> list[int]:
+    """The transfer is a `jal`: after leaf A returns, the guest goes on at 0x2c.
+
+    The call rewrites $ra, so the first pass keeps the caller's return address in $s2
+    ($t0 is zero only then). Expected: $v0 = 0x132, $v1 = 0xA1 (leaf A ran once).
+    """
+    return _entry_slot_cell([
+        _j(0x03, 0),                        # 0x24 jal   leafA (patched, then relocated)
+        _i(0x09, V0, V0, 1),                # 0x28 addiu v0, v0, 1      (ENTRY, and the slot)
+        _r(RA, T0, S2, 0, 0x0A),            # 0x2c movz  s2, ra, t0     (first pass only)
+        _i(0x09, T0, T0, 1),                # 0x30 addiu t0, t0, 1
+        _i(0x09, T1, T1, -1),               # 0x34 addiu t1, t1, -1
+        _i(0x07, T1, ZERO, -6),             # 0x38 bgtz  t1, -6 (-> 0x24)
+        _i(0x09, V0, V0, 0x10),             # 0x3c addiu v0, v0, 16     (slot)
+        _r(S2, ZERO, RA, 0, 0x21),          # 0x40 addu  ra, s2, zero
+        JR_RA,                              # 0x44
+        _i(0x09, V0, V0, 0x100),            # 0x48 addiu v0, v0, 256    (return slot)
+    ])
+
+
 def _cell_xing_taken() -> list[int]:
     """A not-taken and a taken `beq`/`bne` into another entry, slots always run.
 
@@ -1801,6 +1872,9 @@ CELLS: tuple[tuple[str, str, object], ...] = (
     ("bslot", "branch into the delay slot of `b`", _cell_bslot),
     ("jslot", "branch into the delay slot of `j`", _cell_jslot),
     ("bself", "`b` to its own delay slot", _cell_bself),
+    ("eslot", "body entered at the delay slot of a branch it loops back to", _cell_eslot),
+    ("eslot_likely", "body entered at the annulled slot of a branch-likely", _cell_eslot_likely),
+    ("eslot_call", "body entered at the delay slot of a call it loops back to", _cell_eslot_call),
     ("xing_taken", "conditional branches into another entry", _cell_xing_taken),
     ("xing_likely", "branch-likely into another entry, annulled and taken", _cell_xing_likely),
     ("xing_fall_a", "not-taken fall-through into another entry", _cell_xing_fall_a),
@@ -2059,6 +2133,11 @@ def build_text_segment() -> bytes:
     struct.pack_into(
         "<I", text, layout["jslot"][0] + 0x14, _j(0x02, layout["jslot"][0] + 0x28)
     )
+    for cell in ("eslot", "eslot_likely", "eslot_call"):
+        struct.pack_into("<I", text, layout[cell][0] + ENTRY_SLOT_CALL,
+                         _j(0x03, layout[cell][0] + ENTRY_SLOT_ENTRY))
+    struct.pack_into("<I", text, layout["eslot_call"][0] + ENTRY_SLOT_OWNER,
+                     _j(0x03, layout["link_leaf"][0]))
     for cell, at, target in XING_BRANCHES:
         source = layout[cell][0] + at
         word = struct.unpack_from("<I", text, source)[0]
