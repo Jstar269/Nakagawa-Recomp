@@ -8331,6 +8331,162 @@ static int coherence_run_wide_fill(void) {
     return ok;
 }
 
+/* ---- clip_x_widen over a GPU-written matrix (#2302) -----------------------------------------
+ * The culling hook (contract 11.3.6) reads a matrix's x-row words when it makes a table entry and
+ * again when a sweep decides whether the entry still holds them. A matrix in VRAM the GPU drew
+ * over since holds the GPU's words, which reach guest VRAM only when a CPU read collects them
+ * (g_sr_vram_read_pending). Both reads must collect them first, as a CPU load would; the hook's
+ * stores must reach the renderer as a CPU store would. */
+#define CULL_VRAM_FB   0x04100000u
+#define CULL_VRAM_ROW(y) (CULL_VRAM_FB + (uint32_t)(y) * 512u * 4u)
+#define CULL_RAM_FRESH (SR_RAM_BASE + 0x01200000u)   /* clear of every other cell's matrices */
+
+/* The GPU clears 32 pixels of row y (two matrices' worth) to `word`; guest VRAM is left behind. */
+static int cull_gpu_clear_row(uint32_t y, uint32_t word) {
+    memset(s_ge, 0, sizeof(*s_ge));
+    s_ge->fbp = CULL_VRAM_FB;
+    s_ge->fbw = 512u;
+    s_ge->fbfmt = 3u;
+    s_ge->zbp = 0x04080000u;
+    s_ge->zbw = 512u;
+    s_ge->scis_x2 = (int)FB_W - 1;
+    s_ge->scis_y2 = (int)FB_H - 1;
+    s_ge->maxz = 65535;
+    s_ge->clear = 1;
+    s_ge->clear_mode = 0x301;
+    const uint32_t rgba = fb_unpack(word, 3u);
+    GeVtx p0 = { 0.0f, (float)y, 1.0f, 1.0f, 0, 0, 1.0f,
+                 rgba & 0xff, (rgba >> 8) & 0xff, (rgba >> 16) & 0xff, rgba >> 24 };
+    GeVtx p1 = p0;
+    p1.x = 32.0f;
+    p1.y = (float)y + 1.0f;
+    if (!hook_sprite(&p0, &p1, 0) || !s_nbatch) return 0;
+    gegpu_flush("listend");
+    uint32_t host;
+    memcpy(&host, SR_HOST(CULL_VRAM_ROW(y)), sizeof host);
+    return g_sr_vram_read_pending && host != word;   /* the words are the renderer's alone */
+}
+
+static void cull_widen_one(uint32_t m) {
+    const uint32_t offsets[1] = {0u};
+    ge_wide_set_cull(1);
+    sr_enhancement_widen_clip_x(m, offsets, 1u);
+    ge_wide_set_cull(0);
+}
+
+/* A fresh matrix in RAM per call, so each call adds one table entry that keeps its words. */
+static void cull_widen_fresh(uint32_t *next) {
+    for (uint32_t e = 0; e < 16u; e++) {
+        const float v = 3.0f + (float)e;
+        (void)sr_guest_copy_out(*next + 4u * e, &v, sizeof v);
+    }
+    cull_widen_one(*next);
+    *next += 64u;
+}
+
+/* Fresh RAM matrices until the call that sweeps (a new address with the table at the sweep mark).
+ * Returns the calls made, or 0 when none swept within the table's size. */
+static uint32_t cull_widen_until_sweep(uint32_t *next) {
+    for (uint32_t calls = 1; calls <= GE_CULL_SEEN; calls++) {
+        const int sweeps = ge_wide_cull_table_live() >= GE_CULL_SWEEP_AT;
+        cull_widen_fresh(next);
+        if (sweeps) return calls;
+    }
+    return 0;
+}
+
+static int coherence_run_cull_matrix_vram(void) {
+    const char *name = "cull-matrix-vram";
+    const float inv = 480.0f / (480.0f + 2.0f * (float)WIDE_D);   /* as the hook computes it */
+    const uint32_t gpu_word = 0x3fc00000u;   /* 1.5f */
+    int ok = 1;
+    coherence_reset_targets();
+    g_sr_vram_read_pending = 0;
+    memset(SR_HOST(CULL_VRAM_FB), 0, 512u * FB_H * 4u);
+    sr_gpu_vram_dirty(CULL_VRAM_FB, 512u * FB_H * 4u);
+    if (ge_wide_set_wing(WIDE_D) != WIDE_D) {
+        fprintf(stderr, "gpu coherence selftest [%s]: wing %d refused\n", name, WIDE_D);
+        return 0;
+    }
+
+    /* 1. Entry creation: the matrix the call finds is the GPU's, not the zeroes VRAM held. */
+    const uint32_t c = CULL_VRAM_ROW(10);
+    if (!cull_gpu_clear_row(10u, gpu_word)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the GPU clear did not leave its words pending\n", name);
+        ok = 0;
+    }
+    if (ok) cull_widen_one(c);
+    /* Read once straight after the call, then again after the GPU draws the next row of the same
+     * target and a CPU load collects it: the hook's stores must have reached the renderer, or its
+     * copy of the matrix comes back over them. */
+    for (int read = 0; ok && read < 2; read++) {
+        if (read == 1 && !cull_gpu_clear_row(11u, 0x40400000u)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: the next-row GPU clear did not leave its words pending\n",
+                    name);
+            ok = 0;
+            break;
+        }
+        for (uint32_t e = 0; e < 16u; e++) {
+            const uint32_t bits = MEM_R32(c + 4u * e);
+            float got, v;
+            memcpy(&got, &bits, sizeof got);
+            memcpy(&v, &gpu_word, sizeof v);
+            const float want = (e % 4u == 0u) ? v * inv : v;
+            if (got != want) {
+                fprintf(stderr, "gpu coherence selftest [%s]: GPU-written matrix element %u %s: %g (0x%08x), "
+                                "want %g\n", name, e, read ? "after a later GPU draw" : "after clip_x_widen",
+                        (double)got, bits, (double)want);
+                ok = 0;
+            }
+        }
+    }
+
+    /* 2. Sweep: an entry whose matrix the GPU has since drawn over no longer decides a call and is
+     * dropped. First sweep once so every entry left holds its words, then track a VRAM matrix the
+     * CPU wrote, let the GPU overwrite it, and sweep again: the table must hold the entries it held,
+     * plus the fresh ones, without the VRAM matrix. */
+    uint32_t next = CULL_RAM_FRESH;
+    if (ok && !cull_widen_until_sweep(&next)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: no sweep within %u fresh matrices\n", name, GE_CULL_SEEN);
+        ok = 0;
+    }
+    const uint32_t v_addr = CULL_VRAM_ROW(20);
+    if (ok) {
+        for (uint32_t e = 0; e < 16u; e++) {
+            const float w = 2.0f + (float)e;
+            (void)sr_guest_copy_out(v_addr + 4u * e, &w, sizeof w);
+        }
+        const unsigned before = ge_wide_cull_table_live();
+        cull_widen_one(v_addr);
+        if (ge_wide_cull_table_live() != before + 1u) {
+            fprintf(stderr, "gpu coherence selftest [%s]: the CPU-written VRAM matrix took no entry (%u -> %u)\n",
+                    name, before, ge_wide_cull_table_live());
+            ok = 0;
+        }
+    }
+    if (ok && !cull_gpu_clear_row(20u, gpu_word)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the GPU overwrite did not leave its words pending\n", name);
+        ok = 0;
+    }
+    if (ok) {
+        const unsigned held = ge_wide_cull_table_live();   /* every entry but the VRAM one holds its words */
+        const uint32_t calls = cull_widen_until_sweep(&next);
+        const unsigned live = ge_wide_cull_table_live();
+        if (!calls || live != held - 1u + calls) {
+            fprintf(stderr, "gpu coherence selftest [%s]: after the sweep the table holds %u entries, want %u "
+                            "(%u held, %u fresh, the GPU-overwritten VRAM matrix dropped)%s\n", name, live,
+                    held - 1u + calls, held, calls, live == held + calls ? " -- the sweep read stale VRAM" : "");
+            ok = 0;
+        }
+    }
+    ge_wide_set_wing(0);
+    coherence_reset_targets();
+    if (ok) printf("gpu coherence selftest: PASS %s clip_x_widen reads and sweeps a GPU-written matrix as the "
+                   "GPU left it\n", name);
+    else fprintf(stderr, "gpu coherence selftest: FAIL %s\n", name);
+    return ok;
+}
+
 /* Free every depth surface (none of them newer than guest VRAM), so a case starts from empty slots. */
 static void coherence_reset_depths(void) {
     coherence_reset_targets();
@@ -17586,6 +17742,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "texture-ram-linear-tail") == 0) return coherence_run_texture_ram_linear_tail();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
+        if (strcmp(only, "cull-matrix-vram") == 0) return coherence_run_cull_matrix_vram();
         if (strcmp(only, "patch-tess") == 0) return coherence_run_patch_tess();
         if (strcmp(only, "gpu-timestamps") == 0) return coherence_run_gpu_timestamps();
         if (strcmp(only, "gpu-timestamps-off") == 0) return coherence_run_gpu_timestamps_off();
@@ -17745,6 +17902,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_readback_rows()) ok = 0;
     if (!coherence_run_stacked_targets()) ok = 0;
     if (!coherence_run_wide_fill()) ok = 0;
+    if (!coherence_run_cull_matrix_vram()) ok = 0;   /* #2302; after wide-fill, whatever table it leaves */
     if (!coherence_run_patch_tess()) ok = 0;
     /* Last: they free every depth surface the cases above share (the twin cases too). */
     if (!coherence_run_depth_evict_newer()) ok = 0;

@@ -4608,14 +4608,15 @@ def sv_points(elf, insns, labels, hst_profile=False, options=None, entry=None):
         return {}
     if ENHANCEMENT_ACE_SITES and (insns & set(ENHANCEMENT_ACE_SITES.keys())):
         return {}
-    # A labelled delay slot's copy is skipped by its transfer's fall-through, which enters
-    # the next word with the slot run inline, annulled or followed by a call: a join, as a
-    # label is (the emitter's planned skip targets).
-    labels = set(labels) | set(_dup_slot_skips(elf, insns, labels).values())
     # An entry above the body's lowest address is entered past the words below it (emit_function
     # jumps to its label), so the first pass from it did not run them: a join, as a label is.
+    labels = set(labels)
     if entry is not None and entry != min(insns):
         labels.add(entry)
+    # A labelled delay slot's copy is skipped by its transfer's fall-through, which enters
+    # the next word with the slot run inline, annulled or followed by a call: a join, as a
+    # label is (the emitter's planned skip targets, the entry's own label among them).
+    labels |= set(_dup_slot_skips(elf, insns, labels).values())
     points, total = {}, 0
     regs: list[int | None] = [None] * 32
     regs[0] = 0
@@ -5270,6 +5271,12 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     # A variable-import site's immediate is the linker's too, so its body carries none either.
     sv_points = ({} if ADDRESS_SPACE.runtime_module or not ADDRESS_SPACE.patched.keys().isdisjoint(insns)
                  else sv_plan(elf, insns, labels, hst_profile=hst_profile, options=options, entry=start))
+    # An entry above the body's lowest address is a label too (the body jumps to it below).
+    # It joins the labels before the skips are planned: a transfer whose delay slot is that
+    # entry must skip the labelled copy on fall-through like any other labelled slot (#3163).
+    entry_label = bool(insns) and start != min(insns)
+    if entry_label:
+        labels = set(labels) | {start}
     dup_slot_skips = _dup_slot_skips(elf, insns, labels)
     if dup_slot_skips:
         labels = set(labels) | set(dup_slot_skips.values())
@@ -5283,9 +5290,7 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     if sp_kept:
         out.append("    uint32_t _sp_kept = 1u; (void)_sp_kept;")
         out.append("    uint32_t _sp_named = _sp_entry; (void)_sp_named;")
-    if insns and start != min(insns):
-        labels = set(labels)
-        labels.add(start)
+    if entry_label:
         out.append(f"    goto L_{start:08x};")
     ctx = _BodyContext(elf, ranges, known, resume_owners, dispatch_boundaries, labels, continuations,
                        dup_slot_skips, hst_profile, lle_cpu, resumable, stack_census, start, guest_exits,

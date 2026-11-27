@@ -489,8 +489,8 @@ pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the c
 one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not in the disc list, which doesn't
 mean bad, only not shown to be retail, and its disc ID isn't one the list names), then a PICTURE card when the last run of this game fell back to a
 slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
-`paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
-game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
+`paper` paragraph explaining what happened and what may help. If Vulkan selects a CPU device, the card says so,
+including when the Vulkan GE renderer starts successfully. A small Hide button, never the default focus, hides
 that fallback's notice for the rest of the session; then, when the game starts in Authentic and at least one of the
 18 PSP fonts is a stand-in or a replacement font, a FONTS card: one `BODY_S` `paper` sentence ("Text uses stand-in
 fonts. For the original look, get the fonts from your PSP.") and two 44 px secondary buttons, never the default focus: GET

@@ -2731,11 +2731,13 @@ retail title is private: keep it out of the repository and every upload.
 2. Use specific categories: `SR_DEBUG=0x02` for HLE tracing only
 3. Set `SR_WATCHDOG_EXIT=N` to abort after N vblanks without a newly presented frame; the firing is a NO-NEW-FLIP observation, so classify it with the display counters, thread dump, and MPEG/PSMF activity the watchdog prints, not the threshold alone
 4. Check how the picture is drawn: before `window_ready`, the runtime writes one
-   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge>`
+   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge|vulkan_cpu>`
    line from what `gui_init` asked for and what started (`nk_render_path_from_init` in
    `src/core/nk_shared_helpers.c`, #2151). `gdi_presenter` means SDL3/Vulkan did not start and the GDI window shows a
-   software-drawn picture; `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed. A path
-   that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
+   software-drawn picture. `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed.
+   `vulkan_cpu` means the selected Vulkan device runs on the CPU, regardless of the GE renderer in use. The
+   `ge` field still records which GE renderer started. An explicitly selected GDI or software GE path alone
+   gives `fallback=none`. The native player names a fallback
    on the game's page, with Hide for the rest of its session. The game window names it too, over the picture, in
    every play mode (the [render notice](ENHANCEMENT_CONTRACT.md#1024-the-render-notice)): a chip at the bottom left
    that any pause hides for the rest of the run, or, in the GDI window, a band of text that F1 hides. Such a run
