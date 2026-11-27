@@ -39,9 +39,12 @@ stream.
 `cases` holds command-word cases. The first is an untextured solid triangle in a 16×16 8888
 framebuffer. Its selected pixels and full framebuffer digest are deliberately unset until a
 qualified PSP run records them. The case uses the PSP GE command word layout; address operands are
-explicit relocations to its source-owned vertex words. A result records `framebuffer_sha256` and
-one `pixel_<x>_<y>` value for each selected coordinate, packed according to the case framebuffer
-format.
+explicit relocations to its source-owned vertex words. `solid-triangle-8888-v1` has a dedicated
+`PSP-GE-PIXEL-001` producer. Its build binds the fixed declaration and separate initial GE setup
+digests and the parser checks both digests, the scanout and restore guards, and all 16 raw rows.
+The corpus gate derives `framebuffer_sha256` over exactly 1,024 little-endian bytes and compares the
+three selected packed values from that same readback. The existing `PSP-GE-001` NaN probe has its own
+unchanged route. The triangle remains `NOT_RUN`.
 
 `python tools/psp_oracle/run_psplink.py --ge-corpus-write RUN_REPORT...` writes a probe run from
 the runner's report of a `ge-raster`, `ge-weight` or `ge-rtt` launch. It takes only a qualified,
@@ -2260,7 +2263,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   nearest even, `vf2iu` up and `vf2id` down, with the same saturation and NaN results. `vi2f` rounds to nearest
   (`0x7fffffff` gives `0x4f000000`) and a scale divides by 2^scale. `vi2s.q` takes the upper 16 bits of each lane
   pair, `vi2c.q` the top bytes of four lanes, `vi2us.q` bits 30..15 and `vi2uc.q` bits 30..23, the unsigned forms
-  clamping negatives to 0. `.p`, `.t` and `.q` agree with `.s` lane for lane. The [scale regression](https://github.com/Jstar269/Nakagawa-Recomp/issues/2809)
+  clamping negatives to 0. `.p`, `.t` and `.q` agree with `.s` lane for lane. The scale regression (#2809)
   checks scales 0, 8 and 31 in `tests/native/vfpu_interp_selftest.c` at all four widths and in
   `tools/test_codegen_fp_convert.py` through compiled generated scalar instructions. It pins the published rounding
   example and uses fixed result words derived from this rule for the remaining cases.
@@ -4508,6 +4511,49 @@ The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
   with an in-between sample at some block ends (-1663 between -1791 and -1535), 28 / 1.5 on average; at 0x2a00,
   10 or 11 (28 / 2.625 on average). A PCM ramp of 8 * i rises 8 per output sample at pitch 0x2000 and 4 per
   output sample on average at 0x0800.
+
+### PSP-SAS-003 extension capture 2026-11-26
+
+The `sas-mix` case, extended with cells for what the record above leaves open, ran once on 2026-11-26 (UTC) on the
+PSP-3000, boot 237, in the game context (system software 6.61; `pspver` 0x06060110, recorded as 6.6.1; custom
+firmware ARK-5 5.2.0, operator-declared), after a `transport-write` preflight: 377 records and the done record, all
+PASS, COMPLETE PASS, teardown PASS. The capture is `CAPTURED`, not `MEASURED`, and no manifest record cites it. The
+probe was built from `75ea7f222` plus a probe change that is on no public branch, so the added cells are not in
+`tests/fixtures/psp_oracle/probe.c` or `tools/psp_oracle/parse_golden.py`, and nobody can check the commit the
+envelope names. The values become manifest evidence only when the probe change is public and the case has run
+again from that commit. This is one console, one boot and one run; its control is that the 204 cell records it
+shares with the 2026-11-12 run equal that run's. The raw envelope stays private.
+
+The cells are described by their arguments, not by case ids, because the public stream registers none of them.
+Each used a core of grain 256 and 32 voices initialised fresh. The caller's buffer held a known ramp before the
+call and was read in three 32-sample windows; "untouched" means those windows. Only the `__sceSasCoreWithMix` cells
+are published here; the run's other cells (`__sceSasSetVolume` rounding, PCM pitch, and the argument checks of
+other SAS calls) wait for their own change under #2807.
+
+- *One side out of range,* output mode 0, no voice keyed: (-0x1000, 0x1000), (-1, 0x1000), (0x1000, -1),
+  (-0xfff, 0x1000), (0, -0x2000), (0x1001, 0x1000), (0x1000, 0x1001), (0x1000, 0x1fff), (0x2000, 0x1000) and
+  (0x1000, 0x2000) each returned `0x80420018` and left the buffer untouched. Each side takes 0 to 0x1000, and
+  each of the four bounds is isolated.
+- *Scaling,* output mode 0, no voice keyed: (0x555, 0xfff) and (1, 0xaab) returned 0, and every sample read was
+  floor(in * volume / 4096) for its side (at volume 1, -24832 gives -7, -194 gives -1 and 21728 gives 5).
+  (0x1000, 0) returned 0, left the left side unchanged and made the right side 0.
+- *Raw mode* (output mode 1 at `__sceSasInit`): (0x800, 0x800) and (0, 0) returned `0x80000004`, and
+  (0x2000, 0x3000) and (0, -0x1000) returned `0x80420018`, so the volume check answers before the raw-mode check.
+  The buffer was untouched in all four.
+- *Output mode changed after the init:* after an init in mode 0, `__sceSasSetOutputmode(1)` returned 0,
+  `__sceSasGetOutputmode` returned 1, and (0x1000, 0x1000) returned `0x80000004` with the buffer untouched. After
+  an init in mode 1, `__sceSasSetOutputmode(0)` returned 0, `__sceSasGetOutputmode` returned 0, and
+  (0x1000, 0x1000) returned 0 with the buffer equal to the input.
+- *A voice playing:* (0x800, 0x800) returned 0 and gave floor(in / 2) plus the voice's sample (1790);
+  (0x2000, 0x3000) returned `0x80420018` and left the buffer untouched.
+- *Voice advance:* a voice playing, two `__sceSasCore` grains (grains 0 and 1), one `__sceSasCoreWithMix` call,
+  then one more `__sceSasCore`. After (0x1000, 0x1000), which returned 0 and gave the ramp plus the voice's grain
+  2, the next grain was grain 3: an accepted call advances the voice by one grain. After (0x2000, 0x3000)
+  (`0x80420018`), and in output mode 1 after (0x1000, 0x1000) (`0x80000004`), the buffer was untouched and the
+  next grain was grain 2: a refused call of either kind does not advance the voice.
+
+Not captured: the order of the volume and raw-mode checks against the core and address checks (an uninitialised
+or misaligned core, a bad output pointer), a second console, and other firmware.
 
 ### PSP-GE-SIGNAL-001 capture 2026-11-10
 

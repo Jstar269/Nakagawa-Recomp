@@ -9,6 +9,7 @@
    and last until the game closes. */
 
 #include "nk_overlay.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 
 #include <stdio.h>
@@ -162,7 +163,9 @@ static void toggle(NkUi *ui, unsigned row, bool on) {
     knob_style.fill_rgba = on ? theme->ink : theme->muted;
     knob_style.corner_radius = NK_UI_RADIUS_PILL;
     if (!nk_ui_begin_container(ui, part_id(row, 3u), &group, NULL)) return;
-    nk_ui_text_role(ui, part_id(row, 4u), on ? "ON" : "OFF", NK_UI_TYPE_LABEL_S,
+    nk_ui_text_role(ui, part_id(row, 4u),
+                    on ? NK_UI_STR(OVERLAY_SETTINGS_TOGGLE_ON) : NK_UI_STR(OVERLAY_SETTINGS_TOGGLE_OFF),
+                    NK_UI_TYPE_LABEL_S,
                     on ? theme->paper : theme->muted);
     if (nk_ui_begin_container(ui, part_id(row, 5u), &track, &track_style)) {
         if (nk_ui_begin_container(ui, part_id(row, 6u), &knob, &knob_style)) {
@@ -230,12 +233,14 @@ static void segmented_row(NkUi *ui, NkUiId id, unsigned row, const char *label,
 NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
                                          const NkOverlayModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"},
-        {NK_UI_PROMPT_ACT_CONFIRM, "Change"},
-        {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(OVERLAY_PROMPT_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(OVERLAY_PROMPT_CHANGE)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(OVERLAY_PROMPT_BACK)}
     };
     const char *scalings[NK_OVERLAY_SCALING_COUNT];
-    static const char *const pacings[NK_OVERLAY_PACING_COUNT] = {"PSP timing", "No extra cap"};
+    static const char *const pacings[NK_OVERLAY_PACING_COUNT] = {
+        NK_UI_STR(OVERLAY_SETTINGS_PACING_PSP), NK_UI_STR(OVERLAY_SETTINGS_PACING_UNCAPPED)
+    };
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkOverlayAction result = nk_overlay_action(NK_OVERLAY_ACT_NONE, 0);
     int scaling = model->scaling >= 0 && model->scaling < NK_OVERLAY_SCALING_COUNT
@@ -245,8 +250,8 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
                                         compact ? QUICK_CARD_WIDTH_COMPACT : QUICK_CARD_WIDTH);
     if (inner <= 0.0f) return result;
     for (int i = 0; i < NK_OVERLAY_SCALING_COUNT; ++i) scalings[i] = nk_overlay_scaling_label(i);
-    nk_ui_eyebrow(ui, QUICK_ID_EYEBROW, "Game paused \xC2\xB7 Settings");
-    nk_ui_text_role(ui, QUICK_ID_TITLE, "Settings", NK_UI_TYPE_TITLE, theme->paper);
+    nk_ui_eyebrow(ui, QUICK_ID_EYEBROW, NK_UI_STR(OVERLAY_SETTINGS_EYEBROW));
+    nk_ui_text_role(ui, QUICK_ID_TITLE, NK_UI_STR(OVERLAY_SETTINGS_TITLE), NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiLayout rows = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
                                             nk_overlay_fit(),
@@ -257,60 +262,58 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
                lays out exactly as it did. The label column leaves room for the widest
                control. */
             if (model->fullscreen > 0) {
-                toggle_row(ui, NK_OVERLAY_ID_FULLSCREEN, 3u, "Fullscreen",
-                           "The game fills the whole screen. Off puts it back in its window.",
+                toggle_row(ui, NK_OVERLAY_ID_FULLSCREEN, 3u, NK_UI_STR(OVERLAY_SETTINGS_FULLSCREEN),
+                           NK_UI_STR(OVERLAY_SETTINGS_FULLSCREEN_DESCRIPTION),
                            inner - 180.0f, compact, model->fullscreen == 2,
                            NK_OVERLAY_ACT_SET_FULLSCREEN, &result);
             }
-            segmented_row(ui, NK_OVERLAY_ID_SCALING, 0u, "Game scaling",
-                          "Sharp keeps pixels crisp, Integer uses whole multiples, "
-                          "Smooth blends them.", inner - 300.0f, compact, scalings,
+            segmented_row(ui, NK_OVERLAY_ID_SCALING, 0u, NK_UI_STR(OVERLAY_SETTINGS_SCALING),
+                          NK_UI_STR(OVERLAY_SETTINGS_SCALING_DESCRIPTION), inner - 300.0f, compact, scalings,
                           NK_OVERLAY_SCALING_COUNT, scaling, NK_OVERLAY_ACT_SET_SCALING, &result);
             if (model->pacing > 0) {
                 int pacing = model->pacing - 1 < NK_OVERLAY_PACING_COUNT
                     ? model->pacing - 1 : NK_OVERLAY_PACING_PSP;
-                segmented_row(ui, NK_OVERLAY_ID_PACING, 4u, "Frame pacing",
-                              "PSP timing paces frames like the PSP's screen. No extra cap "
-                              "shows every frame.", inner - 300.0f, compact, pacings, NK_OVERLAY_PACING_COUNT, pacing,
+                segmented_row(ui, NK_OVERLAY_ID_PACING, 4u, NK_UI_STR(OVERLAY_SETTINGS_PACING),
+                              NK_UI_STR(OVERLAY_SETTINGS_PACING_DESCRIPTION), inner - 300.0f, compact, pacings,
+                              NK_OVERLAY_PACING_COUNT, pacing,
                               NK_OVERLAY_ACT_SET_PACING, &result);
             }
-            toggle_row(ui, NK_OVERLAY_ID_HUD, 1u, "Performance HUD",
-                       "Frame rate and frame time in a corner of the game. F3 shows or "
-                       "hides it too.", inner - 180.0f, compact, model->hud_on,
+            toggle_row(ui, NK_OVERLAY_ID_HUD, 1u, NK_UI_STR(OVERLAY_SETTINGS_HUD),
+                       NK_UI_STR(OVERLAY_SETTINGS_HUD_DESCRIPTION), inner - 180.0f, compact, model->hud_on,
                        NK_OVERLAY_ACT_SET_HUD, &result);
             /* The Enhanced speed readout (src/rt/ace.h), in an Enhanced or Ace run that can draw it. */
             if (model->ace_readout > 0) {
-                toggle_row(ui, NK_OVERLAY_ID_READOUT, 2u, "Speed readout",
-                           "The game's speed and frame rate in a corner, from Enhanced. "
-                           "Hidden while the HUD shows.", inner - 180.0f, compact,
+                toggle_row(ui, NK_OVERLAY_ID_READOUT, 2u, NK_UI_STR(OVERLAY_SETTINGS_READOUT),
+                           NK_UI_STR(OVERLAY_SETTINGS_READOUT_DESCRIPTION), inner - 180.0f, compact,
                            model->ace_readout == 2, NK_OVERLAY_ACT_SET_READOUT, &result);
             }
             /* The texture dump (ge_gpu.h), in an Enhanced or Ace run on the Vulkan renderer: a
                refused start says why; while on, the files saved, and why it stopped if it did. */
             if (model->texdump > 0) {
                 char status[200];
-                const char *description = "Saves the textures the game draws to your user data folder, "
-                                          "to make a texture pack.";
+                const char *description = NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_DESCRIPTION);
                 if (model->texdump_note != NULL && model->texdump_note[0] != '\0') {
                     description = model->texdump_note;
                 } else if (model->texdump == 2) {
                     const unsigned long long saved = model->texdump_saved;
-                    const char *files = saved == 1u ? "file" : "files";
+                    const char *files = saved == 1u ? NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_FILE)
+                                                    : NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_FILES);
                     if (model->texdump_stopped != NULL && model->texdump_stopped[0] != '\0') {
-                        snprintf(status, sizeof(status), "Stopped: %s. %llu %s saved.",
+                        snprintf(status, sizeof(status), NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_STOPPED),
                                  model->texdump_stopped, saved, files);
                     } else if (model->texdump_changing > 0u) {
                         snprintf(status, sizeof(status),
-                                 "%llu %s saved. Stopped for %llu %s that change every frame.", saved,
+                                 NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_CHANGING), saved,
                                  files, model->texdump_changing,
-                                 model->texdump_changing == 1u ? "texture" : "textures");
+                                 model->texdump_changing == 1u ? NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_TEXTURE)
+                                                              : NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_TEXTURES));
                     } else {
-                        snprintf(status, sizeof(status), "On: %llu %s saved to your user data folder.",
+                        snprintf(status, sizeof(status), NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP_SAVING),
                                  saved, files);
                     }
                     description = status;
                 }
-                toggle_row(ui, NK_OVERLAY_ID_TEXDUMP, 5u, "Dump textures", description,
+                toggle_row(ui, NK_OVERLAY_ID_TEXDUMP, 5u, NK_UI_STR(OVERLAY_SETTINGS_TEXDUMP), description,
                            inner - 180.0f, compact, model->texdump == 2,
                            NK_OVERLAY_ACT_SET_TEXDUMP, &result);
             }
@@ -320,11 +323,9 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
     {
         NkUiTextStyle foot = nk_ui_type(NK_UI_TYPE_FOOTNOTE, theme->dim);
         foot.wrap = true;
-        nk_ui_text(ui, QUICK_ID_FOOT,
-                   "Changes apply now and last until the game closes. The library's "
-                   "Settings choose what a game starts with.", &foot);
+        nk_ui_text(ui, QUICK_ID_FOOT, NK_UI_STR(OVERLAY_SETTINGS_FOOT), &foot);
     }
-    if (nk_ui_button(ui, NK_OVERLAY_ID_SETTINGS_BACK, "Back", 0u) ||
+    if (nk_ui_button(ui, NK_OVERLAY_ID_SETTINGS_BACK, NK_UI_STR(OVERLAY_BUTTON_BACK), 0u) ||
         nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
         nk_overlay_go(state, NK_OVERLAY_SCREEN_MENU, NK_OVERLAY_ID_SETTINGS);
     }

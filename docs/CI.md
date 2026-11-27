@@ -500,8 +500,8 @@ gate runs in exactly one part with the command it had in the serial job:
   merge groups and manual runs skip it, so their time is unchanged. The nightly schedule also
   runs `gpu-coherence-twin-mutants` on lavapipe: its fourteen mutants each build their own
   coherence selftest, which is too long for every run.
-- `player`: present pacing, the player UI tests and regressions, the CMake player, the
-  showcase and the two player smokes that stage its ISO.
+- `player`: present pacing, the player UI tests and regressions, the CMake player and its
+  Release build, the showcase and the two player smokes that stage its ISO.
 
 The `player` part also builds the pinned PSPSDK `gu-cube` sample offline and runs it through a fresh
 native player profile under Xvfb and lavapipe. It checks the refused filename, package validation,
@@ -809,10 +809,11 @@ player UI event and recovery flows, which are UI evidence rather than staging ev
 harness (`tests/native/test_player_ui.py`) forces SDL's dummy video and software render drivers for
 every player it spawns, so the gate is headless without any step environment. The target runs the
 suite as four parallel shards (`PLAYER_UI_SHARDS`, `NAKAGAWA_PLAYER_UI_SHARD`) that together run
-every test exactly once; each test already uses its own temporary data roots. The CMake player is configured with CMake's default, unoptimized build type, so
-the gate covers only that configuration: an optimized Release configuration fails under the global
-`-Werror` on existing truncation warnings in `src/core/nk_launch.c`, a separate defect, and this
-job does not claim that configuration builds. Consumer ISO compatibility on Linux is not supported
+every test exactly once; each test already uses its own temporary data roots. The CMake player is configured with CMake's default, unoptimized build type, and its CTest
+and smokes run from that tree. A second step builds every target in the CMake `Release`
+configuration, in its own tree: `-O3` under the top-level `-Wall -Wextra -Werror` reports warnings
+the default build type does not, and such a break went unseen until #3134. That step compiles and
+links only; it runs no test from the Release tree. Consumer ISO compatibility on Linux is not supported
 (#306); these checks do not establish PSP hardware acceptance or interactive desktop presentation.
 
 ### GCC 16 canary

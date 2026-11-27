@@ -1455,6 +1455,19 @@ jobs:
           printf '%s\n' "$help_output"
           grep -Fq "Usage: nakagawa_player" <<<"$help_output"
 
+      # The Release configuration compiles at -O3 under the top-level -Wall -Wextra -Werror, where
+      # GCC reports warnings the default build type does not; such a break went unseen (#3134).
+      # Build every target in it, in a tree of its own, with the compiler and SDL3 the step above uses.
+      - name: Build the CMake Linux Release configuration
+        if: matrix.part == 'player'
+        run: |
+          set -euo pipefail
+          release_build="$RUNNER_TEMP/nakagawa-cmake-release"
+          cmake -S . -B "$release_build" -G Ninja \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_PREFIX_PATH=/usr/local \
+            -DBUILD_PLAYER=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$release_build" --parallel 2
+
       - name: Run the pinned gu-cube player smoke
         if: matrix.part == 'player'
         env:

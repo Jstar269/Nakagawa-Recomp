@@ -107,6 +107,7 @@ PSP_HEAP_SIZE_KB(64);
 #define GE_CASE_RASTER_BOUNDS 187
 #define GE_CASE_DEPTH_ROUND 188
 #define GE_CASE_DEPTH_BOUNDS 192
+#define GE_CASE_SOLID_TRIANGLE 193
 
 #if PSP_ORACLE_CASE == GE_CASE_SAMPLE
 #define HLE_CAMPAIGN_ID "ge-sample"
@@ -156,6 +157,11 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "ge-depth-bounds"
 #define HLE_TEST_ID "PSP-GE-RASTER-004"
 #define HLE_LOG "host0:/ge_depth_bounds_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE
+#define HLE_CAMPAIGN_ID "solid-triangle-8888-v1"
+#define HLE_TEST_ID "PSP-GE-PIXEL-001"
+#define HLE_LOG "host0:/solid_triangle_8888_v1_log.txt"
+static volatile int s_solid_restore_pending;
 #else
 #error probe_ge_sample.c has no case for this PSP_ORACLE_CASE
 #endif
@@ -167,6 +173,10 @@ int module_stop(SceSize args, void *argp)
 {
     (void)args;
     (void)argp;
+#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE
+    /* A wedged GE may still reference this PRX's list and vertices. */
+    if (s_solid_restore_pending) return 1;
+#endif
     const SceUID main_thread = s_hle_main_thread;
     if (main_thread < 0) {
         return 1;
@@ -177,6 +187,11 @@ int module_stop(SceSize args, void *argp)
     if (sceKernelWaitThreadEnd(main_thread, &timeout) < 0) {
         return 1;
     }
+#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE
+    /* The worker could enter the draw before it observed the stop request.
+       Its exit does not release the GE's references to the PRX. */
+    if (s_solid_restore_pending) return 1;
+#endif
     if (sceKernelDeleteThread(main_thread) < 0) {
         return 1;
     }
@@ -5155,6 +5170,161 @@ static int hle_run(void)
 }
 
 #endif /* GE_CASE_DEPTH_ROUND */
+
+#if PSP_ORACLE_CASE == GE_CASE_SOLID_TRIANGLE
+#include <pspdisplay.h>
+#include "ge_solid_triangle_inputs.h"
+
+/* The external run guard owns GE and scanout for this single launch. The probe
+   checks both scanout slots itself, leaves the display untouched, and escapes
+   before testing if either slot cannot be proved disjoint from EDRAM [0,1024). */
+enum {
+    SOLID_SIDE = 16,
+    SOLID_WORDS = SOLID_SIDE * SOLID_SIDE,
+    SOLID_BYTES = SOLID_WORDS * 4,
+    SOLID_EDRAM_BYTES = 0x00200000,
+    SOLID_SCREEN_WIDTH = 480,
+    SOLID_SCREEN_HEIGHT = 272,
+    SOLID_WAIT_POLLS = 200,
+    SOLID_WAIT_US = 1000,
+    SOLID_CASE_COUNT = sizeof(solid_case_words) / sizeof(solid_case_words[0]),
+    SOLID_PRESTATE_COUNT = sizeof(solid_prestate) / sizeof(solid_prestate[0]),
+};
+_Static_assert(SOLID_CASE_COUNT == 20, "pinned command-word count");
+_Static_assert(sizeof(solid_vertices) == 48, "pinned vertex data size");
+_Static_assert(sizeof(solid_identity) == 64, "two complete input digests");
+
+static PspGeContext s_solid_context __attribute__((aligned(64)));
+static uint32_t s_solid_list[SOLID_PRESTATE_COUNT + SOLID_CASE_COUNT] __attribute__((aligned(64)));
+static uint32_t s_solid_save[SOLID_WORDS];
+static uint32_t s_solid_output[SOLID_WORDS];
+
+/* SOLID_SCANOUT_CHECK_BEGIN (also exercised by the host test) */
+static int solid_scanout_disjoint(uint32_t address, int stride, int format)
+{
+    /* Use only the canonical EDRAM range and its uncached view. The mirror
+       mapping and the meaning of an absent pending pointer are unqualified. */
+    const uint32_t physical = address & ~0x40000000u;
+    if (physical < 0x04000000u || physical >= 0x04000000u + SOLID_EDRAM_BYTES ||
+        stride < SOLID_SCREEN_WIDTH || stride > 2048 || (stride & (stride - 1)) != 0 ||
+        format < 0 || format > 3) return 0;
+    const uint32_t offset = physical - 0x04000000u;
+    const uint32_t bytes = (uint32_t)stride * SOLID_SCREEN_HEIGHT * (format == 3 ? 4u : 2u);
+    return offset >= SOLID_BYTES && bytes <= SOLID_EDRAM_BYTES - offset;
+}
+/* SOLID_SCANOUT_CHECK_END */
+
+static int solid_display_disjoint(void)
+{
+    int mode = -1, width = 0, height = 0;
+    if (sceDisplayGetMode(&mode, &width, &height) != 0 ||
+        mode != PSP_DISPLAY_MODE_LCD || width != SOLID_SCREEN_WIDTH || height != SOLID_SCREEN_HEIGHT)
+        return 0;
+    for (int slot = PSP_DISPLAY_SETBUF_IMMEDIATE; slot <= PSP_DISPLAY_SETBUF_NEXTFRAME; slot++) {
+        void *top = NULL;
+        int stride = 0, format = -1;
+        if (sceDisplayGetFrameBuf(&top, &stride, &format, slot) != 0 ||
+            !solid_scanout_disjoint((uint32_t)(uintptr_t)top, stride, format))
+            return 0;
+    }
+    return 1;
+}
+
+static int solid_wait_draw(int qid, uint32_t *out)
+{
+    for (unsigned poll = 0; poll < SOLID_WAIT_POLLS; poll++) {
+        out[1] = (uint32_t)sceGeListSync(qid, 1);
+        out[2] = (uint32_t)sceGeDrawSync(1);
+        if (out[1] == PSP_GE_LIST_DONE && out[2] == PSP_GE_LIST_DONE) return 1;
+        sceKernelDelayThread(SOLID_WAIT_US);
+    }
+    return 0;
+}
+
+static int hle_run(void)
+{
+    hle_step("display-and-ge-guard");
+    const uint32_t size = sceGeEdramGetSize();
+    const uint32_t base = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    if (size != SOLID_EDRAM_BYTES || base != 0x04000000u ||
+        sceGeDrawSync(1) != PSP_GE_LIST_DONE || !solid_display_disjoint()) {
+        hle_step("display-or-ge-guard-refused");
+        return 0;
+    }
+    const uint32_t vertices = (uint32_t)(uintptr_t)solid_vertices & 0x0fffffffu;
+    if (vertices < 0x08000000u || vertices > 0x0c000000u - sizeof(solid_vertices) ||
+        (vertices & 3u)) {
+        hle_step("vertex-placement-refused");
+        return 0;
+    }
+    memcpy(s_solid_list, solid_prestate, sizeof(solid_prestate));
+    uint32_t *words = s_solid_list + SOLID_PRESTATE_COUNT;
+    memcpy(words, solid_case_words, sizeof(solid_case_words));
+    words[15] |= (vertices >> 24) << 16;
+    words[16] |= vertices & 0x00ffffffu;
+
+    /* Record preparation before the guarded span changes; keep host I/O out
+       of the interval that may need VRAM or GE restoration. */
+    const uint32_t guard[] = {SOLID_SCREEN_WIDTH, SOLID_SCREEN_HEIGHT, size, 2u};
+    hle_record(HLE_CAMPAIGN_ID "-input", "PASS", 0, solid_identity, 16);
+    hle_record(HLE_CAMPAIGN_ID "-guard", "PASS", 0, guard, 4);
+    hle_step("guard-recheck-and-draw");
+    if (sceGeDrawSync(1) != PSP_GE_LIST_DONE || !solid_display_disjoint()) {
+        hle_step("display-or-ge-guard-changed");
+        return 0;
+    }
+    if (sceGeSaveContext(&s_solid_context) != 0) {
+        hle_step("ge-context-save-refused");
+        return 0;
+    }
+    /* The list is now finalized. Flush cached writes before saving and
+       clearing the uncached target, so a cached alias cannot undo the clear. */
+    sceKernelDcacheWritebackAll();
+    volatile uint32_t *const framebuffer = (volatile uint32_t *)(uintptr_t)(base | 0x40000000u);
+    for (unsigned i = 0; i < SOLID_WORDS; i++) s_solid_save[i] = framebuffer[i];
+    s_solid_restore_pending = 1;
+    if (s_hle_stop_requested || sceGeDrawSync(1) != PSP_GE_LIST_DONE || !solid_display_disjoint()) {
+        s_solid_restore_pending = 0;
+        hle_step("pre-write-refused");
+        return 0;
+    }
+    for (unsigned i = 0; i < SOLID_WORDS; i++) framebuffer[i] = 0;
+    __asm__ volatile("sync" ::: "memory");
+    uint32_t initial_nonzero = 0;
+    for (unsigned i = 0; i < SOLID_WORDS; i++) initial_nonzero += framebuffer[i] != 0;
+    int qid = -1;
+    if (initial_nonzero == 0) qid = sceGeListEnQueue(s_solid_list, NULL, -1, NULL);
+    uint32_t draw[4] = {(uint32_t)qid, UINT32_MAX, UINT32_MAX, initial_nonzero};
+    int finished = qid >= 0 && solid_wait_draw(qid, draw);
+    if (finished) {
+        __asm__ volatile("sync" ::: "memory");
+        for (unsigned i = 0; i < SOLID_WORDS; i++) s_solid_output[i] = framebuffer[i];
+    }
+
+    /* Restore only after establishing quiescence and a disjoint scanout. On
+       timeout we do not break somebody else's queue. If restoration cannot
+       be verified, keep the module resident and return no pixel evidence. */
+    uint32_t restore[2] = {UINT32_MAX, UINT32_MAX};
+    if (sceGeDrawSync(1) == PSP_GE_LIST_DONE && solid_display_disjoint()) {
+        for (unsigned i = 0; i < SOLID_WORDS; i++) framebuffer[i] = s_solid_save[i];
+        __asm__ volatile("sync" ::: "memory");
+        restore[0] = 0;
+        for (unsigned i = 0; i < SOLID_WORDS; i++) restore[0] += framebuffer[i] != s_solid_save[i];
+        restore[1] = (uint32_t)sceGeRestoreContext(&s_solid_context);
+        if (restore[0] == 0 && restore[1] == 0) s_solid_restore_pending = 0;
+    }
+    hle_record(HLE_CAMPAIGN_ID "-draw", finished ? "PASS" : qid < 0 ? "FAIL" : "TIMEOUT",
+               0, draw, 4);
+    hle_record(HLE_CAMPAIGN_ID "-restore", s_solid_restore_pending ? "FAIL" : "PASS", 0, restore, 2);
+    if (!finished || s_solid_restore_pending) return 0;
+    for (unsigned y = 0; y < SOLID_SIDE; y++) {
+        char row[48];
+        snprintf(row, sizeof(row), HLE_CAMPAIGN_ID "-r%u", y);
+        hle_record(row, "PASS", y, s_solid_output + y * SOLID_SIDE, SOLID_SIDE);
+    }
+    return 1;
+}
+#endif /* GE_CASE_SOLID_TRIANGLE */
 
 /* ------------------------------------------------------------------------- */
 
