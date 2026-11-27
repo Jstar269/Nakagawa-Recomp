@@ -908,8 +908,7 @@ bool nk_platform_harden_library_search(void);
    again each time it reaches 1 MiB. Call after nk_platform_set_app_data_dir_override. */
 void nk_platform_setup_standard_streams(const char *fallback_log_name);
 
-#if !defined(_WIN32)
-/* POSIX hosts (Android's own log, above): keeps the last `keep` copies of the file at `path`.
+/* Keeps the last `keep` copies of the file at `path` (Android's own log, above).
    The oldest, <stem>.<keep><ext>, is removed, each <stem>.<n><ext> becomes <stem>.<n+1><ext>,
    and `path` becomes <stem>.1<ext>, where <ext> is the last component's extension
    (player-output.txt -> player-output.1.txt; a name with none, or a leading dot only, gets
@@ -917,7 +916,6 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name);
    afterwards for the caller to create. keep 0 removes `path`. False when a name does not fit
    NK_MAX_PATH or an existing copy could not be moved or removed. */
 bool nk_platform_rotate_log_files(const char *path, unsigned keep);
-#endif
 
 /* Android: apply the variables the activity set (NakagawaHost.nativeEnvironment: the launcher's
    NK_ANDROID_PID_FILE, NK_ANDROID_EXIT_FILE, SR_BOOT_EVENT_FILE, NK_ANDROID_APP_DIR and the rest)
