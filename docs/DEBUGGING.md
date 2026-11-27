@@ -1908,9 +1908,23 @@ PC, starting address, value, width in bytes, and most recently delivered vblank:
 $env:SR_WATCH = '0x08800000:4'
 ```
 
-Output uses `SR_WATCH: pc=... addr=... val=... width=... vblank=...`. A vblank value of zero
-means no vblank has been delivered yet. The watch is inert when unset; the shared store helpers
-take only a predicted-false flag check in that case.
+Output uses `SR_WATCH: pc=... addr=... val=... width=... vblank=... ra=... sp=... thread=... old=...`.
+A vblank value of zero means no vblank has been delivered yet. The fields after `vblank` were
+appended for #2809, so a filter written for the shorter line still matches its prefix:
+
+- `ra` and `sp` are `$ra` (`r[31]`) and `$sp` (`r[29]`) of the running thread's register file at
+  the store, or `none` when no register file is current. A store inside a promoted run of a
+  `--promote-registers` build sees the values written back at the start of that run, and an
+  HLE host store names the thread that made the call.
+- `thread` is the running thread's UID, `0x00000000` when no thread is current.
+- `old` is the bytes the store replaced, read just before it in the same layout as `val`. A
+  VRAM store reads them through the CPU read-prepare path, as a guest load would; that read
+  happens only for a store the armed range covers, and it can make the renderer read VRAM back
+  where the store alone would not, so a watch over VRAM changes GPU synchronization.
+
+The watch is inert when unset. With it unset, a store takes the inline fast path or, in a slow
+store helper, one predicted-false flag check; an armed store goes whole to one cold out-of-line
+helper.
 
 ### Sampling guest state per vblank
 
