@@ -1540,11 +1540,11 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         shared = set(_WINDOWS_EVERY_PART) | set(_WINDOWS_MAIN_SAVE)
         self.assertEqual(sorted(name for name in self.steps if name not in shared), sorted(pinned),
                          "every Windows step outside the shared ones is pinned to one part")
-        for part, names in _WINDOWS_PART_STEPS.items():
+        for part, part_steps in _WINDOWS_PART_STEPS.items():
             with self.subTest(part=part):
                 found = [name for name in self.steps
                          if name not in shared and self._part_or_installer_part(name) == part]
-                self.assertEqual(tuple(found), names)
+                self.assertEqual(tuple(found), part_steps)
 
     def test_steps_that_read_another_steps_output_share_its_part_and_follow_it(self) -> None:
         """#3166: a step that reads what another step built runs after it, in the same part."""
