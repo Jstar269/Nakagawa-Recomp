@@ -791,7 +791,57 @@ XING_BRANCHES = (
 )
 
 #: Cells that end by falling into the next cell, an entry: the crossing is the test.
-FALL_INTO_CELLS = {"xing_fall_a": "xing_fall_b", "xing_fall_b": "xing_dst"}
+FALL_INTO_CELLS = {"xing_fall_a": "xing_fall_b", "xing_fall_b": "xing_dst",
+                   "cslot_call": "cslot_branch", "cslot_branch": "cslot_dst"}
+
+
+# A branch onto a delay slot whose next word is another entry (#3128). The slot's transfer
+# ends its path at that entry (a continuation); on the branch's path the slot is an ordinary
+# word, and the guest goes on into the same entry.
+
+
+def _cell_cslot_call() -> list[int]:
+    """A branch onto the delay slot of a `jal` whose link is the next entry.
+
+    The `jal` sits on the never-taken path. A body that owned 0x18 only as the `jal`'s
+    slot ran it under its label and then returned to its caller instead of entering
+    cslot_branch. Expected after the chain returns: $v0 = 0x1131, $v1 = 0x5C.
+    """
+    return [
+        _i(0x09, ZERO, V0, 0),              # 0x00 addiu v0, zero, 0
+        _i(0x09, ZERO, T0, 1),              # 0x04 addiu t0, zero, 1
+        _i(0x05, T0, ZERO, 3),              # 0x08 bne   t0, zero, +3 (-> 0x18, taken)
+        _i(0x09, V0, V0, 1),                # 0x0c addiu v0, v0, 1      (slot)
+        _i(0x09, V0, V0, 0x800),            # 0x10 addiu v0, v0, 2048   (never runs)
+        _j(0x03, 0),                        # 0x14 jal   leafA (patched, relocated; never runs)
+        _i(0x09, V0, V0, 0x10),             # 0x18 addiu v0, v0, 16     (its slot, entered) -> cslot_branch
+    ]
+
+
+def _cell_cslot_branch() -> list[int]:
+    """The same for a conditional branch whose not-taken successor is the next entry.
+
+    Only a split body (codegen --region-split-threshold) stops at that entry; an unsplit
+    body copies cslot_dst's code after the branch. Either way the path through the label
+    runs 0x14 once and goes on into cslot_dst.
+    """
+    return [
+        _i(0x09, ZERO, T0, 1),              # 0x00 addiu t0, zero, 1
+        _i(0x05, T0, ZERO, 3),              # 0x04 bne   t0, zero, +3 (-> 0x14, taken)
+        _i(0x09, V0, V0, 0x100),            # 0x08 addiu v0, v0, 256    (slot)
+        _i(0x09, V0, V0, 0x800),            # 0x0c addiu v0, v0, 2048   (never runs)
+        _i(0x04, T0, ZERO, -5),             # 0x10 beq   t0, zero, -5 (-> 0x00; never runs)
+        _i(0x09, V0, V0, 0x20),             # 0x14 addiu v0, v0, 32     (its slot, entered) -> cslot_dst
+    ]
+
+
+def _cell_cslot_dst() -> list[int]:
+    """The entry the two cells above run on into."""
+    return [
+        _i(0x09, V0, V0, 0x1000),           # 0x00 addiu v0, v0, 4096
+        JR_RA,                              # 0x04
+        _i(0x09, ZERO, V1, 0x5C),           # 0x08 addiu v1, zero, 0x5c (return slot)
+    ]
 
 
 def _leaf(marker: int, delta: int) -> list[int]:
@@ -1828,6 +1878,10 @@ CELLS: tuple[tuple[str, str, object], ...] = (
     ("xing_fall_a", "not-taken fall-through into another entry", _cell_xing_fall_a),
     ("xing_fall_b", "annulled fall-through into another entry", _cell_xing_fall_b),
     ("xing_dst", "entry-crossing target looping back across entries", _cell_xing_dst),
+    ("cslot_call", "branch onto a `jal` delay slot before another entry", _cell_cslot_call),
+    ("cslot_branch", "branch onto a conditional branch's delay slot before another entry",
+     _cell_cslot_branch),
+    ("cslot_dst", "the entry after both labelled delay slots", _cell_cslot_dst),
     ("link_leaf", "leaf A: the correct call destination", _cell_link_leaf),
     ("link_leaf_b", "leaf B: a late-resolved call destination", _cell_link_leaf_b),
     ("link", "jal link semantics", _cell_link),
@@ -2062,6 +2116,9 @@ def build_text_segment() -> bytes:
     # segment-relative targets that the production relocation pass rebases.
     struct.pack_into(
         "<I", text, layout["link"][0] + 0x0C, _j(0x03, layout["link_leaf"][0])
+    )
+    struct.pack_into(
+        "<I", text, layout["cslot_call"][0] + 0x14, _j(0x03, layout["link_leaf"][0])
     )
     struct.pack_into(
         "<I", text, layout["jump"][0] + 0x04, _j(0x02, layout["jump"][0] + 0x10)

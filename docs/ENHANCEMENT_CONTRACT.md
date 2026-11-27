@@ -315,6 +315,22 @@ Many PSP titles run a 30 Hz game-logic loop by waiting two VBLANK intervals per 
 2. **Off at run time unless opted in.** Every rewritten site is emitted twice: the stock statement and its rewrite. The rewrite runs only when the process starts with `SR_EXPERIMENTAL_60HZ=1`; any other value runs the stock statements, so a package build with the toggle off executes the authentic instruction stream. The player sets it per title: "60 FPS game logic" on the title page, shown only for a title with a usable enhancement package, is off by default and saved as the list `enhancement_60hz_discs` in the player's settings file (no other key turns it on). A title with it on launches its enhanced package with `SR_EXPERIMENTAL_60HZ=1`; with it off, the player launches the authentic `packages/<disc_id>` with `SR_EXPERIMENTAL_60HZ=0`, even when an enhanced package exists. Started with `--experimental-60hz`, the player turns it on for every title that has an enhancement package and does not resolve to Authentic (section 10.5), for that session only; the flag is never written to the settings file.
 3. **No faster guest clock.** System time, RTC and audio sample clocks are untouched. Only the sites the package lists change.
 
+The build snapshots the selected declaration before computing its package key and generating code.
+An enhanced package records a versioned source fingerprint alongside its validated declaration
+digest. The player selects the current user or shipped declaration for that title and checks the
+fingerprint when it checks library readiness and again before starting the runtime. A combined
+timing and culling package checks both. JSON whitespace, member order, and equivalent string escapes
+leave the fingerprint unchanged, including equivalent spellings of JSON real numbers within the
+player's declaration size limit. A declaration with the same ID and different contents requires
+a rebuild. The build also snapshots and records the byte digest of any adjacent symbol map it
+uses. Adding, removing or changing that map requires a rebuild. Published declarations resolve
+against their own site map. An explicit guest symbol map takes precedence over adjacent files for
+private declarations. The builder snapshots its bytes and records their digest in the enhanced AOT
+key. The installed package records that build input by digest, and launch continues to check the
+selected declaration files without reading unused adjacent maps. An older enhanced package that
+lacks the declaration identity needs one rebuild to record it.
+Authentic packages have no declaration fingerprint requirement.
+
 ### 9.2. Site Transforms
 
 Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, the SHA-256 `stock_digest` of the stock little-endian instruction word, and a `transform`. `plan_site_rewrite()` in `tools/enhancement_package.py` gives each (transform, instruction) pair exactly one rewrite, chosen from the transform and the instruction encoding alone; a pair without one refuses the whole package. A site is one word, or two words (`word_count: 2`) that build a float constant: `lui rt, hi` followed by `ori rt, rt, lo` of the same register. A pair takes one of the scaling transforms below, applied to the whole 32-bit value and rounded to nearest, and both words are rewritten (`plan_float_pair_rewrite()`).

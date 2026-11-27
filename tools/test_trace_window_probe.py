@@ -52,6 +52,7 @@ WINDOW_H = (ROOT / "src/rt/flight_recorder.h").read_text(encoding="utf-8")
 INTERP_C = (ROOT / "src/rt/guest_interp.c").read_text(encoding="utf-8")
 CODEGEN_PY = (ROOT / "tools/codegen.py").read_text(encoding="utf-8")
 DISPATCH_SELFTEST = (ROOT / "tests/native/dispatch_isolation_selftest.c").read_text(encoding="utf-8")
+SCHED_C = (ROOT / "src/rt/sched.c").read_text(encoding="utf-8")
 MAKEFILE = read_makefile(ROOT)
 NK_CLI = (ROOT / "tools/nk_cli.py").read_text(encoding="utf-8")
 
@@ -193,14 +194,25 @@ class TraceWindowProbeTests(unittest.TestCase):
         self.assertIn("length > (UINT32_MAX + 1ULL) - start", configure)
         self.assertIn("if (s_watch_configured) return;", configure)
 
+        covers = body_of(WINDOW_C, "int sr_watch_covers(")
+        self.assertIn("store_start < s_watch_end && store_end > s_watch_start", covers)
         store = body_of(WINDOW_C, "void sr_watch_store(")
-        self.assertIn("store_start >= s_watch_end || store_end <= s_watch_start", store)
+        self.assertIn("sr_watch_covers(stored->addr, stored->width)", store)
+        # The fields before #2809 keep their order; the context is appended after them.
         self.assertIn(
             '"SR_WATCH: pc=0x%08" PRIx32 " addr=0x%08" PRIx32 " val=0x%08" PRIx32'
-            ' " width=%" PRIu32 " vblank=%" PRIu32 "\\n"',
+            ' " width=%" PRIu32 " vblank=%" PRIu32\n'
+            '            " %s thread=0x%08" PRIx32 " old=0x%08" PRIx32 "\\n"',
             store,
         )
         self.assertIn("s_watch_matches++", store)
+        # #2809: the hit's thread comes from the source the scheduler registers, so the store
+        # helpers need no scheduler symbol and every host that links them still links.
+        self.assertIn("s_watch_thread_source ? s_watch_thread_source() : 0u", store)
+        armed = body_of(RECOMP_H, "void sr_watch_armed_store(")
+        self.assertNotIn("sched_current_uid", armed)
+        self.assertIn("sr_watch_set_thread_source(sched_current_uid);",
+                      body_of(SCHED_C, "void sched_init(CpuState *cpu)"))
         flight_init = body_of(WINDOW_C, "void sr_flight_init(void)")
         self.assertIn("sr_watch_configure();", flight_init)
 
@@ -248,7 +260,19 @@ class TraceWindowProbeTests(unittest.TestCase):
             self.assertIn("sr_store_plain()", body)
             self.assertIn(f"{helper}_slow(a, v, pc);", body)
             slow = body_of(RECOMP_H, f"static inline __attribute__((noinline)) void {helper}_slow(")
-            self.assertIn("SR_WATCH_STORE_IF_ARMED(pc, a, v", slow)
+            # #2809: one flag check, and an armed store goes whole to the cold helper, so
+            # the disabled path is the single predicted-false branch it always was.
+            self.assertEqual(slow.count("SR_WATCH_ACTIVE()"), 1, helper)
+            self.assertIn("sr_watch_armed_store(a, v, ", slow)
+            self.assertNotIn("g_sr_watch_enabled", slow)
+
+        armed = body_of(RECOMP_H, "void sr_watch_armed_store(")
+        self.assertIn("__attribute__((noinline, cold))", RECOMP_H[
+            RECOMP_H.rindex("\n", 0, RECOMP_H.index("void sr_watch_armed_store(")):
+            RECOMP_H.index("void sr_watch_armed_store(")])
+        # The replaced bytes are read before the store lands, and the hit is reported after.
+        self.assertLess(armed.index("old |= "), armed.index("SR_HOST(a + i)[0] = (uint8_t)"))
+        self.assertLess(armed.index("SR_HOST(a + i)[0] = (uint8_t)"), armed.index("sr_watch_store(&hit)"))
 
         self.assertIn("MEM_W32_PC(", CODEGEN_PY,
                       "generated AOT stores must keep their guest instruction PC")

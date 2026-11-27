@@ -4,6 +4,7 @@
 #include "nk_json.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -198,6 +199,7 @@ typedef struct {
     const char *src;
     size_t len;
     size_t pos;
+    size_t max_number_bytes;
     char error[256];
 } JsonParser;
 
@@ -642,29 +644,41 @@ static NkJsonNode *parse_value(JsonParser *p, int depth) {
             while (p->pos < p->len && isdigit((unsigned char)p->src[p->pos])) p->pos++;
         }
 
-        /* The scan above already validated the grammar; copy the token out so
-         * strtod/strtoll see a NUL-terminated string (src is not guaranteed to
-         * be). A token longer than the buffer is refused: cutting it would hand
-         * strtod/strtoll a different number. */
-        char number_text[64];
-        size_t number_len = p->pos - start;
-        if (number_len >= sizeof(number_text)) {
+        /* Copy the entire validated token so conversion sees a terminated
+         * string. Most readers retain the short-token limit. */
+        char small_number[64];
+        const size_t number_len = p->pos - start;
+        if (number_len > p->max_number_bytes || number_len == SIZE_MAX) {
             set_error(p, "Number too long");
             return NULL;
         }
-        memcpy(number_text, &p->src[start], number_len);
-        number_text[number_len] = '\0';
 
         NkJsonNode *node = (NkJsonNode *)calloc(1, sizeof(NkJsonNode));
         if (!node) { set_error(p, "Out of memory"); return NULL; }
+        char *number_text = small_number;
+        if (number_len >= sizeof(small_number)) {
+            number_text = malloc(number_len + 1u);
+            if (!number_text) {
+                free(node);
+                set_error(p, "Out of memory");
+                return NULL;
+            }
+        }
+        memcpy(number_text, &p->src[start], number_len);
+        number_text[number_len] = '\0';
         node->type = NK_JSON_NUMBER;
         node->u.num.num_val = strtod(number_text, NULL);
         node->u.num.is_integer = !has_frac_or_exp;
         if (node->u.num.is_integer) {
-            char *endptr = NULL;
-            node->u.num.int_val = (int64_t)strtoll(number_text, &endptr, 10);
+            errno = 0;
+            node->u.num.int_val = (int64_t)strtoll(number_text, NULL, 10);
+            node->u.num.integer_overflow = errno == ERANGE;
         } else {
             node->u.num.int_val = 0;
+        }
+        if (number_text != small_number) {
+            json_wipe(number_text, number_len);
+            free(number_text);
         }
         return node;
     }
@@ -677,7 +691,8 @@ static NkJsonNode *parse_value(JsonParser *p, int depth) {
  * Public API
  * -------------------------------------------------------------------------- */
 
-NkJsonNode *nk_json_parse(const char *src, size_t len, char *err_buf, size_t err_len) {
+NkJsonNode *nk_json_parse_number_limit(const char *src, size_t len, size_t max_number_bytes,
+                                       char *err_buf, size_t err_len) {
     if (err_buf && err_len > 0) err_buf[0] = '\0';
     if (!src) return NULL;
     if (!nk_json_validate_utf8((const uint8_t *)src, len)) {
@@ -689,6 +704,7 @@ NkJsonNode *nk_json_parse(const char *src, size_t len, char *err_buf, size_t err
     memset(&p, 0, sizeof(p));
     p.src = src;
     p.len = len;
+    p.max_number_bytes = max_number_bytes;
 
     NkJsonNode *root = parse_value(&p, 0);
     if (!root) {
@@ -706,6 +722,10 @@ NkJsonNode *nk_json_parse(const char *src, size_t len, char *err_buf, size_t err
     }
 
     return root;
+}
+
+NkJsonNode *nk_json_parse(const char *src, size_t len, char *err_buf, size_t err_len) {
+    return nk_json_parse_number_limit(src, len, 63, err_buf, err_len);
 }
 
 NkJsonNode *nk_json_obj_get(const NkJsonNode *obj, const char *key) {
