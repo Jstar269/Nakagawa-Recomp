@@ -53,6 +53,7 @@
 #include "nk_achievements.h"
 #include "nk_psp_keystore.h"
 #include "nk_ui_image.h"
+#include "nk_ui_text.h"
 
 typedef struct PlayerRun PlayerRun;
 typedef struct PlayerAchHttpJob PlayerAchHttpJob;
@@ -61,6 +62,7 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
 static void player_achievements_stop_channel(PlayerRun *run);
 static void player_achievements_end_frames(PlayerRun *run);
 static void player_achievements_release_channel(PlayerRun *run);
+static void player_cheat_db_close(PlayerApp *app);
 
 static const char k_invalid_disc_message[] = "This file isn't a PSP disc image.";
 static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
@@ -763,6 +765,9 @@ static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
         player_app_prereq_cancel(app);
     } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
         player_app_set_view(app, VIEW_BUILD_CACHE);
+    } else if (app->active_view == VIEW_CHEAT_DB || app->active_view == VIEW_CHEAT_DB_BUSY ||
+               app->active_view == VIEW_CHEAT_DB_CONFIRM) {
+        player_cheat_db_close(app);
     } else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
         player_app_set_view(app, VIEW_ONLINE_SETTINGS);
     } else if (app->active_view == VIEW_ONLINE_PLAY_CARD) {
@@ -1500,6 +1505,222 @@ static void player_update_shutdown(void) {
     s_update_job = NULL;
 }
 
+/* Cheat database (#2639). Opening the page performs no HTTP. Each button owns
+   one job; the first job can only prepare the confirmation for the second. */
+typedef enum {
+    PLAYER_CHEAT_DB_LIST,
+    PLAYER_CHEAT_DB_DOWNLOAD,
+    PLAYER_CHEAT_DB_IMPORT
+} PlayerCheatDbJobKind;
+
+typedef struct {
+    SDL_Thread *thread;
+    SDL_AtomicInt done;
+    SDL_AtomicInt cancelled;
+    PackageHttpCancel *http_cancel;
+    PlayerCheatDbJobKind kind;
+    PackageHttpOpen transport;
+    NkCheatDbSources sources;
+    NkCheatDbSource source;
+    char import_path[NK_MAX_PATH];
+    char destination[NK_MAX_PATH];
+    char error[256];
+    bool replace;
+    NkCheatDbStatus result;
+} PlayerCheatDbJob;
+
+static PlayerCheatDbJob *s_cheat_db_job;
+static char s_cheat_db_pick[NK_MAX_PATH];
+static SDL_AtomicInt s_cheat_db_pick_result;
+
+static bool player_cheat_db_native_get(void *options, const char *url, const char *allowed_host,
+                                      PackageHttpResponse *response) {
+    /* One anonymous GET per click. The single-request transport does not follow redirects. */
+    return allowed_host && strcmp(allowed_host, NK_CHEAT_DB_HOST) == 0 &&
+           package_builder_native_transport_request(options, url, NK_CHEAT_DB_HOST,
+                                                    "GET", NULL, NULL, 0u, response);
+}
+
+static bool player_cheat_db_cancelled(void *context) {
+    PlayerCheatDbJob *job = (PlayerCheatDbJob *)context;
+    return SDL_GetAtomicInt(&job->cancelled) != 0;
+}
+
+static int SDLCALL player_cheat_db_thread(void *context) {
+    PlayerCheatDbJob *job = (PlayerCheatDbJob *)context;
+    PackageHttpOptions options = {NK_CHEAT_DB_USER_AGENT, job->http_cancel};
+    switch (job->kind) {
+        case PLAYER_CHEAT_DB_LIST:
+            job->result = nk_cheat_db_fetch_sources(job->transport, &options, &job->sources,
+                                                  job->error, sizeof(job->error));
+            break;
+        case PLAYER_CHEAT_DB_DOWNLOAD:
+            job->result = nk_cheat_db_download(job->transport, &options, &job->source,
+                                              job->destination, job->replace,
+                                              player_cheat_db_cancelled, job,
+                                              NULL, job->error, sizeof(job->error));
+            break;
+        case PLAYER_CHEAT_DB_IMPORT:
+            job->result = nk_cheat_db_import_file(job->import_path, job->destination,
+                                                 job->replace, NULL, job->error, sizeof(job->error));
+            break;
+    }
+    SDL_SetAtomicInt(&job->done, 1);
+    return 0;
+}
+
+static void player_cheat_db_open(PlayerApp *app) {
+    app->cheat_db.download_available = player_ui_test_cheat_db_transport() != NULL ||
+                                       package_builder_native_transport() != NULL;
+    player_app_set_view(app, VIEW_CHEAT_DB);
+}
+
+static void player_cheat_db_cancel_job(PlayerCheatDbJob *job) {
+    SDL_SetAtomicInt(&job->cancelled, 1);
+    package_http_cancel(job->http_cancel);
+}
+
+static void player_cheat_db_close(PlayerApp *app) {
+    if (app->active_view == VIEW_CHEAT_DB_CONFIRM) {
+        memset(&app->cheat_db.source, 0, sizeof(app->cheat_db.source));
+        app->cheat_db.import_path[0] = '\0';
+        app->cheat_db.status[0] = '\0';
+        player_app_set_view(app, VIEW_CHEAT_DB);
+    } else if (app->active_view == VIEW_CHEAT_DB_BUSY &&
+               s_cheat_db_job && s_cheat_db_job->kind == PLAYER_CHEAT_DB_LIST) {
+        /* The list cannot change files. Cancel before confirming a database to install. */
+        player_cheat_db_cancel_job(s_cheat_db_job);
+    } else if (!app->cheat_db.picking) {
+        /* After confirmation, Back leaves the accepted file operation to finish. */
+        player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+    }
+}
+
+static void player_cheat_db_start(PlayerApp *app, PlayerCheatDbJobKind kind) {
+    if (s_cheat_db_job || app->cheat_db.picking) return;
+    PlayerCheatDbJob *job = (PlayerCheatDbJob *)calloc(1, sizeof(*job));
+    if (job) {
+        job->kind = kind;
+        if (kind != PLAYER_CHEAT_DB_IMPORT) {
+            job->transport = player_ui_test_cheat_db_transport();
+            if (!job->transport) {
+                job->http_cancel = package_http_cancel_create();
+                if (job->http_cancel) job->transport = player_cheat_db_native_get;
+            }
+        }
+        if (kind != PLAYER_CHEAT_DB_LIST) {
+            job->source = app->cheat_db.source;
+            memcpy(job->import_path, app->cheat_db.import_path, sizeof(job->import_path));
+            memcpy(job->destination, app->cheat_db.destination, sizeof(job->destination));
+            job->replace = app->cheat_db.replace;
+        }
+        if (kind == PLAYER_CHEAT_DB_IMPORT || job->transport) {
+            job->thread = SDL_CreateThread(player_cheat_db_thread, "nakagawa-cheat-db", job);
+        }
+    }
+    if (!job || !job->thread) {
+        if (job) package_http_cancel_destroy(job->http_cancel);
+        free(job);
+        snprintf(app->cheat_db.status, sizeof(app->cheat_db.status),
+                 "CHEAT_DB_IO_ERROR: the database worker could not start.");
+        player_app_set_view(app, VIEW_CHEAT_DB);
+        return;
+    }
+    s_cheat_db_job = job;
+    app->cheat_db.busy = true;
+    app->cheat_db.fetching_sources = kind == PLAYER_CHEAT_DB_LIST;
+    snprintf(app->cheat_db.status, sizeof(app->cheat_db.status), "%s",
+             kind == PLAYER_CHEAT_DB_LIST ? NK_UI_STR(SETTINGS_CHEAT_DB_LIST_BUSY) :
+             kind == PLAYER_CHEAT_DB_DOWNLOAD ? NK_UI_STR(SETTINGS_CHEAT_DB_FILE_BUSY) :
+                                               NK_UI_STR(SETTINGS_CHEAT_DB_IMPORT_BUSY));
+    player_app_set_view(app, VIEW_CHEAT_DB_BUSY);
+}
+
+static bool player_cheat_db_prepare_confirmation(PlayerApp *app) {
+    char root[NK_MAX_PATH];
+    if (!nk_platform_get_app_data_dir(root, sizeof(root)) ||
+        !nk_cheat_db_path(root, app->cheat_db.destination, sizeof(app->cheat_db.destination))) {
+        snprintf(app->cheat_db.status, sizeof(app->cheat_db.status),
+                 "CHEAT_DB_IO_ERROR: the destination could not be resolved.");
+        return false;
+    }
+    app->cheat_db.replace = nk_platform_file_exists(app->cheat_db.destination);
+    player_app_set_view(app, VIEW_CHEAT_DB_CONFIRM);
+    return true;
+}
+
+static void player_cheat_db_poll(PlayerApp *app) {
+    PlayerCheatDbJob *job = s_cheat_db_job;
+    if (!job || !SDL_GetAtomicInt(&job->done)) return;
+    SDL_WaitThread(job->thread, NULL);
+    s_cheat_db_job = NULL;
+    app->cheat_db.busy = false;
+    app->cheat_db.fetching_sources = false;
+    bool showing = app->active_view == VIEW_CHEAT_DB_BUSY;
+    if (showing) player_app_set_view(app, VIEW_CHEAT_DB);
+    if (job->kind == PLAYER_CHEAT_DB_LIST) {
+        app->cheat_db.status[0] = '\0';
+        if (showing && !player_cheat_db_cancelled(job)) {
+            if (job->result != NK_CHEAT_DB_OK) {
+                snprintf(app->cheat_db.status, sizeof(app->cheat_db.status), "%s", job->error);
+            } else {
+                /* The source list is ordered. Confirm the first source before using its URL. */
+                app->cheat_db.source = job->sources.sources[0];
+                app->cheat_db.import_path[0] = '\0';
+                (void)player_cheat_db_prepare_confirmation(app);
+            }
+        }
+    } else if (job->result != NK_CHEAT_DB_OK) {
+        snprintf(app->cheat_db.status, sizeof(app->cheat_db.status), "%s", job->error);
+    } else {
+        snprintf(app->cheat_db.status, sizeof(app->cheat_db.status), "%s",
+                 NK_UI_STR(SETTINGS_CHEAT_DB_INSTALLED));
+    }
+    package_http_cancel_destroy(job->http_cancel);
+    free(job);
+}
+
+static void player_cheat_db_shutdown(void) {
+    PlayerCheatDbJob *job = s_cheat_db_job;
+    if (!job) return;
+    player_cheat_db_cancel_job(job);
+    SDL_WaitThread(job->thread, NULL);
+    package_http_cancel_destroy(job->http_cancel);
+    free(job);
+    s_cheat_db_job = NULL;
+}
+
+static void SDLCALL player_cheat_db_file_picked(void *userdata, const char *const *files,
+                                               int filter) {
+    (void)userdata;
+    (void)filter;
+    int result = files ? 2 : 3;
+    if (files && files[0]) {
+        if (strlen(files[0]) < sizeof(s_cheat_db_pick)) {
+            snprintf(s_cheat_db_pick, sizeof(s_cheat_db_pick), "%s", files[0]);
+            result = 1;
+        } else {
+            result = 3;
+        }
+    }
+    SDL_SetAtomicInt(&s_cheat_db_pick_result, result);
+}
+
+static void player_cheat_db_poll_picker(PlayerApp *app) {
+    int result = SDL_GetAtomicInt(&s_cheat_db_pick_result);
+    if (!result) return;
+    SDL_SetAtomicInt(&s_cheat_db_pick_result, 0);
+    app->cheat_db.picking = false;
+    if (app->active_view != VIEW_CHEAT_DB) return;
+    if (result == 1) {
+        memcpy(app->cheat_db.import_path, s_cheat_db_pick, sizeof(app->cheat_db.import_path));
+        (void)player_cheat_db_prepare_confirmation(app);
+    } else if (result == 3) {
+        snprintf(app->cheat_db.status, sizeof(app->cheat_db.status),
+                 "CHEAT_DB_IO_ERROR: the file picker could not read the selected path.");
+    }
+}
+
 /* Online play (#1139): the server picker's list and the console ID.
 
    The list is PPSSPP's public list of ad hoc servers. It is downloaded (nk_adhoc_list_fetch,
@@ -2035,6 +2256,26 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_CHEATS:
             player_app_toggle_cheats(app);
             break;
+        case PLAYER_UI_SETTINGS_OPEN_CHEAT_DB:
+            player_cheat_db_open(app);
+            break;
+        case PLAYER_UI_SETTINGS_FETCH_CHEAT_DB_SOURCES:
+            if (app->active_view == VIEW_CHEAT_DB && app->cheat_db.download_available) {
+                player_cheat_db_start(app, PLAYER_CHEAT_DB_LIST);
+            }
+            break;
+        case PLAYER_UI_SETTINGS_CHOOSE_CHEAT_DB_FILE:
+            if (app->active_view == VIEW_CHEAT_DB && !app->cheat_db.busy) {
+                app->cheat_db.picking = true;
+                app->request_cheat_db_picker = true;
+            }
+            break;
+        case PLAYER_UI_SETTINGS_CONFIRM_CHEAT_DB:
+            if (app->active_view == VIEW_CHEAT_DB_CONFIRM) {
+                player_cheat_db_start(app, app->cheat_db.import_path[0]
+                    ? PLAYER_CHEAT_DB_IMPORT : PLAYER_CHEAT_DB_DOWNLOAD);
+            }
+            break;
         case PLAYER_UI_SETTINGS_REFRESH_COVER_ART:
             app->request_cover_art_refresh = true;
             break;
@@ -2130,6 +2371,8 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_BACK:
             if (app->active_view == VIEW_ACE_SETTINGS) player_app_close_enhanced_page(app);
             else if (app->active_view == VIEW_PSP_FONTS) player_app_close_fonts_page(app);
+            else if (app->active_view == VIEW_CHEAT_DB || app->active_view == VIEW_CHEAT_DB_BUSY ||
+                     app->active_view == VIEW_CHEAT_DB_CONFIRM) player_cheat_db_close(app);
             else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
                 player_app_set_view(app, VIEW_ONLINE_SETTINGS);
             } else if (app->active_view == VIEW_ONLINE_PLAY_CARD) {
@@ -7479,6 +7722,7 @@ static void player_frame_begin(PlayerRun *run) {
     }
     player_update_poll(app);
     player_online_play_list_poll(app);
+    player_cheat_db_poll(app);
     player_report_poll(app);
     player_ui_test_report_update_phase(&run->ui_test, app);
     /* A worker that could not queue its own completion has no other way
@@ -7492,7 +7736,7 @@ static void player_frame_begin(PlayerRun *run) {
         &run->build_check_pending);
     if (player_ui_test_active(&run->ui_test)) {
         player_ui_test_step_script(&run->ui_test, app, &run->running,
-                                   run->package_status_job != NULL);
+                                   run->package_status_job != NULL || s_cheat_db_job != NULL);
     }
     uint64_t now_tick = SDL_GetTicks();
     uint32_t delta_ms = (uint32_t)(now_tick >= run->last_tick ? (now_tick - run->last_tick) : 0);
@@ -7634,6 +7878,16 @@ static void player_frame_requests(PlayerRun *run) {
         }
     }
     player_take_font_pick(app);
+    if (app->request_cheat_db_picker) {
+        if (!player_ui_test_active(&run->ui_test)) {
+            app->request_cheat_db_picker = false;
+            player_host_show_picker(PLAYER_HOST_PICK_CHEAT_DB, run->window, NULL,
+                                    player_cheat_db_file_picked, NULL);
+        } else if (player_ui_test_answer_picker(player_cheat_db_file_picked, NULL)) {
+            app->request_cheat_db_picker = false;
+        }
+    }
+    player_cheat_db_poll_picker(app);
     if (app->request_save_folder_picker) {
         if (!player_ui_test_active(&run->ui_test)) {
             app->request_save_folder_picker = false;
@@ -7993,7 +8247,7 @@ static void player_frame_render(PlayerRun *run) {
         /* A finished staging or PSN job stays allocated until the next one. */
         if (cover_art_writing ||
             run->launch_job || run->package_status_job || s_update_job || run->disc_check_job ||
-            run->outdated_scan_job || s_report_job ||
+            run->outdated_scan_job || s_report_job || s_cheat_db_job ||
             (run->staging_job && !run->staging_job->completion_handled) ||
             (run->psn_job && !run->psn_job->completion_handled)) {
             /* A worker may still have a file in the user data open. */
@@ -8087,6 +8341,7 @@ static int player_shutdown(PlayerRun *run) {
 
     player_update_shutdown();
     player_online_play_list_shutdown();
+    player_cheat_db_shutdown();
     player_report_shutdown();
     player_app_discord_shutdown(app);
     destroy_staging_job(&run->staging_job);

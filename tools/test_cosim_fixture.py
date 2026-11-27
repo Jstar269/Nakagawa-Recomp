@@ -537,6 +537,37 @@ class FixtureSemanticTests(unittest.TestCase):
         skipped = words[index + 2]
         self.assertEqual(skipped >> 26, 0x09, "the skipped word should be the addiu marker")
 
+    def test_entry_slot_cells_enter_a_loop_at_its_transfer_delay_slot(self):
+        """The shape #3163 needs, or the cells compare an ordinary loop.
+
+        The `jal` must name the word after a transfer that can fall through, and the
+        body it starts must loop back to that transfer. A branch must skip at least
+        one word when taken and a call must reach leaf A, so a run of the slot too
+        many is visible in $v0.
+        """
+        text = cosim.build_text_segment()
+        self.assertEqual(cosim.ENTRY_SLOT_OWNER + 4, cosim.ENTRY_SLOT_ENTRY)
+        entry = cosim.ENTRY_SLOT_ENTRY // 4
+        for name, owner_op in (("eslot", 0x05), ("eslot_likely", 0x15), ("eslot_call", 0x03)):
+            with self.subTest(cell=name):
+                offset, words = self.layout[name]
+                call = struct.unpack_from("<I", text, offset + cosim.ENTRY_SLOT_CALL)[0]
+                self.assertEqual(call >> 26, 0x03, "expected the jal that makes the entry")
+                self.assertEqual((call & 0x03FFFFFF) << 2, offset + cosim.ENTRY_SLOT_ENTRY)
+                owner = struct.unpack_from("<I", text, offset + cosim.ENTRY_SLOT_OWNER)[0]
+                self.assertEqual(owner >> 26, owner_op,
+                                 "the word before the entry must be bne / bnel / jal")
+                if owner_op == 0x03:
+                    self.assertEqual((owner & 0x03FFFFFF) << 2, self.layout["link_leaf"][0])
+                else:
+                    self.assertGreater(branch_target_index(entry - 1, owner), entry + 1)
+                self.assertEqual(words[entry] >> 26, 0x09, "the entry word must be an addiu")
+                self.assertEqual((words[entry] >> 16) & 0x1F, cosim.V0)
+                back = [index for index in range(entry + 1, len(words))
+                        if (words[index] >> 26) == 0x07
+                        and branch_target_index(index, words[index]) == entry - 1]
+                self.assertEqual(len(back), 1, "one bgtz must loop back to the transfer")
+
     def test_branch_target_index_sign_extends_the_offset(self):
         beq = 0x10000000  # beq $zero, $zero, offset
         self.assertEqual(branch_target_index(9, beq | 0x0002), 12)
