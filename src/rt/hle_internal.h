@@ -1085,6 +1085,9 @@ typedef struct {
     uint32_t *msgs;                /* guest SceKernelMsgPacket addresses, delivery order */
     int nmsgs, msg_cap;
     uint32_t waiters[MBX_MAX_WAITERS];
+    /* waiter_out[i]: where the Receive call of waiters[i] stores its packet pointer. SendMbx
+     * writes it when it hands a packet to that receiver (#3066). */
+    uint32_t waiter_out[MBX_MAX_WAITERS];
     int nwaiters;
 } Mbx;
 

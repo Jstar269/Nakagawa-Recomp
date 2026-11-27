@@ -48,6 +48,13 @@ aspect-correct letterbox). Input moves to SDL3 (keyboard + SDL_Gamepad, same PSP
 mapping as gui.c). Deliverable: pixel-identical output to the GDI build at lower CPU cost,
 resizable window, fullscreen-capable.
 
+Device choice (#3187): among the first 16 physical devices the instance lists, those with a
+graphics queue that can present to the window are candidates. A discrete GPU wins, then an
+integrated GPU, a virtual GPU, any other type, and last a CPU (software) implementation such
+as llvmpipe, lavapipe or SwiftShader; devices of equal rank keep the loader's order. There is
+no device override setting. Init logs `sdl3vk: device <n> of <count> presentable: <type>`
+before `sdl3vk: using <name>`.
+
 ### Phase 1 — GE draw capture → Vulkan rasterization (DONE, `ge_gpu.c`)
 
 Enabled with `SR_GPU_GE=1`. Implementation:

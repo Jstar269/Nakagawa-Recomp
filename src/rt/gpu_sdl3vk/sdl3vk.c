@@ -963,6 +963,37 @@ static VkResult enum_fault(int bit, VkResult r) {
     return VK_INCOMPLETE;
 }
 
+/* Physical-device preference (#3187): a lower rank wins. A GPU beats a software (CPU)
+ * implementation such as llvmpipe, lavapipe or SwiftShader, which the loader may list first. */
+static int device_type_rank(VkPhysicalDeviceType type) {
+    switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return 0;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 1;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return 2;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:            return 4;
+    default:                                     return 3; /* OTHER, or a type newer than us */
+    }
+}
+
+/* The index of the device init takes among `n` presentable candidates of the given types, in
+ * enumeration order: the lowest rank, and the earliest of equal rank. -1 when `n` is 0. */
+static int pick_device_index(const VkPhysicalDeviceType *types, uint32_t n) {
+    int best = -1;
+    for (uint32_t i = 0; i < n; i++)
+        if (best < 0 || device_type_rank(types[i]) < device_type_rank(types[best])) best = (int)i;
+    return best;
+}
+
+static const char *device_type_name(VkPhysicalDeviceType type) {
+    switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return "discrete GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return "virtual GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:            return "CPU (software)";
+    default:                                     return "other";
+    }
+}
+
 /* A list query's result as init takes it: VK_INCOMPLETE means the list holds more entries than
  * the caller's array, and the entries written are valid. */
 static VkResult list_result(VkResult r) {
@@ -1153,20 +1184,34 @@ int sdl3vk_init(const char *title) {
     INIT_OK(SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf),
             "sdl3vk: SDL_Vulkan_CreateSurface failed: %s\n", SDL_GetError());
 
-    /* Physical device: first one with a graphics queue that can present to our surface, among
-     * the first 16 the instance lists. */
+    /* Physical device: among the first 16 the instance lists, those with a graphics queue that
+     * can present to our surface (each with its first such queue family) are candidates; the
+     * best-ranked type wins (pick_device_index), enumeration order breaking ties. */
     VkPhysicalDevice devs[16]; uint32_t nd = 16;
     INIT_VK(list_result(enum_fault(ENUM_FAULT_DEVICES, vkEnumeratePhysicalDevices(s_inst, &nd, devs))));
     s_pdev = VK_NULL_HANDLE;
-    for (uint32_t d = 0; d < nd && !s_pdev; d++) {
-        VkQueueFamilyProperties qf[16]; uint32_t nq = 16;
-        vkGetPhysicalDeviceQueueFamilyProperties(devs[d], &nq, qf);
-        for (uint32_t q = 0; q < nq; q++) {
-            VkBool32 can_present = VK_FALSE;
-            vkGetPhysicalDeviceSurfaceSupportKHR(devs[d], q, s_surf, &can_present);
-            if ((qf[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && can_present) {
-                s_pdev = devs[d]; s_qfam = q; break;
+    {
+        VkPhysicalDevice cand[16]; uint32_t cand_qfam[16]; VkPhysicalDeviceType cand_type[16];
+        uint32_t nc = 0;
+        for (uint32_t d = 0; d < nd; d++) {
+            VkQueueFamilyProperties qf[16]; uint32_t nq = 16;
+            vkGetPhysicalDeviceQueueFamilyProperties(devs[d], &nq, qf);
+            for (uint32_t q = 0; q < nq; q++) {
+                VkBool32 can_present = VK_FALSE;
+                vkGetPhysicalDeviceSurfaceSupportKHR(devs[d], q, s_surf, &can_present);
+                if ((qf[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && can_present) {
+                    VkPhysicalDeviceProperties cp;
+                    vkGetPhysicalDeviceProperties(devs[d], &cp);
+                    cand[nc] = devs[d]; cand_qfam[nc] = q; cand_type[nc] = cp.deviceType; nc++;
+                    break;
+                }
             }
+        }
+        int pick = pick_device_index(cand_type, nc);
+        if (pick >= 0) {
+            s_pdev = cand[pick]; s_qfam = cand_qfam[pick];
+            fprintf(stderr, "sdl3vk: device %d of %u presentable: %s\n", pick + 1, nc,
+                    device_type_name(cand_type[pick]));
         }
     }
     INIT_OK(s_pdev != VK_NULL_HANDLE, "sdl3vk: no usable Vulkan device\n");
