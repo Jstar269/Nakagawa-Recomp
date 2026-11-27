@@ -24,10 +24,10 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 74 |
-| `ppsspp-derived` | 189 | 88 |
+| `ppsspp-derived` | 192 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 398 | 183 |
-| `unverified` | 69 | 22 |
+| `synthetic` | 396 | 183 |
+| `unverified` | 68 | 22 |
 | total | 720 | 367 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -794,7 +794,7 @@ a title that translates none has generated code unchanged.
 | `0xfe707fdf` | `sceKernelAllocMemoryBlock` | kernel_memory | `synthetic` | HLE selftest dispatch |
 | `0xfee03a2f` | `scePowerGetCpuClockFrequency` | power | `hardware-measured` | PSP oracle PSP-HLE-POWER-001 |
 | `0xff5940b6` | `sceIoCloseAsync` | io | `synthetic` | HLE selftest dispatch |
-| `0xffc36a14` | `sceKernelReferThreadRunStatus` | kernel_thread | `unverified` | no recorded evidence |
+| `0xffc36a14` | `sceKernelReferThreadRunStatus` | kernel_thread | `ppsspp-derived` | handler comment names PPSSPP |
 
 ## VFPU forms
 
