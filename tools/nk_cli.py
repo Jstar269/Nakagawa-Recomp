@@ -1998,7 +1998,10 @@ def _package_codegen_options(manifest: dict, environment: dict[str, str]) -> dic
     # CODEGEN_USER_ARGS above. Named only when on, so untrapped keys are unchanged.
     if package_cache.nan_trap_enabled(environment):
         options["nan_trap"] = True
-    options.update(package_cache.enhancement_package_options(environment))
+    enhancement = package_cache.enhancement_package_options(environment)
+    if "enhancement_explicit_symbol_map" in enhancement:
+        options["codegen_user_args"] = package_cache.package_codegen_user_args(environment)
+    options.update(enhancement)
     # Mirrors the planner: the LLVM IR backend (#330) names its sources and toolchain.
     options.update(package_cache.llvm_backend_options(environment, repository_root=ROOT))
     return options

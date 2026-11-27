@@ -769,7 +769,9 @@ typedef struct {
     uint8_t on_umd;              /* 1 = a file of the disc, or one served in its place: a read takes the drive's time */
     uint32_t lba, size, off;
     int64_t async_res;
+    int write_counted;           /* writable ordinary host stream has no deferred buffer */
     int writable;
+    int append;                  /* 1 = opened with PSP_O_APPEND: every write lands at the end */
     uint8_t *truncated_bytes;    /* what PSP_O_TRUNC cut, for a later write past them */
     uint32_t truncated_size;
     int flash0;                  /* 1 = served by the read-only flash0: font device */
@@ -1016,6 +1018,10 @@ typedef struct {
     uint32_t uid;
     uint32_t start_pc;
     uint32_t current_pc;
+    /* The address the driver keeps for the list (uofw SceGeDisplayList.list): the enqueue
+     * address, replaced by the saved resume address when sceGeBreak(0) pauses the list. It is
+     * what sceGeListEnQueue's duplicate check compares; current_pc is where the walker resumes. */
+    uint32_t driver_addr;
     uint32_t stall_addr;
     uint32_t cbid;
     uint32_t cbarg;
@@ -1085,6 +1091,9 @@ typedef struct {
     uint32_t *msgs;                /* guest SceKernelMsgPacket addresses, delivery order */
     int nmsgs, msg_cap;
     uint32_t waiters[MBX_MAX_WAITERS];
+    /* waiter_out[i]: where the Receive call of waiters[i] stores its packet pointer. SendMbx
+     * writes it when it hands a packet to that receiver (#3066). */
+    uint32_t waiter_out[MBX_MAX_WAITERS];
     int nwaiters;
 } Mbx;
 

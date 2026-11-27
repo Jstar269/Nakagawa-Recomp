@@ -201,6 +201,19 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                                    const char *memstick_root,
                                    char *problem, size_t problem_size);
 
+typedef enum {
+    NK_PBP_HB_STICK_EMPTY,
+    NK_PBP_HB_STICK_SEEDED,
+    NK_PBP_HB_STICK_SAME_PROGRAM,
+    NK_PBP_HB_STICK_OTHER_PROGRAM,
+    NK_PBP_HB_STICK_UNREADABLE
+} NkPbpHomebrewStickOwner;
+
+/* Read the actual EBOOT and the stock seed record for this old or shared
+ * Stick. SEEDED means the record for this image claims the installed bytes. */
+NkPbpHomebrewStickOwner nk_pbp_homebrew_stick_owner(const char *iso_path, const char *folder,
+                                                   const char *memstick_root);
+
 #ifdef __cplusplus
 }
 #endif

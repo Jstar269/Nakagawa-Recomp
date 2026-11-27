@@ -495,14 +495,13 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
              sizeof(app->runtime_package_cache[game_index].reason), "%s", reason);
 }
 
-NkRuntimePackageStatus player_runtime_package_status_check(const char *user_data_root,
-                                                           const GameRecord *game,
-                                                           NkRuntimePackageInfo *info,
-                                                           char *reason, size_t reason_size) {
-    NkRuntimePackageInfo local;
-    NkRuntimePackageInfo *out = info ? info : &local;
-    memset(out, 0, sizeof(*out));
-    return nk_launch_validate_runtime_package(user_data_root, game, out, reason, reason_size);
+NkRuntimePackageStatus player_runtime_package_status_check(
+    const char *user_data_root, const GameRecord *game,
+    const NkLaunchEnhancementSources *sources, NkRuntimePackageInfo *info,
+    char *reason, size_t reason_size
+) {
+    return nk_launch_validate_runtime_package_for_launch(
+        user_data_root, game, sources, info, reason, reason_size);
 }
 
 /* The report's Runtime source line for a package's record (#2875): "" when the package
@@ -632,8 +631,10 @@ NkRuntimePackageStatus player_app_validate_runtime_package(
         }
         root = default_root;
     }
-    return nk_launch_validate_runtime_package(root, game, out_info, reason,
-                                              reason_size);
+    NkLaunchEnhancementSources sources = {0};
+    if (game && game->enhancement_package_id[0]) player_app_enhancement_sources(app, &sources);
+    return nk_launch_validate_runtime_package_for_launch(
+        root, game, &sources, out_info, reason, reason_size);
 }
 
 static bool player_runtime_cache_entry_matches(const PlayerApp *app, int index,
@@ -3434,33 +3435,27 @@ bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_
            player_join_path(out, out_size, assets, "enhancements");
 }
 
+void player_app_enhancement_sources(const PlayerApp *app, NkLaunchEnhancementSources *out) {
+    memset(out, 0, sizeof(*out));
+    (void)player_app_data_root(app, out->user_root, sizeof(out->user_root));
+    (void)player_app_shipped_enhancements_root(app, out->shipped_root, sizeof(out->shipped_root));
+}
+
 /* One of a title's package files, <key>-<suffix>.json, from the user's enhancements folder,
    else the shipped one: its id into `id`, or why it cannot be used into `problem`. `noun`
    names the file in that sentence; a non-NULL `category` must be the package's own. A
    non-NULL `experimental_out` is cleared only for a usable shipped package that declares
    "experimental": false (section 9.10). */
 static bool player_read_title_package_file(const char *user_root, const char *shipped_root,
-                                           const GameRecord *game, const char *key,
-                                           const char *suffix, const char *noun,
+                                           const GameRecord *game, bool code_hook,
+                                           const char *noun,
                                            const char *category, char *id_out, size_t id_cap,
                                            bool *shipped_out, bool *experimental_out,
                                            char *problem, size_t problem_cap) {
-    bool have_user = user_root && user_root[0];
-    bool have_shipped = shipped_root && shipped_root[0];
-    char leaf[PLAYER_DISC_ID_KEY_LEN + 16];
-    snprintf(leaf, sizeof(leaf), "%s-%s.json", key, suffix);
-    char folder[MAX_PATH_LEN];
     char path[MAX_PATH_LEN];
-    bool found = have_user &&
-                 player_join_path(folder, sizeof(folder), user_root, "enhancements") &&
-                 player_join_path(path, sizeof(path), folder, leaf) &&
-                 nk_platform_file_exists(path);
-    if (!found && have_shipped && player_join_path(path, sizeof(path), shipped_root, leaf) &&
-        nk_platform_file_exists(path)) {
-        found = true;
-        *shipped_out = true;
-    }
-    if (!found) return false;
+    if (!nk_title_manifest_enhancement_declaration_path(
+            user_root, shipped_root, game->disc_id, code_hook, path, sizeof(path),
+            shipped_out)) return false;
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) {
         snprintf(problem, problem_cap, "Its %s can't be read.", noun);
@@ -3469,9 +3464,8 @@ static bool player_read_title_package_file(const char *user_root, const char *sh
     char *text = NULL;
     long size = -1;
     if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
-    /* tools/enhancement_package.py has no size limit of its own; a package is a
-       list of instruction sites, far below this. */
-    if (size > 0 && size <= 8L * 1024L * 1024L && fseek(f, 0, SEEK_SET) == 0) {
+    if (size > 0 && (unsigned long)size <= NK_ACE_DECLARATION_MAX_BYTES &&
+        fseek(f, 0, SEEK_SET) == 0) {
         text = (char *)malloc((size_t)size + 1u);
     }
     size_t got = text ? fread(text, 1, (size_t)size, f) : 0;
@@ -3483,7 +3477,8 @@ static bool player_read_title_package_file(const char *user_root, const char *sh
     }
     text[got] = '\0';
     char error[128] = "";
-    NkJsonNode *package = nk_json_parse(text, got, error, sizeof(error));
+    NkJsonNode *package = nk_json_parse_number_limit(text, got, NK_ACE_DECLARATION_MAX_BYTES,
+                                                     error, sizeof(error));
     free(text);
     const char *id = package && nk_json_is_object(package)
         ? nk_json_get_string(nk_json_obj_get(package, "id")) : NULL;
@@ -3522,24 +3517,18 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     out->experimental = true;
-    char key[PLAYER_DISC_ID_KEY_LEN];
-    bool have_user = user_root && user_root[0];
-    bool have_shipped = shipped_root && shipped_root[0];
-    if ((!have_user && !have_shipped) || !game || game->is_sample ||
-        game->is_showcase_package || !game->title_id[0] ||
-        !player_disc_id_key(game->disc_id, key)) {
+    if (!game || game->is_sample || game->is_showcase_package || !game->title_id[0]) {
         return false;
     }
-    for (size_t i = 0; key[i]; i++) key[i] = (char)tolower((unsigned char)key[i]);
     out->available = player_read_title_package_file(
-        user_root, shipped_root, game, key, "60hz", "enhancement package", NULL,
+        user_root, shipped_root, game, false, "enhancement package", NULL,
         out->package_id, sizeof(out->package_id), &out->shipped, &out->experimental,
         out->problem, sizeof(out->problem));
     /* The culling package (section 11.3.6) is read on its own: a title may have either. Its
        build beside the timing package is named <timing id>+<hook id>, so the two ids differ
        and the joined name fits a variant (nk_title_manifest_enhancement_variant_valid). */
     out->cull_available = player_read_title_package_file(
-        user_root, shipped_root, game, key, "cull", "culling package", "guest_memory_code_hook",
+        user_root, shipped_root, game, true, "culling package", "guest_memory_code_hook",
         out->cull_package_id, sizeof(out->cull_package_id), &out->cull_shipped, NULL,
         out->cull_problem, sizeof(out->cull_problem));
     if (out->cull_available && out->available) {
@@ -6876,6 +6865,16 @@ static void player_set_boundary_text(PlayerApp *app, const char *reason) {
 static NkResult player_resolve_input_profile(PlayerApp *app, const GameRecord *game,
                                              char *out, size_t out_size);
 
+void player_app_select_launch_game(const PlayerApp *app, const GameRecord *game,
+                                   GameRecord *launch_game) {
+    *launch_game = *game;
+    if (app->headless_accept_presented_frames > 0u) {
+        /* The Authentic checkpoint needs the stock executable as well as Ace off. */
+        launch_game->enhancement_package_id[0] = '\0';
+        launch_game->enhancement_hook_only = false;
+    }
+}
+
 bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *work) {
     if (!app || !work || game_index < 0 || game_index >= app->game_count) return false;
     const GameRecord *game = &app->games[game_index];
@@ -6888,7 +6887,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     const bool without_pack = have_key && app->launch_without_pack[0] &&
                               strcmp(app->launch_without_pack, game_key) == 0;
     app->launch_without_pack[0] = '\0';
-    if (player_app_title_60hz_blocked(app, game_index)) {
+    if (app->headless_accept_presented_frames == 0u &&
+        player_app_title_60hz_blocked(app, game_index)) {
         /* 60 FPS game logic is on and its package is gone: the original game
            is not started in its place. */
         player_app_set_error(
@@ -6934,7 +6934,10 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
        package preflight rejects it before launch-session preparation. */
     app->launch_session.config.gui_mode = !app->launch_headless;
     work->game_index = game_index;
-    work->game = *game;
+    player_app_select_launch_game(app, game, &work->game);
+    if (work->game.enhancement_package_id[0]) {
+        player_app_enhancement_sources(app, &work->enhancement_sources);
+    }
     if (root) {
         snprintf(work->package_root, sizeof(work->package_root), "%s", root);
         work->has_package_root = true;
@@ -6999,9 +7002,9 @@ void player_launch_work_run(PlayerLaunchWork *work) {
         }
     }
     NkRuntimePackageStatus package_status = package_root
-        ? nk_launch_validate_runtime_package(package_root, game, NULL,
-                                             work->package_error,
-                                             sizeof(work->package_error))
+        ? nk_launch_validate_runtime_package_for_launch(
+            package_root, game, &work->enhancement_sources, NULL, work->package_error,
+            sizeof(work->package_error))
         : NK_RUNTIME_PACKAGE_MISSING;
     /* An enhanced build has no developer-layout stand-in: it is valid or the
        launch stops here. */
@@ -7021,7 +7024,8 @@ void player_launch_work_run(PlayerLaunchWork *work) {
     printf("[PLAYER] Preparing launch session for %s (%s)...\n", game->disc_id, game->title_name);
 
     NkLaunchSession *session = &work->session;
-    work->result = nk_launch_prepare_session(session, game, root);
+    work->result = nk_launch_prepare_session_with_declarations(
+        session, game, root, &work->enhancement_sources);
     /* nk_launch defaults gui_mode to false for headless harnesses. */
     session->config.gui_mode = !work->launch_headless;
     snprintf(session->ui_root, sizeof(session->ui_root), "%s", work->ui_root);
@@ -7641,6 +7645,11 @@ bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
             t = "The GPU renderer did not start on this PC, so this game is drawn in software. "
                 "The Internal resolution setting has no effect, and the game may run slower. "
                 "Updating the graphics driver may help.";
+            break;
+        case NK_RENDER_FALLBACK_VULKAN_CPU:
+            h = "Drawn in software";
+            t = "Vulkan is running on the CPU, so the game may run slower. Selecting a graphics card "
+                "or updating its driver may help.";
             break;
         case NK_RENDER_FALLBACK_NONE:
         case NK_RENDER_FALLBACK_COUNT:

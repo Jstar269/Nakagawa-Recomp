@@ -263,6 +263,21 @@ The **Where** column of each table names the places a code can appear:
 | `BUILD_TOOLCHAIN_MISSING` | player | The build tools are not installed. |
 | `CACHE_CLEAR_FAILED` | player | Some files in the shared-library cache could not be removed. |
 | `CANCELLED` | decrypt, disc, player | The operation was cancelled; nothing was kept. |
+| `CHEAT_DB_BAD_ARGUMENT` | player | A cheat database step was given no pinned source, file or transport. |
+| `CHEAT_DB_CANCELLED` | player | The cheat database download was cancelled; nothing was written. |
+| `CHEAT_DB_EXISTS` | player | A `cheat.db` is already there and replacing it was not confirmed. |
+| `CHEAT_DB_HASH_MISMATCH` | player | The downloaded cheat database is not the file its source pins (SHA-256); nothing was written. |
+| `CHEAT_DB_HTTP_STATUS` | player | The cheat database host answered with an HTTP status other than 200. |
+| `CHEAT_DB_IO_ERROR` | player | The cheat database could not be read or written in the user data folder. |
+| `CHEAT_DB_LIST_INVALID` | player | The list of cheat database sources is not valid, or names a source that is not pinned. |
+| `CHEAT_DB_LIST_VERSION` | player | The list of cheat database sources is a newer version than this player reads. |
+| `CHEAT_DB_NOT_A_DATABASE` | player | The file is not a usable cheat database. It may contain a cheat outside every game or a cheat that starts enabled. |
+| `CHEAT_DB_NOT_REACHED` | player | The cheat database host did not answer. |
+| `CHEAT_DB_OUT_OF_MEMORY` | player | There was not enough memory to hold the cheat database. |
+| `CHEAT_DB_REDIRECT_REFUSED` | player | The cheat database answer came from a host other than `raw.githubusercontent.com`. |
+| `CHEAT_DB_SIZE_MISMATCH` | player | The downloaded cheat database is not the size its source pins; nothing was written. |
+| `CHEAT_DB_TOO_LARGE` | player | The cheat database or its list of sources is larger than allowed. |
+| `CHEAT_DB_TRUNCATED` | player | The cheat database download broke off before its end. |
 | `CLI_NOT_FOUND` | player | The bundled tools folder could not be found. |
 | `DATA_DIR_UNAVAILABLE` | route, player | Nakagawa's data folder is not available. |
 | `DESTINATION_WRITE_FAILED` | player | A verified download could not be moved into place, or its downloads folder could not be prepared. |
