@@ -827,20 +827,22 @@ class FastPathRemovedStructuralTests(unittest.TestCase):
 
 
 class Ctc1MeasuredMaskTests(unittest.TestCase):
-    """ctc1 drops FCR31 bits 25..31 (PSP-FPU-CC-001, measured on a PSP-3000).
+    """ctc1 drops FCR31 bits 18..22 and 25..31.
 
-    A guest ctc1 of 0xFE800000 reads back 0x00800000 on the console. The
+    A guest ctc1 of 0xFE800000 reads back 0x00800000 on a PSP-3000
+    (PSP-FPU-CC-001), and one of 0x00400000, 0x00200000 or 0x001C0000 reads back
+    0 (pspautotests e37443a6 tests/cpu/fpu/fcr.expected, recorded on a PSP). The
     generated code, the reference interpreter and the named constant must
     agree on exactly that word, and a generator COPY restored to the old
     wholesale store must be killed by the measured generated-code cell.
     """
 
-    EMITTED = 'f"if ({fs} == 31) {{ s->fcr31 = {R(rt(w))} & ~0xfe000000u; "'
+    EMITTED = 'f"if ({fs} == 31) {{ s->fcr31 = {R(rt(w))} & ~0xfe7c0000u; "'
     WHOLESALE = 'f"if ({fs} == 31) {{ s->fcr31 = {R(rt(w))}; "'
 
     def test_every_ctc1_model_drops_exactly_the_measured_bits(self):
         self.assertIn(self.EMITTED, CODEGEN.read_text(encoding="utf-8"))
-        self.assertIn("#define SR_FCR31_CTC1_UNWRITABLE 0xfe000000u",
+        self.assertIn("#define SR_FCR31_CTC1_UNWRITABLE 0xfe7c0000u",
                       HEADER.read_text(encoding="utf-8"))
         self.assertIn("s->fcr31 = s->r[ft] & ~SR_FCR31_CTC1_UNWRITABLE;",
                       REF_INTERP.read_text(encoding="utf-8"))
@@ -878,7 +880,7 @@ class Ctc1MeasuredMaskTests(unittest.TestCase):
                              "MUTANT_GENERATION_FAILED\n" + gen_proc.stderr[-1500:])
             emitted = "\n".join(p.read_text(encoding="ascii")
                                 for p in sorted(work.glob("m*.c")))
-            self.assertNotIn("0xfe000000u", emitted, "mutant still masks ctc1")
+            self.assertNotIn("0xfe7c0000u", emitted, "mutant still masks ctc1")
 
             (work / "recomp.h").write_text(fixture.ISOLATED_RECOMP_H, encoding="ascii")
             (work / "harness.c").write_text(

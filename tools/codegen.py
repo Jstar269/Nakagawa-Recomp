@@ -3748,13 +3748,14 @@ def fpu_effect(addr, w, options=None):
     if fmt == 0x00: return wr(rt(w), f"s->fi[{fs}]"), None, 0          # mfc1
     if fmt == 0x02: return wr(rt(w), f"({fs} == 31 ? s->fcr31 : ({fs} == 0 ? 0x00003351u : 0u))"), None, 0  # cfc1
     if fmt == 0x04: return f"s->fi[{fs}] = {R(rt(w))};", None, 0       # mtc1
-    # ctc1 stores the guest FCSR except bits 25..31: the PSP FPU has FCC0 only, and
-    # a ctc1 of 0xFE800000 reads back 0x00800000 (PSP-FPU-CC-001, measured on a
-    # PSP-3000). No other bit was measured as unwritable, so no other bit is
-    # masked; src/rt/fp_convert.h names the word SR_FCR31_CTC1_UNWRITABLE. FCC0 is
-    # the architectural compare condition, so the cached fpcond mirror resyncs
-    # from the written bits.
-    if fmt == 0x06: return (f"if ({fs} == 31) {{ s->fcr31 = {R(rt(w))} & ~0xfe000000u; "
+    # ctc1 stores the guest FCSR except bits 18..22 and 25..31. The PSP FPU has FCC0
+    # only: a ctc1 of 0xFE800000 reads back 0x00800000 (PSP-FPU-CC-001, measured on
+    # a PSP-3000). A ctc1 of 0x00400000, 0x00200000 or 0x001C0000 reads back 0
+    # (pspautotests e37443a6 tests/cpu/fpu/fcr.expected, recorded on a PSP).
+    # src/rt/fp_convert.h names the word SR_FCR31_CTC1_UNWRITABLE. FCC0 is the
+    # architectural compare condition, so the cached fpcond mirror resyncs from
+    # the written bits.
+    if fmt == 0x06: return (f"if ({fs} == 31) {{ s->fcr31 = {R(rt(w))} & ~0xfe7c0000u; "
                             f"s->fpcond = (s->fcr31 >> 23) & 1u; }}"), None, 0
     if fmt == 0x10:
         fn = funct(w)

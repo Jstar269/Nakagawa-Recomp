@@ -1235,7 +1235,7 @@ static SrGuestInterpResult execute_noncontrol(
             write_gpr(s, ft, fs == 31u ? s->fcr31 : (fs == 0u ? SR_FCR0_FIR : 0u));
         } else if (fmt == 0x06u && move_shape) {  /* ctc1 */
             if (fs == 31u) {
-                s->fcr31 = read_gpr(s, ft) & ~0xfe000000u;
+                s->fcr31 = read_gpr(s, ft) & ~SR_FCR31_CTC1_UNWRITABLE;
                 s->fpcond = (s->fcr31 >> 23) & 1u;
             }
         } else if (fmt == 0x04u && move_shape) {  /* mtc1 rt, fs */

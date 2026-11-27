@@ -654,6 +654,25 @@ void TestFpuConditionCodesMeasured() {
 	Check("bc1t cc3 target ran", s.r[T5], 0x111u);
 }
 
+// pspautotests e37443a6 tests/cpu/fpu/fcr.expected (recorded on a PSP), lines 16, 18 and 24: a
+// ctc1 of FO (0x00400000), FN (0x00200000) or bits 18..20 (0x001C0000) reads back 0, and line 14
+// reads FS (0x01000000) back as written.
+void TestFcr31UnwritableBitsRecorded() {
+	const uint32_t base = 0x08900000;
+	std::vector<uint32_t> p = {
+		I(0x0F, ZERO, T0, 0x0040), CTC1(T0, 31), CFC1(T1, 31),   // FO
+		I(0x0F, ZERO, T0, 0x0020), CTC1(T0, 31), CFC1(T2, 31),   // FN
+		I(0x0F, ZERO, T0, 0x001C), CTC1(T0, 31), CFC1(T3, 31),   // bits 18..20
+		I(0x0F, ZERO, T0, 0x0100), CTC1(T0, 31), CFC1(T4, 31),   // FS
+		SYSCALL,
+	};
+	ref::CpuState s = RunProgram(p, base);
+	Check("ctc1 0x00400000 reads back", s.r[T1], 0x00000000u);
+	Check("ctc1 0x00200000 reads back", s.r[T2], 0x00000000u);
+	Check("ctc1 0x001C0000 reads back", s.r[T3], 0x00000000u);
+	Check("ctc1 0x01000000 reads back", s.r[T4], 0x01000000u);
+}
+
 // PSP-LLSC-001 (PSP-3000 / 6.61, 2026-10-15): the probe's three ll/sc link windows with its
 // values (tests/fixtures/psp_oracle/probe.c, run_llsc_link). On the console a plain ll/sc pair
 // stores and reports 1, a second sc with no new ll stores and reports 1 again, and an sc to
@@ -1310,6 +1329,7 @@ int main() {
 	TestFpuConvertEdgeCases();
 	TestFpuCompareBranch();
 	TestFpuConditionCodesMeasured();
+	TestFcr31UnwritableBitsRecorded();
 	TestLlScMeasuredWindows();
 	TestArithmeticShifts();
 	TestR0IsZero();
