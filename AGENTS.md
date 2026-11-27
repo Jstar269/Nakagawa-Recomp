@@ -37,7 +37,7 @@ change.
 `python tools/nk_doctor.py --scope build`. Then `mingw32-make contrib-check` (Linux: `make CC=gcc native-core-tests`,
 then `make contrib-check`) and `python -m unittest tools.test_<name>` for each module you touch; hosted CI runs the
 whole suite. One native selftest: `mingw32-make GAME_NAME=ci BUILD_DIR=build/windows-runtime CC=gcc
-hle-thread-selftest` (Linux: `make CC=gcc GAME_NAME=ci BUILD_DIR=build/linux-check hle-thread-selftest`; more in
+hle-thread-selftest` (Linux: `make CC=gcc hle-thread-selftest`; more in
 [Quick recipes](docs/DEBUGGING.md#quick-recipes)). `contrib-check` runs the gates your changes need; it is not
 hosted CI, and `SKIP` is not a pass ([results](CONTRIBUTING.md#the-fast-path-one-command)).
 
