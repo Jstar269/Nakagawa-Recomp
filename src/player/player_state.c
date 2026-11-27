@@ -7653,6 +7653,11 @@ bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
                 "The Internal resolution setting has no effect, and the game may run slower. "
                 "Updating the graphics driver may help.";
             break;
+        case NK_RENDER_FALLBACK_VULKAN_CPU:
+            h = "Drawn in software";
+            t = "Vulkan is running on the CPU, so the game may run slower. Selecting a graphics card "
+                "or updating its driver may help.";
+            break;
         case NK_RENDER_FALLBACK_NONE:
         case NK_RENDER_FALLBACK_COUNT:
         default:

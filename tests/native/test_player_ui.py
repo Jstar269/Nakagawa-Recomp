@@ -1566,6 +1566,7 @@ class NativePlayerUiTests(unittest.TestCase):
         runtime_root_arg: str | None = None,
         library_unwritable: bool = False,
         config_files: dict[str, str] | None = None,
+        cheat_db_seed: bytes | None = None,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -1581,6 +1582,10 @@ class NativePlayerUiTests(unittest.TestCase):
             # a disc list the user imported (nk_disc_verify.h).
             data_folder = (localappdata / "Nakagawa" / "data" if os.name == "nt"
                            else userprofile / "data" / "Nakagawa" / "data")
+            cheat_db = data_folder / "cheats" / "cheat.db"
+            if cheat_db_seed is not None:
+                cheat_db.parent.mkdir(parents=True)
+                cheat_db.write_bytes(cheat_db_seed)
             if library_unwritable:
                 # library.json loads (there is none) but is never written: its temporary
                 # file's name is taken by a folder that is not empty (nk_library_save).
@@ -1975,6 +1980,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 "library": persisted_library,
                 "default_profile_files": default_profile_files(),
                 "data_folder_files": files_under(data_folder),
+                "cheat_db_bytes": cheat_db.read_bytes() if cheat_db.is_file() else None,
                 "dedicated_files": files_under(dedicated),
                 "save_fixture": ({name: (saves / name).read_bytes() for name in files_under(saves)}
                                  if save_fixture is not None else None),
@@ -5580,6 +5586,104 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(saved, dict)
         self.assertIs(saved.get("cheats"), True)
         self.assertIs(saved.get("download_cover_art"), False)
+
+    def test_next_ui_cheat_database_two_step_consent(self) -> None:
+        """Settings lists the source on click one. Cancellation starts no DB request, even
+        with a fresh destination. Only the confirmation writes the pinned file."""
+        host = "raw.githubusercontent.com"
+        source_url = f"https://{host}/Jstar269/nakagawa-recomp/main/assets/cheat_db_sources.json"
+        digest = "1" * 40
+        database_url = f"https://{host}/test/fixture/{digest}/cheat.db"
+        contents = b"_S TEST-00001\n_G Synthetic\n_C0 Off\n_L 0x20001000 0x00000001\n"
+        sentinel = b"previous database"
+        entry = {
+            "id": "fixture", "name": "Fixture database", "maintainer": "Fixture maintainer",
+            "licence": "No licence stated", "homepage": "https://example.invalid/fixture",
+            "commit": digest, "url": database_url, "size": len(contents),
+            "sha256": hashlib.sha256(contents).hexdigest(),
+        }
+        listing = {"format": "nakagawa-cheat-db-sources", "schema_version": 1, "sources": [entry]}
+        with tempfile.TemporaryDirectory(prefix=".cheat-db-", dir=ROOT) as tmp:
+            folder = Path(tmp)
+            (folder / "sources.json").write_text(json.dumps(listing), encoding="utf-8")
+            (folder / "database.db").write_bytes(contents)
+            env = {
+                "NK_UI_TEST_CHEAT_DB_LIST": str(folder / "sources.json"),
+                "NK_UI_TEST_CHEAT_DB_FILE": str(folder / "database.db"),
+                "NK_UI_TEST_CHEAT_DB_URL": database_url,
+            }
+            # Developer, Nickname, Online play, Cover art, Cheats, the Windows
+            # Achievements switch (disabled on other hosts), then Cheat database.
+            open_page = (
+                ("WAIT_LAID_OUT=5000",) + ("KEY_DOWN",) * (6 if os.name == "nt" else 5)
+                + ("KEY_RETURN", "WAIT_VIEW=cheat_db,5000", "WAIT_LAID_OUT=5000")
+            )
+            first_click = ("KEY_RETURN", "WAIT_VIEW=cheat_db_confirm,5000", "WAIT_LAID_OUT=5000")
+            return_to_page = ("WAIT_VIEW=cheat_db,5000", "WAIT_LAID_OUT=5000")
+
+            def request_urls(run: dict[str, object]) -> list[str]:
+                rows = re.findall(r"cheat_db_get url=(\S+) allow=(\S+) user_agent=(\S+)",
+                                  str(run["stdout"]))
+                for _, allowed, agent in rows:
+                    self.assertEqual(allowed, host)
+                    self.assertEqual(agent, "NakagawaRecomp/CheatDatabase")
+                files = run["data_folder_files"]
+                assert isinstance(files, list)
+                self.assertFalse(any(str(name).startswith("cheats/cheat.db")
+                                     and str(name).endswith(".part") for name in files), files)
+                return [url for url, _, _ in rows]
+
+            idle = self.next_ui_run("online-settings", open_page, env_extra=env)
+            self.assertEqual(request_urls(idle), [])
+            self.assertIsNone(idle["cheat_db_bytes"])
+            cancelled = self.next_ui_run(
+                "online-settings", open_page + first_click + ("KEY_RETURN",) + return_to_page,
+                env_extra=env,
+            )
+            self.assertEqual(request_urls(cancelled), [source_url])
+            self.assertIsNone(cancelled["cheat_db_bytes"])
+            reopened = self.next_ui_run(
+                "online-settings",
+                open_page + first_click + ("KEY_ESCAPE",) + return_to_page
+                + first_click + ("KEY_ESCAPE",) + return_to_page,
+                env_extra=env,
+            )
+            self.assertEqual(request_urls(reopened), [source_url, source_url])
+            self.assertIsNone(reopened["cheat_db_bytes"])
+            waiting = self.next_ui_run("online-settings", open_page + first_click,
+                                       env_extra=env, cheat_db_seed=sentinel)
+            self.assertEqual(request_urls(waiting), [source_url])
+            self.assertEqual(waiting["cheat_db_bytes"], sentinel)
+            confirmed = self.next_ui_run(
+                "online-settings", open_page + first_click + ("KEY_UP", "KEY_RETURN") + return_to_page,
+                env_extra=env, cheat_db_seed=sentinel,
+            )
+            self.assertEqual(request_urls(confirmed), [source_url, database_url])
+            self.assertEqual(confirmed["cheat_db_bytes"], contents)
+
+            # After an explicit confirmation, Back dismisses progress while
+            # the accepted download continues. Hold the fake response until Back.
+            backed = self.next_ui_run(
+                "online-settings", open_page + first_click + (
+                    "KEY_UP", "KEY_RETURN", "WAIT_VIEW=cheat_db_busy,5000",
+                    "WAIT_LAID_OUT=5000", "KEY_RETURN", "WAIT_VIEW=online_settings,5000",
+                ),
+                env_extra={**env, "NK_UI_TEST_CHEAT_DB_WAIT_FOR_BACK": "1"},
+                cheat_db_seed=sentinel, wait_background=True,
+            )
+            self.assertEqual(request_urls(backed), [source_url, database_url])
+            self.assertEqual(backed["cheat_db_bytes"], contents)
+
+            from_disk = self.next_ui_run(
+                "online-settings", open_page + (
+                    "PAD_DPAD_DOWN", "PAD_SOUTH", f"PICK_FILE={folder / 'database.db'}",
+                    "WAIT_VIEW=cheat_db_confirm,5000", "WAIT_LAID_OUT=5000",
+                    "PAD_DPAD_UP", "PAD_SOUTH",
+                ) + return_to_page,
+                env_extra=env,
+            )
+            self.assertEqual(request_urls(from_disk), [])
+            self.assertEqual(from_disk["cheat_db_bytes"], contents)
 
     # The next UI's controller page (player_ui_nk.h), as the frame line prints it.
     CONTROLLER_FOCUS = {
@@ -9955,9 +10059,13 @@ class PlayerUiStringSourceTests(unittest.TestCase):
     """Keep launcher copy in the English catalog, including text built before draw calls."""
 
     SOURCES = ("src/player/ui", "src/ui")
+    # The in-game overlay's pages (#2953) resolve the same catalog through the shared UI core.
+    OVERLAY_SOURCES = ("src/rt/overlay",)
     # These files provide data or backend diagnostics rather than composing screen text.
     # Still check their text-sink calls. New files get the full check by default.
     SINK_ONLY = frozenset({
+        # The overlay host's errors are stderr diagnostics for gui.c, never drawn on a page.
+        "src/rt/overlay/overlay_host.c",
         "src/player/ui/love_all_credits.c",
         "src/player/ui/player_ui_art.c",
         "src/player/ui/player_ui_at3.c",
@@ -10009,6 +10117,13 @@ class PlayerUiStringSourceTests(unittest.TestCase):
         '"display-smoke-v1"', '"synthetic-allegrex-v1"', '"pspdev-phase5-v1"',
         '"synthetic-title2-v1"', '"showcase-scene-v1"', '"showcase-breakout-v1"',
         '"UCUS98701"', '"UCUS-98701"', '"PAC-MAN Championship Edition"',
+    })
+    OVERLAY_KEY_NAMES = frozenset({
+        '"up"', '"down"', '"left"', '"right"', '"lshift"', '"rshift"',
+        '"lctrl"', '"rctrl"', '"lalt"', '"ralt"',
+    })
+    OVERLAY_GE_FORMATS = frozenset({
+        '"CLUT4"', '"CLUT8"', '"CLUT16"', '"CLUT32"', '"DXT1"', '"DXT3"', '"DXT5"', '"DEPTH16"',
     })
     # These strings are protocol names, paths, units or proper names. Keep the
     # source/call context with each exception to catch the same word in copy.
@@ -10114,6 +10229,14 @@ class PlayerUiStringSourceTests(unittest.TestCase):
             return re.fullmatch(r'"input-prompts/[a-z0-9_]+\.png"', token) is not None
         if path == "src/ui/nk_ui_theme.c":
             return re.fullmatch(r'"assets/fonts/ui/[\w/-]+\.ttf"', token) is not None
+        if path == "src/rt/overlay/overlay_controls.c":
+            # Input-profile key names looked up by nk_host_key_from_name, never shown.
+            return (token in cls.OVERLAY_KEY_NAMES
+                    and re.search(r"\bk_(?:arrows|shift|ctrl|alt)\[\]\s*=\s*\{", before) is not None)
+        if path == "src/rt/overlay/overlay_dev.c":
+            # The GE's texture format mnemonics and a hexadecimal guest address, shown verbatim.
+            return ((token in cls.OVERLAY_GE_FORMATS and re.fullmatch(r'\s*(?:"\w+",\s*)*', before) is not None)
+                    or token == '"0x%08X"')
         return False
 
     @classmethod
@@ -10172,6 +10295,47 @@ class PlayerUiStringSourceTests(unittest.TestCase):
                     continue
                 problems.extend(self.problems(relative, path.read_text(encoding="utf-8")))
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_overlay_strings_come_from_the_catalog(self) -> None:
+        """#2953: the in-game overlay's pages take their copy from the catalog too."""
+        problems = []
+        scanned = 0
+        for directory in self.OVERLAY_SOURCES:
+            for path in sorted((ROOT / directory).rglob("*")):
+                if path.suffix not in {".c", ".h", ".inc"}:
+                    continue
+                scanned += 1
+                problems.extend(self.problems(path.relative_to(ROOT).as_posix(),
+                                              path.read_text(encoding="utf-8")))
+        self.assertGreater(scanned, 0, "no overlay sources found")
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_guard_finds_overlay_copy_and_keeps_its_data(self) -> None:
+        source = (
+            'static const char *const k_arrows[] = {"up", "down", "left", "right"};\n'
+            'static const NkUiPromptItem prompts[] = {{NK_UI_PROMPT_ACT_BACK, "Back"}};\n'
+            'key_group(keys, taken, count, k_arrows, 4u, "Arrow keys", words, list);\n'
+            'nk_ui_button(ui, NK_OVERLAY_ID_RESUME, NK_UI_STR(OVERLAY_BUTTON_RESUME), 0u);\n'
+        )
+        problems = self.problems("src/rt/overlay/overlay_controls.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["2", "3"])
+        # Key names are data only in the controls file's key tables.
+        self.assertEqual(len(self.problems("src/rt/overlay/overlay_pause.c", source)), 6)
+        source = (
+            'static const char *const names[] = {\n'
+            '    "5650", "CLUT4", "DXT1",\n'
+            '};\n'
+            '(void)snprintf(text, sizeof(text), "0x%08X", (unsigned)w->addr);\n'
+            'return "UNKNOWN";\n'
+            'nk_ui_text(ui, DEV_ID_EMPTY, "CLUT4", &empty);\n'
+        )
+        problems = self.problems("src/rt/overlay/overlay_dev.c", source)
+        self.assertEqual([p.split(":")[1] for p in problems], ["5", "6"])
+        # The host's diagnostics stay literal, but a string drawn there still needs the catalog.
+        host = ('host_error(error, error_size, "out of memory");\n'
+                'nk_ui_text(ui, id, "Raw overlay copy", &style);\n')
+        self.assertEqual([p.split(":")[1] for p in self.problems("src/rt/overlay/overlay_host.c", host)],
+                         ["2"])
 
     def test_guard_finds_direct_descriptor_and_formatted_copy(self) -> None:
         source = (

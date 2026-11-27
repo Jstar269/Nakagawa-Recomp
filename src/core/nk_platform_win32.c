@@ -135,6 +135,15 @@ bool nk_platform_path_missing(const char *path) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
+bool nk_platform_available_disk_bytes(const char *path, uint64_t *available) {
+    WCHAR wide[32768];
+    ULARGE_INTEGER free_bytes;
+    if (!path || !available || !utf8_to_wide(path, wide, sizeof(wide) / sizeof(wide[0])) ||
+        !GetDiskFreeSpaceExW(wide, &free_bytes, NULL, NULL)) return false;
+    *available = (uint64_t)free_bytes.QuadPart;
+    return true;
+}
+
 #define TREE_PATH_CAP 32768u
 
 /* A tree walk keeps one path buffer: each level appends "\name", works on it
