@@ -2454,6 +2454,40 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name) {
     setvbuf(stderr, NULL, _IONBF, 0);
 }
 
+/* `path` with ".<n>" before its extension (from the last '.' of its last component, unless
+   that component starts with it), else at its end. Either separator ends a component. */
+static bool numbered_log_path(const char *path, unsigned n, char *out, size_t out_size) {
+    const char *leaf = path;
+    for (const char *c = path; *c; c++) {
+        if (*c == '/' || *c == '\\') leaf = c + 1;
+    }
+    const char *dot = strrchr(leaf, '.');
+    if (dot == leaf) dot = NULL;
+    size_t stem = dot ? (size_t)(dot - path) : strlen(path);
+    int written = snprintf(out, out_size, "%.*s.%u%s", (int)stem, path, n, dot ? dot : "");
+    return written > 0 && (size_t)written < out_size;
+}
+
+bool nk_platform_rotate_log_files(const char *path, unsigned keep) {
+    char from[NK_MAX_PATH];
+    char to[NK_MAX_PATH];
+    bool ok = true;
+    if (!path || !path[0] || strlen(path) >= NK_MAX_PATH) return false;
+    if (keep == 0u) return !nk_platform_file_exists(path) || nk_remove_utf8(path) == 0;
+    if (!numbered_log_path(path, keep, to, sizeof(to))) return false;
+    if (nk_platform_file_exists(to) && nk_remove_utf8(to) != 0) ok = false;
+    for (unsigned n = keep; n > 1u; n--) {
+        if (!numbered_log_path(path, n - 1u, from, sizeof(from)) ||
+            !numbered_log_path(path, n, to, sizeof(to))) {
+            return false;
+        }
+        if (nk_platform_file_exists(from) && nk_rename_utf8(from, to) != 0) ok = false;
+    }
+    if (!numbered_log_path(path, 1u, to, sizeof(to))) return false;
+    if (nk_platform_file_exists(path) && nk_rename_utf8(path, to) != 0) ok = false;
+    return ok;
+}
+
 /* Android only: a Windows process gets its environment from the process that started it. */
 bool nk_platform_android_import_environment(void *jni_env) {
     (void)jni_env;
