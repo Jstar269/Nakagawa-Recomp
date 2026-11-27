@@ -312,16 +312,24 @@ int main(void) {{
                         self.assertNotRegex(wb, r"s->r\[\d+\]\s*=[^=]")
                         self.assertIn("s->r[10] + ", wb)
 
-    def test_mtvc_to_the_condition_code_register_keeps_six_bits(self):
-        # PSP-VFPU-CCCMOV-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov):
-        # mtvc then mfvc on VFPU_CC read back the
-        # written value and 0x3f in every cell. Only control register 3 is masked here.
-        mtvc = lambda reg: (0x12 << 26) | (7 << 21) | (5 << 16) | (128 + reg)
-        effect, _, _ = codegen.vfpu_effect(0x3000, mtvc(3))
-        self.assertEqual(effect, "s->vfpuCtrl[3] = s->r[5] & 0x3fu;")
-        for reg in (0, 1, 2, 8):
-            other, _, _ = codegen.vfpu_effect(0x3000, mtvc(reg))
-            self.assertEqual(other, f"s->vfpuCtrl[{reg}] = s->r[5];")
+    def test_mtvc_stores_the_bits_the_psp_keeps(self):
+        # VFPU_CC: PSP-VFPU-CCCMOV-001 (PSP-3000, 2026-11-08, issue #326, probe case
+        # vfpu-cc-cmov), mtvc then mfvc read back the written value and 0x3f in every cell.
+        # S/T/D prefixes: pspautotests e37443a6 tests/cpu/vfpu/prefix_ctrl.expected (recorded
+        # on a PSP), 0xffffffff reads back 000fffff, 000fffff, 00000fff. RCX0-7: pspautotests
+        # e37443a6 tests/cpu/vfpu/vrnd.expected (recorded on a PSP), 0xffffffff reads back
+        # 3f8fffff and 0x12345678 reads 3f845678. Controls 4-7 have no recorded row.
+        mtvc = lambda reg, rt=5: (0x12 << 26) | (7 << 21) | (rt << 16) | (128 + reg)
+        want = {0: "s->r[5] & 0xfffffu", 1: "s->r[5] & 0xfffffu", 2: "s->r[5] & 0xfffu",
+                3: "s->r[5] & 0x3fu"}
+        want.update({reg: "s->r[5]" for reg in range(4, 8)})
+        want.update({reg: "(s->r[5] & 0xfffffu) | 0x3f800000u" for reg in range(8, 16)})
+        for reg, value in want.items():
+            with self.subTest(reg=reg):
+                effect, _, _ = codegen.vfpu_effect(0x3000, mtvc(reg))
+                self.assertEqual(effect, f"s->vfpuCtrl[{reg}] = {value};")
+        zero, _, _ = codegen.vfpu_effect(0x3000, mtvc(8, rt=0))
+        self.assertEqual(zero, "s->vfpuCtrl[8] = (0u & 0xfffffu) | 0x3f800000u;")
 
     def test_vrot_overlap_recomputes_cosine_from_written_lane(self):
         # vt/op subfields select vrot; choose vd/vs in one matrix with scalar vs

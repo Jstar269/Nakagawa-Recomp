@@ -3264,11 +3264,24 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
     handler = _VFPU_COP2_MOVE_FORMS.get(sub)
     if handler is None:
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
-    if sub == 7 and imm == 131:
-        # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
-        # (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
-        return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
+    if sub == 7 and imm >= 128 and imm - 128 in _VFPU_MTVC_KEPT:
+        keep, fixed = _VFPU_MTVC_KEPT[imm - 128]
+        value = f"{R(rt(w))} & 0x{keep:x}u"
+        return (f"{dst} = ({value}) | 0x{fixed:08x}u;" if fixed else f"{dst} = {value};"), None, 0
     return handler(w, src, dst)
+
+
+# What mtvc stores in a VFPU control register: (bits kept from the written word, bits that
+# always read set). VFPU_CC keeps bits 0..5 (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue
+# #326, probe case vfpu-cc-cmov: mtvc then mfvc read back written & 0x3f in every cell). The
+# S/T/D prefixes keep bits 0..19, 0..19 and 0..11 (pspautotests e37443a6
+# tests/cpu/vfpu/prefix_ctrl.expected, recorded on a PSP: 0xffffffff reads back 000fffff,
+# 000fffff, 00000fff; 0xfff00000, 0xfff00000, 0xffffff00 read 0, 0, 00000f00). RCX0-7 keep
+# bits 0..19 and read 0x3f8 above them (pspautotests e37443a6 tests/cpu/vfpu/vrnd.expected,
+# recorded on a PSP: 00000001 reads 3f800001, ffffffff reads 3f8fffff, 12345678 reads
+# 3f845678). Controls 4-7 have no recorded write and store the word as written.
+_VFPU_MTVC_KEPT = {0: (0xFFFFF, 0), 1: (0xFFFFF, 0), 2: (0xFFF, 0), 3: (0x3F, 0),
+                   **{ctrl: (0xFFFFF, 0x3F800000) for ctrl in range(8, 16)}}
 
 
 def _vfpu_cop2_mfv(w, src, dst):
@@ -4552,14 +4565,15 @@ def sv_points(elf, insns, labels, hst_profile=False, options=None, entry=None):
         return {}
     if ENHANCEMENT_ACE_SITES and (insns & set(ENHANCEMENT_ACE_SITES.keys())):
         return {}
-    # A labelled delay slot's copy is skipped by its transfer's fall-through, which enters
-    # the next word with the slot run inline, annulled or followed by a call: a join, as a
-    # label is (the emitter's planned skip targets).
-    labels = set(labels) | set(_dup_slot_skips(elf, insns, labels).values())
     # An entry above the body's lowest address is entered past the words below it (emit_function
     # jumps to its label), so the first pass from it did not run them: a join, as a label is.
+    labels = set(labels)
     if entry is not None and entry != min(insns):
         labels.add(entry)
+    # A labelled delay slot's copy is skipped by its transfer's fall-through, which enters
+    # the next word with the slot run inline, annulled or followed by a call: a join, as a
+    # label is (the emitter's planned skip targets, the entry's own label among them).
+    labels |= set(_dup_slot_skips(elf, insns, labels).values())
     points, total = {}, 0
     regs: list[int | None] = [None] * 32
     regs[0] = 0
@@ -5214,6 +5228,12 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     # A variable-import site's immediate is the linker's too, so its body carries none either.
     sv_points = ({} if ADDRESS_SPACE.runtime_module or not ADDRESS_SPACE.patched.keys().isdisjoint(insns)
                  else sv_plan(elf, insns, labels, hst_profile=hst_profile, options=options, entry=start))
+    # An entry above the body's lowest address is a label too (the body jumps to it below).
+    # It joins the labels before the skips are planned: a transfer whose delay slot is that
+    # entry must skip the labelled copy on fall-through like any other labelled slot (#3163).
+    entry_label = bool(insns) and start != min(insns)
+    if entry_label:
+        labels = set(labels) | {start}
     dup_slot_skips = _dup_slot_skips(elf, insns, labels)
     if dup_slot_skips:
         labels = set(labels) | set(dup_slot_skips.values())
@@ -5227,9 +5247,7 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     if sp_kept:
         out.append("    uint32_t _sp_kept = 1u; (void)_sp_kept;")
         out.append("    uint32_t _sp_named = _sp_entry; (void)_sp_named;")
-    if insns and start != min(insns):
-        labels = set(labels)
-        labels.add(start)
+    if entry_label:
         out.append(f"    goto L_{start:08x};")
     ctx = _BodyContext(elf, ranges, known, resume_owners, dispatch_boundaries, labels, continuations,
                        dup_slot_skips, hst_profile, lle_cpu, resumable, stack_census, start, guest_exits,
