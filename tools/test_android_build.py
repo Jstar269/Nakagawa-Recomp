@@ -279,6 +279,14 @@ class AndroidAppContractTests(unittest.TestCase):
         line = posix[posix.index("static void android_log_line(const char *line) {"):]
         line = line[:line.index("\n}\n")]
         self.assertIn("NK_ANDROID_LOG_MAX_BYTES", line)
+        # A failed write (a full disk) is said by name, once until a write succeeds again
+        # (AGENTS.md section 6: no hidden failures).
+        self.assertIn("if (fflush(s_android_log_file) != 0) wrote = false;", line)
+        failed = line[line.index("} else if (!s_android_log_write_failed) {"):]
+        self.assertLess(failed.index("s_android_log_write_failed = true;"),
+                        failed.index('"NK_LOG_WRITE_FAILED %s (%s)'))
+        self.assertLess(line.index("s_android_log_write_failed = false;"),
+                        line.index("} else if (!s_android_log_write_failed) {"))
         player = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         self.assertLess(player.index('nk_platform_host_startup("nakagawa");'),
                         player.index('nk_platform_setup_standard_streams("player-output.txt");'))

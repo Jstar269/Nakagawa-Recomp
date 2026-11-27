@@ -1987,13 +1987,15 @@ void nk_platform_close_process(NkProcessHandle *process) {
    at all, so the file is the record that always has them. */
 static int s_android_log_pipe[2] = { -1, -1 };
 static char s_android_log_tag[32] = "nakagawa";
-/* The file and the two below are shared by the pump thread and the thread that opens the
+/* The file and the three below are shared by the pump thread and the thread that opens the
    process's own log, so they change only under the lock. */
 static pthread_mutex_t s_android_log_lock = PTHREAD_MUTEX_INITIALIZER;
 static FILE *s_android_log_file;
 /* The process's own log, which it rotates; empty for a run log the launcher named and reads. */
 static char s_android_log_path[NK_MAX_PATH];
 static long s_android_log_bytes;
+/* A write to the file failed and was reported; cleared by the next one that succeeds. */
+static bool s_android_log_write_failed;
 static pthread_t s_android_log_thread;
 static bool s_android_log_thread_running;
 
@@ -2007,8 +2009,21 @@ static void android_log_line(const char *line) {
     pthread_mutex_lock(&s_android_log_lock);
     if (s_android_log_file) {
         int n = fprintf(s_android_log_file, "%s\n", line);
-        fflush(s_android_log_file);
-        if (n > 0) s_android_log_bytes += n;
+        bool wrote = n > 0;
+        if (fflush(s_android_log_file) != 0) wrote = false;
+        if (wrote) {
+            s_android_log_bytes += n;
+            s_android_log_write_failed = false;
+        } else if (!s_android_log_write_failed) {
+            /* Said once, until a line is written again (a full disk would fail every line). */
+            int error = errno;
+            s_android_log_write_failed = true;
+            __android_log_print(ANDROID_LOG_ERROR, s_android_log_tag,
+                                "NK_LOG_WRITE_FAILED %s (%s): lines are missing from the file "
+                                "until a write succeeds; the system log still has them",
+                                s_android_log_path[0] ? s_android_log_path : "the run log",
+                                strerror(error));
+        }
         if (s_android_log_path[0] && s_android_log_bytes >= NK_ANDROID_LOG_MAX_BYTES) {
             fclose(s_android_log_file);
             if (!nk_platform_rotate_log_files(s_android_log_path, NK_ANDROID_LOG_KEEP)) {
@@ -2158,6 +2173,7 @@ void nk_platform_host_shutdown(void) {
         s_android_log_file = NULL;
     }
     s_android_log_path[0] = '\0';
+    s_android_log_write_failed = false;
     pthread_mutex_unlock(&s_android_log_lock);
 }
 #else
