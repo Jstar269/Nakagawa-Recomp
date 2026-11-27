@@ -1948,8 +1948,9 @@ $(GPU_CAPTURE_BIN): shader-verify
 		tests/native/gpu_capture_selftest.c src/rt/perf.c \
 		$(SDL3VK_SRCS) $(LIBS)
 
-# The terminal-fault legs gpu-capture-selftest runs after its default run;
-# gpu-selftest-status runs the same legs, so the manager's gate covers them too.
+# The present-fault legs gpu-capture-selftest runs after its default run: unclassified and
+# device-lost turn the renderer terminal; surface-lost replaces the window's surface and goes on
+# (#360). gpu-selftest-status runs the same legs, so the manager's gate covers them too.
 GPU_CAPTURE_TERMINAL_CASES := surface-lost unclassified device-lost
 
 gpu-capture-selftest: $(GPU_CAPTURE_BIN)
