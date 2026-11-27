@@ -9,6 +9,12 @@ supported, it stops and names the missing piece. This page lists those stopping 
 Every row below uses one of these words, except Hot Shots Tennis, which shows its rating from the player. Hot Shots Tennis and the two showcase demos are rated from the player's own record (`src/player/ui/player_ui_nk.c`), not from their status word (see below).
 A row claims only what its recorded evidence shows, and no other document can raise it.
 
+A row added or changed from now on names the source its evidence ran on: a commit on `main` (its SHA, as the
+*Wipeout Pure* row does) or the pull request whose head was run, with that head's SHA. A local branch, an unpushed
+commit or a tree with uncommitted changes is not a source anyone else can check out, so a run of one is not cited
+here. A date alone ("a 2026-11-06 build") does not name a source; older rows that use one keep it until the title is
+run again.
+
 The player doesn't show these words. Each game's page in the player shows a rating instead: **Perfect**,
 **Playable**, **In-game**, **Menu**, **Title screen** or **Won't boot**, with a plain sentence on what to expect
 ([#1297](https://github.com/Jstar269/nakagawa-recomp/issues/1297)). A status word describes the project's own test

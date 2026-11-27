@@ -23,6 +23,7 @@
 #include "discord_presence.h"
 #include "cover_art.h"
 #include "adhoc_servers.h"
+#include "cheat_db.h"
 #include "setup_staging.h"
 #include "nk_title_manifest.h"
 #include "generated/nk_title_catalog.h"
@@ -159,7 +160,10 @@ typedef enum {
     VIEW_ONLINE_PLAY_SERVERS,   /* Settings > Online play: the server picker */
     VIEW_ACHIEVEMENTS_CARD,     /* Settings > Online and developer: RetroAchievements' consent
                                    card (#1316) */
-    VIEW_ACHIEVEMENTS_SIGN_IN   /* RetroAchievements' sign-in form (#1316); the last value */
+    VIEW_ACHIEVEMENTS_SIGN_IN,  /* RetroAchievements' sign-in form (#1316) */
+    VIEW_CHEAT_DB,
+    VIEW_CHEAT_DB_CONFIRM,
+    VIEW_CHEAT_DB_BUSY          /* Last value; the UI harness's view mask has 32 bits. */
 } PlayerView;
 
 typedef enum {
@@ -1070,6 +1074,17 @@ typedef enum {
 
 struct PlayerApp {
     PlayerView active_view;
+    struct {
+        NkCheatDbSource source;
+        char import_path[NK_MAX_PATH];
+        char destination[NK_MAX_PATH];
+        char status[256];
+        bool replace;
+        bool download_available;
+        bool picking;
+        bool busy;
+        bool fetching_sources;
+    } cheat_db;
     GameRecord games[MAX_LIBRARY_GAMES];
     PlayerRuntimePackageCacheEntry runtime_package_cache[MAX_LIBRARY_GAMES];
     PlayerRuntimePackageWorkerFailure runtime_package_worker_failures[MAX_LIBRARY_GAMES];
@@ -1206,6 +1221,7 @@ struct PlayerApp {
     /* The Fonts & System step requests the host folder dialog for PSP font import through
        this flag; the event loop in main.c opens it. */
     bool request_font_folder_picker;
+    bool request_cheat_db_picker;
     /* Saves > Add a save (#1883) asks for the host folder dialog for games[saves_pick_index];
        main.c opens it, and the folder picked waits in saves_picked (saves_pick_ready) until
        the Saves dialog takes it. A cancelled dialog leaves nothing. */
@@ -2338,6 +2354,9 @@ bool player_app_should_attempt_window_handoff(bool interactive_window,
 void player_app_next_boot_event_path(char *out, size_t out_size);
 
 /* Process launch integration */
+/* Select the runtime for this launch without changing the library or its saved play mode. */
+void player_app_select_launch_game(const PlayerApp *app, const GameRecord *game,
+                                   GameRecord *launch_game);
 bool player_app_launch_game(PlayerApp *app, int game_index);
 void player_app_stop_game(PlayerApp *app);
 void player_app_stop_stalled_game(PlayerApp *app);

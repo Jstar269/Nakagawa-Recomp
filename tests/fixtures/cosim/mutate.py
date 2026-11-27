@@ -453,6 +453,26 @@ MUTANTS: tuple[Mutant, ...] = (
         ],
         target="generator",
     ),
+    # A body entered at a delay slot (#3163): the eslot cells must diverge.
+    Mutant(
+        "codegen-entry-slot-runs-again",
+        "GENERATOR: a transfer whose delay slot is the body's entry falls into the entry label",
+        [(
+            # The pre-fix order: the skips are planned first, then the entry label joins.
+            "    if entry_label:\n"
+            "        labels = set(labels) | {start}\n"
+            "    dup_slot_skips = _dup_slot_skips(elf, insns, labels)\n"
+            "    if dup_slot_skips:\n"
+            "        labels = set(labels) | set(dup_slot_skips.values())\n",
+            "    dup_slot_skips = _dup_slot_skips(elf, insns, labels)\n"
+            "    if dup_slot_skips:\n"
+            "        labels = set(labels) | set(dup_slot_skips.values())\n"
+            "    if entry_label:\n"
+            "        labels = set(labels) | {start}\n",
+            1,
+        )],
+        target="generator",
+    ),
     Mutant(
         "drop-fcr31-threading",
         "guest FCR31 not threaded into the scalar FPU helper path",
