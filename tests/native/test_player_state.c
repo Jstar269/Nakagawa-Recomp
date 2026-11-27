@@ -1416,6 +1416,8 @@ static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
    options. */
 static const char *g_fixture_codegen_options_written = NULL;
 static const char *g_fixture_codegen_options_canonical = NULL;
+static const NkEnhancementDeclarationIdentity *g_fixture_primary_declaration = NULL;
+static const NkEnhancementDeclarationIdentity *g_fixture_hook_declaration = NULL;
 
 /* `folder_enhancement_id` names the package folder (NULL: the authentic
    packages/<disc_id>, else packages/<disc_id>-enhanced-<id>), and
@@ -1435,7 +1437,7 @@ static void write_runtime_package_fixture_variant(
     char aot_components_json[2048], native_components_json[2048], identity_json[2048];
     char aot_hash_input[2050], native_hash_input[2050], identity_hash_input[2050];
     char aot_digest[65], native_digest[65], modules_digest[65], identity_digest[65];
-    char codegen_options_json[512] = "{}";
+    char codegen_options_json[1024] = "{}";
     char codegen_options_digest[65] =
         "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356";
     char analyzer_sha256[65], codegen_sha256[65], runtime_source_digest[65];
@@ -1461,17 +1463,41 @@ static void write_runtime_package_fixture_variant(
             assert(timing_length < sizeof(timing_id));
             memcpy(timing_id, recorded_enhancement_id, timing_length);
             timing_id[timing_length] = '\0';
+            if (g_fixture_hook_declaration) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"code_hook_declaration_sha256_v1\":\"%s\",",
+                                 g_fixture_hook_declaration->fingerprint);
+            }
             if (plus) {
                 used += snprintf(codegen_options_json + used,
                                  sizeof(codegen_options_json) - (size_t)used,
                                  "\"code_hook_package_id\":\"%s\","
                                  "\"code_hook_package_sha256\":\"%064d\",", plus + 1, 0);
             }
+            if (g_fixture_hook_declaration && g_fixture_hook_declaration->symbol_map_sha256[0]) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"code_hook_symbol_map_sha256\":\"%s\",",
+                                 g_fixture_hook_declaration->symbol_map_sha256);
+            }
+            if (g_fixture_primary_declaration) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"enhancement_declaration_sha256_v1\":\"%s\",",
+                                 g_fixture_primary_declaration->fingerprint);
+            }
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
                              "\"enhancement_package_epoch\":\"aot-enhancement-package-v1\","
                              "\"enhancement_package_id\":\"%s\","
                              "\"enhancement_package_sha256\":\"%064d\"",
                              timing_id, 0);
+            if (g_fixture_primary_declaration && g_fixture_primary_declaration->symbol_map_sha256[0]) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 ",\"enhancement_symbol_map_sha256\":\"%s\"",
+                                 g_fixture_primary_declaration->symbol_map_sha256);
+            }
         }
         if (builder) {
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
@@ -1666,6 +1692,69 @@ static void write_runtime_package_fixture_variant(
     snprintf(completion_path, sizeof(completion_path), "%s%ccompletion-manifest.json",
              package_dir, nk_platform_path_separator());
     write_text_file(completion_path, completion_json);
+}
+
+static void write_ace_declaration_fixture(const char *root, const char *disc_id,
+                                          const char *title_id, const char *id,
+                                          bool hook, unsigned offset, bool formatted) {
+    char folder[NK_MAX_PATH];
+    char path[NK_MAX_PATH];
+    char key[10];
+    char text[640];
+    char sep = nk_platform_path_separator();
+    assert(nk_title_manifest_package_dir_name(disc_id, NULL, key, sizeof(key)));
+    for (size_t i = 0; key[i]; i++) key[i] = (char)tolower((unsigned char)key[i]);
+    int length = snprintf(folder, sizeof(folder), "%s%cenhancements", root, sep);
+    assert(length > 0 && (size_t)length < sizeof(folder));
+    assert(nk_platform_mkdir_p_private(folder));
+    length = snprintf(path, sizeof(path), "%s%c%s-%s.json", folder, sep, key, hook ? "cull" : "60hz");
+    assert(length > 0 && (size_t)length < sizeof(path));
+    const char *category = hook ? "guest_memory_code_hook" : "timing_frame_presentation";
+    if (formatted) {
+        static const char long_value[] = "1.25"
+            "0000000000" "0000000000" "0000000000" "0000000000"
+            "0000000000" "0000000000" "0000000000";
+        length = snprintf(text, sizeof(text),
+            "{\r\n \"sites\": [ {\"insn_offset\": %u, \"stock_values\": [%s]} ],\r\n"
+            " \"category\":\"%s\", \"target_title_id\": \"%s\", \"id\": \"%s\"\r\n}\r\n",
+            offset, long_value, category, title_id, id);
+    } else {
+        length = snprintf(text, sizeof(text),
+            "{\"id\":\"%s\",\"target_title_id\":\"%s\",\"category\":\"%s\","
+            "\"sites\":[{\"insn_offset\":%u,\"stock_values\":[1.25]}]}",
+            id, title_id, category, offset);
+    }
+    assert(length > 0 && (size_t)length < sizeof(text));
+    write_text_file(path, text);
+}
+
+static void write_runtime_package_fixture_for_ace(
+    const char *root, const char *disc_id, const char *title_id, const char *executable,
+    const char *source_media, const char *variant, bool hook_only
+) {
+    char primary_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    char path[NK_MAX_PATH];
+    NkEnhancementDeclarationIdentity primary, companion;
+    const char *plus = strchr(variant, '+');
+    size_t length = plus ? (size_t)(plus - variant) : strlen(variant);
+    assert(length < sizeof(primary_id));
+    memcpy(primary_id, variant, length);
+    primary_id[length] = '\0';
+    assert(nk_title_manifest_enhancement_declaration_path(
+        root, NULL, disc_id, hook_only, path, sizeof(path), NULL));
+    assert(nk_title_manifest_enhancement_declaration_identity(path, primary_id, title_id, true, &primary));
+    if (plus) {
+        assert(nk_title_manifest_enhancement_declaration_path(
+            root, NULL, disc_id, true, path, sizeof(path), NULL));
+        assert(nk_title_manifest_enhancement_declaration_identity(path, plus + 1, title_id, true, &companion));
+    }
+    g_fixture_primary_declaration = &primary;
+    g_fixture_hook_declaration = plus ? &companion : NULL;
+    write_runtime_package_fixture_variant(
+        root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION, executable, FIXTURE_SHA256,
+        NULL, source_media, 0, false, variant, variant);
+    g_fixture_primary_declaration = NULL;
+    g_fixture_hook_declaration = NULL;
 }
 
 static void write_runtime_package_fixture_with_options(
@@ -2160,7 +2249,7 @@ static void repeat_launch_cache_from_status_check(PlayerApp *app, const char *us
     char reason[1024] = "";
     char identity[65] = "";
     NkRuntimePackageStatus status = player_runtime_package_status_check(
-        user_root, &app->games[0], &info, reason, sizeof(reason));
+        user_root, &app->games[0], NULL, &info, reason, sizeof(reason));
     assert(status == NK_RUNTIME_PACKAGE_OK);
     assert(nk_launch_runtime_package_cache_identity(user_root, &app->games[0], identity));
     player_app_runtime_package_cache_store(app, 0, &app->games[0], true, identity, status,
@@ -3600,11 +3689,9 @@ static int player_state_package_builder_child(int argc, char **argv) {
             bool want_hook_only = hook_only && strcmp(hook_only, "1") == 0;
             bool want_cull = want_hook_only || strchr(enhancement_id, '+') != NULL;
             if (logic_60 == want_hook_only || cull != want_cull) return 97;
-            write_runtime_package_fixture_variant(
-                user_root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION, executable,
-                FIXTURE_SHA256, NULL,
-                source_media && source_media[0] ? source_media : NULL, 0, false,
-                enhancement_id, enhancement_id);
+            write_runtime_package_fixture_for_ace(
+                user_root, disc_id, title_id, executable,
+                source_media && source_media[0] ? source_media : NULL, enhancement_id, want_hook_only);
         } else if (source_media && source_media[0]) {
             write_runtime_package_fixture_with_source_media(
                 user_root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION,
@@ -5740,6 +5827,10 @@ static void test_package_build_lifecycle(const char *self_executable) {
                  user_root, sep, sep, rebuild_app->games[0].disc_id, sep);
         fixture_sha_file(stock_package, stock_hash_before);
         GameRecord stock_game = rebuild_app->games[0];
+        write_ace_declaration_fixture(user_root, stock_game.disc_id, stock_game.title_id,
+                                      "fixture-60hz", false, 0, false);
+        write_ace_declaration_fixture(user_root, stock_game.disc_id, stock_game.title_id,
+                                      "fixture-cull", true, 0, false);
         snprintf(rebuild_app->games[0].enhancement_package_id,
                  sizeof(rebuild_app->games[0].enhancement_package_id), "fixture-60hz");
         player_app_runtime_package_cache_invalidate(rebuild_app);
@@ -14785,6 +14876,209 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+static void test_live_ace_declarations(void) {
+    static const char disc[] = "TEST00001";
+    static const char title[] = "synthetic-allegrex-v1";
+    static const char exe[] = "synthetic-allegrex-v1.exe";
+    static const char timing[] = "fixture-60hz";
+    static const char cull[] = "fixture-cull";
+    static const char combined[] = "fixture-60hz+fixture-cull";
+    NkLaunchEnhancementSources sources = {0};
+    assert(snprintf(sources.user_root, sizeof(sources.user_root), "%s/ace-declaration-check",
+                    native_test_get_root()) < (int)sizeof(sources.user_root));
+    const char *root = sources.user_root;
+    char assets[NK_MAX_PATH + 48];
+    snprintf(assets, sizeof(assets), "%s/tests/fixtures/profile_zero", root);
+    assert(nk_platform_mkdir_p_private(assets));
+
+    NkGameEntry stock = {0};
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc);
+    snprintf(stock.title_id, sizeof(stock.title_id), "%s", title);
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    assert(snprintf(stock.iso_path, sizeof(stock.iso_path), "%s/source.iso", root) <
+           (int)sizeof(stock.iso_path));
+    write_iso_with_fixture_eboot(stock.iso_path, NULL, 0u, 0u);
+    /* The source ISO member contains the same "fixture" bytes this helper hashes. */
+    char source_media[256];
+    int source_media_length = snprintf(source_media, sizeof(source_media),
+        "{\"executable\":{\"path\":\"PSP_GAME/SYSDIR/EBOOT.BIN\","
+        "\"sha256\":\"%s\"},\"modules\":[]}", FIXTURE_SHA256);
+    assert(source_media_length > 0 && (size_t)source_media_length < sizeof(source_media));
+    write_runtime_package_fixture_with_source_media(
+        root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL, source_media);
+
+    NkGameEntry game = stock;
+    snprintf(game.enhancement_package_id, sizeof(game.enhancement_package_id), "%s", timing);
+    write_ace_declaration_fixture(root, disc, title, timing, false, 0, false);
+    write_ace_declaration_fixture(root, disc, title, cull, true, 0, false);
+    char reason[1024];
+    /* Readiness must still refuse a live ISO with no recorded source media. */
+    write_runtime_package_fixture_variant(
+        root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL,
+        NULL, 0, false, timing, timing);
+    assert(nk_launch_validate_runtime_package(root, &game, NULL, reason, sizeof(reason)) ==
+           NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "Source media identity is unqualified") != NULL);
+
+    write_runtime_package_fixture_variant(
+        root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL,
+        source_media, 0, false, timing, timing);
+    NkRuntimePackageStatus status =
+        nk_launch_validate_runtime_package(root, &game, NULL, reason, sizeof(reason));
+    if (status != NK_RUNTIME_PACKAGE_OK)
+        fprintf(stderr, "Ace legacy fixture package validation failed: %s\n", reason);
+    assert(status == NK_RUNTIME_PACKAGE_OK);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, NULL, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "predates declaration identity checks") != NULL);
+
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, timing, false);
+    NkRuntimePackageInfo info;
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+    char package_path[NK_MAX_PATH + 32];
+    snprintf(package_path, sizeof(package_path), "%s/package.json", info.package_root);
+    char package_before[65], package_after[65], identity[65], after_identity[65];
+    fixture_sha_file(package_path, package_before);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(root, &game, &sources, identity));
+
+    assert(snprintf(sources.shipped_root, sizeof(sources.shipped_root), "%s/shipped", root) <
+           (int)sizeof(sources.shipped_root));
+    assert(nk_platform_mkdir_p_private(sources.shipped_root));
+    char user_declaration[NK_MAX_PATH], shipped_declaration[NK_MAX_PATH + 32];
+    assert(nk_title_manifest_enhancement_declaration_path(
+        root, NULL, disc, false, user_declaration, sizeof(user_declaration), NULL));
+    snprintf(shipped_declaration, sizeof(shipped_declaration), "%s/test00001-60hz.json",
+             sources.shipped_root);
+    assert(rename(user_declaration, shipped_declaration) == 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+
+    /* A formatting-only user copy wins over an identical shipped declaration.
+       Its 74-byte token is the same numeric value the builder saw. */
+    write_ace_declaration_fixture(root, disc, title, timing, false, 0, true);
+    PlayerTitleEnhancement selection;
+    assert(player_read_title_enhancement(root, sources.shipped_root, &game, &selection));
+    assert(selection.available && !selection.shipped && strcmp(selection.package_id, timing) == 0);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(
+        root, &game, &sources, after_identity));
+    assert(strcmp(after_identity, identity) == 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+    assert(info.validation_cache_hit);
+    NkLaunchSession prepared;
+    NkResult result = nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources);
+    if (result != NK_OK) fprintf(stderr, "Ace prepare failed: %s\n", prepared.last_error);
+    assert(result == NK_OK && prepared.package_launch);
+    /* The package fixture is intentionally not a native program. A spawn error
+       here shows the equivalent spelling passed the final validation first. */
+    assert(nk_launch_start(&prepared) == NK_ERROR_PROCESS_SPAWN);
+    assert(!prepared.is_running);
+
+    write_ace_declaration_fixture(root, disc, title, timing, false, 4, false);
+    fixture_sha_file(package_path, package_after);
+    assert(strcmp(package_before, package_after) == 0);
+    assert(nk_launch_validate_runtime_package(root, &game, &info, reason, sizeof(reason)) ==
+           NK_RUNTIME_PACKAGE_OK && info.validation_cache_hit);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(
+        root, &game, &sources, after_identity));
+    assert(strcmp(after_identity, identity) != 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace declaration changed") && !info.executable_path[0]);
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace declaration changed") && !prepared.is_running);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &stock, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, timing, false);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+
+    static const char map_a[] = "{\"synth_fn\":\"0x08804000\"}";
+    static const char map_b[] = "{\"synth_fn\":\"0x08804004\"}";
+    char sidecar[NK_MAX_PATH + 64];
+    snprintf(sidecar, sizeof(sidecar), "%s/enhancements/test00001-60hz.symbols.json", root);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(root, &game, &sources, identity));
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_a);
+    assert(nk_launch_runtime_package_cache_identity_for_launch(root, &game, &sources, after_identity));
+    assert(strcmp(identity, after_identity) != 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace symbol map changed"));
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace symbol map changed") && !prepared.is_running);
+
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, timing, false);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_b);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace symbol map changed") && !prepared.is_running);
+    assert(remove(sidecar) == 0);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace symbol map changed"));
+
+    /* An explicit build-time map has its own digest. An unused adjacent map
+       must not make that package stale, even after the launch was prepared. */
+    NkEnhancementDeclarationIdentity explicit_declaration;
+    assert(nk_title_manifest_enhancement_declaration_identity(
+        user_declaration, timing, title, false, &explicit_declaration));
+    char explicit_options[640], map_option[128] = "";
+    for (int has_digest = 0; has_digest <= 1; has_digest++) {
+        if (has_digest)
+            snprintf(map_option, sizeof(map_option),
+                     "\"enhancement_explicit_symbol_map_sha256\":\"%s\",", FIXTURE_SHA256);
+        int length = snprintf(explicit_options, sizeof(explicit_options),
+            "{\"enhancement_declaration_sha256_v1\":\"%s\","
+            "\"enhancement_explicit_symbol_map\":true,%s"
+            "\"enhancement_package_epoch\":\"aot-enhancement-package-v1\","
+            "\"enhancement_package_id\":\"%s\",\"enhancement_package_sha256\":\"%064d\"}",
+            explicit_declaration.fingerprint, map_option, timing, 0);
+        assert(length > 0 && (size_t)length < sizeof(explicit_options));
+        g_fixture_codegen_options_written = explicit_options;
+        g_fixture_codegen_options_canonical = explicit_options;
+        write_runtime_package_fixture_variant(
+            root, disc, title, SR_CPUSTATE_ABI_VERSION, exe, FIXTURE_SHA256, NULL,
+            source_media, 0, false, timing, timing);
+        g_fixture_codegen_options_written = NULL;
+        g_fixture_codegen_options_canonical = NULL;
+        status = nk_launch_validate_runtime_package_for_launch(
+            root, &game, &sources, &info, reason, sizeof(reason));
+        assert(status == (has_digest ? NK_RUNTIME_PACKAGE_OK : NK_RUNTIME_PACKAGE_STALE));
+    }
+    write_text_file(sidecar, map_a);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_b);
+    assert(nk_launch_start(&prepared) == NK_ERROR_PROCESS_SPAWN);
+    assert(!prepared.is_running);
+    assert(remove(sidecar) == 0);
+
+    snprintf(game.enhancement_package_id, sizeof(game.enhancement_package_id), "%s", combined);
+    snprintf(sidecar, sizeof(sidecar), "%s/enhancements/test00001-cull.symbols.json", root);
+    write_text_file(sidecar, map_a);
+    write_runtime_package_fixture_for_ace(root, disc, title, exe, source_media, combined, false);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_text_file(sidecar, map_b);
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace symbol map changed") && !prepared.is_running);
+    write_text_file(sidecar, map_a);
+    assert(nk_launch_prepare_session_with_declarations(&prepared, &game, root, &sources) == NK_OK);
+    write_ace_declaration_fixture(root, disc, title, cull, true, 4, false);
+    assert(nk_launch_validate_runtime_package_for_launch(
+        root, &game, &sources, &info, reason, sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    assert(strstr(reason, "selected Ace declaration changed"));
+    assert(nk_launch_start(&prepared) == NK_ERROR_INVALID_EXECUTABLE);
+    assert(strstr(prepared.last_error, "selected Ace declaration changed") && !prepared.is_running);
+    assert(nk_platform_remove_tree(root, NULL));
+    printf("[PLAYER_STATE_TEST] live Ace declarations: warm reuse, long numeric spelling, "
+           "legacy rebuild, timing/hook and symbol changes blocked before spawn, "
+           "Authentic and rebuild accepted PASS\n");
+}
+
 static void test_acceptance_launch_uses_stock_package(const char *self_executable) {
     const char sep = nk_platform_path_separator();
     const char *disc_id = "TEST00001";
@@ -14813,8 +15107,15 @@ static void test_acceptance_launch_uses_stock_package(const char *self_executabl
              "\"sha256\":\"%s\"},\"modules\":[]}", FIXTURE_SHA256);
     write_runtime_package_fixture_with_source_media(root, disc_id, title_id,
         SR_CPUSTATE_ABI_VERSION, executable, FIXTURE_SHA256, self_executable, media);
+    /* The Ace package records the identity of the declaration it was built from, as a
+       current builder does; a package without one is refused as predating the check. */
+    NkEnhancementDeclarationIdentity timing_identity;
+    assert(nk_title_manifest_enhancement_declaration_identity(declaration, timing_id, title_id,
+                                                              true, &timing_identity));
+    g_fixture_primary_declaration = &timing_identity;
     write_runtime_package_fixture_variant(root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION,
         executable, FIXTURE_SHA256, self_executable, media, 0, false, timing_id, timing_id);
+    g_fixture_primary_declaration = NULL;
 
     PlayerApp *app = calloc(1, sizeof(*app));
     assert(app);
@@ -16292,6 +16593,7 @@ static void assert_package_launch_root_is_the_saves_page_folder(const GameRecord
 }
 
 int main(int argc, char **argv) {
+    const bool ace_declarations_only = argc == 2 && strcmp(argv[1], "--ace-declarations") == 0;
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
     }
@@ -16341,7 +16643,7 @@ int main(int argc, char **argv) {
     /* Copies of this binary stand in for the bundled python and child modes above. Any other
      * arguments are a mode this binary does not have: name them and stop, instead of running
      * the whole suite again inside a child (which would start its own children). */
-    if (argc > 1) {
+    if (argc > 1 && !ace_declarations_only) {
         fprintf(stderr, "test_player_state: no mode takes these arguments:");
         for (int i = 1; i < argc; i++) fprintf(stderr, " [%s]", argv[i]);
         fprintf(stderr, "\n");
@@ -16380,6 +16682,10 @@ int main(int argc, char **argv) {
     }
     native_test_assert_cache_root_isolated();
     native_test_assert_config_root_isolated();
+    if (ace_declarations_only) {
+        test_live_ace_declarations();
+        return 0;
+    }
 
     test_versioned_user_data();
     test_psn_package_imports_as_its_iso();
@@ -16427,6 +16733,7 @@ int main(int argc, char **argv) {
     test_license_folder_request();
     test_library_card_status_text();
     test_enhanced_package_variants();
+    test_live_ace_declarations();
     test_acceptance_launch_uses_stock_package(self_executable);
     test_package_cache_digest_ignores_key_order();
     test_package_case_sibling_is_outside();
@@ -20916,7 +21223,7 @@ int main(int argc, char **argv) {
                                                           sizeof(reason)) ==
                        NK_RUNTIME_PACKAGE_OK);
                 NkRuntimePackageInfo long_info;
-                assert(player_runtime_package_status_check(long_root, &game, &long_info, reason,
+                assert(player_runtime_package_status_check(long_root, &game, NULL, &long_info, reason,
                                                            sizeof(reason)) ==
                        NK_RUNTIME_PACKAGE_INCOMPATIBLE);
                 assert(strstr(reason, "Package paths exceed the player path limit.") != NULL);

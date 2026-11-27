@@ -1247,12 +1247,15 @@ class PublicFixtureTest(unittest.TestCase):
     # lines: each cell's transfer ends in a `goto` to the word after the entry, and that word
     # carries a label. The fixed-address executable's `jal`s are not relocated, so no body
     # there is entered at a delay slot.
+    # #3128's cells (`cslot_call`, `cslot_branch`, `cslot_dst`) and their entry calls move the
+    # other cells. They come with no codegen change: on the old and on the expanded inputs
+    # main's codegen and this one write identical files.
     # The two cosim digests change because ctc1 now drops FCR31 bits 18..22 as well as 25..31:
     # its four ctc1 lines read `& ~0xfe7c0000u` for `& ~0xfe000000u`, and nothing else in
     # either output differs.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "b3624d0784ff96b72134b7eeef879bfad5cee8fbd7f1cf803b6628e77e72cc77",
-        ("cosim", "exec"): "77333c8b4d2107966c68875b3017b0000a836ee5bfad330efb851ff9e62ce8a4",
+        ("cosim", "prx"): "15716f376fb3377d6f1bac91b717e17e8bcd82ef888033edba5ecb52d9847f5c",
+        ("cosim", "exec"): "151315e2215652b6a83a95c11dc957d980be413c0d4e0775a6c46b3280279261",
         ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
         ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
         ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",

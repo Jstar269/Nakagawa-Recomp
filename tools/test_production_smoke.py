@@ -925,7 +925,7 @@ class TestProductionSmokePackage(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
             return real_run(command, *args, **kwargs)
 
-        def record_options(environment):
+        def record_options(environment, staged_symbol_map=None):
             option_environments.append(dict(environment))
             return {}
 
@@ -986,8 +986,10 @@ class TestProductionSmokePackage(unittest.TestCase):
         self.assertEqual(hook_sidecars, [True] * len(make_calls))
         self.assertTrue(option_environments)
         for environment in option_environments:
+            # Every Ace declaration is snapshotted into the build's own stage, under
+            # _stage_for_make's "<label>_<name>" form, so the key names that copy.
             self.assertEqual(Path(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"]).name,
-                             "enhancement_package.cull.json", environment)
+                             "code-hook_package_enhancement_package.cull.json", environment)
 
     def test_spaced_enhancement_data_root_uses_short_form_or_is_refused(self):
         """#2281: the data root is read in place and interpolated into the codegen

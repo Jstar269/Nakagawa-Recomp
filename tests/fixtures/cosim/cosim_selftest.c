@@ -1175,6 +1175,15 @@ static int run_case(const CosimCase *test, const char *trace_dir) {
     } else if (strcmp(test->name, "jtarget") == 0) {
         expect_lane_word(test, &aot, "v0", aot.state.r[2], COSIM_SCRATCH, &failed);
         expect_lane_word(test, &interp, "v0", interp.state.r[2], COSIM_SCRATCH, &failed);
+    } else if (strcmp(test->name, "cslot_call") == 0) {
+        /* A branch onto a delay slot before another entry (generate.py, #3128): each
+         * labelled slot runs once and the guest goes on through cslot_branch into
+         * cslot_dst, whose return slot sets $v1. */
+        const CosimLane *lanes[2] = {&aot, &interp};
+        for (unsigned i = 0u; i < 2u; i++) {
+            expect_lane_word(test, lanes[i], "v0", lanes[i]->state.r[2], 0x1131u, &failed);
+            expect_lane_word(test, lanes[i], "v1", lanes[i]->state.r[3], 0x5Cu, &failed);
+        }
     } else if (strcmp(test->name, "branch_likely") == 0) {
         static const unsigned annulled_gprs[] = {10u, 11u, 12u, 13u, 14u, 15u, 24u, 25u, 16u};
         const CosimLane *lanes[2] = {&aot, &interp};
