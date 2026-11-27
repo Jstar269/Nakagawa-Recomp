@@ -97,7 +97,10 @@ public class TitleActivity extends SDLActivity {
             Log.e(NakagawaHost.TAG, "TITLE_LIBRARY_LOAD_FAILED library=" + mLibraryPath
                     + ": the runtime did not start");
             endProcess(EXIT_NOT_STARTED);
+            return;
         }
+        // Back pauses the game (the runtime takes SDLK_AC_BACK as Esc); it never ends the run.
+        NakagawaHost.sendBackToSdl(this);
     }
 
     /**

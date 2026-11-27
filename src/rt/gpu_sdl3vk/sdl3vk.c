@@ -1094,6 +1094,10 @@ int sdl3vk_init(const char *title) {
     s_init_steps = 0;
     s_init_found_device = 0;
     sdl3vk_set_app_identity();
+    /* Android (#3220): Back is the game's pause, not the end of the run. Untrapped, a Back that
+     * reaches SDL's onBackPressed lets the system finish TitleActivity, and the game ends
+     * unsaved. Only Android reads this hint. */
+    (void)SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     INIT_OK(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD), "sdl3vk: SDL_Init failed: %s\n", SDL_GetError());
     s_sdl_subsystems = 1;
     /* SR_WINDOW_HIDDEN=1: the same presenter (Vulkan swapchain, keyboard, frame capture) with
@@ -1829,10 +1833,22 @@ static void host_key_state(const bool *k, int key_count, uint32_t mouse_held,
     }
 }
 
+/* Android's Back (the back button, the back gesture, and on Android 16 and newer
+ * TitleActivity's back callback) arrives as SDLK_AC_BACK (#3220). It is Esc: it asks for the
+ * pause, and in the overlay it goes back or resumes, as Esc does there. */
+static void back_key_as_escape(SDL_Event *ev) {
+    if ((ev->type == SDL_EVENT_KEY_DOWN || ev->type == SDL_EVENT_KEY_UP) &&
+        ev->key.key == SDLK_AC_BACK) {
+        ev->key.key = SDLK_ESCAPE;
+        ev->key.scancode = SDL_SCANCODE_ESCAPE;
+    }
+}
+
 static void poll_input_on_this_stack(void *arg) {
     int *quit = (int *)arg;
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
+        back_key_as_escape(&ev);
         /* Device bookkeeping and quit are the window's own, claimed or not. */
         switch (ev.type) {
         case SDL_EVENT_QUIT: s_quit_requested = 1; break;
