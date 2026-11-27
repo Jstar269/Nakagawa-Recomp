@@ -601,6 +601,147 @@ class TestUnittestFailureReporting(unittest.TestCase):
         self.assertIn("contrib-check: OK", output)
 
 
+class TestUnitGateScalesWithSelectedWork(unittest.TestCase):
+    """The Python step used to run every selected module in one process under a fixed 1800 s limit.
+    A change selecting 31 modules (2121 tests, about 1000 measured hosted seconds, 2728 s on a Windows
+    workstation) always hit it, although the same modules passed when run directly."""
+
+    HEAVY = {"test_heavy_a": 385.0, "test_heavy_b": 308.0, "test_mid": 128.0, "test_light_a": 45.0,
+             "test_light_b": 30.0, "test_light_c": 30.0}
+    SEPARATE = [["test_mutates_a", "test_mutates_b"]]
+
+    def _data(self):
+        weights = dict(self.HEAVY, test_mutates_a=2.0, test_mutates_b=3.0)
+        return contrib_check.ci_test_shards.parse_weight_data(
+            {"default_seconds": 0.5, "weights": weights, "separate": self.SEPARATE})
+
+    def _modules(self, *names: str) -> list[str]:
+        return [f"tools.{name}" for name in (names or (*self.HEAVY, "test_mutates_a", "test_mutates_b"))]
+
+    def _gate(self, modules: list[str], *, jobs: str = "4", outcome=None):
+        calls: list[tuple[tuple[str, ...], int]] = []
+
+        def fake_run(command, **kwargs):
+            selected = tuple(command[command.index("unittest") + 1:])
+            calls.append((selected, kwargs["timeout"]))
+            if outcome is not None:
+                return outcome(selected, kwargs["timeout"])
+            return _Completed(0)
+
+        with (
+            mock.patch.object(contrib_check.ci_test_shards, "load_weight_data", return_value=self._data()),
+            mock.patch.object(contrib_check.subprocess, "run", side_effect=fake_run),
+            mock.patch.dict(os.environ, {contrib_check.UNIT_JOBS_ENV: jobs}),
+            redirect_stdout(io.StringIO()),
+        ):
+            gate = contrib_check.unit_gate(modules)
+        return gate, calls
+
+    def test_heavy_selection_runs_in_parallel_processes_each_within_its_scaled_limit(self) -> None:
+        gate, calls = self._gate(self._modules())
+        self.assertEqual(gate.status, contrib_check.PASS, gate.detail)
+        self.assertGreater(len(calls), 2, calls)
+        scheduled = [module for selected, _timeout in calls for module in selected]
+        self.assertCountEqual(scheduled, self._modules())
+        weights = self._data().weights
+        for selected, timeout in calls:
+            planned = sum(weights[module.rsplit(".", 1)[-1]] for module in selected)
+            self.assertGreaterEqual(timeout, contrib_check.UNIT_MIN_TIMEOUT)
+            self.assertGreaterEqual(timeout, contrib_check.UNIT_TIMEOUT_PER_MEASURED_SECOND * planned)
+
+    def test_modules_that_mutate_the_checkout_run_alone_after_the_others(self) -> None:
+        _gate, calls = self._gate(self._modules())
+        self.assertEqual(calls[-1][0], ("tools.test_mutates_a", "tools.test_mutates_b"))
+        for selected, _timeout in calls[:-1]:
+            self.assertFalse({"tools.test_mutates_a", "tools.test_mutates_b"} & set(selected), calls)
+
+    def test_serial_run_scales_its_one_limit_with_the_measured_work(self) -> None:
+        heavy = self._modules(*self.HEAVY)
+        _gate, calls = self._gate(heavy, jobs="1")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertCountEqual(calls[0][0], heavy)
+        self.assertEqual(calls[0][1], 6 * sum(self.HEAVY.values()))
+
+    def test_default_is_one_process_for_the_shared_checkout(self) -> None:
+        with mock.patch.dict(os.environ):
+            os.environ.pop(contrib_check.UNIT_JOBS_ENV, None)
+            self.assertEqual(contrib_check._unit_jobs(), 1)
+
+    def test_small_selection_keeps_one_process_and_the_minimum_limit(self) -> None:
+        _gate, calls = self._gate(self._modules("test_unmeasured_a", "test_unmeasured_b"))
+        self.assertEqual(calls, [(("tools.test_unmeasured_a", "tools.test_unmeasured_b"), 1800)])
+
+    def test_an_exceeded_limit_is_a_named_failure_listing_its_modules(self) -> None:
+        def outcome(selected, timeout):
+            if "tools.test_heavy_a" in selected:
+                raise subprocess.TimeoutExpired(cmd="unittest", timeout=timeout)
+            return _Completed(0)
+
+        gate, calls = self._gate(self._modules(), outcome=outcome)
+        self.assertEqual(gate.status, contrib_check.FAIL)
+        self.assertIn("UNITTEST_TIME_LIMIT", gate.detail)
+        self.assertIn("tools.test_heavy_a", gate.detail)
+        self.assertIn("did not finish within", gate.detail)
+        self.assertEqual(len([line for line in gate.detail.splitlines() if line]), 1, gate.detail)
+        self.assertGreater(len(calls), 2)
+
+    def test_a_failing_process_is_named_by_its_modules(self) -> None:
+        def outcome(selected, _timeout):
+            if "tools.test_heavy_b" in selected:
+                return _Completed(1, "", "FAILED (failures=1)")
+            return _Completed(0)
+
+        gate, _calls = self._gate(self._modules(), outcome=outcome)
+        self.assertEqual(gate.status, contrib_check.FAIL)
+        self.assertIn("tools.test_heavy_b", gate.detail)
+        self.assertIn("FAILED (failures=1)", gate.detail)
+
+    def test_a_bad_job_count_fails_instead_of_guessing(self) -> None:
+        for value in ("0", "-2", "many"):
+            with self.subTest(value=value):
+                gate, calls = self._gate(self._modules(), jobs=value)
+                self.assertEqual(gate.status, contrib_check.FAIL)
+                self.assertIn(contrib_check.UNIT_JOBS_ENV, gate.detail)
+                self.assertEqual(calls, [])
+
+    def test_no_process_gets_less_time_than_its_measured_work_allows(self) -> None:
+        """Failing-before on the production path: the heaviest measured modules of the #2981 selection
+        ran in one process under 1800 s, about 2.2 times their measured hosted seconds; a
+        workstation needed 2.7 times serially and about 4.6 in four parallel processes."""
+        import ci_test_shards
+
+        weights = ci_test_shards.load_weight_data().weights
+        names = ("test_hle_manifest", "test_dispatch_call_boundary", "test_build_truth",
+                 "test_portability_inventory", "test_psp_oracle", "test_native_host_backends")
+        calls: list[tuple[tuple[str, ...], int]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append((tuple(command[command.index("unittest") + 1:]), kwargs["timeout"]))
+            return _Completed(0)
+
+        with (
+            mock.patch.object(contrib_check.subprocess, "run", side_effect=fake_run),
+            redirect_stdout(io.StringIO()),
+        ):
+            gate = contrib_check.unit_gate([f"tools.{name}" for name in names])
+        self.assertEqual(gate.status, contrib_check.PASS, gate.detail)
+        self.assertCountEqual([module for selected, _t in calls for module in selected],
+                              [f"tools.{name}" for name in names])
+        for selected, timeout in calls:
+            planned = sum(weights[module.rsplit(".", 1)[-1]] for module in selected)
+            self.assertGreaterEqual(timeout, 6 * planned, (selected, timeout))
+
+    def test_the_real_weight_data_plans_every_selected_module_once(self) -> None:
+        data = contrib_check.ci_test_shards.load_weight_data()
+        modules = [f"tools.{name}" for name in contrib_check.ci_test_shards.discover_modules()]
+        parallel, alone = contrib_check.plan_unit_batches(modules, data, 4)
+        scheduled = [module for unit in (*parallel, *alone) for module in unit.modules]
+        self.assertCountEqual(scheduled, modules)
+        self.assertEqual(len(parallel), 4)
+        separated = {f"tools.{name}" for group in data.separate for name in group}
+        self.assertEqual(set(alone[0].modules), separated & set(modules))
+
+
 class TestStrictCompileIncludePath(unittest.TestCase):
     """A `tests/native` unit may include a `src/player` header by bare name.
 
