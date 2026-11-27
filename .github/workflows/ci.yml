@@ -574,11 +574,11 @@ jobs:
         run: make --no-print-directory -C src/psp_companion BUILD_DIR="$RUNNER_TEMP/fontcopy"
 
       # #2143: the homebrew import route tests (tools/test_player_package_route.py) run in the
-      # Windows smoke part, which has no PSPDEV, on programs built here from the fixtures'
+      # Windows homebrew part, which has no PSPDEV, on programs built here from the fixtures'
       # own sources with the same locked PSPDEV. The folder holds each fixture's EBOOT.PBP
       # beside the main.c and Makefile it was built from, BUILT_FROM (the commit), and
       # SHA256SUMS over all of them; the tests check the sources against their checkout,
-      # and the Windows smoke step checks BUILT_FROM against its own commit. Nothing is
+      # and the Windows homebrew route step checks BUILT_FROM against its own commit. Nothing is
       # committed.
       - name: Build the homebrew fixtures for the Windows job
         if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
@@ -2593,14 +2593,16 @@ jobs:
     # exactly one part, and steps that depend on one another (the staged smoke on the
     # production smoke) share it. tools/test_public_ci_wiring.py pins that every gate
     # the serial job ran still runs in exactly one part.
-    #   smoke:     production pipeline, AOT-gap, staged smoke, player, UI, display,
-    #              homebrew import routes
+    #   smoke:     production pipeline, AOT-gap, staged smoke, display
+    #   player:    player build, installer package, UI regressions, staging smoke
+    #   homebrew:  homebrew import routes
     #   ladder:    full platform ladder
     #   routes:    profile-zero production routes, native core tests
-    #   selftests: cosimulation + mutants, scheduler, dispatch, FP, strbuf, HLE thread,
+    #   cosim:     cosimulation + mutants, snapshot and verify selftests
+    #   selftests: scheduler, dispatch, FP, strbuf, HLE thread,
     #              Media Foundation H.264 media
     #   fuzz:      synthetic VFPU fuzzer, every case in one run
-    # The five parts run on four runners (docs/CI.md, "Jobs per run"): each matrix
+    # The eight parts run on six runners (docs/CI.md, "Jobs per run"): each matrix
     # group runs its parts one after another, in this file's step order, after one
     # copy of the shared setup and the runtime-object compile gate (about 2.3
     # minutes). smoke and routes ran as one group until run 42870221118 measured it
@@ -2617,26 +2619,50 @@ jobs:
     # Make prerequisite), and when the two shared build/, the selftest targets they
     # had in common had no output file, so their recipes compiled and ran every
     # time anyway.
+    # #3166: over the 20 newest full runs (2026-11-25 to 2026-11-26) the smoke group
+    # had grown to a median of 25.0 minutes, the longest job of a full run (and
+    # windows_installer waits for every group), and selftests to 20.1. The player
+    # steps, the homebrew import routes and the cosimulation steps became the parts
+    # player, homebrew and cosim, each a group of its own, and smoke joined
+    # ladder-fuzz; no step moved and no command changed. Expected minutes, from those
+    # runs' step medians plus the shared setup (no hosted run has measured this
+    # layout yet): smoke-ladder-fuzz 13.1, player 10.1, homebrew 10.5, routes 13.6 (measured),
+    # cosim 9.3, selftests 12.4. Steps that read what another builds share a part:
+    # the staged smoke follows the production smoke (smoke), and the installer
+    # package and the staging smoke run build/nakagawa_player.exe from the player
+    # build (player). The homebrew route tests build their own player under a
+    # scratch BUILD_ROOT, display-smoke-run builds its own guests, and the cosim,
+    # snapshot, verify and mutant targets build their own inputs (the verify
+    # selftest builds the replay runner it uses). The compiler cache key names the
+    # group, so a new group name has no entry until a run on main saves one, and
+    # its first runs compile without a restored cache.
     # needs.windows_runtime.result aggregates all groups, and a failing step fails
     # its group's job.
-    # A group's timeout is the sum of its parts' former 25-minute limits, plus the own
-    # limit of any step added to a part since: smoke has the homebrew import routes'
-    # 15 minutes (#2143), so 40. They run in smoke, measured at 8.1 minutes, rather than
-    # routes, measured at 13.9, so that no group becomes the run's longest job. selftests has
-    # the Windows-only Python tests' 20 minutes, so 45.
+    # A group's timeout is 25 minutes for each of its parts, plus the own limit of any
+    # step in them: homebrew has the homebrew import routes' 15 minutes (#2143), so 40,
+    # as the smoke group had while they ran there (in smoke, measured at 8.1 minutes,
+    # rather than routes, at 13.9, so that no group became the run's longest job);
+    # selftests has the Windows-only Python tests' 20 minutes, so 45; smoke-ladder-fuzz
+    # has three parts, so 75.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - group: smoke
-            parts: [smoke]
+          - group: smoke-ladder-fuzz
+            parts: [smoke, ladder, fuzz]
+            timeout: 75
+          - group: player
+            parts: [player]
+            timeout: 25
+          - group: homebrew
+            parts: [homebrew]
             timeout: 40
           - group: routes
             parts: [routes]
             timeout: 25
-          - group: ladder-fuzz
-            parts: [ladder, fuzz]
-            timeout: 50
+          - group: cosim
+            parts: [cosim]
+            timeout: 25
           - group: selftests
             parts: [selftests]
             timeout: 45
@@ -2863,7 +2889,7 @@ jobs:
       # Hosted build/link gate for the public player/launcher (#294). Link-only
       # proof: the player's GUI smoke remains a developer/display gate.
       - name: Build and link the native player
-        if: contains(matrix.parts, 'smoke')
+        if: contains(matrix.parts, 'player')
         shell: msys2 {0}
         env:
           MSYS2_PATH_TYPE: inherit
@@ -2874,7 +2900,7 @@ jobs:
           mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 player-ui-tests
 
       - name: Stage Windows installer package from the existing player build
-        if: contains(matrix.parts, 'smoke') && needs.classify.outputs.run_installer == 'true'
+        if: contains(matrix.parts, 'player') && needs.classify.outputs.run_installer == 'true'
         shell: msys2 {0}
         env:
           MSYS2_PATH_TYPE: inherit
@@ -2891,7 +2917,7 @@ jobs:
           "$py" -c 'import sys; from pathlib import Path; sys.path.insert(0, "tools"); import stage_install; print(stage_install.write_sha256sums(Path(sys.argv[1])))' "$package"
 
       - name: Upload Windows installer package
-        if: contains(matrix.parts, 'smoke') && needs.classify.outputs.run_installer == 'true'
+        if: contains(matrix.parts, 'player') && needs.classify.outputs.run_installer == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-installer-package
@@ -2900,7 +2926,7 @@ jobs:
           retention-days: 7
 
       - name: Run native player UI regressions headlessly on Windows
-        if: contains(matrix.parts, 'smoke')
+        if: contains(matrix.parts, 'player')
         shell: msys2 {0}
         env:
           MSYS2_PATH_TYPE: inherit
@@ -2917,7 +2943,7 @@ jobs:
       # identity, the manifest and the executable's bytes, not the guest's code. Every
       # user-data root is redirected under the runner temp directory, never a profile.
       - name: Smoke the Windows player staging headlessly
-        if: contains(matrix.parts, 'smoke')
+        if: contains(matrix.parts, 'player')
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -3002,7 +3028,7 @@ jobs:
           mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 display-smoke-run
 
       - name: Fetch the homebrew fixtures built from source
-        if: contains(matrix.parts, 'smoke')
+        if: contains(matrix.parts, 'homebrew')
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: homebrew-fixtures
@@ -3019,7 +3045,7 @@ jobs:
       # The tests build the player themselves, so VULKAN_SDK names the UCRT64 Vulkan headers
       # as every other Windows step does, and MAKEFLAGS lets that build use the runner's cores.
       - name: Run the homebrew import routes on the fixtures built from source
-        if: contains(matrix.parts, 'smoke')
+        if: contains(matrix.parts, 'homebrew')
         shell: msys2 {0}
         timeout-minutes: 15
         env:
@@ -3056,7 +3082,7 @@ jobs:
       # Without this in CI, the only thing standing between a codegen semantic
       # regression and a title run is a developer remembering to run it.
       - name: Build and run AOT/interpreter cosimulation gate
-        if: contains(matrix.parts, 'selftests')
+        if: contains(matrix.parts, 'cosim')
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -3066,7 +3092,7 @@ jobs:
       # compared with the reference interpreter in src/ref; the selftest also builds and
       # runs a generated-C mutant that must report the expected MISMATCH.
       - name: Build and run snapshot execution selftest
-        if: contains(matrix.parts, 'selftests')
+        if: contains(matrix.parts, 'cosim')
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -3077,7 +3103,7 @@ jobs:
       # per-function report, and a generated-C mutant must be reported as a MISMATCH whose
       # capture the snapshot runner replays to the same verdict.
       - name: Build and run verify selftest
-        if: contains(matrix.parts, 'selftests')
+        if: contains(matrix.parts, 'cosim')
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -3088,7 +3114,7 @@ jobs:
       # the gate must fail for every one, and a mutant that only breaks the build
       # is rejected as INVALID rather than counted as a kill.
       - name: Prove the cosimulation comparator is load-bearing
-        if: contains(matrix.parts, 'selftests')
+        if: contains(matrix.parts, 'cosim')
         shell: msys2 {0}
         run: |
           set -euo pipefail

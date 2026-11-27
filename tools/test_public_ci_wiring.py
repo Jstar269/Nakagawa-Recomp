@@ -1060,7 +1060,7 @@ class PublicCiWiringTests(unittest.TestCase):
             windows_text,
         )
         # Exactly one Windows part runs the UI regressions.
-        self.assertIn("if: contains(matrix.parts, 'smoke')", windows_text)
+        self.assertIn("if: contains(matrix.parts, 'player')", windows_text)
 
         # The harness, not the workflow, makes the gate headless: it forces the
         # drivers for every player it spawns.
@@ -1140,13 +1140,82 @@ _WINDOWS_MAIN_SAVE_CONDITION = (
 
 #: The Windows parts each matrix group runs, one after another (docs/CI.md, "Jobs per
 #: run"). Parts in one group share the build tree; the fuzzer runs once, unsharded, in
-#: build/windows-runtime (audit 2026-11-17 F-fe9cc4cb).
+#: build/windows-runtime (audit 2026-11-17 F-fe9cc4cb). #3166 split the player, homebrew
+#: and cosim parts out of smoke and selftests, each into a group of its own.
 _WINDOWS_GROUPS = {
-    "smoke": ["smoke"],
+    "smoke-ladder-fuzz": ["smoke", "ladder", "fuzz"],
+    "player": ["player"],
+    "homebrew": ["homebrew"],
     "routes": ["routes"],
-    "ladder-fuzz": ["ladder", "fuzz"],
+    "cosim": ["cosim"],
     "selftests": ["selftests"],
 }
+
+#: Each group's time limit (docs/CI.md, "Jobs per run"): 25 minutes per part, plus the own
+#: limit of every step in its parts: the homebrew import routes' 15 (#2143) and the
+#: Windows-only Python tests' 20.
+_WINDOWS_GROUP_TIMEOUTS = {
+    "smoke-ladder-fuzz": 75,
+    "player": 25,
+    "homebrew": 40,
+    "routes": 25,
+    "cosim": 25,
+    "selftests": 45,
+}
+
+#: Every step each Windows part runs, in the workflow's order (#3166). A step outside
+#: _WINDOWS_EVERY_PART and _WINDOWS_MAIN_SAVE runs in exactly the one part listed here.
+_WINDOWS_PART_STEPS = {
+    "smoke": (
+        "Build and run full production pipeline smoke",
+        "Build and run AOT-gap dispatch-seam smoke",
+        "Stage and run production smoke outside its build directory",
+        "Build and run display presentation smoke",
+    ),
+    "player": (
+        "Build and link the native player",
+        "Stage Windows installer package from the existing player build",
+        "Upload Windows installer package",
+        "Run native player UI regressions headlessly on Windows",
+        "Smoke the Windows player staging headlessly",
+    ),
+    "homebrew": (
+        "Fetch the homebrew fixtures built from source",
+        "Run the homebrew import routes on the fixtures built from source",
+    ),
+    "ladder": ("Build and run the full platform ladder",),
+    "routes": (
+        "Run native core test suite on Windows",
+        "Fetch the profile-zero fixture built from source",
+        "Build and run profile-zero production routes",
+    ),
+    "cosim": (
+        "Build and run AOT/interpreter cosimulation gate",
+        "Build and run snapshot execution selftest",
+        "Build and run verify selftest",
+        "Prove the cosimulation comparator is load-bearing",
+    ),
+    "selftests": (
+        "Build and run scheduler selftest",
+        "Build and run dispatch isolation selftest matrix",
+        "Build and run portable FPU/VFPU conversion selftest",
+        "Build and run strbuf checked-append formatting selftest",
+        "Build and run HLE thread selftest",
+        "Build and run flash0 font device selftest",
+        "Build and run the Win32 Memory Stick containment selftest",
+        "Run the Windows-only Python tests",
+        "Build and run the Media Foundation H.264 media selftest",
+        "Build and run the vendored FFmpeg H.264 media selftest on Windows",
+    ),
+    "fuzz": ("Build and run synthetic VFPU fuzzer",),
+}
+#: The steps that read build/nakagawa_player.exe, which only the player build makes, or the
+#: package staged from it; none of them builds it.
+_WINDOWS_PLAYER_READERS = (
+    "Stage Windows installer package from the existing player build",
+    "Upload Windows installer package",
+    "Smoke the Windows player staging headlessly",
+)
 
 
 def _windows_matrix_entries(block: list[str]) -> dict[str, tuple[list[str], int]]:
@@ -1205,7 +1274,8 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
 
     def test_every_part_is_in_exactly_one_group_and_the_groups_are_pinned(self) -> None:
         self.assertEqual(self.groups, _WINDOWS_GROUPS)
-        self.assertEqual(sorted(self.parts), sorted({"smoke", "ladder", "routes", "selftests", "fuzz"}))
+        self.assertEqual(sorted(self.parts), sorted({"smoke", "player", "homebrew", "ladder", "routes",
+                                                     "cosim", "selftests", "fuzz"}))
         self.assertEqual(len(self.parts), len(set(self.parts)), "a part is in two groups")
         text = "\n".join(self.block)
         # Only the include list defines the jobs: no bare matrix axis adds a cross product.
@@ -1224,8 +1294,10 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
                 self.assertIsNotNone(part, f"{name}: a step with its own limit must be in a part")
                 required_part = _required(part, f"{name}: a step with its own limit must be in a part")
                 step_limits[required_part] = step_limits.get(required_part, 0) + int(limit.group(1))
-        self.assertEqual(step_limits, {"smoke": 15, "selftests": 20})
-        for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
+        self.assertEqual(step_limits, {"homebrew": 15, "selftests": 20})
+        entries = _windows_matrix_entries(self.block)
+        self.assertEqual({group: timeout for group, (_parts, timeout) in entries.items()}, _WINDOWS_GROUP_TIMEOUTS)
+        for group, (parts, timeout) in entries.items():
             with self.subTest(group=group):
                 self.assertEqual(timeout, sum(25 + step_limits.get(part, 0) for part in parts))
         self.assertIn("      fail-fast: false", text)
@@ -1416,12 +1488,12 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         compile_step = " ".join(_required(self.steps[compile_name], f"workflow step {compile_name!r} is missing"))
         self.assertIn("runtime-objects", compile_step)
 
-    def test_installer_package_steps_are_scoped_to_the_smoke_group(self) -> None:
+    def test_installer_package_steps_are_scoped_to_the_player_group(self) -> None:
         for name in _WINDOWS_INSTALLER_STEPS:
             with self.subTest(step=name):
                 step = "\n".join(_required(self.steps[name], f"workflow step {name!r} is missing"))
                 self.assertIn(
-                    "if: contains(matrix.parts, 'smoke') && needs.classify.outputs.run_installer == 'true'",
+                    "if: contains(matrix.parts, 'player') && needs.classify.outputs.run_installer == 'true'",
                     step,
                 )
         self.assertLess(
@@ -1441,6 +1513,67 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
             _ci_step_index(self.block, "Build and run full production pipeline smoke"),
             _ci_step_index(self.block, "Stage and run production smoke outside its build directory"),
         )
+
+    def _part_or_installer_part(self, name: str) -> str | None:
+        """part_of, or the part of an installer package step, whose condition adds run_installer."""
+        if name not in _WINDOWS_INSTALLER_STEPS:
+            return self.part_of(name)
+        conditions = [
+            line.strip() for line in _required(self.steps[name], f"workflow step {name!r} is missing")
+            if line.strip().startswith("if:")
+        ]
+        self.assertEqual(len(conditions), 1, name)
+        match = re.fullmatch(
+            r"if: contains\(matrix\.parts, '([A-Za-z0-9_-]+)'\) && needs\.classify\.outputs\.run_installer == 'true'",
+            conditions[0],
+        )
+        self.assertIsNotNone(match, f"{name}: an installer step names exactly one part and run_installer")
+        return _matched(match).group(1)
+
+    def test_every_step_runs_in_exactly_its_pinned_part_in_order(self) -> None:
+        """#3166: the layout of the eight parts, step by step, in the workflow's order."""
+        self.assertEqual(sorted(_WINDOWS_PART_STEPS), sorted(self.parts))
+        names = [line.strip() for line in self.block if line.startswith("      - name: ")]
+        self.assertEqual(len(names), len(set(names)), "two Windows steps share a name")
+        pinned = [name for steps in _WINDOWS_PART_STEPS.values() for name in steps]
+        self.assertEqual(len(pinned), len(set(pinned)), "a step is pinned to two parts")
+        shared = set(_WINDOWS_EVERY_PART) | set(_WINDOWS_MAIN_SAVE)
+        self.assertEqual(sorted(name for name in self.steps if name not in shared), sorted(pinned),
+                         "every Windows step outside the shared ones is pinned to one part")
+        for part, part_steps in _WINDOWS_PART_STEPS.items():
+            with self.subTest(part=part):
+                found = [name for name in self.steps
+                         if name not in shared and self._part_or_installer_part(name) == part]
+                self.assertEqual(tuple(found), part_steps)
+
+    def test_steps_that_read_another_steps_output_share_its_part_and_follow_it(self) -> None:
+        """#3166: a step that reads what another step built runs after it, in the same part."""
+        pairs = [("Build and link the native player", reader) for reader in _WINDOWS_PLAYER_READERS]
+        pairs += [
+            ("Stage Windows installer package from the existing player build", "Upload Windows installer package"),
+            ("Fetch the homebrew fixtures built from source",
+             "Run the homebrew import routes on the fixtures built from source"),
+            ("Build and run full production pipeline smoke",
+             "Stage and run production smoke outside its build directory"),
+            ("Fetch the profile-zero fixture built from source", "Build and run profile-zero production routes"),
+        ]
+        for builder, reader in pairs:
+            with self.subTest(builder=builder, reader=reader):
+                self.assertEqual(self._part_or_installer_part(reader), self._part_or_installer_part(builder))
+                self.assertLess(_ci_step_index(self.block, builder), _ci_step_index(self.block, reader))
+        # The readers run the executable the player build made; none of them builds it.
+        for reader in ("Stage Windows installer package from the existing player build",
+                       "Smoke the Windows player staging headlessly"):
+            with self.subTest(reader=reader):
+                text = "\n".join(_required(self.steps[reader], f"workflow step {reader!r} is missing"))
+                self.assertIn("build/nakagawa_player.exe", text)
+                self.assertNotIn("mingw32-make", text)
+        for name, step in self.steps.items():
+            if "build/nakagawa_player.exe" in "\n".join(line for line in step or [] if not line.strip().startswith("#")):
+                with self.subTest(step=name):
+                    self.assertEqual(self._part_or_installer_part(name), "player")
+        self.assertIn("${{ runner.temp }}\\windows-installer-package",
+                      "\n".join(_required(self.steps["Upload Windows installer package"], "no upload step")))
 
 
 # Every gate the serial native_tools job ran before it was split into parallel parts,
@@ -2144,9 +2277,9 @@ class WindowsPlayerStageSmokeTests(unittest.TestCase):
         cls.step = _ci_step(cls.block, cls.STEP)
         cls.text = "\n".join(cls.step or [])
 
-    def test_step_runs_in_the_smoke_part_after_the_player_is_built(self) -> None:
+    def test_step_runs_in_the_player_part_after_the_player_is_built(self) -> None:
         self.assertIsNotNone(self.step, f"windows_runtime no longer runs {self.STEP!r}")
-        self.assertIn("if: contains(matrix.parts, 'smoke')", self.text)
+        self.assertIn("if: contains(matrix.parts, 'player')", self.text)
         self.assertIn("shell: msys2 {0}", self.text)
         index = _ci_step_index(self.block, self.STEP)
         for earlier in ("Build and link the native player",
@@ -2737,15 +2870,15 @@ class PublicExportJobTests(unittest.TestCase):
         windows = self.blocks["windows_runtime"]
         fetch = "Fetch the homebrew fixtures built from source"
         run = "Run the homebrew import routes on the fixtures built from source"
-        # The smoke part (the shortest measured group), after its display smoke; the fetch
-        # comes first.
+        # The homebrew part, a group of its own since #3166; no step moved in the file, so
+        # the two still follow the display smoke, and the fetch comes first.
         self.assertLess(_ci_step_index(windows, "Build and run display presentation smoke"),
                         _ci_step_index(windows, fetch))
         names = self._step_names(windows)
         self.assertEqual(names[names.index(fetch) + 1], run)
         for name in (fetch, run):
             with self.subTest(step=name):
-                self.assertIn("        if: contains(matrix.parts, 'smoke')", _ci_step(windows, name) or [])
+                self.assertIn("        if: contains(matrix.parts, 'homebrew')", _ci_step(windows, name) or [])
         self.assertIn("path: ${{ runner.temp }}/homebrew-fixtures",
                       "\n".join(_ci_step(windows, fetch) or []))
         step = "\n".join(_ci_step(windows, run) or [])
