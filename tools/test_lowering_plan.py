@@ -249,6 +249,32 @@ class TransferRuleTests(unittest.TestCase):
             plan, c_text = _plan_and_c(words)
             self.assertEqual(plan_signature(plan), c_signature(c_text))
 
+    def test_a_transfer_whose_delay_slot_is_the_entry_skips_the_entry_copy(self):
+        # #3163: entered at 0x1004, the body loops back to the transfer at 0x1000, whose
+        # delay slot is the entry word. The slot ran inline (or was annulled), so the
+        # fall-through goes on at 0x1008, a label of its own, as in emit_function's C.
+        bne = lambda rs, target, pc: 0x05 << 26 | rs << 21 | (((target - pc - 4) >> 2) & 0xFFFF)  # noqa: E731
+        body = {0x1004: 0x24420001,                              # addiu v0, v0, 1 (entry, slot)
+                0x1008: 0x24A5FFFF,                              # addiu a1, a1, -1
+                0x100C: bne(5, 0x1000, 0x100C), 0x1010: NOP,     # back to the transfer
+                0x1014: JR_RA, 0x1018: NOP, 0x2000: JR_RA, 0x2004: NOP}
+        ranges, known = [(0x1000, 0x101C), (0x2000, 0x2008)], {0x1004, 0x2000}
+        for name, owner in (("bne", bne(4, 0x1014, 0x1000)),
+                            ("bnel", bne(4, 0x1014, 0x1000) | 0x40000000),
+                            ("jal", 0x03 << 26 | 0x2000 >> 2),
+                            ("jalr", 25 << 21 | 31 << 11 | 0x09),
+                            ("bgezal", 0x01 << 26 | 4 << 21 | 0x11 << 16 | 0x03FF)):
+            with self.subTest(owner=name):
+                elf = FakeElf({0x1000: owner, **body})
+                plan = P.plan_function(codegen, elf, 0x1004, ranges, known)
+                c_text = "\n".join(codegen.emit_function(elf, 0x1004, ranges, known))
+                self.assertTrue(plan.entry_label)
+                transfer = next(step for step in plan.steps
+                                if isinstance(step, P.Transfer) and step.addr == 0x1000)
+                self.assertEqual(transfer.then_label, 0x1008)
+                self.assertIn(P.Label(0x1008), plan.steps)
+                self.assertEqual(plan_signature(plan), c_signature(c_text))
+
     def test_operand_order_of_register_shifts_and_moves(self):
         srav = 5 << 21 | 6 << 16 | 7 << 11 | 0x07                 # srav r7, r6, r5
         movz = 5 << 21 | 6 << 16 | 7 << 11 | 0x0A                 # movz r7, r5, r6
