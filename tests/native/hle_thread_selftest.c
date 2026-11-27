@@ -49520,6 +49520,78 @@ static void test_msgpipe_send_queues_behind_waiting_senders(void) {
     s_cur = -1;
 }
 
+/* sceKernelTrySendMsgPipe beside a waiting sender. The queue-behind rule above applies to
+ * blocking sends only: a TrySend never parks, in either wait mode. pspautotests
+ * tests/threads/msgpipe/trysend.expected records TrySend only beside waiting receivers, so
+ * what a TrySend that fits does while a sender waits is UNMEASURED; this pins the current
+ * project model (it takes the free space and returns at once; the waiting sender keeps
+ * waiting). A WAIT_FULL TrySend with no room answers MPP_FULL (0x800201B3) without writing
+ * the result, as measured on a PSP-3000 (PSP-B3-01, docs/HARDWARE_ORACLE.md); the WAIT_ASAP
+ * leg with no free byte pins current behaviour. */
+static void test_msgpipe_try_send_beside_waiting_sender(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t GUEST_BUF = 0x08010000u;
+    const uint32_t GUEST_NAME = 0x08030000u;
+    const uint32_t GUEST_RES = 0x08040000u;
+    const uint32_t GUEST_INFO = 0x08050000u;
+    MEM_W8(GUEST_NAME, 't'); MEM_W8(GUEST_NAME + 1u, 's'); MEM_W8(GUEST_NAME + 2u, 0u);
+    for (uint32_t i = 0; i < 8u; i++) MEM_W8(GUEST_BUF + i, (uint8_t)(0x40u + i));
+
+    TCB *owner = fixture_thread(0x30811u, TH_RUNNING, 60);
+    owner->started = 1;
+    int owner_index = (int)(owner - s_tcb);
+    s_cur = owner_index;
+    uint32_t pipe = selftest_msgpipe_create(GUEST_NAME, 0u, 4u);
+    expect(pipe != 0u && pipe < 0x80000000u, "try-send fixture creates a four-byte FIFO pipe");
+    if (!pipe || pipe >= 0x80000000u) return;
+
+    CpuState cpu;
+    msgpipe_setup(&cpu, pipe, GUEST_BUF, 2u, 0u, GUEST_RES);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE) == 0u,
+           "try-send fixture: the first TrySend deposits half the pipe");
+
+    SelftestMsgPipeWaiterCtx big = {0};
+    selftest_msgpipe_waiter_start_sized(&big, 0x30812u, 40, pipe, GUEST_BUF + 2u, 4u,
+                                        GUEST_RES + 4u, 1, 0);
+    expect(!big.returned && big.tcb->state == TH_WAIT_OBJ,
+           "try-send fixture: a whole-pipe sender waits for room");
+
+    s_cur = owner_index;
+    MEM_W32(GUEST_RES + 8u, 0xa5a5a5a5u);
+    msgpipe_setup(&cpu, pipe, GUEST_BUF + 6u, 2u, 0u, GUEST_RES + 8u);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE) == 0u &&
+           MEM_R32(GUEST_RES + 8u) == 2u && s_cur == owner_index &&
+           owner->state == TH_RUNNING && big.tcb->state == TH_WAIT_OBJ,
+           "a WAIT_FULL TrySend that fits returns at once beside a waiting sender "
+           "(project model, UNMEASURED); the sender keeps waiting");
+
+    MEM_W32(GUEST_RES + 8u, 0xa5a5a5a5u);
+    msgpipe_setup(&cpu, pipe, GUEST_BUF, 1u, 0u, GUEST_RES + 8u);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE) == 0x800201b3u &&
+           MEM_R32(GUEST_RES + 8u) == 0xa5a5a5a5u && s_cur == owner_index &&
+           owner->state == TH_RUNNING,
+           "a WAIT_FULL TrySend with no room answers MPP_FULL and does not park");
+    msgpipe_setup(&cpu, pipe, GUEST_BUF, 1u, 1u, GUEST_RES + 8u);
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE) == 0x800201b3u &&
+           s_cur == owner_index && owner->state == TH_RUNNING,
+           "a WAIT_ASAP TrySend with no room answers MPP_FULL and does not park");
+
+    MEM_W32(GUEST_INFO, MSGPIPE_SELFTEST_INFO_SIZE);
+    expect(selftest_msgpipe_refer(pipe, GUEST_INFO) == 0u &&
+           MEM_R32(GUEST_INFO + 44u) == 0u && MEM_R32(GUEST_INFO + 48u) == 1u &&
+           MEM_R32(GUEST_INFO + 52u) == 0u,
+           "Refer reports a full pipe and only the one blocking sender waiting");
+
+    s_cur = owner_index;
+    cpu = (CpuState){0}; cpu.r[4] = pipe;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_MSG_PIPE) == 0u,
+           "try-send fixture deletes");
+    if (!big.returned) selftest_msgpipe_waiter_resume(&big);
+    if (big.tcb->coro) { sr_coro_destroy(big.tcb->coro); big.tcb->coro = NULL; }
+    s_cur = -1;
+}
+
 static void test_msgpipe_repeated_transfer_skips_readied_waiter(int reverse_resume) {
     const uint32_t GUEST_BUF = 0x08010000u;
     const uint32_t GUEST_OUT = 0x08020000u;
@@ -71830,6 +71902,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msgpipe_invocation_lifetime();
     test_msgpipe_waiter_order();
     test_msgpipe_send_queues_behind_waiting_senders();
+    test_msgpipe_try_send_beside_waiting_sender();
     test_msgpipe_priority_wake_skips_ineligible_waiter();
     test_msgpipe_repeated_transfer_skips_readied_waiter(0);
     test_msgpipe_repeated_transfer_skips_readied_waiter(1);
