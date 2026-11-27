@@ -50,6 +50,35 @@ AI-generated summaries must describe what the exact diff and tests actually prov
   range and the resolved lock graph. Changing a manifest version without synchronizing the lockfile
   and exercising the real consumer is not a verified fix.
 
+### The final report
+
+[AGENTS.md section 11](../AGENTS.md#11-reporting-and-cleanup) points here. End an implementation task with exact
+facts, not a play-by-play. Fields that do not apply say `N/A`; a contributor's agent puts its branch name in `LANE`.
+
+```text
+LANE:
+MISSION:
+BASE_SHA:
+HEAD_SHA:
+PR:
+STATUS: DRAFT / READY / BLOCKED
+RESULT:
+ROOT_CAUSE:
+CHANGED_FILES:
+NEW_PATH_PROVENANCE:
+FAILING_BEFORE:
+TESTS:
+PRIVATE_ACCEPTANCE:
+HARDWARE:
+UNRESOLVED:
+DISCOVERED_FOLLOWUPS:
+NOT_PERFORMED:
+READY_QUALITY: YES/NO
+```
+
+`NOT_PERFORMED` names each tag, release, asset, version, hardware or private-input operation intentionally not
+performed, or says `none`.
+
 ## DCO and commit identity
 
 A `Signed-off-by:` trailer is a contributor rights certification, not decoration.
