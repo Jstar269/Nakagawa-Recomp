@@ -67,7 +67,8 @@ public:
 	// raises an address error for any other address, as the runtime interpreter's floor does
 	// (src/rt/guest_interp.c, MISALIGNED_DATA and MISALIGNED_PC, PSP-A3-01). A misaligned
 	// address records the sticky fault, so the step stops as a memory fault instead of reading
-	// or writing bytes that straddle two words. An sc whose link is clear still checks it.
+	// or writing bytes that straddle two words. An sc whose link is clear still checks it. A
+	// jr/jalr never fetches a misaligned pc: the PSP clears bits 1:0 of its target (interp.cpp).
 	bool CheckAligned(uint32_t addr, uint32_t width) const {
 		if ((addr & (width - 1u)) == 0u)
 			return true;
