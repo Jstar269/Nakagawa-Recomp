@@ -244,12 +244,29 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             if (imm < 128) {
                 vreg_idx(imm, 1, vi_idx);
                 s->vi[vi_idx[0]] = value;
-            } else if (imm == 131) {
+                return SR_VFPU_COMPUTE;
+            }
+            const int ctrl = imm - 128;
+            if (ctrl <= 1) {
+                /* The S/T prefixes keep bits 0..19 and D bits 0..11 (pspautotests e37443a6
+                 * tests/cpu/vfpu/prefix_ctrl.expected, recorded on a PSP: 0xffffffff reads
+                 * back 000fffff, 000fffff, 00000fff; 0xffffff00 to D reads 00000f00). */
+                value &= 0xfffffu;
+            } else if (ctrl == 2) {
+                value &= 0xfffu;
+            } else if (ctrl == 3) {
                 /* VFPU_CC keeps only bits 0..5 (unrecorded PSP read, PSP-3000, 2026-11-08,
                  * issue #326, probe case vfpu-cc-cmov: mtvc then mfvc read back written & 0x3f
                  * in every cell). */
-                s->vfpuCtrl[3] = value & 0x3fu;
-            } else s->vfpuCtrl[imm - 128] = value;
+                value &= 0x3fu;
+            } else if (ctrl >= 8) {
+                /* RCX0-7 keep bits 0..19 and read 0x3f8 above them (pspautotests e37443a6
+                 * tests/cpu/vfpu/vrnd.expected, recorded on a PSP: 00000001 reads 3f800001,
+                 * ffffffff reads 3f8fffff, 12345678 reads 3f845678). */
+                value = (value & 0xfffffu) | 0x3f800000u;
+            }
+            /* Controls 4-7 have no recorded write and keep the word as written. */
+            s->vfpuCtrl[ctrl] = value;
             return SR_VFPU_COMPUTE;
         }
     }

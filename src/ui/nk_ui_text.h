@@ -10,7 +10,9 @@
 NkUiTextBackend nk_ui_text_fixed(void);
 
 /* Shared English UI copy (#2747). Keep each message a literal expression so it can
- * initialize static screen descriptors and retain printf format diagnostics. */
+ * initialize static screen descriptors and retain printf format diagnostics.
+ * A _DEVICE message is its PC message's wording on a host that is not a PC (Android:
+ * player_ui_host_is_pc). */
 
 /* Shared widgets and navigation. */
 #define NK_UI_EN_SHARED_DISC_TILE_BADGE "Your disc"
@@ -24,6 +26,7 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_SHARED_INPUT_NINTENDO_CONTROLLER "NINTENDO-STYLE CONTROLLER"
 #define NK_UI_EN_SHARED_INPUT_PLAYSTATION_CONTROLLER "PLAYSTATION-STYLE CONTROLLER"
 #define NK_UI_EN_SHARED_INPUT_CONTROLLER "CONTROLLER"
+#define NK_UI_EN_SHARED_INPUT_TOUCH "TOUCH"
 #define NK_UI_EN_SHARED_LAUNCHER_WORDMARK "NAKAGAWA RECOMP"
 #define NK_UI_EN_SHARED_PROMPT_BUTTON_A "A"
 #define NK_UI_EN_SHARED_PROMPT_BUTTON_B "B"
@@ -156,11 +159,15 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_WIZARD_SKIP_TO_LIBRARY "Skip to library"
 #define NK_UI_EN_WIZARD_WELCOME_TITLE "Set up your first game"
 #define NK_UI_EN_WIZARD_WELCOME_INTRO "This wizard checks a disc image of a PSP game you own, stages its files on " "this PC, and gets it ready to build and play."
+#define NK_UI_EN_WIZARD_WELCOME_INTRO_DEVICE "This wizard checks a disc image of a PSP game you own, stages its files on " "this device, and gets it ready to build and play."
 #define NK_UI_EN_WIZARD_REQUIREMENTS_HEADING "What you need"
 #define NK_UI_EN_WIZARD_DISC_REQUIREMENT "A disc image (.iso) of a PSP game you own"
 #define NK_UI_EN_WIZARD_GRAPHICS_REQUIREMENT "A PC with a recent graphics driver"
+#define NK_UI_EN_WIZARD_GRAPHICS_REQUIREMENT_DEVICE "A device with a recent graphics driver"
 #define NK_UI_EN_WIZARD_INPUT_REQUIREMENT "Keyboard and mouse, or a controller"
+#define NK_UI_EN_WIZARD_INPUT_REQUIREMENT_DEVICE "Touch, a controller, or a keyboard and mouse"
 #define NK_UI_EN_WIZARD_PRIVACY_NOTE "Your games stay on this PC. Nakagawa never uploads anything, and downloads " "only the build tools you approve. It decrypts your own disc here and never " "touches firmware."
+#define NK_UI_EN_WIZARD_PRIVACY_NOTE_DEVICE "Your games stay on this device. Nakagawa never uploads anything, and downloads " "only the build tools you approve. It decrypts your own disc here and never " "touches firmware."
 #define NK_UI_EN_WIZARD_CONTINUE "Continue"
 #define NK_UI_EN_WIZARD_SKIP "Skip"
 #define NK_UI_EN_WIZARD_OPTIONS_TITLE "Online and developer options"
@@ -177,6 +184,7 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_WIZARD_READY_TO_VERIFY "Ready to verify."
 #define NK_UI_EN_WIZARD_DISC_NOT_CHOSEN "No file chosen"
 #define NK_UI_EN_WIZARD_DROP_DISC_HINT "Choose a disc image below, or drop an .iso file onto this window."
+#define NK_UI_EN_WIZARD_DROP_DISC_HINT_DEVICE "Choose a disc image below."
 #define NK_UI_EN_WIZARD_DISC_BADGE_NEEDS_FILES "Needs your files"
 #define NK_UI_EN_WIZARD_DISC_BADGE_BLOCKED "Not playable yet"
 #define NK_UI_EN_WIZARD_DISC_BADGE_RECORDED "On the list"
@@ -239,6 +247,7 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_LIBRARY_FIND_PLACEHOLDER "Type a name or disc ID"
 #define NK_UI_EN_LIBRARY_EMPTY_TITLE "Add your first game"
 #define NK_UI_EN_LIBRARY_EMPTY_SETUP_HELP "The setup wizard checks a disc image (.iso) of a PSP game you " "own and gets it ready to play on this PC."
+#define NK_UI_EN_LIBRARY_EMPTY_SETUP_HELP_DEVICE "The setup wizard checks a disc image (.iso) of a PSP game you " "own and gets it ready to play on this device."
 #define NK_UI_EN_LIBRARY_START_SETUP "Start setup wizard"
 #define NK_UI_EN_LIBRARY_CHOOSE_DISC "Choose a disc image"
 #define NK_UI_EN_LIBRARY_DROP_DISC_HINT "Or drop an .iso onto this window."
@@ -246,6 +255,7 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_LIBRARY_MARKED_STATUS_FORMAT "%s %s"
 #define NK_UI_EN_LIBRARY_STATUS_FORMAT "%s"
 #define NK_UI_EN_LIBRARY_DEMOS_HEADING "Test this PC"
+#define NK_UI_EN_LIBRARY_DEMOS_HEADING_DEVICE "Test this device"
 #define NK_UI_EN_LIBRARY_DEMOS_HELP "Play a demo that comes with Nakagawa to check " "graphics, sound and controls."
 #define NK_UI_EN_LIBRARY_HEADING "LIBRARY"
 #define NK_UI_EN_LIBRARY_SORT_FORMAT "Sort: %s"
@@ -272,6 +282,7 @@ NkUiTextBackend nk_ui_text_fixed(void);
 #define NK_UI_EN_TITLE_TIER_TITLE_SCREEN "Title screen"
 #define NK_UI_EN_TITLE_TIER_WONT_BOOT "Won't boot"
 #define NK_UI_EN_TITLE_PACKAGE_READY "Built for this PC and ready to play."
+#define NK_UI_EN_TITLE_PACKAGE_READY_DEVICE "Built for this device and ready to play."
 #define NK_UI_EN_TITLE_PACKAGE_CHECKING "Checking the package for this game."
 #define NK_UI_EN_TITLE_PACKAGE_BUILDING "Building the package for this game."
 #define NK_UI_EN_TITLE_PACKAGE_CHECK_FAILED "The package could not be checked."

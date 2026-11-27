@@ -502,6 +502,18 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->wheel.mouse_y = s_ui_test_mouse_y;
         return 1;
     }
+    if (strcmp(token, "TOUCH_DOWN") == 0 || strcmp(token, "TOUCH_UP") == 0) {
+        /* A tap at the pointer, as SDL reports one: the left button of its touch mouse. */
+        event->type = strcmp(token, "TOUCH_DOWN") == 0 ? SDL_EVENT_MOUSE_BUTTON_DOWN
+                                                       : SDL_EVENT_MOUSE_BUTTON_UP;
+        event->button.which = SDL_TOUCH_MOUSEID;
+        event->button.button = SDL_BUTTON_LEFT;
+        event->button.down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        event->button.clicks = 1u;
+        event->button.x = s_ui_test_mouse_x;
+        event->button.y = s_ui_test_mouse_y;
+        return 1;
+    }
     if (strcmp(token, "MOUSE_DOWN") == 0 || strcmp(token, "MOUSE_UP") == 0 ||
         strcmp(token, "MOUSE_X1_DOWN") == 0 || strcmp(token, "MOUSE_X1_UP") == 0) {
         /* As SDL reports a real click: at the pointer, with its button state. */
@@ -538,7 +550,8 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
             { "BACKSPACE", SDLK_BACKSPACE, SDL_SCANCODE_BACKSPACE },
             { "D", SDLK_D, SDL_SCANCODE_D }, { "E", SDLK_E, SDL_SCANCODE_E },
             { "Q", SDLK_Q, SDL_SCANCODE_Q }, { "SLASH", SDLK_SLASH, SDL_SCANCODE_SLASH },
-            { "F12", SDLK_F12, SDL_SCANCODE_F12 }, { "W", SDLK_W, SDL_SCANCODE_W }
+            { "F12", SDLK_F12, SDL_SCANCODE_F12 }, { "W", SDLK_W, SDL_SCANCODE_W },
+            { "AC_BACK", SDLK_AC_BACK, SDL_SCANCODE_AC_BACK }
         };
         for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
             if (strcmp(token + 4, keys[i].name) == 0) {

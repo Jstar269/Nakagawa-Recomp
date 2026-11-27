@@ -90,14 +90,31 @@ static int audio_regular_sample_count_valid(uint32_t frames) {
            (frames & 63u) == 0u;
 }
 
+/* A negative channel asks for a free channel. Two evidence tiers, kept apart:
+ * - All eight free: channel 7. PSPAutotests tests/audio/sceaudio/reserve.expected at
+ *   ea71108f00933712c4662276261b39cd42249b1e (reference output recorded on a PSP; corroborative,
+ *   not measured by this project) records 7 for channels -9, -7, -2, -1 and 0x80000000 with every
+ *   channel free, and 0x80260005 once all eight are reserved. Those are the only automatic cells
+ *   it records.
+ * - Some channels held: the highest free one, searching down from 7. PPSSPP-derived, not
+ *   PSP-measured: hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp,
+ *   GetFreeChannel (runs from PSP_AUDIO_CHANNEL_MAX - 1 down). Logged once per run, the first
+ *   time the search passes a held channel. */
+static int s_audio_auto_order_noted;
 static uint32_t h_AudioChReserve(CpuState *s) {
     int32_t ch = (int32_t)A0;
     if (ch < 0) {
         ch = -1;
-        for (int32_t i = 0; i < 8; i++) {
+        for (int32_t i = 7; i >= 0; i--) {
             if (!s_audio_ch[i]) { ch = i; break; }
         }
         if (ch < 0) return SCE_AUDIO_ERROR_NOT_FOUND;
+        if (ch < 7 && !s_audio_auto_order_noted) {
+            s_audio_auto_order_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceAudioChReserve(%d) with "
+                            "channel 7 held takes the highest free channel (%d)\n",
+                    (int)(int32_t)A0, (int)ch);
+        }
     }
     if (ch >= 8) return SCE_AUDIO_ERROR_INVALID_CH;
     if (!audio_regular_sample_count_valid(A1)) return SCE_AUDIO_ERROR_INVALID_SIZE;
@@ -734,11 +751,15 @@ static int audio_output2_reserved(void) {
 static uint32_t h_AudioOutput2Reserve(CpuState *s) {
     uint32_t samples = A0;
     /* A slot held through sceAudioSRCChReserve refuses this with 0x80268002 (measured,
-     * PSP-HLE-AUDIO-SRC-001). The code for a second Output2 reserve over an Output2 one is
-     * unmeasured and keeps the regular-channel busy code. */
-    if (s_audio_src_owned) return SCE_AUDIO_ERROR_OUTPUT2_BUSY;
-    if (s_audio_ch[AUDIO_OUTPUT2_CHANNEL]) return SCE_AUDIO_ERROR_OUTPUT_BUSY;
-    if (samples < 17u || samples > 4111u) return SCE_AUDIO_ERROR_INVALID_SIZE;
+     * PSP-HLE-AUDIO-SRC-001). A second Output2 reserve over an Output2 one returns the same
+     * code, and a sample count outside 17..4111 returns 0x80000104 (SCE_KERNEL_ERROR_INVALID_SIZE),
+     * not a regular-channel code. Corroborative, not measured here: PSPAutotests
+     * tests/audio/sceaudio/reserve.expected at ea71108f00933712c4662276261b39cd42249b1e (recorded
+     * on a PSP) and PPSSPP (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
+     * Core/HLE/sceAudio.cpp, sceAudioOutput2Reserve) agree on both. Which of the two a call
+     * failing both returns is unmeasured; the busy check stays first. */
+    if (s_audio_src_owned || s_audio_ch[AUDIO_OUTPUT2_CHANNEL]) return SCE_AUDIO_ERROR_OUTPUT2_BUSY;
+    if (samples < 17u || samples > 4111u) return SCE_AUDIO_ERROR_SRC_INVALID_SIZE;
     s_audio_ch[AUDIO_OUTPUT2_CHANNEL] = 1;
     s_audio_fmt[AUDIO_OUTPUT2_CHANNEL] = 0;
     s_audio_len[AUDIO_OUTPUT2_CHANNEL] = samples;

@@ -161,9 +161,11 @@ static uint32_t tier_rgba(const NkUiTheme *theme, PlayerUiTier tier) {
 }
 
 /* The package card's sentence for each package state (#1297). */
-static const char *package_state_text(PlayerUiPackageState state) {
+static const char *package_state_text(PlayerUiPackageState state, NkHostKind host) {
     switch (state) {
-        case PLAYER_UI_PACKAGE_READY: return NK_UI_STR(TITLE_PACKAGE_READY);
+        case PLAYER_UI_PACKAGE_READY:
+            return player_ui_host_is_pc(host) ? NK_UI_STR(TITLE_PACKAGE_READY)
+                                              : NK_UI_STR(TITLE_PACKAGE_READY_DEVICE);
         case PLAYER_UI_PACKAGE_CHECKING: return NK_UI_STR(TITLE_PACKAGE_CHECKING);
         case PLAYER_UI_PACKAGE_BUILDING: return NK_UI_STR(TITLE_PACKAGE_BUILDING);
         case PLAYER_UI_PACKAGE_CHECK_FAILED: return NK_UI_STR(TITLE_PACKAGE_CHECK_FAILED);
@@ -650,7 +652,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                        reason, or the package state's own sentence. */
                     bool live = title->package_state == PLAYER_UI_PACKAGE_STARTING ||
                                 title->package_state == PLAYER_UI_PACKAGE_RUNNING;
-                    const char *state_text = package_state_text(title->package_state);
+                    const char *state_text = package_state_text(title->package_state, model->host);
                     nk_ui_text_role(ui, TITLE_ID_STATUS_DETAIL,
                                     live ? state_text
                                          : safe_text(title->library_status_detail, state_text),

@@ -2266,7 +2266,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   nearest even, `vf2iu` up and `vf2id` down, with the same saturation and NaN results. `vi2f` rounds to nearest
   (`0x7fffffff` gives `0x4f000000`) and a scale divides by 2^scale. `vi2s.q` takes the upper 16 bits of each lane
   pair, `vi2c.q` the top bytes of four lanes, `vi2us.q` bits 30..15 and `vi2uc.q` bits 30..23, the unsigned forms
-  clamping negatives to 0. `.p`, `.t` and `.q` agree with `.s` lane for lane. The [scale regression](https://github.com/Jstar269/Nakagawa-Recomp/issues/2809)
+  clamping negatives to 0. `.p`, `.t` and `.q` agree with `.s` lane for lane. The scale regression (#2809)
   checks scales 0, 8 and 31 in `tests/native/vfpu_interp_selftest.c` at all four widths and in
   `tools/test_codegen_fp_convert.py` through compiled generated scalar instructions. It pins the published rounding
   example and uses fixed result words derived from this rule for the remaining cases.

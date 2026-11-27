@@ -4,6 +4,7 @@
 package io.github.jstar269.nakagawa;
 
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -19,6 +20,7 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLSurface;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -138,6 +140,12 @@ public class LauncherActivity extends SDLActivity {
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (mUnpackPanel != null && mUnpackPanel.key(event)) return true;
         return super.dispatchKeyEvent(event);
+    }
+
+    /** SDL's surface, without its accelerometer request on a device that has none. */
+    @Override
+    protected SDLSurface createSDLSurface(Context context) {
+        return new NakagawaHost.Surface(context);
     }
 
     @Override

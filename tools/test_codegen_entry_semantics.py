@@ -1815,6 +1815,24 @@ class SymbolMapFileTests(unittest.TestCase):
                     self._load(text)
                 self.assertRegex(str(caught.exception), r"map\.txt:\d+: ")
 
+    def test_digest_reader_preserves_newlines_and_raw_bytes(self):
+        with scratch_dir.TemporaryDirectory(prefix="symbol_map_digest_") as tmp:
+            path = Path(tmp) / "map.txt"
+            raw = b"# comment\r\nfirst = 0x10;\r// comment\nlast = 0x20;"
+            path.write_bytes(raw)
+            expected = {0x10: ("first", 0), 0x20: ("last", 0)}
+            self.assertEqual(codegen.load_symbol_map(path), expected)
+            self.assertEqual(codegen._load_symbol_map_with_digest(path),
+                             (expected, hashlib.sha256(raw).hexdigest()))
+
+            path.write_bytes(raw + b"\rbad line")
+            with self.assertRaises(codegen.SymbolMapError) as original:
+                codegen.load_symbol_map(path)
+            with self.assertRaises(codegen.SymbolMapError) as observed:
+                codegen._load_symbol_map_with_digest(path)
+            self.assertEqual(str(original.exception), str(observed.exception))
+            self.assertIn("map.txt:5:", str(observed.exception))
+
     def test_command_line_refuses_a_bad_map_before_the_analysis(self):
         with scratch_dir.TemporaryDirectory(prefix="symbol_map_cli_") as tmp:
             bad = Path(tmp) / "bad.txt"
