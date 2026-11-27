@@ -17,7 +17,8 @@ data and never will.
    guides). Before changing provenance or publication controls, CI, or codegen, read
    [`docs/PUBLICATION_READINESS.md`](docs/PUBLICATION_READINESS.md), [`docs/CI.md`](docs/CI.md), or
    [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and Section 7. Read [`README.md`](README.md) and
-   [`docs/CODE_TOUR.md`](docs/CODE_TOUR.md) when the task needs design context.
+   [`docs/CODE_TOUR.md`](docs/CODE_TOUR.md) when the task needs design context; its
+   [The pieces](docs/CODE_TOUR.md#the-pieces) table is the map of the code.
 2. Work from an issue ([`docs/STATUS.md`](docs/STATUS.md) summarizes them); for more than a small fix, comment there
    first. An issue you file gets a label and a milestone ([which](CONTRIBUTING.md#start-here)).
 3. Branch from freshly fetched `origin/main` after the Section 1 preflight.
@@ -35,8 +36,10 @@ change.
 ([`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md)). Once: `python -m pip install .` and
 `python tools/nk_doctor.py --scope build`. Then `mingw32-make contrib-check` (Linux: `make CC=gcc native-core-tests`,
 then `make contrib-check`) and `python -m unittest tools.test_<name>` for each module you touch; hosted CI runs the
-whole suite. `contrib-check` runs the gates your changes need; it is not hosted CI, and `SKIP` is not a pass
-([results](CONTRIBUTING.md#the-fast-path-one-command)).
+whole suite. One native selftest: `mingw32-make GAME_NAME=ci BUILD_DIR=build/windows-runtime CC=gcc
+hle-thread-selftest` (Linux: `make CC=gcc GAME_NAME=ci BUILD_DIR=build/linux-check hle-thread-selftest`; more in
+[Quick recipes](docs/DEBUGGING.md#quick-recipes)). `contrib-check` runs the gates your changes need; it is not
+hosted CI, and `SKIP` is not a pass ([results](CONTRIBUTING.md#the-fast-path-one-command)).
 
 ### Hard limits
 
