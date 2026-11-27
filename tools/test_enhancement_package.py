@@ -930,6 +930,195 @@ class _SynthTimingElfFixture(unittest.TestCase):
 class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
     """Verify authentic byte-identity, all 6 transform classes, fail-closed digest rejection, and AOT cache epoch."""
 
+    def test_timing_identity_preserves_positional_codegen_options(self) -> None:
+        from codegen import CodegenOptions
+
+        options = CodegenOptions(True, True)
+        self.assertTrue(options.lle_cpu)
+        self.assertTrue(options.lle_import_seam)
+        self.assertIsNone(options.timing_run_identity)
+
+    def test_timing_run_identity_observes_generated_startup(self) -> None:
+        """Run separately compiled synthetic startup registrations and the real diagnostic."""
+        if GCC is None:
+            self.skipTest("TOOLCHAIN_MISSING: needs a host compiler to run generated startup")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            elf_path = root / "fixture.elf"
+            words = dict(self.words)
+            for offset in (0, 4, 8):
+                words[0x1700 + offset] = words[0x1100 + offset]
+            words.update({0x1030: 0x0C0005C0, 0x1034: 0, 0x1038: 0x03E00008, 0x103C: 0})
+            elf = _write_synthetic_mips_elf(elf_path, words, self.entry)
+            package, symbols = self._make_package_and_symbols(elf)
+            harness = root / "startup.c"
+            harness.write_text(
+                '#include "recomp.h"\n'
+                'void sr_register_all(void);\n'
+                'void sr_register_chunk_0(void) {}\n'
+                'void sr_guest_symbols_register(const SrGuestSymbol *table, uint32_t count) '
+                '{ (void)table; (void)count; }\n'
+                'void sr_exec_span_reset(void) {}\n'
+                'int sr_exec_span_register(uint32_t start, uint32_t end) { return end > start; }\n'
+                'void sr_enhancement_register_updates(const volatile uint32_t *counter) { (void)counter; }\n'
+                'int main(void) { sr_register_all(); return 0; }\n',
+                encoding="ascii",
+            )
+
+            def build(name, revision, declaration=None, *, symbol_indent=None, explicit_wait=None):
+                out = root / name
+                out.mkdir()
+                flags = [f"--record-timing-identity=TEST30340:{revision}"] if revision else []
+                if declaration is not None:
+                    package_path = out / "timing.json"
+                    package_path.write_text(json.dumps(declaration), encoding="utf-8")
+                    package_path.with_suffix(".symbols.json").write_text(
+                        json.dumps(symbols, indent=symbol_indent), encoding="utf-8")
+                    flags.append(f"--enhancement-package={package_path}")
+                if explicit_wait is not None:
+                    symbol_path = out / "guest.map"
+                    effective = dict(symbols, synth_vblank_wait=f"0x{explicit_wait:08x}")
+                    symbol_path.write_bytes("".join(
+                        f"{name} = {addr};\n" for name, addr in effective.items()
+                    ).encode("ascii"))
+                    flags.append(f"--symbol-map={symbol_path}")
+                rc, log, files = self._run_codegen(elf_path, out / "out.c", flags)
+                self.assertEqual(rc, 0, log)
+                if explicit_wait is not None:
+                    generated = files["out_0.c"].decode()
+                    wait = re.findall(
+                        r"if \(nk_enhancement_on\(\)\) \{ sr_begin\(s, (0x[0-9a-f]+)u, 0x24020002u\);",
+                        generated,
+                    )
+                    self.assertEqual(wait, [f"0x{explicit_wait:08x}"])
+                exe = out / "startup.exe"
+                # The generated image gets the package build's include path: the build
+                # directory and src/rt only (mk/pipeline.mk), never src/core.
+                main_obj = out / "out.o"
+                compiler = _run([
+                    GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(out), "-I", str(ROOT / "src/rt"),
+                    "-c", "-o", str(main_obj), str(out / "out.c"),
+                ], capture_output=True, text=True)
+                self.assertEqual(compiler.returncode, 0, compiler.stderr)
+                if revision:
+                    # Its own declaration must stay compatible with the runtime header's.
+                    checked = _run([
+                        GCC, "-std=c11", "-D_GNU_SOURCE", "-fsyntax-only", "-I", str(out),
+                        "-I", str(ROOT / "src/rt"),
+                        "-include", str(ROOT / "src/core/nk_shared_helpers.h"), str(out / "out.c"),
+                    ], capture_output=True, text=True)
+                    self.assertEqual(checked.returncode, 0, checked.stderr)
+                compiler = _run([
+                    GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(ROOT / "src/rt"),
+                    "-I", str(ROOT / "src/core"), "-o", str(exe), str(harness), str(main_obj),
+                    str(ROOT / "src/core/nk_shared_helpers.c"),
+                ], capture_output=True, text=True)
+                self.assertEqual(compiler.returncode, 0, compiler.stderr)
+                return exe
+
+            def append_capture(path):
+                if os.name != "nt":
+                    return path.open("ab")
+                import ctypes
+                import msvcrt
+                from ctypes import wintypes
+
+                # Match the player's native append-only handle. Python's CRT append
+                # mode alone does not transfer its seek-to-end policy to the child.
+                create = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+                create.restype = wintypes.HANDLE
+                create.argtypes = (
+                    wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+                )
+                append_access = 0x4 | 0x00100000  # FILE_APPEND_DATA | SYNCHRONIZE
+                share_all = 7  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                handle = create(str(path), append_access, share_all, None, 4, 0x80, None)
+                if handle == ctypes.c_void_p(-1).value:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                return os.fdopen(msvcrt.open_osfhandle(handle, os.O_BINARY), "wb", buffering=0)
+
+            def observe(exe, name, setting, *, shared_sink=False, boot_file=True):
+                event_file = root / f"{name}.events"
+                env = {**os.environ, "SR_EXPERIMENTAL_60HZ": setting}
+                env.pop("SR_BOOT_EVENT_FILE", None)
+                if boot_file:
+                    env["SR_BOOT_EVENT_FILE"] = str(event_file)
+                if shared_sink:
+                    # Normal launch gives both child streams and SR_BOOT_EVENT_FILE the same
+                    # append destination. Read the exact resulting run log.
+                    with append_capture(event_file) as output:
+                        _run([str(exe)], env=env, check=True, stdout=output, stderr=output)
+                else:
+                    run = _run([str(exe)], env=env, check=True, capture_output=True, text=True)
+                    if not event_file.exists():
+                        # Older generated startup sent progress to stderr, but no timing event.
+                        event_file.write_text(run.stderr, encoding="utf-8")
+                result = _run([
+                    sys.executable, "-B", str(ROOT / "tools/enhancement_package.py"),
+                    "--inspect-timing-run", str(event_file),
+                ], check=True, capture_output=True, text=True)
+                return json.loads(result.stdout)
+
+            stock = build("stock", "1.00")
+            timed = build("timed", "1.00", package)
+            legacy = build("legacy", None)
+            revision = build("other-revision", "1.01")
+            changed = build("changed-declaration", "1.00", dict(package, version="1.1.0"))
+            changed_symbols = build("changed-sidecar", "1.00", package, symbol_indent=2)
+            mismatched = build("mismatched-declaration", "1.01", package)
+            explicit_maps = {
+                "first-map": build("first-map", "1.00", package, explicit_wait=0x1100),
+                "second-map": build("second-map", "1.00", package, explicit_wait=0x1700),
+            }
+
+            stock_identity = observe(stock, "stock", "1")
+            self.assertEqual(stock_identity, {
+                "status": "observed", "mode": "stock", "disc_id": "TEST30340", "disc_version": "1.00",
+                "executable_sha256": hashlib.sha256(elf).hexdigest(),
+            })
+            inactive = observe(timed, "timed-off", "0")
+            active = observe(timed, "timed-on", "1")
+            self.assertEqual(inactive, dict(active, mode="stock"))
+            self.assertEqual(observe(stock, "stock-shared", "1", shared_sink=True), stock_identity)
+            self.assertEqual(observe(timed, "timed-shared", "1", shared_sink=True), active)
+            self.assertEqual(observe(timed, "timed-stderr", "1", boot_file=False), active)
+            self.assertEqual(active, {
+                **stock_identity, "mode": "timing", "declaration_id": package["id"],
+                "declaration_sha256": enhancement_package.compute_package_digest(validate_package(package)),
+                "symbol_map_sha256": hashlib.sha256(json.dumps(symbols).encode()).hexdigest(),
+            })
+            self.assertEqual(observe(legacy, "legacy", "1"), {"status": "unavailable"})
+            self.assertEqual(observe(mismatched, "mismatched", "1"), {"status": "unavailable"})
+            self.assertEqual(observe(revision, "revision", "1"), dict(stock_identity, disc_version="1.01"))
+
+            newer = observe(changed, "changed", "1")
+            self.assertEqual(newer["declaration_id"], active["declaration_id"])
+            self.assertNotEqual(newer["declaration_sha256"], active["declaration_sha256"])
+            other_symbols = observe(changed_symbols, "other-symbols", "1")
+            self.assertEqual(other_symbols["declaration_sha256"], active["declaration_sha256"])
+            self.assertNotEqual(other_symbols["symbol_map_sha256"], active["symbol_map_sha256"])
+
+            for name, executable in explicit_maps.items():
+                with self.subTest(name=name):
+                    digest = hashlib.sha256((root / name / "guest.map").read_bytes()).hexdigest()
+                    self.assertEqual(observe(executable, name, "1"), dict(active, symbol_map_sha256=digest))
+                    self.assertEqual(observe(executable, f"{name}-off", "0"),
+                                     dict(active, mode="stock", symbol_map_sha256=digest))
+
+            event_text = (root / "timed-on.events").read_text(encoding="utf-8")
+            for name, text in (
+                ("two launches", event_text * 2),
+                ("truncated record", event_text + "BOOT_EVENT phase=timing_package"),
+                ("program replaced", event_text + "BOOT_EVENT phase=loadexec_restart\n"),
+                ("retained tail", "[nakagawa] the first 32 bytes of this run were cut; "
+                                  "the last 16777216 bytes are kept\n" + event_text),
+            ):
+                with self.subTest(name=name):
+                    ambiguous = root / "ambiguous.events"
+                    ambiguous.write_text(text, encoding="utf-8")
+                    self.assertEqual(enhancement_package.inspect_timing_run(ambiguous), {"status": "unavailable"})
+
     def test_authentic_mode_output_and_transforms_and_fail_closed_digest(self) -> None:
         """Verify authentic output stays untouched, all 6 transforms apply when enabled, and 1 wrong digest fails closed."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3166,7 +3355,7 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
                     plan, selected_optional=set(), funcs_per_chunk=2000,
                     enhancement_package_path=declaration,
                 )
-            _, resolved = codegen._package_symbol_map(
+            _, resolved, _ = codegen._package_symbol_map(
                 SimpleNamespace(sec=lambda _: None), package, declaration,
                 codegen.load_symbol_map(guest_map), guest_map, None, None, None,
             )

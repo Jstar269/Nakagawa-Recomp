@@ -91,6 +91,11 @@ void nk_shared_boot_event_vwrite(FILE *stderr_stream, uint64_t timestamp_ns,
                                  const char *format,
                                  va_list args);
 
+/* The generated main image reports its verified timing inputs after startup registration. */
+void nk_shared_timing_run_observed(bool timing, const char *disc_id, const char *disc_version,
+                                   const char *executable_sha256, const char *declaration_id,
+                                   const char *declaration_sha256, const char *symbol_map_sha256);
+
 /* Formats the player's process/sequence-specific event pathname. Failure clears out. */
 int nk_shared_boot_event_format_path(char *out, size_t out_capacity,
                                     const char *cache_dir, char separator,
