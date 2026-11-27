@@ -184,6 +184,31 @@ class StaticVerifyTests(unittest.TestCase):
         self.assertIn((0x100C, 8, 6), checks)
         self.assertIn((0x100C, 9, 7), checks)
 
+    # The witness of #3163 for the checks: the entry at 0x1004 is the delay slot of the
+    # transfer at 0x1000, which the backward branch reaches. emit_function runs the slot
+    # inline there (annulled by a not-taken beql, followed by the call of a jal) and jumps
+    # over the entry's copy to 0x1008, so 0x1008 is a join: the lui's a2 is no constant there.
+    @staticmethod
+    def _entry_slot_words(owner):
+        return {
+            0x1000: owner,
+            0x1004: (0x0F << 26) | (6 << 16) | 0x1234,          # lui a2, 0x1234 (entry, slot)
+            0x1008: (0x0D << 26) | (7 << 16) | 5,               # ori a3, zero, 5
+            0x100C: (0x0D << 26) | (8 << 16) | 6,               # ori t0, zero, 6
+            0x1010: (0x05 << 26) | (5 << 21) | 0xFFFB,          # bne a1, zero, 0x1000
+            0x1014: (0x09 << 26) | (6 << 21) | (6 << 16) | 1,   # addiu a2, a2, 1 (slot)
+            0x1018: 0x03E00008,
+            0x101C: 0,
+        }
+
+    def test_the_word_after_an_entry_on_a_delay_slot_is_a_join(self):
+        beql = (0x14 << 26) | (4 << 21) | 5                     # beql a0, zero, 0x1018
+        jal = (0x03 << 26) | (0x2000 >> 2)                      # jal 0x2000
+        for name, owner in (("beql", beql), ("jal", jal)):
+            with self.subTest(owner=name):
+                checks = self._entry_join_checks(0x1004, self._entry_slot_words(owner))
+                self.assertEqual(checks, [(0x100C, 7, 5), (0x100C, 8, 6)])
+
     def test_disabled_by_default(self):
         words = {0x6000: (0x0F << 26) | (4 << 16) | 1,
                  0x6004: (0x0D << 26) | (4 << 21) | (4 << 16) | 2}

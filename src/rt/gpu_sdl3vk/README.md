@@ -313,12 +313,38 @@ go on decides the transition:
   fails before it is enqueued: `recover_unenqueued_present` waits for the frame and replaces its
   semaphore, and the swapchain is rebuilt, which hands back the image the present still held.
   The next present tries again.
+- A lost window surface (`VK_ERROR_SURFACE_LOST_KHR` from an acquire or a present, or SDL's
+  background events: Android destroys the window's surface in the background) is replaced
+  (#360): once the queue is idle the swapchain and the `VkSurfaceKHR` are destroyed, a new
+  surface is made for the same window with `SDL_Vulkan_CreateSurface`, its present support is
+  checked, and a swapchain is built on it. The device and everything made on it stay. The
+  present that met the loss returns -1 and the next one is shown. While the app is in the
+  background (`SDL_EVENT_WILL_ENTER_BACKGROUND` or `SDL_EVENT_DID_ENTER_BACKGROUND` until
+  `SDL_EVENT_DID_ENTER_FOREGROUND`), or on Android while SDL holds no native window, a present
+  returns `SDL3VK_PRESENT_DISPLAY_BUSY`; one line marks when frames start being held back, naming
+  why (the background, no window surface, or a minimized window), and one when presenting
+  resumes, and shutdown prints how many were held back. A swapchain rebuild (a suboptimal or
+  out-of-date result, such as a rotation, or a present that was not enqueued) that finds the
+  surface lost, at its capabilities query or at `vkCreateSwapchainKHR`, marks it lost the same
+  way instead of turning the renderer terminal; the next present replaces it. A new surface that
+  cannot be made, or cannot be presented to, with the window in the foreground is terminal, as
+  is a swapchain that cannot be made on it for a window with pixels, and a new surface lost as
+  its swapchain is made while the platform still has a window (otherwise every present would
+  replace the surface again). Likewise a surface made to replace a lost one that is lost again,
+  at an acquire, a present or a rebuild, before any frame was shown on it, while the platform
+  still has a window, is terminal with one line instead of being replaced again; a frame shown on
+  it, or the platform taking the window away in between, lets it be replaced. The pause overlay
+  replaces the surface the same way and asks for its image to be composed again (2). Its extent
+  query replaces a lost surface first; when that turns the renderer terminal the query returns
+  -1, and the pause ends so the game meets the terminal renderer, as after a failed overlay
+  present.
 - The renderer turns terminal (`sdl3vk_renderer_terminal()`; every later present returns -1 at
-  once) when the device or surface is lost, a fence wait fails (the frame's work may still run),
+  once) when the device is lost, a fence wait fails (the frame's work may still run),
   or any step between a successful acquire and the submit fails (the image stays acquired and its
   semaphore stays to be signalled, and neither can be handed back without a present). It also
   turns terminal when the swapchain cannot be rebuilt: the queue-idle wait fails,
-  `vkCreateSwapchainKHR` fails (the old swapchain is retired anyway, so it is destroyed), or
+  `vkCreateSwapchainKHR` fails with anything but a lost surface (the old swapchain is retired
+  anyway, so it is destroyed), or
   its images cannot be read.
 - A suboptimal acquire has acquired its image: the frame is presented and the present, which
   reports it again, rebuilds the swapchain. When that rebuild finds the window minimized (a 0x0
@@ -339,6 +365,25 @@ validation layer on, and expects no leaked object and no validation error from e
 - a failure at each checked present step, through a one-shot present-step fault seam, and the
   two faults above the renderer goes on from (a capture buffer that cannot be made, a suboptimal
   present whose rebuild finds a minimized window).
+
+`sdl3vk_surface_selftest` (also inside `gpu-capture-selftest`) checks the window-surface cases
+with the validation layer on: a surface lost at the acquire and at the present, twice each in
+one session; SDL's background and foreground events, and a loss while the platform has no window
+surface (a seam), each twice; the pause overlay meeting a loss at its acquire or its present; a
+loss at the rebuild's capabilities query and at its `vkCreateSwapchainKHR`, after a suboptimal
+present and after a present that was not enqueued (a game frame and the pause overlay); a new
+surface lost at once as the window goes; a surface lost again as the window goes, and lost and
+shown in turn; a loss followed by a background and return in one event poll; the pause overlay
+alone losing its surface, showing a frame and losing it again; and the terminal cases (a new
+surface that cannot be made, after a lost acquire, a lost present, in the pause overlay or in
+the pause overlay's extent query after a background and return, cannot be presented to (also
+in that query), or is lost at once with the window still there or minimized; a surface
+lost at every acquire, at every present, or at every pause-overlay present; a device lost at the
+acquire or the present), each with one line. The minimized window is a seam that exists only in
+the selftest build (`SR_VIDEOREC_SELFTEST`), so that case runs on every host. The
+`surface-lost` leg of `gpu-capture-selftest` checks that a present that met the loss is not
+shown, the renderer is not terminal and the next present is shown. These run on desktop
+drivers; they do not show what an Android device does.
 
 ## Render scale and render targets read as textures (#2052)
 

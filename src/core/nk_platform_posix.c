@@ -31,6 +31,7 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
@@ -140,6 +141,16 @@ bool nk_platform_path_missing(const char *path) {
     if (!path || !*path) return false;
     if (lstat(path, &st) == 0) return false;
     return errno == ENOENT || errno == ENOTDIR;
+}
+
+bool nk_platform_available_disk_bytes(const char *path, uint64_t *available) {
+    struct statvfs volume;
+    if (!path || !available || statvfs(path, &volume) != 0) return false;
+    uint64_t block = volume.f_frsize ? volume.f_frsize : volume.f_bsize;
+    if (!block) return false;
+    uint64_t count = (uint64_t)volume.f_bavail;
+    *available = count > UINT64_MAX / block ? UINT64_MAX : count * block;
+    return true;
 }
 
 static bool tree_size_posix(const char *path, uint64_t *bytes) {

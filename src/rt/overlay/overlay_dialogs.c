@@ -7,6 +7,7 @@
    refuses while the game is saving; a lost controller pauses the game and says so. */
 
 #include "nk_overlay.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 
 #include <stdio.h>
@@ -22,9 +23,9 @@
 #define DIALOG_MARK_DOT "\xE2\x97\x8F"
 
 static const NkUiPromptItem k_dialog_prompts[] = {
-    {NK_UI_PROMPT_ACT_MOVE, "Move"},
-    {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-    {NK_UI_PROMPT_ACT_BACK, "Back"}
+    {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(OVERLAY_PROMPT_MOVE)},
+    {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(OVERLAY_PROMPT_SELECT)},
+    {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(OVERLAY_PROMPT_BACK)}
 };
 
 static void dialog_text(NkUi *ui, const char *title, const char *body, float inner) {
@@ -53,31 +54,31 @@ NkOverlayAction nk_overlay_page_quit(NkUi *ui, NkOverlayState *state, const NkOv
     if (inner <= 0.0f) return result;
     if (model->saving) {
         /* Ending the run now would cut the save off part-way. */
-        nk_overlay_eyebrow(ui, DIALOG_ID_EYEBROW, DIALOG_MARK_TRIANGLE, "Saving", theme->warning);
-        dialog_text(ui, "The game is saving",
-                    "Resume to let it finish, then quit from the pause menu.", inner);
+        nk_overlay_eyebrow(ui, DIALOG_ID_EYEBROW, DIALOG_MARK_TRIANGLE, NK_UI_STR(OVERLAY_QUIT_SAVING_EYEBROW),
+                           theme->warning);
+        dialog_text(ui, NK_UI_STR(OVERLAY_QUIT_SAVING_TITLE), NK_UI_STR(OVERLAY_QUIT_SAVING_BODY), inner);
         if (actions_begin(ui)) {
-            if (nk_ui_button(ui, NK_OVERLAY_ID_RESUME, "Resume", NK_UI_BUTTON_PRIMARY)) {
+            if (nk_ui_button(ui, NK_OVERLAY_ID_RESUME, NK_UI_STR(OVERLAY_BUTTON_RESUME), NK_UI_BUTTON_PRIMARY)) {
                 result = nk_overlay_action(NK_OVERLAY_ACT_RESUME, 0);
             }
-            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT_STAY, "Back", 0u)) go_back = true;
+            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT_STAY, NK_UI_STR(OVERLAY_BUTTON_BACK), 0u)) go_back = true;
             nk_ui_end_container(ui);
         }
     } else {
         char title[192];
         if (model->title_name != NULL && model->title_name[0] != '\0') {
-            (void)snprintf(title, sizeof(title), "Quit %s?", model->title_name);
+            (void)snprintf(title, sizeof(title), NK_UI_STR(OVERLAY_QUIT_TITLE_NAMED), model->title_name);
         } else {
-            (void)snprintf(title, sizeof(title), "Quit the game?");
+            (void)snprintf(title, sizeof(title), NK_UI_STR(OVERLAY_QUIT_TITLE));
         }
-        nk_overlay_eyebrow(ui, DIALOG_ID_EYEBROW, DIALOG_MARK_TRIANGLE, "Quit to library",
+        nk_overlay_eyebrow(ui, DIALOG_ID_EYEBROW, DIALOG_MARK_TRIANGLE, NK_UI_STR(OVERLAY_QUIT_EYEBROW),
                            theme->warning);
-        dialog_text(ui, title, "Anything the game has not saved is lost.", inner);
+        dialog_text(ui, title, NK_UI_STR(OVERLAY_QUIT_BODY), inner);
         if (actions_begin(ui)) {
-            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT_STAY, "Keep playing", NK_UI_BUTTON_PRIMARY)) {
+            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT_STAY, NK_UI_STR(OVERLAY_QUIT_STAY), NK_UI_BUTTON_PRIMARY)) {
                 result = nk_overlay_action(NK_OVERLAY_ACT_RESUME, 0);
             }
-            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT_CONFIRM, "Quit to library",
+            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT_CONFIRM, NK_UI_STR(OVERLAY_QUIT_CONFIRM),
                              NK_UI_BUTTON_DANGER | NK_UI_BUTTON_NOT_DEFAULT)) {
                 result = nk_overlay_action(NK_OVERLAY_ACT_QUIT, 0);
             }
@@ -101,20 +102,18 @@ NkOverlayAction nk_overlay_page_pad_lost(NkUi *ui, NkOverlayState *state,
     if (inner <= 0.0f) return result;
     if (model->pad_connected) {
         nk_overlay_eyebrow(ui, DIALOG_ID_EYEBROW, DIALOG_MARK_DOT,
-                           "Controller connected \xC2\xB7 Game paused", theme->ready);
-        dialog_text(ui, "Controller connected", "Resume when you are ready.", inner);
+                           NK_UI_STR(OVERLAY_PAD_CONNECTED_EYEBROW), theme->ready);
+        dialog_text(ui, NK_UI_STR(OVERLAY_PAD_CONNECTED_TITLE), NK_UI_STR(OVERLAY_PAD_CONNECTED_BODY), inner);
     } else {
         nk_overlay_eyebrow(ui, DIALOG_ID_EYEBROW, DIALOG_MARK_TRIANGLE,
-                           "Controller disconnected \xC2\xB7 Game paused", theme->warning);
-        dialog_text(ui, "Your controller disconnected",
-                    "Reconnect it, or carry on with the keyboard. The game stays paused "
-                    "until you resume.", inner);
+                           NK_UI_STR(OVERLAY_PAD_LOST_EYEBROW), theme->warning);
+        dialog_text(ui, NK_UI_STR(OVERLAY_PAD_LOST_TITLE), NK_UI_STR(OVERLAY_PAD_LOST_BODY), inner);
     }
     if (actions_begin(ui)) {
-        if (nk_ui_button(ui, NK_OVERLAY_ID_PAD_RESUME, "Resume", NK_UI_BUTTON_PRIMARY)) {
+        if (nk_ui_button(ui, NK_OVERLAY_ID_PAD_RESUME, NK_UI_STR(OVERLAY_BUTTON_RESUME), NK_UI_BUTTON_PRIMARY)) {
             result = nk_overlay_action(NK_OVERLAY_ACT_RESUME, 0);
         }
-        if (nk_ui_button(ui, NK_OVERLAY_ID_PAD_MENU, "Pause menu", 0u)) {
+        if (nk_ui_button(ui, NK_OVERLAY_ID_PAD_MENU, NK_UI_STR(OVERLAY_PAD_LOST_MENU), 0u)) {
             nk_overlay_go(state, NK_OVERLAY_SCREEN_MENU, 0u);
         }
         nk_ui_end_container(ui);
