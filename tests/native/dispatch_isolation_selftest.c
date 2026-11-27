@@ -1045,6 +1045,124 @@ static void test_ram_store_watch_every_width(void) {
           "watched RAM stores did not land");
 }
 
+/* #2809: a watch hit names the running thread's $ra (r[31]) and $sp (r[29]), the thread, and
+ * the bytes the store replaced. Failing before: the hit carried pc, address, value and width
+ * only. memory-watch-selftest's second run arms WATCH_RAM_ADDR:4. */
+#define WATCH_CONTEXT_RA     0x08804abcu
+#define WATCH_CONTEXT_SP     0x09ffe0c0u
+#define WATCH_CONTEXT_THREAD 0x0415u
+
+static void test_store_watch_hit_names_its_context(void) {
+    if (watch_hits(WATCH_RAM_ADDR, 4u) == 0u) return;
+#if !defined(SR_FLIGHT_RECORDER_LINKED) || defined(SR_FLIGHT_RECORDER_STANDALONE)
+    return; /* test_store_watch_is_armed_when_requested names this build's failure */
+#elif !defined(SR_WATCH_HIT_CONTEXT)
+    CHECK(0, "an SR_WATCH hit names no $ra, $sp, thread or old value");
+#else
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[31] = WATCH_CONTEXT_RA;
+    cpu.r[29] = WATCH_CONTEXT_SP;
+    CpuState *saved_cpu = s_cpu;
+    const uint32_t saved_uid = g_current_uid;
+    s_cpu = &cpu;
+    g_current_uid = WATCH_CONTEXT_THREAD;
+
+    MEM_W32(WATCH_RAM_ADDR, 0x11223344u);
+    MEM_W16_PC(WATCH_RAM_ADDR + 2u, 0xbeefu, WATCH_AOT_PC);
+    SrWatchHit half;
+    memset(&half, 0, sizeof half);
+    const int have_half = sr_watch_last_hit(&half);
+
+    s_cpu = NULL;
+    g_current_uid = 0u;
+    MEM_W8_PC(WATCH_RAM_ADDR, 0x5au, WATCH_AOT_PC);
+    SrWatchHit byte;
+    memset(&byte, 0, sizeof byte);
+    const int have_byte = sr_watch_last_hit(&byte);
+    s_cpu = saved_cpu;
+    g_current_uid = saved_uid;
+
+    CHECK(have_half && half.pc == WATCH_AOT_PC && half.addr == WATCH_RAM_ADDR + 2u &&
+          half.value == 0xbeefu && half.width == 2u,
+          "the halfword hit lost its store (pc=0x%08x addr=0x%08x val=0x%08x width=%u)",
+          half.pc, half.addr, half.value, half.width);
+    CHECK(half.has_cpu && half.ra == WATCH_CONTEXT_RA && half.sp == WATCH_CONTEXT_SP,
+          "the hit did not name the running thread's $ra and $sp (ra=0x%08x sp=0x%08x)",
+          half.ra, half.sp);
+    CHECK(half.thread == WATCH_CONTEXT_THREAD, "the hit did not name the thread (0x%x)",
+          half.thread);
+    /* The word 0x11223344 is little-endian: bytes +2..+3 hold 0x1122. */
+    CHECK(half.old_value == 0x1122u, "the hit did not name the replaced bytes (old=0x%08x)",
+          half.old_value);
+    CHECK(have_byte && byte.addr == WATCH_RAM_ADDR && byte.old_value == 0x44u,
+          "the byte hit did not name the replaced byte (old=0x%08x)", byte.old_value);
+    CHECK(!byte.has_cpu && byte.ra == 0u && byte.sp == 0u && byte.thread == 0u,
+          "a store with no current register file reported registers (ra=0x%08x sp=0x%08x)",
+          byte.ra, byte.sp);
+    CHECK(MEM_R32(WATCH_RAM_ADDR) == 0xbeef335au, "the watched stores did not land (0x%08x)",
+          MEM_R32(WATCH_RAM_ADDR));
+#endif
+}
+
+/* The interpreter's `sw` reaches the same context: the production shape runs guest code on the
+ * scheduler's register file, so s_cpu is the dispatched state. The first memory-watch-selftest
+ * run arms INTERP_DATA_ADDR:4. */
+static void test_interpreter_store_watch_hit_names_its_context(void) {
+    if (watch_hits(INTERP_DATA_ADDR, 4u) == 0u) return;
+#if !defined(SR_FLIGHT_RECORDER_LINKED) || defined(SR_FLIGHT_RECORDER_STANDALONE)
+    return;
+#elif !defined(SR_WATCH_HIT_CONTEXT)
+    CHECK(0, "an interpreted store's SR_WATCH hit names no $ra, $sp, thread or old value");
+#else
+    static const uint32_t program[] = {
+        0x24081234u, /* addiu t0, zero, 0x1234 */
+        0xac880000u, /* sw    t0, 0(a0) */
+        0x8c820000u, /* lw    v0, 0(a0) */
+        0x03e00008u, /* jr    ra */
+        0x24420001u, /* addiu v0, v0, 1 -- return delay slot */
+    };
+    for (size_t i = 0; i < sizeof program / sizeof program[0]; i++)
+        MEM_W32(INTERP_EXEC_START + (uint32_t)(i * 4u), program[i]);
+    MEM_W32(INTERP_DATA_ADDR, 0xfeedfaceu);
+    sr_exec_span_reset();
+    CHECK(sr_exec_span_register(INTERP_EXEC_START, INTERP_EXEC_END),
+          "source-owned executable span registration failed");
+    own_synthetic_aot_word(PROBE_RA);
+    g_interp_handoff_hits = 0;
+    sr_register(PROBE_RA, interp_handoff_body);
+
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    s.pc = PROBE_PC;
+    s.r[4] = INTERP_DATA_ADDR;
+    s.r[29] = WATCH_CONTEXT_SP;
+    s.r[31] = PROBE_RA;
+    CpuState *saved_cpu = s_cpu;
+    const uint32_t saved_uid = g_current_uid;
+    s_cpu = &s;
+    g_current_uid = WATCH_CONTEXT_THREAD;
+    dispatch(&s, INTERP_EXEC_START);
+    SrWatchHit hit;
+    memset(&hit, 0, sizeof hit);
+    const int have = sr_watch_last_hit(&hit);
+    s_cpu = saved_cpu;
+    g_current_uid = saved_uid;
+    sr_exec_span_reset();
+
+    CHECK(have && hit.pc == INTERP_EXEC_START + 4u && hit.addr == INTERP_DATA_ADDR &&
+          hit.value == 0x1234u && hit.width == 4u,
+          "the interpreted sw hit lost its store (pc=0x%08x addr=0x%08x val=0x%08x)",
+          hit.pc, hit.addr, hit.value);
+    CHECK(hit.has_cpu && hit.ra == PROBE_RA && hit.sp == WATCH_CONTEXT_SP &&
+          hit.thread == WATCH_CONTEXT_THREAD,
+          "the interpreted sw hit did not name $ra, $sp and the thread "
+          "(ra=0x%08x sp=0x%08x thread=0x%x)", hit.ra, hit.sp, hit.thread);
+    CHECK(hit.old_value == 0xfeedfaceu, "the interpreted sw hit did not name the old word "
+          "(old=0x%08x)", hit.old_value);
+#endif
+}
+
 static int g_call_continuation_hits = 0;
 static int g_call_outer_handoff_hits = 0;
 static uint32_t g_call_ra_after_callee = 0u;
@@ -3059,6 +3177,9 @@ int main(int argc, char **argv) {
     }
     sr_watch_configure();
     sr_watch_note_vblank(7u);
+#ifdef SR_WATCH_HIT_CONTEXT
+    sr_watch_set_thread_source(sched_current_uid); /* as sched_init registers it */
+#endif
     atomic_store(&sr_timeslice, 0);
 
     if (argc == 2 && strcmp(argv[1], "--unregistered-dispatch-child") == 0) {
@@ -3128,6 +3249,8 @@ int main(int argc, char **argv) {
     test_valid_aot_miss_executes_guest_bytes();
     test_aot_store_watch_synthetic_guest();
     test_ram_store_watch_every_width();
+    test_store_watch_hit_names_its_context();
+    test_interpreter_store_watch_hit_names_its_context();
     test_aot_call_returns_before_native_continuation();
     test_interpreter_tail_transfers_remain_untyped();
     test_interpreter_rejects_unowned_and_invalid_fetches();

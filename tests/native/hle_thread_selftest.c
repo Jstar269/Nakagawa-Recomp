@@ -69924,13 +69924,206 @@ static void test_mp3_error_paths(void) {
     expect(mp3t_call(NID_MP3_DECODE, h, 0u, 0, 0) == MP3_TONE_FRAME_SAMPLES * 4u,
            "errors: sceMp3Decode accepts a NULL out-pointer");
 
-    /* The low-level pair is not modelled: a named refusal, not success. */
-    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, 0, 0, 0, 0) == 0x80010086u &&
-               mp3t_call(NID_MP3_LOW_LEVEL_DECODE, 0, 0, 0, 0) == 0x80010086u,
-           "errors: sceMp3LowLevelInit/Decode are refused by name");
     expect(mp3t_call(NID_MP3_TERM_RESOURCE, 0, 0, 0, 0) == 0u, "errors: sceMp3TermResource");
     expect(mp3t_call(NID_MP3_TERM_RESOURCE, 0, 0, 0, 0) == 0u,
            "errors: a second sceMp3TermResource is harmless");
+}
+
+/* sceMp3LowLevelInit/sceMp3LowLevelDecode (#2640), PPSSPP-derived, not PSP-measured
+ * (hrydgard/ppsspp 0028f30da6784570264a41ef6cce1c3963692ea7, Core/HLE/sceMp3.cpp). The expected
+ * values follow that contract and the fixture: the caller picks the handle number; each decode
+ * reads at most 4096 source bytes, skips leading zero bytes, decodes the frame that starts there
+ * into interleaved stereo s16, and writes the source bytes used (the zeros and the frame) and the
+ * PCM bytes (1152 samples * 4 = 4608 for these frames). The bytes-used rule is the one PPSSPP's
+ * bundled FFmpeg (libavcodec 57.24.102, mpegaudiodec_template.c decode_frame) and JPCSP share. */
+#define MP3LL_SRC 0x08b40000u
+#define MP3LL_SRC_SPAN 0x10000u
+#define MP3LL_PCM 0x08b50000u
+#define MP3LL_USED 0x08b52000u
+#define MP3LL_BYTES 0x08b52004u
+#define MP3LL_WINDOW 4096u
+#define MP3LL_FRAME_PCM (MP3_TONE_FRAME_SAMPLES * 4u)
+
+static uint32_t mp3ll_decode(uint32_t h, uint32_t src, uint32_t used, uint32_t pcm, uint32_t bytes) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = h;
+    cpu.r[5] = src;
+    cpu.r[6] = used;
+    cpu.r[7] = pcm;
+    cpu.r[8] = bytes; /* the fifth argument travels in $t0 */
+    return sr_syscall(&cpu, NID_MP3_LOW_LEVEL_DECODE);
+}
+
+/* Clear the source area, then place `len` bytes of the test file at offset `at`. */
+static void mp3ll_place(uint32_t at, uint32_t len) {
+    for (uint32_t i = 0; i < MP3LL_SRC_SPAN; i++) MEM_W8(MP3LL_SRC + i, 0u);
+    for (uint32_t i = 0; i < len; i++) MEM_W8(MP3LL_SRC + at + i, s_mp3t_file[i]);
+}
+
+static void mp3ll_sentinels(void) {
+    MEM_W32(MP3LL_USED, 0xdeadbeefu);
+    MEM_W32(MP3LL_BYTES, 0xdeadbeefu);
+    MEM_W8(MP3LL_PCM + MP3LL_FRAME_PCM, 0xa5u);
+}
+
+static void test_mp3_low_level(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_mp3_reset();
+    const uint32_t h = 7u; /* a number sceMp3ReserveMp3Handle never hands out */
+
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a decode on a number without sceMp3LowLevelInit is INVALID_HANDLE and writes nothing");
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, h, 0, 0, 0) == 0u,
+           "low-level: sceMp3LowLevelInit takes a caller-chosen number without sceMp3InitResource");
+
+    /* Ten zero bytes, then 12 stereo frames, then zeros. Each call decodes one frame; the game
+     * advances by the bytes used, which for the first call include the zeros before the sync. */
+    const uint32_t frames = 12u, lead = 10u;
+    uint32_t len = mp3t_build_file(0, 0, frames);
+    mp3ll_place(lead, len);
+    uint32_t pos = 0, good = 0, bad = 0;
+    for (uint32_t call = 0; call < frames; call++) {
+        mp3ll_sentinels();
+        uint32_t ret = mp3ll_decode(h, MP3LL_SRC + pos, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES);
+        uint32_t used = MEM_R32(MP3LL_USED), bytes = MEM_R32(MP3LL_BYTES);
+        uint32_t want_used = MP3_TONE_FRAME_BYTES + (call == 0u ? lead : 0u);
+        if (ret != 0u || used != want_used || bytes != MP3LL_FRAME_PCM ||
+            MEM_R8(MP3LL_PCM + MP3LL_FRAME_PCM) != 0xa5u) {
+            if (bad++ == 0u)
+                fprintf(stderr, "low-level: call %u returned 0x%08x, used %u, bytes %u\n", call, ret,
+                        used, bytes);
+            break;
+        }
+        for (uint32_t i = 0; i < 2u * MP3_TONE_FRAME_SAMPLES; i++)
+            s_mp3t_pcm[good * 2u * MP3_TONE_FRAME_SAMPLES + i] = (int16_t)MEM_R16(MP3LL_PCM + i * 2u);
+        good++;
+        pos += used;
+    }
+    expect(bad == 0u && good == frames,
+           "low-level: each call decodes one frame, reports its bytes (the leading zeros included first) "
+           "and 4608 PCM bytes, and writes nothing past them; the last frame decodes before the zeros");
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC + pos, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_BYTES) == 0u && MEM_R32(MP3LL_USED) == 0u,
+           "low-level: a window of zero bytes returns 0 with no bytes used and no PCM bytes");
+
+    /* Non-zero bytes that are not a frame header (an ID3v2 tag) are not skipped: PPSSPP's
+     * decoder fails, nothing is used, no PCM, result 0 (JPCSP returns 0x80672001 here). */
+    len = mp3t_build_file(0, 1, 3u);
+    mp3ll_place(0u, len);
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_USED) == 0u && MEM_R32(MP3LL_BYTES) == 0u &&
+               MEM_R8(MP3LL_PCM + MP3LL_FRAME_PCM) == 0xa5u,
+           "low-level: an ID3v2 tag at the start is no frame: 0 bytes used, no PCM, result 0");
+    /* An ID3v1 tag ("TAG") after the zeros is discarded with the rest of the window. */
+    len = mp3t_build_file(0, 0, 3u);
+    mp3ll_place(5u, len);
+    MEM_W8(MP3LL_SRC + 5u, 'T');
+    MEM_W8(MP3LL_SRC + 6u, 'A');
+    MEM_W8(MP3LL_SRC + 7u, 'G');
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_USED) == MP3LL_WINDOW - 5u && MEM_R32(MP3LL_BYTES) == 0u,
+           "low-level: an ID3v1 tag after 5 zero bytes is discarded: 4091 bytes used, no PCM");
+
+    /* The PCM is the fixture's tone: interleaved L/R, 995 Hz left at peak 4096 and 1991 Hz right
+     * at peak 2048, measured past the first frame. */
+    const double left_hz = MP3_TONE_LEFT_LINE * (double)MP3_TONE_SAMPLE_RATE / 1152.0;
+    const double right_hz = MP3_TONE_RIGHT_LINE * (double)MP3_TONE_SAMPLE_RATE / 1152.0;
+    const uint32_t first = MP3_TONE_FRAME_SAMPLES, count = (frames - 1u) * MP3_TONE_FRAME_SAMPLES;
+    if (good == frames) {
+        expect(mp3t_tone(s_mp3t_pcm, first, count, 0, left_hz) > 50.0 * mp3t_tone(s_mp3t_pcm, first, count, 0, right_hz) &&
+                   mp3t_tone(s_mp3t_pcm, first, count, 1, right_hz) > 50.0 * mp3t_tone(s_mp3t_pcm, first, count, 1, left_hz),
+               "low-level: the left channel carries the 995 Hz tone and the right the 1991 Hz one");
+        double l_rms = mp3t_rms(s_mp3t_pcm, first, count, 0), r_rms = mp3t_rms(s_mp3t_pcm, first, count, 1);
+        expect(fabs(l_rms - 4096.0 / sqrt(2.0)) < 0.03 * 4096.0 / sqrt(2.0) &&
+                   fabs(r_rms - 2048.0 / sqrt(2.0)) < 0.03 * 2048.0 / sqrt(2.0),
+               "low-level: both tones have the fixture's amplitudes");
+    }
+
+    /* At most 4096 source bytes: a frame that starts 50 bytes before the window's end would be
+     * decoded truncated by the reference, which is not modelled: a named stop, nothing written.
+     * From its sync the frame decodes. */
+    const uint32_t late = MP3LL_WINDOW - 50u;
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, h, 0, 0, 0) == 0u, "low-level: Init again on the same number");
+    len = mp3t_build_file(0, 0, 3u);
+    mp3ll_place(late, len);
+    mp3ll_sentinels();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops + 1u &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a frame that crosses the 4096-byte window stops by name and writes nothing");
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC + late, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_BYTES) == MP3LL_FRAME_PCM && MEM_R32(MP3LL_USED) == MP3_TONE_FRAME_BYTES,
+           "low-level: from its sync the frame decodes");
+
+    /* A mono frame comes out as stereo, the one channel on both sides. */
+    len = mp3t_build_file(1, 0, 3u);
+    mp3ll_place(0u, len);
+    uint32_t mono_bytes = 0, mono_split = 0, mono_silent = 1;
+    for (uint32_t call = 0, at = 0; call < 2u; call++, at += MP3_TONE_FRAME_BYTES) {
+        mp3ll_sentinels();
+        (void)mp3ll_decode(h, MP3LL_SRC + at, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES);
+        mono_bytes = MEM_R32(MP3LL_BYTES);
+    }
+    for (uint32_t i = 0; i < MP3_TONE_FRAME_SAMPLES; i++) {
+        uint16_t l = MEM_R16(MP3LL_PCM + i * 4u), r = MEM_R16(MP3LL_PCM + i * 4u + 2u);
+        if (l != r) mono_split++;
+        if (l) mono_silent = 0;
+    }
+    expect(mono_bytes == MP3LL_FRAME_PCM && mono_split == 0u && !mono_silent,
+           "low-level: a mono frame is written as 4608 bytes of stereo with equal channels");
+
+    /* An unmapped or NULL argument pointer is -1 and nothing is written. */
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, 0u) == 0xffffffffu &&
+               mp3ll_decode(h, 0u, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0xffffffffu &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a NULL out-word or source pointer returns -1 and writes nothing");
+    /* The whole 4096-byte source and 4608-byte PCM spans must be mapped: either one starting 16
+     * bytes before the end of guest memory is -1 and nothing is written. */
+    const uint32_t mem_tail = 0x0c000000u - 16u;
+    mp3ll_sentinels();
+    expect(mp3ll_decode(h, mem_tail, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0xffffffffu &&
+               mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, mem_tail, MP3LL_BYTES) == 0xffffffffu &&
+               MEM_R32(MP3LL_USED) == 0xdeadbeefu && MEM_R32(MP3LL_BYTES) == 0xdeadbeefu,
+           "low-level: a source or PCM span that runs past guest memory returns -1 and writes nothing");
+
+    /* One handle namespace with the reserved handles: Init replaces a reserved context under its
+     * number, a reserve passes over a number in low-level use, release and TermResource free
+     * low-level contexts. */
+    expect(mp3t_call(NID_MP3_RELEASE, h, 0, 0, 0) == 0u &&
+               mp3ll_decode(h, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE,
+           "low-level: sceMp3ReleaseMp3Handle frees a low-level context");
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u, "low-level: sceMp3InitResource");
+    expect(mp3t_reserve(mp3t_build_file(0, 0, 4u)) == 0u, "low-level: a reserve takes handle 0");
+    /* Both references decode on a reserved handle with that handle's own decoder. */
+    len = mp3t_build_file(0, 0, 3u);
+    mp3ll_place(0u, len);
+    mp3ll_sentinels();
+    expect(mp3ll_decode(0u, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == 0u &&
+               MEM_R32(MP3LL_USED) == MP3_TONE_FRAME_BYTES && MEM_R32(MP3LL_BYTES) == MP3LL_FRAME_PCM,
+           "low-level: a decode on a reserved handle without low-level Init uses that handle's decoder");
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, 0u, 0, 0, 0) == 0u &&
+               mp3t_call(NID_MP3_CHECK_NEEDED, 0u, 0, 0, 0) == MP3_ERR_UNRESERVED,
+           "low-level: Init on a reserved number replaces the reserved context");
+    expect(mp3t_reserve(mp3t_build_file(0, 0, 4u)) == 1u,
+           "low-level: a reserve passes over a number in low-level use");
+    expect(mp3t_call(NID_MP3_RELEASE, 0u, 0, 0, 0) == 0u &&
+               mp3ll_decode(0u, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE,
+           "low-level: releasing that number frees the low-level context");
+    expect(mp3t_call(NID_MP3_LOW_LEVEL_INIT, 5u, 0, 0, 0) == 0u &&
+               mp3t_call(NID_MP3_TERM_RESOURCE, 0, 0, 0, 0) == 0u &&
+               mp3ll_decode(5u, MP3LL_SRC, MP3LL_USED, MP3LL_PCM, MP3LL_BYTES) == MP3_ERR_INVALID_HANDLE,
+           "low-level: sceMp3TermResource frees low-level contexts");
+    sr_hle_test_mp3_reset();
 }
 
 /* sceKernelGetThreadmanIdList(type, readbuf, readbufsize, idcount), issue #1288. The
@@ -72606,6 +72799,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_mp3_stream_lifecycle();
     test_mp3_loop_and_mono();
     test_mp3_error_paths();
+    test_mp3_low_level();
     test_at3_synthetic_decode_bookkeeping();
     test_at3_set_data_delay_2048_1096();
     test_atrac_set_entry_points_1379();
