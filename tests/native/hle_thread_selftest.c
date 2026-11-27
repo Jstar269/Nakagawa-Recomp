@@ -20070,6 +20070,62 @@ static void test_audio_regular_contract_safety(void) {
            "the negative queue sentinel takes the open-loop path after one query");
 }
 
+/* sceAudioChReserve with a negative channel. Two evidence tiers, asserted apart:
+ * - All eight free, and all eight held (the first block): PSPAutotests
+ *   tests/audio/sceaudio/reserve.expected at ea71108f00933712c4662276261b39cd42249b1e (reference
+ *   output recorded on a PSP; corroborative here) gives 7 for channels -9, -7, -2, -1 and
+ *   0x80000000 with every channel free, and 0x80260005 once all eight are reserved.
+ * - Partly occupied (the second block): the downward search order is
+ *   PPSSPP-derived, not PSP-measured (hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
+ *   Core/HLE/sceAudio.cpp, GetFreeChannel runs from PSP_AUDIO_CHANNEL_MAX - 1 down); reserve.expected
+ *   records no such cell.
+ * A game that reserves one channel with -1 and another by number then gets both. */
+static void test_audio_reserve_auto_channel_order(void) {
+    CpuState cpu;
+    int reserved = -1;
+
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    /* Recorded tier: each channel value of reserve.expected's "Channel values" block with every
+     * channel free, released after each call as the test program does. */
+    static const uint32_t recorded_auto[] = {0xfffffff7u, 0xfffffff9u, 0xfffffffeu, 0xffffffffu,
+                                             0x80000000u};
+    for (unsigned i = 0; i < sizeof(recorded_auto) / sizeof(recorded_auto[0]); i++) {
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, recorded_auto[i], 1024u, 0u) == 7u,
+               "recorded: AudioChReserve(negative) with every channel free takes channel 7");
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 7u, 0u, 0u);
+    }
+    for (uint32_t ch = 0u; ch < 8u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, ch, 1024u, 0u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 0x80260005u,
+           "recorded: AudioChReserve(-1) with all eight reserved returns 0x80260005");
+    for (uint32_t ch = 0u; ch < 8u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, ch, 0u, 0u);
+    /* PPSSPP-derived tier: the search order once some channels are held. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 7u,
+           "AudioChReserve(-1) with every channel free takes channel 7, the highest");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 1024u, 0u) == 0u,
+           "after an auto reserve, channel 0 is still free to reserve by number");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0x80000000u, 1024u, 0u) == 6u,
+           "AudioChReserve(0x80000000) takes the highest channel still free (6)");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 7u, 0u, 0u) == 0u,
+           "the auto-reserved channel 7 releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xfffffff7u, 1024u, 0u) == 7u,
+           "AudioChReserve(-9) takes channel 7 again once it is free");
+    for (uint32_t ch = 1u; ch <= 5u; ch++)
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, ch, 1024u, 0u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) ==
+               0x80260005u,
+           "AudioChReserve(-1) with all eight reserved returns 0x80260005");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 3u, 0u, 0u) == 0u,
+           "a middle channel releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0xffffffffu, 1024u, 0u) == 3u &&
+               sr_hle_test_audio_state(3u, &reserved, NULL, NULL) && reserved == 1,
+           "AudioChReserve(-1) takes the only free channel (3)");
+    sr_hle_test_audio_reset();
+}
+
 /* Regular output and release refuse a channel that is out of range or not reserved, and
  * sceAudioOutputPanned is the non-blocking form (audit 2026-11-17). The refusal codes and the
  * busy rule are PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
@@ -20399,6 +20455,36 @@ static void test_audio_output2_release_refuses_while_queued(void) {
            "release succeeds once Output2 is drained");
     sr_hle_test_audio_reset();
     audio_fixture_reset();
+}
+
+/* sceAudioOutput2Reserve's argument codes. PSPAutotests tests/audio/sceaudio/reserve.expected at
+ * ea71108f00933712c4662276261b39cd42249b1e (recorded on a PSP; corroborative here) records
+ * 0x80268002 for a second Output2Reserve over a held one, and 0x80000104 for every sample count
+ * outside 17..4111 (0, 16, 4112, 65472 and the negative ones). PPSSPP agrees (hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp, sceAudioOutput2Reserve:
+ * SCE_KERNEL_ERROR_INVALID_SIZE and SCE_ERROR_AUDIO_CHANNEL_ALREADY_RESERVED). A refused call
+ * leaves Output2 as it was. */
+static void test_audio_output2_reserve_codes(void) {
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    s_audio_queue_result = 0;
+    static const uint32_t bad[] = {0u, 16u, 4112u, 65472u, 0xffffffc0u};
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, bad[i], 0u, 0u) ==
+                   0x80000104u,
+               "Output2Reserve refuses a sample count outside 17..4111 with 0x80000104");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0x80260008u,
+           "a refused Output2Reserve leaves nothing reserved");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 17u, 0u, 0u) == 0u,
+           "Output2Reserve accepts 17 samples");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 1024u, 0u, 0u) == 0x80268002u,
+           "a second Output2Reserve over a held one returns 0x80268002");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "the first reservation is still held and releases");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 4111u, 0u, 0u) == 0u &&
+               audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "Output2Reserve accepts 4111 samples");
 }
 
 /* The Output2/SRC blocking outputs accept volumes up to 0xFFFFF (PPSSPP-derived, unmeasured
@@ -73119,10 +73205,12 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_thread_end_blocking_and_resume();
     test_wait_thread_end_cb_execution();
     test_audio_regular_contract_safety();
+    test_audio_reserve_auto_channel_order();
     test_audio_regular_output_refuses_bad_channels();
     test_audio_regular_output_refuses_bad_volumes();
     test_audio_output_panned_blocking_unreserved_channel();
     test_audio_output2_release_refuses_while_queued();
+    test_audio_output2_reserve_codes();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
     test_audio_output2_and_src_accept_volumes_to_0xfffff();
