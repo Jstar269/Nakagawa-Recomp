@@ -44,7 +44,7 @@ static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
         if (next) *next++ = '\0';
         if (!name[0]) return false;
         bool found = false;
-        for (int view = VIEW_LIBRARY; view <= VIEW_ACHIEVEMENTS_SIGN_IN; view++) {
+        for (int view = VIEW_LIBRARY; view <= VIEW_CHEAT_DB_BUSY; view++) {
             if (strcmp(name, player_ui_test_view_name((PlayerView)view)) == 0) {
                 if ((unsigned)view >= 32) return false;
                 parsed_mask |= UINT32_C(1) << (unsigned)view;
@@ -204,6 +204,7 @@ static int player_ui_test_music_state(const char *name) {
    reached it. The main thread is the one that set the harness up. */
 static char s_ui_test_pick[1024];
 static bool s_ui_test_pick_pending;
+static SDL_AtomicInt s_ui_test_cheat_db_background;
 static SDL_ThreadID s_ui_test_main_thread;
 
 int player_ui_test_next_event(const char *script, size_t *cursor,
@@ -614,6 +615,9 @@ const char *player_ui_test_view_name(PlayerView view) {
     case VIEW_ONLINE_PLAY_SERVERS: return "online_play_servers";
     case VIEW_ACHIEVEMENTS_CARD: return "achievements_card";
     case VIEW_ACHIEVEMENTS_SIGN_IN: return "achievements_sign_in";
+    case VIEW_CHEAT_DB: return "cheat_db";
+    case VIEW_CHEAT_DB_CONFIRM: return "cheat_db_confirm";
+    case VIEW_CHEAT_DB_BUSY: return "cheat_db_busy";
     case VIEW_UPDATES: return "updates";
     case VIEW_CONFIRM_FACTORY_RESET: return "confirm_factory_reset";
     case VIEW_ACCESSIBILITY_SETTINGS: return "accessibility_settings";
@@ -1390,8 +1394,7 @@ void player_ui_test_report_startup(const PlayerUiTest *t, const PlayerUiNk *next
         player_ui_nk_test_report_compatibility();
     }
     if (t->mode && getenv("NK_UI_TEST_REPORT_VIEWS") != NULL) {
-        /* Every PlayerView, VIEW_LIBRARY through the last, VIEW_ACHIEVEMENTS_SIGN_IN. */
-        for (int view = (int)VIEW_LIBRARY; view <= (int)VIEW_ACHIEVEMENTS_SIGN_IN; ++view) {
+        for (int view = (int)VIEW_LIBRARY; view <= (int)VIEW_CHEAT_DB_BUSY; ++view) {
             printf("[PLAYER_UI_TEST] view_coverage value=%d name=%s nk=%d\n", view,
                    player_ui_test_view_name((PlayerView)view),
                    player_ui_nk_draws_view(view) ? 1 : 0);
@@ -1489,6 +1492,9 @@ void player_ui_test_report_update_phase(const PlayerUiTest *t, const PlayerApp *
 void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
                                 bool background_pending) {
     if (!t->mode) return;
+    if (app->active_view == VIEW_ONLINE_SETTINGS && app->cheat_db.busy) {
+        SDL_SetAtomicInt(&s_ui_test_cheat_db_background, 1);
+    }
     uint64_t ui_test_now = SDL_GetTicks();
     bool ui_test_block_script = false;
     if (t->waiting_for_music) {
@@ -2330,6 +2336,38 @@ static bool player_adhoc_list_test_open(void *context, const char *url, const ch
 
 PackageHttpOpen player_ui_test_adhoc_list_transport(void) {
     return player_adhoc_list_test_open;
+}
+
+/* Every request from the regression build arrives here, even without a fixture. */
+static bool player_cheat_db_test_open(void *context, const char *url, const char *allowed_host,
+                                     PackageHttpResponse *out) {
+    const PackageHttpOptions *options = (const PackageHttpOptions *)context;
+    const char *user_agent = options && options->user_agent ? options->user_agent : "(none)";
+    const char *database_url = getenv("NK_UI_TEST_CHEAT_DB_URL");
+    const char *path = NULL;
+    printf("[PLAYER_UI_TEST] cheat_db_get url=%s allow=%s user_agent=%s\n",
+           url ? url : "(none)", allowed_host ? allowed_host : "(none)", user_agent);
+    fflush(stdout);
+    if (!url || !allowed_host || strcmp(allowed_host, NK_CHEAT_DB_HOST) != 0 ||
+        strcmp(user_agent, NK_CHEAT_DB_USER_AGENT) != 0) return false;
+    if (strcmp(url, NK_CHEAT_DB_SOURCES_URL) == 0) {
+        path = getenv("NK_UI_TEST_CHEAT_DB_LIST");
+    } else if (database_url && strcmp(url, database_url) == 0) {
+        if (getenv("NK_UI_TEST_CHEAT_DB_WAIT_FOR_BACK")) {
+            /* Hold only the fake response until the real Back action leaves the screen. */
+            uint64_t expired = SDL_GetTicks() + 10000u;
+            while (SDL_GetAtomicInt(&s_ui_test_cheat_db_background) == 0) {
+                if (SDL_GetTicks() >= expired) return false;
+                SDL_Delay(1u);
+            }
+        }
+        path = getenv("NK_UI_TEST_CHEAT_DB_FILE");
+    }
+    return path && path[0] && player_ui_test_file_response(path, url, out);
+}
+
+PackageHttpOpen player_ui_test_cheat_db_transport(void) {
+    return player_cheat_db_test_open;
 }
 
 /* The key update signatures are checked with: a TEST-ONLY key from

@@ -742,6 +742,24 @@ if(WIN32)
 endif()
 add_test(NAME adhoc_servers_test COMMAND test_adhoc_servers)
 
+# Download and local import use synthetic files and a fake transport.
+add_executable(test_cheat_db
+    tests/native/test_cheat_db.c
+    tests/native/native_test_isolation.c
+    src/player/package_builder.c
+    src/player/cheat_db.c
+)
+target_include_directories(test_cheat_db PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+target_link_libraries(test_cheat_db PRIVATE nakagawa_core)
+if(WIN32)
+    target_link_libraries(test_cheat_db PRIVATE winhttp bcrypt)
+endif()
+add_test(NAME cheat_db_test COMMAND test_cheat_db)
+set_tests_properties(cheat_db_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # Discord status (#2259) on a fake transport and, on Windows, a fake pipe server with a
 # test-only name; it never opens Discord's own pipes.
 add_executable(test_discord_presence
@@ -919,6 +937,7 @@ if(BUILD_PLAYER)
         ${NK_RCHEEVOS_PLAYER_SOURCES}
         src/player/cover_art.c
         src/player/adhoc_servers.c
+        src/player/cheat_db.c
         ${NK_UI_CORE_SOURCES}
         ${NK_UI_EDGE_SOURCES}
         src/ui/backend/nk_ui_sdlr.c

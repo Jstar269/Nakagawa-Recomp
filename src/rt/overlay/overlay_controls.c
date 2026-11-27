@@ -9,6 +9,7 @@
    button, a PlayStation-style one Cross, and an unknown pad its position. */
 
 #include "nk_overlay.h"
+#include "nk_ui_text.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -20,16 +21,17 @@ typedef struct {
 } ControlsRowSpec;
 
 static const ControlsRowSpec k_rows[] = {
-    {"D-pad", NK_PSP_BTN_UP_BIT | NK_PSP_BTN_DOWN_BIT | NK_PSP_BTN_LEFT_BIT | NK_PSP_BTN_RIGHT_BIT, 0},
-    {"Analog stick", 0u, 1},
-    {"Cross", NK_PSP_BTN_CROSS_BIT, 0},
-    {"Circle", NK_PSP_BTN_CIRCLE_BIT, 0},
-    {"Square", NK_PSP_BTN_SQUARE_BIT, 0},
-    {"Triangle", NK_PSP_BTN_TRIANGLE_BIT, 0},
-    {"L", NK_PSP_BTN_LTRIGGER_BIT, 0},
-    {"R", NK_PSP_BTN_RTRIGGER_BIT, 0},
-    {"Start", NK_PSP_BTN_START_BIT, 0},
-    {"Select", NK_PSP_BTN_SELECT_BIT, 0}
+    {NK_UI_STR(OVERLAY_PSP_DPAD),
+     NK_PSP_BTN_UP_BIT | NK_PSP_BTN_DOWN_BIT | NK_PSP_BTN_LEFT_BIT | NK_PSP_BTN_RIGHT_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_ANALOG_STICK), 0u, 1},
+    {NK_UI_STR(OVERLAY_PSP_CROSS), NK_PSP_BTN_CROSS_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_CIRCLE), NK_PSP_BTN_CIRCLE_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_SQUARE), NK_PSP_BTN_SQUARE_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_TRIANGLE), NK_PSP_BTN_TRIANGLE_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_L), NK_PSP_BTN_LTRIGGER_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_R), NK_PSP_BTN_RTRIGGER_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_START), NK_PSP_BTN_START_BIT, 0},
+    {NK_UI_STR(OVERLAY_PSP_SELECT), NK_PSP_BTN_SELECT_BIT, 0}
 };
 
 /* Per family: Xbox-style (A south), Switch-style (A east), PlayStation-style,
@@ -45,41 +47,51 @@ static int family_set(NkUiPadFamily family) {
     }
 }
 
+/* A pad button's name in the catalog (src/ui/nk_ui_text.h). */
+#define PAD_NAME(id) NK_UI_STR(OVERLAY_PAD_##id)
+
 static const char *const k_button_names[NK_HOST_BUTTON_COUNT][FAMILY_SETS] = {
-    [NK_HOST_BUTTON_SOUTH] = {"A", "B", "Cross", "South button"},
-    [NK_HOST_BUTTON_EAST] = {"B", "A", "Circle", "East button"},
-    [NK_HOST_BUTTON_WEST] = {"X", "Y", "Square", "West button"},
-    [NK_HOST_BUTTON_NORTH] = {"Y", "X", "Triangle", "North button"},
-    [NK_HOST_BUTTON_BACK] = {"View", "Minus", "Create", "Back"},
-    [NK_HOST_BUTTON_GUIDE] = {"Guide", "Home", "PS button", "Guide"},
-    [NK_HOST_BUTTON_START] = {"Menu", "Plus", "Options", "Start"},
-    [NK_HOST_BUTTON_LEFT_STICK] = {"LS", "Left stick press", "L3", "Left stick press"},
-    [NK_HOST_BUTTON_RIGHT_STICK] = {"RS", "Right stick press", "R3", "Right stick press"},
-    [NK_HOST_BUTTON_LEFT_SHOULDER] = {"LB", "L", "L1", "Left shoulder"},
-    [NK_HOST_BUTTON_RIGHT_SHOULDER] = {"RB", "R", "R1", "Right shoulder"},
-    [NK_HOST_BUTTON_DPAD_UP] = {"D-pad", "D-pad", "D-pad", "D-pad"},
-    [NK_HOST_BUTTON_DPAD_DOWN] = {"D-pad", "D-pad", "D-pad", "D-pad"},
-    [NK_HOST_BUTTON_DPAD_LEFT] = {"D-pad", "D-pad", "D-pad", "D-pad"},
-    [NK_HOST_BUTTON_DPAD_RIGHT] = {"D-pad", "D-pad", "D-pad", "D-pad"},
-    [NK_HOST_BUTTON_MISC1] = {"Share", "Capture", "Mic", "Extra button"},
-    [NK_HOST_BUTTON_RIGHT_PADDLE1] = {"Right paddle 1", "Right paddle 1", "Right paddle 1", "Right paddle 1"},
-    [NK_HOST_BUTTON_LEFT_PADDLE1] = {"Left paddle 1", "Left paddle 1", "Left paddle 1", "Left paddle 1"},
-    [NK_HOST_BUTTON_RIGHT_PADDLE2] = {"Right paddle 2", "Right paddle 2", "Right paddle 2", "Right paddle 2"},
-    [NK_HOST_BUTTON_LEFT_PADDLE2] = {"Left paddle 2", "Left paddle 2", "Left paddle 2", "Left paddle 2"},
-    [NK_HOST_BUTTON_TOUCHPAD] = {"Touchpad", "Touchpad", "Touchpad", "Touchpad"}
+    [NK_HOST_BUTTON_SOUTH] = {PAD_NAME(A), PAD_NAME(B), PAD_NAME(CROSS), PAD_NAME(SOUTH)},
+    [NK_HOST_BUTTON_EAST] = {PAD_NAME(B), PAD_NAME(A), PAD_NAME(CIRCLE), PAD_NAME(EAST)},
+    [NK_HOST_BUTTON_WEST] = {PAD_NAME(X), PAD_NAME(Y), PAD_NAME(SQUARE), PAD_NAME(WEST)},
+    [NK_HOST_BUTTON_NORTH] = {PAD_NAME(Y), PAD_NAME(X), PAD_NAME(TRIANGLE), PAD_NAME(NORTH)},
+    [NK_HOST_BUTTON_BACK] = {PAD_NAME(VIEW), PAD_NAME(MINUS), PAD_NAME(CREATE), PAD_NAME(BACK)},
+    [NK_HOST_BUTTON_GUIDE] = {PAD_NAME(GUIDE), PAD_NAME(HOME), PAD_NAME(PS), PAD_NAME(GUIDE)},
+    [NK_HOST_BUTTON_START] = {PAD_NAME(MENU), PAD_NAME(PLUS), PAD_NAME(OPTIONS), PAD_NAME(START)},
+    [NK_HOST_BUTTON_LEFT_STICK] = {PAD_NAME(LS), PAD_NAME(LEFT_STICK_PRESS), PAD_NAME(L3), PAD_NAME(LEFT_STICK_PRESS)},
+    [NK_HOST_BUTTON_RIGHT_STICK] = {PAD_NAME(RS), PAD_NAME(RIGHT_STICK_PRESS),
+                                    PAD_NAME(R3), PAD_NAME(RIGHT_STICK_PRESS)},
+    [NK_HOST_BUTTON_LEFT_SHOULDER] = {PAD_NAME(LB), PAD_NAME(L), PAD_NAME(L1), PAD_NAME(LEFT_SHOULDER)},
+    [NK_HOST_BUTTON_RIGHT_SHOULDER] = {PAD_NAME(RB), PAD_NAME(R), PAD_NAME(R1), PAD_NAME(RIGHT_SHOULDER)},
+    [NK_HOST_BUTTON_DPAD_UP] = {PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD)},
+    [NK_HOST_BUTTON_DPAD_DOWN] = {PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD)},
+    [NK_HOST_BUTTON_DPAD_LEFT] = {PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD)},
+    [NK_HOST_BUTTON_DPAD_RIGHT] = {PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD), PAD_NAME(DPAD)},
+    [NK_HOST_BUTTON_MISC1] = {PAD_NAME(SHARE), PAD_NAME(CAPTURE), PAD_NAME(MIC), PAD_NAME(EXTRA)},
+    [NK_HOST_BUTTON_RIGHT_PADDLE1] = {PAD_NAME(RIGHT_PADDLE_1), PAD_NAME(RIGHT_PADDLE_1),
+                                      PAD_NAME(RIGHT_PADDLE_1), PAD_NAME(RIGHT_PADDLE_1)},
+    [NK_HOST_BUTTON_LEFT_PADDLE1] = {PAD_NAME(LEFT_PADDLE_1), PAD_NAME(LEFT_PADDLE_1),
+                                     PAD_NAME(LEFT_PADDLE_1), PAD_NAME(LEFT_PADDLE_1)},
+    [NK_HOST_BUTTON_RIGHT_PADDLE2] = {PAD_NAME(RIGHT_PADDLE_2), PAD_NAME(RIGHT_PADDLE_2),
+                                      PAD_NAME(RIGHT_PADDLE_2), PAD_NAME(RIGHT_PADDLE_2)},
+    [NK_HOST_BUTTON_LEFT_PADDLE2] = {PAD_NAME(LEFT_PADDLE_2), PAD_NAME(LEFT_PADDLE_2),
+                                     PAD_NAME(LEFT_PADDLE_2), PAD_NAME(LEFT_PADDLE_2)},
+    [NK_HOST_BUTTON_TOUCHPAD] = {PAD_NAME(TOUCHPAD), PAD_NAME(TOUCHPAD), PAD_NAME(TOUCHPAD), PAD_NAME(TOUCHPAD)}
 };
 
 static const char *const k_trigger_names[2][FAMILY_SETS] = {
-    {"LT", "ZL", "L2", "Left trigger"},
-    {"RT", "ZR", "R2", "Right trigger"}
+    {PAD_NAME(LT), PAD_NAME(ZL), PAD_NAME(L2), PAD_NAME(LEFT_TRIGGER)},
+    {PAD_NAME(RT), PAD_NAME(ZR), PAD_NAME(R2), PAD_NAME(RIGHT_TRIGGER)}
 };
+
+#undef PAD_NAME
 
 static const char *axis_stick_name(int axis) {
     switch (axis) {
     case NK_HOST_AXIS_LEFTX:
-    case NK_HOST_AXIS_LEFTY: return "Left stick";
+    case NK_HOST_AXIS_LEFTY: return NK_UI_STR(OVERLAY_PAD_LEFT_STICK);
     case NK_HOST_AXIS_RIGHTX:
-    case NK_HOST_AXIS_RIGHTY: return "Right stick";
+    case NK_HOST_AXIS_RIGHTY: return NK_UI_STR(OVERLAY_PAD_RIGHT_STICK);
     default: return NULL;
     }
 }
@@ -192,10 +204,10 @@ static void describe_keys(NameList *list, KeyWords *words, const NkInputProfile 
         keys_collect(keys, &count, &profile->psp_keys[b]);
     }
     memset(taken, 0, sizeof(taken));
-    key_group(keys, taken, count, k_arrows, 4u, "Arrow keys", words, list);
-    key_group(keys, taken, count, k_shift, 2u, "Shift", words, list);
-    key_group(keys, taken, count, k_ctrl, 2u, "Ctrl", words, list);
-    key_group(keys, taken, count, k_alt, 2u, "Alt", words, list);
+    key_group(keys, taken, count, k_arrows, 4u, NK_UI_STR(OVERLAY_KEYS_ARROWS), words, list);
+    key_group(keys, taken, count, k_shift, 2u, NK_UI_STR(OVERLAY_KEYS_SHIFT), words, list);
+    key_group(keys, taken, count, k_ctrl, 2u, NK_UI_STR(OVERLAY_KEYS_CTRL), words, list);
+    key_group(keys, taken, count, k_alt, 2u, NK_UI_STR(OVERLAY_KEYS_ALT), words, list);
     for (i = 0; i < count; ++i) {
         char text[24];
         if (taken[i]) continue;

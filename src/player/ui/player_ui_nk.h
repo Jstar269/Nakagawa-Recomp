@@ -611,7 +611,9 @@ typedef enum {
     PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_CARD,   /* VIEW_ONLINE_PLAY_CARD: the consent card */
     PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY_SERVERS, /* VIEW_ONLINE_PLAY_SERVERS: the server picker */
     PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_CARD,   /* VIEW_ACHIEVEMENTS_CARD: the consent card */
-    PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN /* VIEW_ACHIEVEMENTS_SIGN_IN: the sign-in form */
+    PLAYER_UI_SETTINGS_PAGE_ACHIEVEMENTS_SIGN_IN, /* VIEW_ACHIEVEMENTS_SIGN_IN */
+    PLAYER_UI_SETTINGS_PAGE_CHEAT_DB,
+    PLAYER_UI_SETTINGS_PAGE_CHEAT_DB_CONFIRM
 } PlayerUiSettingsPage;
 
 /* What a Settings control asks for (PLAYER_UI_ACTION_SETTINGS). main.c runs the
@@ -693,6 +695,10 @@ typedef enum {
     PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,     /* Settings > Online and developer (#2632) */
     PLAYER_UI_SETTINGS_REFRESH_COVER_ART,    /* Settings > Build tools and cache (#2632) */
     PLAYER_UI_SETTINGS_TOGGLE_CHEATS,        /* Settings > Online and developer (#2639) */
+    PLAYER_UI_SETTINGS_OPEN_CHEAT_DB,
+    PLAYER_UI_SETTINGS_FETCH_CHEAT_DB_SOURCES,
+    PLAYER_UI_SETTINGS_CHOOSE_CHEAT_DB_FILE,
+    PLAYER_UI_SETTINGS_CONFIRM_CHEAT_DB,
     PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
@@ -902,6 +908,15 @@ typedef struct {
     const char *cover_art_cache_size;
     /* Cheats (#2639): the stored switch, off by default. */
     bool cheats;
+    const char *cheat_db_status;
+    const char *cheat_db_source;
+    const char *cheat_db_maintainer;
+    const char *cheat_db_licence;
+    bool cheat_db_import;
+    bool cheat_db_replace;
+    bool cheat_db_download_available;
+    bool cheat_db_busy;
+    bool cheat_db_fetching_sources;
     const char *current_version;    /* "0.0.3" */
     const char *update_version;     /* "0.0.4", once checked */
     bool update_prerelease;
@@ -1422,6 +1437,10 @@ enum {
     PLAYER_UI_ID_ACHIEVEMENTS_SIGN_IN_CANCEL = 0x45B3u, /* its CANCEL */
     PLAYER_UI_ID_ACHIEVEMENTS_CONSENT_TEXT = 0x45B4u, /* RA's consent card: its scrolling text */
     PLAYER_UI_ID_ACHIEVEMENTS_AGREE = 0x45B5u,        /* RA's card: AGREE AND TURN ON */
+    PLAYER_UI_ID_SETTINGS_CHEAT_DB = 0x45B6u,
+    PLAYER_UI_ID_CHEAT_DB_DOWNLOAD = 0x45B7u,
+    PLAYER_UI_ID_CHEAT_DB_IMPORT = 0x45B8u,
+    PLAYER_UI_ID_CHEAT_DB_CONFIRM = 0x45B9u,
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,
