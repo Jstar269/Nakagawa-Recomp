@@ -190,6 +190,16 @@ VFPU_MEASURED_SELFTESTS = {
         "reason": "replays cells of the PSP-3000 vfpu-wide-dot-matrix run (vdot, vhdp, vcrsp, vqmul, vtfm4, "
                   "vhtfm4, vmmul, vmmov, vrot and the constant fills) through the AOT body and the interpreter",
     },
+    "vfpu-interp-selftest:check_vocp_vcrs_measured": {
+        "oracle_id": "PSP-VFPU-WIDEROPS-001",
+        "reason": "runs vocp.s/.q over the 20 measured specials and the vcrs.t finite, NaN, inf and denormal "
+                  "cells through the AOT body and the interpreter",
+    },
+    "vfpu-interp-selftest:check_vfim_measured": {
+        "oracle_id": "PSP-VFPU-PREFIX-001",
+        "reason": "runs vfim.s of the eight measured halves and the recorded D-prefix mask and saturation "
+                  "cells through the AOT body and the interpreter",
+    },
     "vfpu-interp-selftest:check_vf2i_measured_cells": {
         "oracle_id": "PSP-VFPU-CONVERT-001",
         "reason": "runs vf2in, vf2iz, vf2iu and vf2id.s on the measured denormal and negative quiet NaN cells "

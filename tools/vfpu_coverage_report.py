@@ -672,6 +672,13 @@ def _measured_selftests(word: int, op: int, size: object) -> list[str]:
     # The dot, cross, quaternion and matrix forms at their measured widths (PSP-VFPU-WIDEDOT-001).
     if _wide_dot_key(word, op, size) in WIDE_DOT_MEASURED_FORMS:
         tests.append("vfpu-interp-selftest:check_vfpu_wide_dot_measured")
+    # vcrs.t and vocp.s/.q (PSP-VFPU-WIDEROPS-001); vocp at .p/.t was not measured.
+    if (op == 0x19 and sub3 == 5 and size == 3) or (
+            op == 0x34 and (word >> 21) & 0x1F == 2 and (word >> 16) & 0x1F == 4 and size in {1, 4}):
+        tests.append("vfpu-interp-selftest:check_vocp_vcrs_measured")
+    # vfim.s (bits 23-25 all set; PSP-VFPU-PREFIX-001).
+    if op == 0x37 and sub3 == 7:
+        tests.append("vfpu-interp-selftest:check_vfim_measured")
     if op != 0x34:
         return tests
     jump, sel = (word >> 21) & 0x1F, (word >> 16) & 0x1F
