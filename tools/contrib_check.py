@@ -26,6 +26,9 @@ A source whose SDK header is not installed is ``SKIP``; one that includes a
 header only a build step writes, when that step has not run, is ``NOT_RUN``.
 
 The Python gate names failing unittest cases alongside its short output excerpt.
+Each unittest process gets a time limit scaled to its measured work; with
+``CONTRIB_TEST_JOBS`` above 1 the modules run in that many parallel processes
+planned from the measured weights (``plan_unit_batches``).
 The publication audit's provenance self-consistency leg compares the working
 tree against the checked-in ledger, which only a maintainer holding the private
 trusted ledger can regenerate.  Those findings are therefore reported as
@@ -39,23 +42,27 @@ from __future__ import annotations
 import argparse
 import ast
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
-    from . import ci_paths  # noqa: E402
+    from . import ci_paths, ci_test_shards  # noqa: E402
     from .vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # noqa: E402
 except ImportError:  # pragma: no cover - direct script execution
     import ci_paths  # type: ignore[no-redef]  # noqa: E402
+    import ci_test_shards  # type: ignore[no-redef]  # noqa: E402
     from vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # type: ignore[no-redef]  # noqa: E402
 
 #: Findings the publication audit raises only because the generated controls
@@ -924,13 +931,129 @@ def _unittest_failure_notes(stderr: str) -> list[str]:
     return [f"{'/'.join(sorted(statuses))}: {name}" for name, statuses in failures.items()]
 
 
+#: The time limit of one unittest process never falls below this.
+UNIT_MIN_TIMEOUT = 1800
+#: Local seconds allowed per measured hosted second (``tools/ci_test_weights.json``).  Those weights
+#: were taken under coverage on hosted runners.  A Windows workstation ran 31 selected modules in one
+#: process in 2.7 times their weight; in four parallel processes, on a machine other sessions were
+#: also loading, one process took 5.0 times its own, so the limit allows six.
+UNIT_TIMEOUT_PER_MEASURED_SECOND = 6
+#: Measured seconds of work that justify one more parallel unittest process.
+UNIT_SECONDS_PER_PROCESS = 300
+#: Environment variable that sets the parallel unittest processes.  The default is one: the modules
+#: share one checkout and the workstation's RAM lock grants one slot, and two parallel runs of the
+#: #2981 selection each failed a different test that passes alone.
+UNIT_JOBS_ENV = "CONTRIB_TEST_JOBS"
+
+
+@dataclass(frozen=True)
+class UnitBatch:
+    """One unittest process: its modules, their measured seconds and its time limit."""
+
+    modules: tuple[str, ...]
+    planned_seconds: float
+    timeout: int
+
+
+def _unit_timeout(planned_seconds: float) -> int:
+    return max(UNIT_MIN_TIMEOUT, math.ceil(UNIT_TIMEOUT_PER_MEASURED_SECOND * planned_seconds))
+
+
+def _unit_jobs() -> int:
+    raw = os.environ.get(UNIT_JOBS_ENV, "").strip()
+    if raw:
+        try:
+            jobs = int(raw)
+        except ValueError:
+            jobs = 0
+        if jobs < 1:
+            raise ValueError(f"{UNIT_JOBS_ENV} must be a positive integer, got {raw!r}")
+        return jobs
+    return 1
+
+
+def plan_unit_batches(modules: list[str], data: ci_test_shards.WeightData, jobs: int) -> tuple[
+    tuple[UnitBatch, ...], tuple[UnitBatch, ...],
+]:
+    """Split *modules* into parallel unittest processes and the processes that must run alone.
+
+    The parallel processes are packed by the hosted shard planner over the measured weights, one
+    per ``UNIT_SECONDS_PER_PROCESS`` of work and at most *jobs*.  A module in a ``separate`` group
+    mutates tracked repository state, which hosted runners keep apart on separate checkouts; here
+    the checkout is shared, so those modules run in one process of their own after the others.
+    Each process's time limit scales with its measured work.
+    """
+    def weight(module: str) -> float:
+        return data.weights.get(module.rsplit(".", 1)[-1], data.default_seconds)
+
+    def batch(group: list[str]) -> UnitBatch:
+        planned = round(sum(weight(module) for module in group), 3)
+        return UnitBatch(tuple(group), planned, _unit_timeout(planned))
+
+    exclusive_names = frozenset().union(*data.separate) if data.separate else frozenset()
+    exclusive = [module for module in modules if module.rsplit(".", 1)[-1] in exclusive_names]
+    shared = [module for module in modules if module not in exclusive]
+    parallel: list[UnitBatch] = []
+    if shared:
+        total = sum(weight(module) for module in shared)
+        count = max(1, min(jobs, len(shared), math.ceil(total / UNIT_SECONDS_PER_PROCESS)))
+        if count == 1:
+            parallel.append(batch(shared))
+        else:
+            by_name = {module.rsplit(".", 1)[-1]: module for module in shared}
+            unseparated = ci_test_shards.WeightData(data.default_seconds, data.weights, ())
+            plan = ci_test_shards.plan_shards(list(by_name), unseparated, count)
+            parallel.extend(batch([by_name[name] for name in shard]) for shard in plan.shards if shard)
+    alone = (batch(exclusive),) if exclusive else ()
+    return tuple(parallel), alone
+
+
+def _unit_batch_gate(unit: UnitBatch) -> tuple[Gate, float]:
+    started = time.monotonic()
+    gate = _run(
+        "python-unittest", [GATE_PYTHON, "-m", "unittest", *unit.modules], timeout=unit.timeout,
+        failure_notes=_unittest_failure_notes,
+    )
+    return gate, time.monotonic() - started
+
+
+def _timeout_detail(unit: UnitBatch) -> str:
+    return (f"UNITTEST_TIME_LIMIT: {len(unit.modules)} module(s) with {unit.planned_seconds:g}s of measured "
+            f"work did not finish within {unit.timeout}s: {', '.join(unit.modules)}")
+
+
 def unit_gate(modules: list[str]) -> Gate:
     if not modules:
         return Gate("python-unittest", NOT_RUN, "no matching test module for changed paths")
-    return _run(
-        "python-unittest", [GATE_PYTHON, "-m", "unittest", *modules], timeout=1800,
-        failure_notes=_unittest_failure_notes,
-    )
+    try:
+        data = ci_test_shards.load_weight_data()
+        parallel, alone = plan_unit_batches(modules, data, _unit_jobs())
+    except (ci_test_shards.ShardDataError, ValueError) as exc:
+        return Gate("python-unittest", FAIL, f"cannot plan the unittest processes: {exc}")
+    batches = parallel + alone
+    if len(parallel) > 1:
+        print(f"  unittest: {len(parallel)} parallel process(es)"
+              + (f", then {len(alone[0].modules)} module(s) alone" if alone else ""))
+    with ThreadPoolExecutor(max_workers=max(1, len(parallel))) as pool:
+        timed = list(pool.map(_unit_batch_gate, parallel))
+    timed.extend(_unit_batch_gate(unit) for unit in alone)
+    results = [gate for gate, _elapsed in timed]
+    if len(batches) > 1:
+        for unit, (gate, elapsed) in zip(batches, timed, strict=True):
+            print(f"  unittest process: {len(unit.modules)} module(s), {unit.planned_seconds:g}s measured, "
+                  f"limit {unit.timeout}s, took {elapsed:.0f}s, {gate.status}")
+    failed = [(unit, gate) for unit, gate in zip(batches, results, strict=True) if gate.status != PASS]
+    if not failed:
+        return Gate("python-unittest", PASS)
+    details = []
+    for unit, gate in failed:
+        detail = _timeout_detail(unit) if gate.detail.startswith("timed out after ") else gate.detail
+        if gate.status == FAIL and len(batches) > 1 and not detail.startswith("UNITTEST_TIME_LIMIT"):
+            detail = f"[{', '.join(unit.modules)}] {detail}"
+        details.append(detail)
+    status = FAIL if any(gate.status == FAIL for _unit, gate in failed) else failed[0][1].status
+    output = "\n".join(gate.output for _unit, gate in failed if gate.output)
+    return Gate("python-unittest", status, "\n".join(details), output)
 
 
 def markdown_gate(paths: list[str]) -> Gate:

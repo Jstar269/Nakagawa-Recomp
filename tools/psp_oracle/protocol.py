@@ -1015,6 +1015,60 @@ GE_RESULT_RECORD_MAX_BYTES = 16384
 #: A probe run's record is one whole campaign stream (ge-raster: 946 records, about 330 KB).
 GE_PROBE_RECORD_MAX_BYTES = 1 << 20
 
+GE_SOLID_TRIANGLE_CASE = "solid-triangle-8888-v1"
+GE_SOLID_TRIANGLE_TEST = "PSP-GE-PIXEL-001"
+GE_SOLID_TRIANGLE_INPUT_SHA256 = "f9798f69e08b7085e5ab6bd9c5461b10767e437a68b4b3916380d9a284add224"
+
+# The setup prefix is independent of the declared twenty words. It bounds
+# raster writes to the color surface and disables writes through the depth
+# buffer. The draw list does not inherit these registers from the shell.
+GE_SOLID_TRIANGLE_PRESTATE = (
+    0x13000000,                         # OFFSETADDR
+    0x4C000000, 0x4D000000,             # OFFSETX/Y
+    0x15000000, 0x16003C0F,             # region (0,0)..(15,15)
+    0xD4000000, 0xD5003C0F,             # scissor (0,0)..(15,15)
+    0x1C000000, 0x25000000, 0x50000000, # clipping, antialias, flat shade
+    0xD3000000, 0xE7000001,             # clear mode off, depth writes off
+    0xE8000000, 0xE9000000,             # color and stencil write masks
+)
+GE_SOLID_TRIANGLE_PRESTATE_SHA256 = hashlib.sha256(
+    b"".join(word.to_bytes(4, "little") for word in GE_SOLID_TRIANGLE_PRESTATE)
+).hexdigest()
+
+
+def ge_solid_triangle_input_sha256(case: dict[str, Any]) -> str:
+    declaration = {key: case[key] for key in (
+        "case_id", "command_words", "relocations", "vertex_words", "framebuffer",
+    )}
+    declaration["selected_coordinates"] = [[pixel["x"], pixel["y"]] for pixel in case["selected_pixels"]]
+    return hashlib.sha256(json.dumps(declaration, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def ge_solid_triangle_input_words() -> tuple[int, ...]:
+    """Encode the declaration and setup digests as eight scalar words each."""
+    digests = GE_SOLID_TRIANGLE_INPUT_SHA256 + GE_SOLID_TRIANGLE_PRESTATE_SHA256
+    return tuple(int(digests[index:index + 8], 16) for index in range(0, len(digests), 8))
+
+
+def ge_solid_triangle_header(corpus_path: Path) -> str:
+    """Emit only the pinned named probe input; changes require a new case identity."""
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    matches = [case for case in corpus["cases"] if case["case_id"] == GE_SOLID_TRIANGLE_CASE]
+    if len(matches) != 1 or ge_solid_triangle_input_sha256(matches[0]) != GE_SOLID_TRIANGLE_INPUT_SHA256:
+        raise ProtocolError(f"{GE_SOLID_TRIANGLE_CASE}: pinned case input changed")
+    case = matches[0]
+
+    def array(name: str, words: Iterable[int]) -> str:
+        return f"static const uint32_t {name}[] = {{ " + ", ".join(f"0x{word:08x}u" for word in words) + " };"
+
+    return "\n".join((
+        "/* Generated from the pinned public GE case. */",
+        array("solid_case_words", (int(word, 16) for word in case["command_words"])),
+        array("solid_vertices", (int(word, 16) for word in case["vertex_words"])),
+        array("solid_prestate", GE_SOLID_TRIANGLE_PRESTATE),
+        array("solid_identity", ge_solid_triangle_input_words()),
+    ))
+
 
 def _load_result_record(
     record: Any, results_root: Path | None, max_bytes: int = GE_RESULT_RECORD_MAX_BYTES
@@ -1115,6 +1169,24 @@ def _ge_case_status(case: dict[str, Any], results_root: Path | None = None) -> t
         return "REFUSED", identity_refusal
     if envelope["CASE_ID"] != case_id:
         return "REFUSED", "oracle CASE_ID does not match the corpus case_id."
+    if case_id == GE_SOLID_TRIANGLE_CASE:
+        from .parse_golden import ge_solid_triangle_readback, parse_campaign_probe_output
+
+        if ge_solid_triangle_input_sha256(case) != GE_SOLID_TRIANGLE_INPUT_SHA256:
+            return "REFUSED", "pinned command-case declaration differs."
+        try:
+            sequence = parse_campaign_probe_output(raw_result, case_id)
+            pixels = ge_solid_triangle_readback(sequence)
+        except ProtocolError as exc:
+            return "REFUSED", f"command-case result is invalid: {exc}"
+        if hashlib.sha256(pixels).hexdigest() != case["framebuffer_sha256"]:
+            return "REFUSED", "raw result framebuffer_sha256 does not match the case digest."
+        for pixel in case["selected_pixels"]:
+            x, y = pixel["x"], pixel["y"]
+            offset = (y * case["framebuffer"]["stride_pixels"] + x) * 4
+            if int.from_bytes(pixels[offset:offset + 4], "little") != pixel["pixel_value"]:
+                return "REFUSED", f"raw result pixel_{x}_{y} does not match the case pixel vector."
+        return "MEASURED", "acceptance-eligible PSP_HARDWARE record matches this case and its pixel results."
     records = [
         record for record in parsed.results
         if record.test_id == "PSP-GE-001" and record.case_id == case_id

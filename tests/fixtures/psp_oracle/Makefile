@@ -298,6 +298,8 @@ CASE_ID = 157
 # reads of a framebuffer the GE just drew into, with and without TEXFLUSH and TEXSYNC.
 else ifeq ($(CASE),ge-rtt)
 CASE_ID = 158
+else ifeq ($(CASE),solid-triangle-8888-v1)
+CASE_ID = 193
 # 187: #2193's raster bounds cells (probe_ge_sample.c, PSP-GE-RASTER-002): colour writes past
 # the frame-buffer stride, depth writes past zbw, and a depth-only clear under a scissor.
 else ifeq ($(CASE),ge-raster-bounds)
@@ -839,6 +841,10 @@ OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),ge-rtt)
 TARGET = $(BUILD_DIR)/ge_rtt
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),solid-triangle-8888-v1)
+TARGET = $(BUILD_DIR)/solid_triangle_8888_v1
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+CFLAGS += -I$(BUILD_DIR)
 # The GE raster bounds cells: the same source as the sample-point cells, case 187.
 else ifeq ($(CASE),ge-raster-bounds)
 TARGET = $(BUILD_DIR)/ge_raster_bounds
@@ -1306,6 +1312,14 @@ $(BUILD_DIR)/probe_hle_issues.o: probe_hle_issues.c hle_vfpu_cells.h probe_hle_h
 
 $(BUILD_DIR)/probe_ge_sample.o: probe_ge_sample.c probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@
+
+ifeq ($(CASE),solid-triangle-8888-v1)
+GE_SOLID_PROTOCOL_DIR = $(FIXTURE_DIR)../../../tools
+$(BUILD_DIR)/probe_ge_sample.o: $(BUILD_DIR)/ge_solid_triangle_inputs.h
+$(BUILD_DIR)/ge_solid_triangle_inputs.h: ge_corpus.json $(GE_SOLID_PROTOCOL_DIR)/psp_oracle/protocol.py
+	"$(PYTHON)" -B -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from psp_oracle.protocol import ge_solid_triangle_header; print(ge_solid_triangle_header(Path(sys.argv[2])))' "$(GE_SOLID_PROTOCOL_DIR)" "$<" > "$@.tmp" && mv "$@.tmp" "$@"
+EXTRA_CLEAN += $(BUILD_DIR)/ge_solid_triangle_inputs.h
+endif
 
 $(BUILD_DIR)/probe_dmac_timing.o: probe_dmac_timing.c probe_hle_harness.h
 	$(CC) $(CFLAGS) -c $< -o $@

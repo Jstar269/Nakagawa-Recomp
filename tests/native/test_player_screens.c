@@ -1235,7 +1235,7 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
            this page pushed the prompt bar off the window. The render case adds #2151's notice
-           with the longer of its two sentences (player_render_notice_text); the effects case
+           with the longest of its sentences (player_render_notice_text); the effects case
            the longest sentence player_render_effects_text writes, every effect named. The
            font note case is the Authentic page with the font note (player_app_font_note). */
         static PlayerUiTitle fixture;
@@ -4927,8 +4927,7 @@ static void test_settings_pages(void) {
               strstr(dump, "thumbnails.libretro.com") != NULL,
           "Online and developer offers Discord status and opt-in cover art, off by default");
     {
-        /* Focus steps cleanly through every row on Online and developer, reaching both
-           Online play and Download cover art without duplicate widget IDs. */
+        /* Focus reaches every active row in order, including Cheat database. */
         static const NkUiId expected_order[] = {
             PLAYER_UI_ID_SETTINGS_DEVELOPER,
             PLAYER_UI_ID_SETTINGS_DISCORD,
@@ -4936,6 +4935,7 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
             PLAYER_UI_ID_SETTINGS_CHEATS,
+            PLAYER_UI_ID_SETTINGS_CHEAT_DB,
             PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         NkUi *ui = NULL;
@@ -4949,7 +4949,7 @@ static void test_settings_pages(void) {
             (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
             (void)nk_ui_end(ui);
             CHECK(nk_ui_focused(ui) == expected_order[step],
-                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, Cheats, and Developer log");
+                  "Down reaches every enabled Online and developer control in order");
         }
         if (ui != NULL) {
             push_nav(ui, NK_UI_DIR_LEFT);
@@ -4962,14 +4962,12 @@ static void test_settings_pages(void) {
         }
     }
     {
-        /* All six optional/standard rows active together (Online mode, Developer mode,
-           Discord status, Nickname, Online play, Download cover art) stay within the row
-           table and keep distinct focusable controls. */
+        /* Optional and standard rows fit together and keep distinct focusable controls. */
         NkUiConfig config;
         NkUiTextBackend text = screen_test_text_backend();
         PlayerUiSettingsModel six;
         const NkUiDrawList *draw = NULL;
-        static const NkUiId six_order[] = {
+        static const NkUiId full_order[] = {
             PLAYER_UI_ID_SETTINGS_ONLINE_MODE,
             PLAYER_UI_ID_SETTINGS_DEVELOPER,
             PLAYER_UI_ID_SETTINGS_DISCORD,
@@ -4977,13 +4975,14 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
             PLAYER_UI_ID_SETTINGS_CHEATS,
+            PLAYER_UI_ID_SETTINGS_CHEAT_DB,
             PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         memset(&config, 0, sizeof(config));
         config.host = NK_UI_HOST_LAUNCHER;
         config.text = &text;
         NkUi *ui = screen_ui_create(&config);
-        CHECK(ui != NULL, "create UI for 6-row Online and developer regression");
+        CHECK(ui != NULL, "create UI for the populated Online and developer layout");
         if (ui != NULL) {
             set_test_viewport(ui, 1280, 800);
             memset(&six, 0, sizeof(six));
@@ -5006,12 +5005,13 @@ static void test_settings_pages(void) {
             CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u &&
                       strstr(dump, "\"ONLINE MODE: ON\"") != NULL &&
                       strstr(dump, "\"ONLINE PLAY: ON (SOCOM.CC)\"") != NULL &&
-                      strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL,
-                  "all 6 rows on Online and developer render together cleanly");
-            for (size_t step = 0u; step < sizeof(six_order) / sizeof(six_order[0]); ++step) {
-                CHECK(nk_ui_focused(ui) == six_order[step],
-                      "6-row Online and developer focus visits every control in order");
-                if (step + 1u < sizeof(six_order) / sizeof(six_order[0])) {
+                      strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL &&
+                      strstr(dump, "\"CHEAT DATABASE: OPEN\"") != NULL,
+                  "the optional and standard Online and developer rows fit together");
+            for (size_t step = 0u; step < sizeof(full_order) / sizeof(full_order[0]); ++step) {
+                CHECK(nk_ui_focused(ui) == full_order[step],
+                      "the populated Online and developer layout visits every control in order");
+                if (step + 1u < sizeof(full_order) / sizeof(full_order[0])) {
                     push_nav(ui, NK_UI_DIR_DOWN);
                     nk_ui_begin(ui, 0.0);
                     (void)player_ui_screen_settings(ui, &six);
@@ -5023,7 +5023,7 @@ static void test_settings_pages(void) {
             (void)player_ui_screen_settings(ui, &six);
             (void)nk_ui_end(ui);
             CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_SETTINGS_BACK,
-                  "Left from Developer log reaches Back in 6-row Online and developer layout");
+                  "Left from Developer log reaches Back in the populated layout");
             nk_ui_destroy(ui);
         }
     }

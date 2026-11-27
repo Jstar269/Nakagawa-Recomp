@@ -1273,7 +1273,7 @@
     "classification": "dedicated",
     "handler": "h_SasSetVolume",
     "name": "__sceSasSetVolume",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x446d8de6": {
     "classification": "dedicated",
@@ -1478,7 +1478,7 @@
     "classification": "dedicated",
     "handler": "h_SasCoreWithMix",
     "name": "__sceSasCoreWithMix",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x50c4cd57": {
     "classification": "dedicated",
