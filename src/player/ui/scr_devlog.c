@@ -115,7 +115,7 @@ PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperL
     (void)nk_ui_waves_element(ui, DEV_ID_WAVES, (NkUiRect){0.0f, 0.0f, width, height}, 0u);
     layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_grow(), 0.0f);
     if (!nk_ui_begin_container(ui, DEV_ID_ROOT, &layout, NULL)) return result;
-    (void)nk_ui_top_bar(ui, DEV_ID_TOP, NULL, 0u, nk_ui_input_label(nk_ui_prompt_style(ui)),
+    (void)nk_ui_top_bar(ui, DEV_ID_TOP, NULL, 0u, nk_ui_input_chip_label(ui),
                         nk_ui_prompt_style(ui) != NK_UI_PROMPT_KEYCAPS);
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
     layout.align_x = NK_UI_ALIGN_CENTER;

@@ -921,6 +921,17 @@ class AndroidTitleLibraryTests(unittest.TestCase):
         shim = (ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c").read_text(encoding="utf-8")
         self.assertIn("    __wrap_exit(main(argc, argv));\n}", shim)
 
+    def test_the_launcher_takes_the_system_back_itself(self) -> None:
+        """Untrapped, SDL let the system end the launcher on every Back, whatever page was
+        open, after sending SDLK_AC_BACK too (SDLActivity.onBackPressed): the player traps it
+        before SDL starts and goes back one view, as Esc does (#3215)."""
+        player = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        opened = player[player.index("static int player_open_window(PlayerRun *run) {"):]
+        self.assertLess(opened.index('SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");'),
+                        opened.index("SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)"))
+        back = player[player.index("static const SDL_Event *player_back_as_escape("):]
+        self.assertIn("event->key.key == SDLK_AC_BACK", back[:back.index("\n}\n")])
+
     def test_a_failed_bundled_file_unpack_is_shown(self) -> None:
         """A failed copy of the bundled files is shown by the launcher, and does not also hide
         the toolchain unpack (its flag is set before the copy)."""

@@ -1050,6 +1050,74 @@ static int test_prompt_style_follows_device(void) {
     return 1;
 }
 
+/* Touch is the last-used input among touch, keys, the mouse and pads: a tap makes it active,
+   and the next key, click, wheel notch or pad press ends it. The system's Back leaves the
+   active input as it is. */
+static int test_touch_input(void) {
+    NkUiInput in;
+    NkUiEvent ev[NK_UI_INPUT_MAX_EVENTS];
+    size_t n;
+    nk_ui_input_init(&in);
+    CHECK(!nk_ui_input_touch_active(&in) && !nk_ui_input_touch_active(NULL),
+          "no input yet: not touch");
+    n = nk_ui_input_touch(&in, 40.0f, 50.0f, true, ev, 4);
+    CHECK(n >= 1u && ev[n - 1u].type == NK_UI_EV_POINTER && ev[n - 1u].down &&
+              ev[n - 1u].x == 40.0f && ev[n - 1u].y == 50.0f,
+          "a tap is the pointer event a click makes");
+    (void)nk_ui_input_touch(&in, 40.0f, 50.0f, false, ev, 4);
+    CHECK(nk_ui_input_touch_active(&in) && nk_ui_input_prompt_style(&in) == NK_UI_PROMPT_KEYCAPS,
+          "a tap makes touch the active input");
+    (void)nk_ui_input_pointer(&in, 60.0f, 70.0f, false, ev, 4);
+    CHECK(nk_ui_input_touch_active(&in), "pointer motion alone keeps touch");
+    n = nk_ui_input_system_back(&in, true, 1.0, ev, 4);
+    CHECK(n == 1u && ev[0].type == NK_UI_EV_BACK && ev[0].down && nk_ui_input_touch_active(&in),
+          "the system's Back goes back and keeps touch");
+    CHECK(nk_ui_input_system_back(&in, true, 1.05, ev, 4) == 0u,
+          "a second press of a held system Back is ignored");
+    CHECK(nk_ui_input_system_back(&in, false, 1.1, ev, 4) == 0u, "its release is silent");
+    n = nk_ui_input_button(&in, NK_UI_BTN_DOWN, true, NK_UI_DEVICE_KEYBOARD_MOUSE,
+                           NK_UI_PAD_KEYBOARD, 2.0, ev, 4);
+    CHECK(n == 2u && ev[0].type == NK_UI_EV_DEVICE && ev[0].pad_family == NK_UI_PAD_KEYBOARD &&
+              ev[1].type == NK_UI_EV_NAV && !nk_ui_input_touch_active(&in),
+          "a key ends touch, and its device is announced again");
+    (void)nk_ui_input_button(&in, NK_UI_BTN_DOWN, false, NK_UI_DEVICE_KEYBOARD_MOUSE,
+                             NK_UI_PAD_KEYBOARD, 2.1, ev, 4);
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, true, ev, 4);
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, false, ev, 4);
+    (void)nk_ui_input_pointer(&in, 10.0f, 10.0f, true, ev, 4);
+    CHECK(!nk_ui_input_touch_active(&in), "a mouse click ends touch");
+    (void)nk_ui_input_pointer(&in, 10.0f, 10.0f, false, ev, 4);
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, true, ev, 4);
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, false, ev, 4);
+    (void)nk_ui_input_wheel(&in, 10.0f, 10.0f, NK_UI_DIR_DOWN, ev, 4);
+    CHECK(!nk_ui_input_touch_active(&in), "a wheel notch ends touch");
+    (void)nk_ui_input_device_change(&in, 7, NK_UI_PAD_LETTERS_A_SOUTH, true, ev, 4);
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, true, ev, 4);
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, false, ev, 4);
+    CHECK(nk_ui_input_touch_active(&in) && nk_ui_input_prompt_style(&in) == NK_UI_PROMPT_KEYCAPS,
+          "a tap takes over from a built-in pad that was connected first");
+    n = nk_ui_input_system_back(&in, true, 3.0, ev, 4);
+    (void)nk_ui_input_system_back(&in, false, 3.1, ev, 4);
+    CHECK(n == 1u && ev[0].type == NK_UI_EV_BACK && nk_ui_input_touch_active(&in),
+          "the system's Back keeps touch with a pad connected");
+    (void)nk_ui_input_button(&in, NK_UI_BTN_CONFIRM, true, 7, NK_UI_PAD_LETTERS_A_SOUTH, 4.0, ev, 4);
+    (void)nk_ui_input_button(&in, NK_UI_BTN_CONFIRM, false, 7, NK_UI_PAD_LETTERS_A_SOUTH, 4.1, ev, 4);
+    CHECK(!nk_ui_input_touch_active(&in) &&
+              nk_ui_input_prompt_style(&in) == NK_UI_PROMPT_LETTERS_A_SOUTH,
+          "a pad press ends touch and shows the pad's glyphs");
+    n = nk_ui_input_system_back(&in, true, 5.0, ev, 4);
+    (void)nk_ui_input_system_back(&in, false, 5.1, ev, 4);
+    CHECK(n == 1u && ev[0].device == 7 &&
+              nk_ui_input_prompt_style(&in) == NK_UI_PROMPT_LETTERS_A_SOUTH,
+          "the system's Back after a pad press keeps the pad's glyphs");
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, true, ev, 4);
+    (void)nk_ui_input_touch(&in, 10.0f, 10.0f, false, ev, 4);
+    (void)nk_ui_input_device_change(&in, 9, NK_UI_PAD_SHAPES, true, ev, 4);
+    CHECK(!nk_ui_input_touch_active(&in) && nk_ui_input_prompt_style(&in) == NK_UI_PROMPT_SHAPES,
+          "a pad that connects ends touch, as it switches the glyphs");
+    return 1;
+}
+
 static int test_event_construction(void) {
     NkUiInput in;
     NkUiEvent ev[NK_UI_INPUT_MAX_EVENTS];
@@ -1756,6 +1824,51 @@ static int test_sdl_translation(void) {
         x1.button.down = false;
         (void)tr(&s, &x1, 3.79);
     }
+    e = key_event(SDLK_AC_BACK, true, false, 0);
+    n = tr(&s, &e, 3.8);
+    CHECK(n == 1 && g_out[0].type == NK_UI_EV_BACK && g_out[0].down,
+          "Android's back button (SDLK_AC_BACK) is Back");
+    e = key_event(SDLK_AC_BACK, false, false, 0);
+    (void)tr(&s, &e, 3.81);
+    e = key_event(SDLK_ESCAPE, true, false, 0);
+    e.key.scancode = SDL_SCANCODE_AC_BACK;
+    n = tr(&s, &e, 3.82);
+    CHECK(n == 1 && g_out[0].type == NK_UI_EV_BACK, "so is that key after the host names it Esc");
+    e = key_event(SDLK_ESCAPE, false, false, 0);
+    e.key.scancode = SDL_SCANCODE_AC_BACK;
+    (void)tr(&s, &e, 3.83);
+    {
+        /* SDL reports a tap as the left button of its touch mouse, a pen as its pen mouse. */
+        static const SDL_MouseID kTouchMice[2] = {SDL_TOUCH_MOUSEID, SDL_PEN_MOUSEID};
+        size_t m;
+        for (m = 0u; m < 2u; ++m) {
+            SDL_Event tap;
+            CHECK(!nk_ui_input_touch_active(&s.input), "a key ended touch");
+            memset(&tap, 0, sizeof(tap));
+            tap.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            tap.button.which = kTouchMice[m];
+            tap.button.button = SDL_BUTTON_LEFT;
+            tap.button.down = true;
+            tap.button.x = 30.0f;
+            tap.button.y = 40.0f;
+            n = tr(&s, &tap, 3.84 + 0.01 * (double)m);
+            CHECK(n >= 1 && g_out[n - 1].type == NK_UI_EV_POINTER && g_out[n - 1].down,
+                  "a tap presses the pointer");
+            tap.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            tap.button.down = false;
+            (void)tr(&s, &tap, 3.845 + 0.01 * (double)m);
+            CHECK(nk_ui_input_touch_active(&s.input), "a tap or a pen press is touch input");
+            e = key_event(SDLK_AC_BACK, true, false, 0);
+            (void)tr(&s, &e, 3.846 + 0.01 * (double)m);
+            e = key_event(SDLK_AC_BACK, false, false, 0);
+            (void)tr(&s, &e, 3.847 + 0.01 * (double)m);
+            CHECK(nk_ui_input_touch_active(&s.input), "Android's back button keeps touch");
+            e = key_event(SDLK_SPACE, true, false, 0);
+            (void)tr(&s, &e, 3.848 + 0.01 * (double)m);
+            e = key_event(SDLK_SPACE, false, false, 0);
+            (void)tr(&s, &e, 3.849 + 0.01 * (double)m);
+        }
+    }
     e = key_event(SDLK_Z, true, false, 0);
     CHECK(tr(&s, &e, 4.0) == 0u, "an unmapped key is ignored");
 
@@ -1994,6 +2107,40 @@ static int test_sdl_translation(void) {
     n = tr(&s, &e, 8.6);
     CHECK(n == 1 && g_out[0].dir == NK_UI_DIR_LEFT, "flipped wheels reverse");
 
+    /* A UI drawn inside the window's safe area (#3215): every position is taken from that
+       area's corner, then scaled, for the mouse, a tap and the wheel alike. */
+    nk_ui_sdl_input_set_event_origin(&s, 40.0f, 30.0f);
+    memset(&e, 0, sizeof(e));
+    e.type = SDL_EVENT_MOUSE_MOTION;
+    e.motion.x = 260.0f;
+    e.motion.y = 150.0f;
+    n = tr(&s, &e, 8.7);
+    CHECK(n == 1 && g_out[0].type == NK_UI_EV_POINTER && g_out[0].x == 110.0f &&
+          g_out[0].y == 60.0f, "mouse motion from the safe area's corner");
+    memset(&e, 0, sizeof(e));
+    e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    e.button.which = SDL_TOUCH_MOUSEID;
+    e.button.button = SDL_BUTTON_LEFT;
+    e.button.down = true;
+    e.button.x = 60.0f;
+    e.button.y = 50.0f;
+    n = tr(&s, &e, 8.71);
+    CHECK(n >= 1 && g_out[n - 1u].type == NK_UI_EV_POINTER && g_out[n - 1u].x == 10.0f &&
+          g_out[n - 1u].y == 10.0f, "a tap from the safe area's corner");
+    e.button.down = false;
+    (void)tr(&s, &e, 8.72);
+    memset(&e, 0, sizeof(e));
+    e.type = SDL_EVENT_MOUSE_WHEEL;
+    e.wheel.y = 1.0f;
+    e.wheel.mouse_x = 40.0f;
+    e.wheel.mouse_y = 30.0f;
+    n = tr(&s, &e, 8.73);
+    /* After the tap, the wheel first says the mouse is the input again. */
+    CHECK(n >= 1 && g_out[n - 1u].type == NK_UI_EV_WHEEL && g_out[n - 1u].x == 0.0f &&
+          g_out[n - 1u].y == 0.0f, "the wheel from the safe area's corner");
+    nk_ui_sdl_input_set_event_origin(&s, NAN, INFINITY);
+    CHECK(s.event_origin_x == 0.0f && s.event_origin_y == 0.0f, "a non-finite corner resets to 0");
+
     /* Text. */
     memset(&e, 0, sizeof(e));
     e.type = SDL_EVENT_TEXT_INPUT;
@@ -2056,7 +2203,7 @@ int main(int argc, char **argv) {
         !test_nested_scroller_hides_its_list() || !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
         !test_repeat_timing() || !test_direction_holders() || !test_stick_hysteresis() ||
         !test_event_construction() ||
-        !test_prompt_style_follows_device() ||
+        !test_prompt_style_follows_device() || !test_touch_input() ||
         !test_utf8() || !test_label_table() || !test_prompt_bounds() ||
         !test_prompt_labels() || !test_prompt_images() || !test_glyph_goldens()) {
         return 1;
