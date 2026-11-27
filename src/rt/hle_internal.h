@@ -769,6 +769,7 @@ typedef struct {
     uint8_t on_umd;              /* 1 = a file of the disc, or one served in its place: a read takes the drive's time */
     uint32_t lba, size, off;
     int64_t async_res;
+    int write_counted;           /* writable ordinary host stream has no deferred buffer */
     int writable;
     int append;                  /* 1 = opened with PSP_O_APPEND: every write lands at the end */
     uint8_t *truncated_bytes;    /* what PSP_O_TRUNC cut, for a later write past them */
