@@ -52,7 +52,7 @@ SAVE_BYTES = b"PROFILE_ZERO_SAVE_V1\n"
 VBLANK_SCRIPT = "12 4000 4\n240 0008 4\n"
 # What the profile-zero package produces on the deterministic guest clock
 # (SR_DETERMINISTIC_CLOCK=1), pinned once and checked on every host that runs the route: Windows
-# (windows_runtime, routes part) and Linux (native_tools, player part) in hosted CI, and macOS
+# (windows_runtime, routes part) and Linux (native_tools, routes part) in hosted CI, and macOS
 # (#329) and Android (#360) as they arrive. Guest time there is a function of the guest's work
 # alone, so these are pure functions of the guest bytes and the runtime source. Values:
 # sha256 of RESULT.TXT and ROUNDTRIP.BIN, and the vblank and sha256 of the first frame

@@ -1145,7 +1145,10 @@ Clock ownership:
   not pause the guest.
 
   In the SDL3/Vulkan window, `Esc`, `F1` or the controller's Guide button asks for the pause,
-  and so does losing the open controller (`src/rt/gpu_sdl3vk/sdl3vk.c`, `src/rt/gui.c`). The
+  and so does losing the open controller (`src/rt/gpu_sdl3vk/sdl3vk.c`, `src/rt/gui.c`). On
+  Android the system's Back (`SDLK_AC_BACK`) is `Esc`, in the game and in the overlay: the
+  runtime traps it, so it never ends `TitleActivity`. On Android 16 and newer,
+  `TitleActivity` registers a back callback that sends it to SDL. The
   request opens the pause at the scheduler's next switch point. It is refused while the
   on-screen keyboard is open, once the presenter can no longer present, without a window
   presenter (headless, offscreen or GDI runs) and under automation; `SR_PAUSE: refused` names
