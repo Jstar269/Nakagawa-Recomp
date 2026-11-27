@@ -563,7 +563,7 @@ a title that translates none has generated code unchanged.
 | `0xa9ed66b9` | `sceNetInetTerm` | network | `synthetic` | HLE selftest dispatch |
 | `0xaa73c935` | `sceKernelExitThread` | kernel_thread | `synthetic` | HLE selftest dispatch; unlinked hardware note |
 | `0xab1abe07` | `sceHttpInit` | network | `synthetic` | HLE selftest dispatch |
-| `0xab49e76a` | `sceGeListEnQueue` | ge | `synthetic` | HLE selftest dispatch |
+| `0xab49e76a` | `sceGeListEnQueue` | ge | `ppsspp-derived` | handler comment names PPSSPP |
 | `0xab96437f` | `sceIoSync` | io | `unverified` | no recorded evidence |
 | `0xabed3790` | `sceNetAdhocPdpSend` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0xace946e8` | `sceIoGetstat` | io | `ppsspp-derived` | handler comment names PPSSPP |
