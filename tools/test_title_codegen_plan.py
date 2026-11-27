@@ -801,6 +801,58 @@ class TitleCodegenPlanTests(unittest.TestCase):
             self.assertFalse([name for name in libraries if name.lower().endswith(".dll")],
                              libraries)
 
+    def test_verified_package_build_requests_timing_observation(self) -> None:
+        from nk_core import package_cache
+
+        class StopAtMake(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps(self.synthetic), encoding="utf-8")
+            elf = root / "fixture.elf"
+            elf.write_bytes(b"synthetic ELF identity")
+            identity = root / "title-input-identity.json"
+            identity.write_text(json.dumps(package_cache.build_title_input_identity(
+                manifest=self.synthetic,
+                executable_name=elf.name,
+                executable_sha256=package_cache.sha256_file(elf),
+                modules=[],
+                disc_id="TEST30340",
+                disc_version="1.00",
+            )), encoding="utf-8")
+            actual = []
+            run = title_codegen_plan.subprocess.run
+
+            def inspect_make(argv, **kwargs):
+                if Path(argv[0]).name == "fixture-make":
+                    actual.append(kwargs["env"]["CODEGEN_USER_ARGS"])
+                    raise StopAtMake
+                return run(argv, **kwargs)
+
+            with mock.patch.dict(os.environ, {"CODEGEN_USER_ARGS": "--nan-trap"}), \
+                    mock.patch.object(title_codegen_plan.shutil, "which",
+                                      side_effect=lambda name, **_kwargs: f"/fixture/{name}"), \
+                    mock.patch.object(title_codegen_plan, "_version_identity",
+                                      return_value=("tool", "tool 1")), \
+                    mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=inspect_make):
+                for name, supplied in (("verified", identity), ("direct", None)):
+                    with self.subTest(name=name), self.assertRaises(StopAtMake):
+                        title_codegen_plan.build_package(
+                            self.synthetic,
+                            manifest_path=manifest,
+                            game_elf=elf,
+                            output_dir=root / name,
+                            game_name="synthetic",
+                            make_command="fixture-make",
+                            title_input_identity_file=supplied,
+                            aot_stage=True,
+                        )
+            self.assertEqual(actual, [
+                "--nan-trap --record-timing-identity=TEST30340:1.00", "--nan-trap",
+            ])
+
     def test_package_inputs_with_the_same_name_keep_distinct_staged_bytes(self) -> None:
         class StopAfterStaging(Exception):
             pass
