@@ -457,16 +457,17 @@ uint32_t h_IoWrite(CpuState *s) {
     if (count != 0u && !sr_inrange_n(src, count)) return 0x80010016u;
     if (f->append) return io_write_append(f, fd, write_at, src, count);
     if (f->truncated_bytes && !io_restore_truncated_gap(f)) return 0x80010005u;
-    if (io_host_seek(f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
-    uint8_t tmp[4096]; uint32_t done = 0;
-    while (done < count) {
-        uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
-        for (uint32_t k = 0; k < n; k++) tmp[k] = (uint8_t)MEM_R8(src + done + k);
-        uint32_t wrote = (uint32_t)fwrite(tmp, 1, n, f->host);
-        done += wrote;
-        if (wrote < n) break;
+    if (io_seek_for_write(fd, f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
+    clearerr(f->host);   /* an earlier read's error is not this write's */
+    uint32_t done = io_write_guest_prefix(fd, f->host, src, count);
+    /* Buffered streams keep the flush-error rule. Count only the actual accepted
+     * prefix for an ordinary writable stream configured unbuffered at open. */
+    if (!f->write_counted && (fflush(f->host) != 0 || ferror(f->host))) {
+        clearerr(f->host);
+        return 0x80010005u;
     }
-    fflush(f->host);
+    clearerr(f->host);
+    if (f->write_counted && count != 0u && done == 0u) return 0x80010005u;
     f->off += done; if (f->off > f->size) f->size = f->off;
     return done;
 }
@@ -552,6 +553,7 @@ static uint32_t io_read_payload(CpuState *s) {
     uint8_t tmp[4096];
     uint32_t done = 0;
     if (f->host && io_host_seek(f->host, f->off) != 0) return 0x80010005u;
+    if (f->host) clearerr(f->host);   /* an earlier write's error is not this read's */
     while (done < count) {
         uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
         if (f->host) { size_t got = fread(tmp, 1, n, f->host); if (got < n) n = (uint32_t)got; }
@@ -562,6 +564,13 @@ static uint32_t io_read_payload(CpuState *s) {
         for (uint32_t k = 0; k < n; k++) MEM_W8(dst + done + k, tmp[k]);
         done += n;
         if (n == 0) break;
+    }
+    /* fread stops short both at the end of the file and on a host error; only the first is
+     * the end of the guest's file. A failed host read answers the host I/O error with the
+     * position unchanged, never a short count the guest takes for the end. */
+    if (f->host && ferror(f->host)) {
+        clearerr(f->host);
+        return 0x80010005u;
     }
     if (f->host && perf_started)
         sr_perf_storage_read(SR_PERF_STORAGE_VFS, done, perf_started, done == count);
