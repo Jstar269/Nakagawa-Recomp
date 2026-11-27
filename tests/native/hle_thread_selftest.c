@@ -54557,6 +54557,8 @@ typedef struct {
     int      is_cb;
     uint32_t ret;
     int      returned;
+    uint32_t status_ptr;
+    uint32_t status_result;
 } SelftestPoolWaiterCtx;
 
 int s_pool_parks = 0;
@@ -54583,6 +54585,16 @@ static void selftest_vpl_waiter_fiber_body(void *arg) {
     cpu.r[6] = ctx->outptr;
     cpu.r[7] = ctx->toptr;
     ctx->ret = sr_syscall(&cpu, ctx->is_cb ? NID_VPL_ALLOCATE_CB : NID_VPL_ALLOCATE);
+    if (ctx->ret == 0u && ctx->status_ptr) {
+        CpuState probe = {0};
+        uint32_t intr = sr_syscall(&probe, NID_SCE_KERNEL_CPU_SUSPEND_INTR);
+        MEM_W32(ctx->status_ptr, 52u);
+        probe.r[4] = ctx->pool_uid;
+        probe.r[5] = ctx->status_ptr;
+        ctx->status_result = sr_syscall(&probe, NID_VPL_REFER);
+        probe.r[4] = intr;
+        (void)sr_syscall(&probe, NID_SCE_KERNEL_CPU_RESUME_INTR);
+    }
     ctx->returned = 1;
     s_pool_parks++;
     selftest_park_on_scheduler();
@@ -55953,6 +55965,66 @@ static void test_fpl_free_bounds_do_not_wrap(void) {
     (void)selftest_fpl_delete(pool);
 }
 
+/* One FreeVpl that frees room for two queued waiters must serve both. FreeVpl wakes one waiter;
+ * once that waiter has its block, the next one whose request fits the space left must be woken
+ * too, not left blocked beside free memory until some later free. Code-derived (the space is
+ * free and the waiter is next in the queue); PPSSPP's sceKernelFreeVpl likewise serves every
+ * waiter that fits in queue order. */
+static void test_vpl_free_serves_every_waiter_that_fits(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x6a20u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t held_out = 0x00271050u, out1 = 0x00271054u, out2 = 0x00271058u;
+    /* PSP-B1-01 accounting: a 0x200-byte pool hands out 0x1e0 bytes, all of them to one
+     * 0x1d8-byte block, and two 0x40-byte blocks cost 0x48 each. */
+    uint32_t vpool = selftest_vpl_create(0x200u);
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL free serves all: the pool is created");
+    expect(selftest_vpl_try_allocate(vpool, 0x1d8u, held_out) == 0u,
+           "VPL free serves all: one block takes the whole pool");
+    const uint32_t held = MEM_R32(held_out);
+
+    SelftestPoolWaiterCtx w1; memset(&w1, 0, sizeof w1);
+    w1.uid = 0x6a21u; w1.tcb = fixture_thread(w1.uid, TH_READY, 40); w1.tcb->started = 1;
+    w1.pool_uid = vpool; w1.req_size = 0x40u; w1.outptr = out1;
+    w1.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &w1, (size_t)4 << 20);
+    SelftestPoolWaiterCtx w2; memset(&w2, 0, sizeof w2);
+    w2.uid = 0x6a22u; w2.tcb = fixture_thread(w2.uid, TH_READY, 40); w2.tcb->started = 1;
+    w2.pool_uid = vpool; w2.req_size = 0x40u; w2.outptr = out2;
+    w2.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &w2, (size_t)4 << 20);
+    MEM_W32(out1, 0xfeedfaceu);
+    MEM_W32(out2, 0xfeedfaceu);
+    s_cur = (int)(w1.tcb - s_tcb); sr_coro_switch(w1.tcb->coro);
+    s_cur = (int)(w2.tcb - s_tcb); sr_coro_switch(w2.tcb->coro);
+    expect(!w1.returned && !w2.returned && w1.tcb->state == TH_WAIT_OBJ &&
+               w2.tcb->state == TH_WAIT_OBJ,
+           "VPL free serves all: both waiters block on the full pool");
+
+    s_cur = (int)(cur - s_tcb);
+    expect(selftest_vpl_free(vpool, held) == 0u, "VPL free serves all: the owner frees the pool");
+    expect(w1.tcb->state == TH_READY, "VPL free serves all: the first waiter is woken");
+    s_cur = (int)(w1.tcb - s_tcb); sr_coro_switch(w1.tcb->coro);
+    expect(w1.returned && w1.ret == 0u && MEM_R32(out1) != 0xfeedfaceu,
+           "VPL free serves all: the first waiter gets its block");
+    expect(w2.tcb->state == TH_READY,
+           "VPL free serves all: the second waiter, whose request fits what is left, is woken");
+    if (w2.tcb->state == TH_READY) {
+        s_cur = (int)(w2.tcb - s_tcb); sr_coro_switch(w2.tcb->coro);
+    }
+    expect(w2.returned && w2.ret == 0u && MEM_R32(out2) != 0xfeedfaceu &&
+               MEM_R32(out2) != MEM_R32(out1),
+           "VPL free serves all: the second waiter gets its own block from the same free");
+
+    sr_coro_destroy(w1.tcb->coro); w1.tcb->coro = NULL;
+    sr_coro_destroy(w2.tcb->coro); w2.tcb->coro = NULL;
+    s_cur = (int)(cur - s_tcb);
+    (void)selftest_vpl_delete(vpool);
+    s_cur = -1;
+}
+
 /* Audit 2026-11-17 (F-5e96c5e7): an FPL or VPL wait that ends with a latched result
  * (sceKernelReleaseWaitThread's WAIT_RELEASE here) leaves the pool's queue. The entry used to
  * stay, so ReferStatus counted a thread that no longer waits and a zero-timeout allocate on a
@@ -56511,6 +56583,7 @@ static void test_pool_priority_attribute_orders_waiters(void) {
             if (vpl) (void)selftest_vpl_delete(pool);
             else (void)selftest_fpl_delete(pool);
             for (int i = 0; i < 2; i++) {
+                if (vpl) sched_release_thread_resources(w[i].tcb);
                 sr_coro_destroy(w[i].tcb->coro);
                 w[i].tcb->coro = NULL;
             }
@@ -57848,6 +57921,395 @@ static void test_mutex_departure_schedules_released_waiter(int cancel, int waite
     }
     if (thread->coro) { sr_coro_destroy(thread->coro); thread->coro = NULL; }
     if (owner->coro) { sr_coro_destroy(owner->coro); owner->coro = NULL; }
+    s_cur = -1;
+}
+
+/* A pool CB waiter that runs a callback while it waits, whose body frees the block the waiter
+ * is queued for. FreeFpl / FreeVpl dequeue the first waiter and wake it; the waiter is running
+ * its callback, not parked, so the wake finds no one. After the callback the waiter must take
+ * the freed block (it was the one chosen for it) rather than park again with no queue entry and
+ * a free block nobody will ever hand it. Code-derived: the pool's own FreeFpl/FreeVpl hand-off
+ * contract and fpl_requeue_waiter_head's comment; PSP callback-wait policy is not measured here. */
+static uint32_t s_pool_cb_free_nid, s_pool_cb_free_pool, s_pool_cb_free_addr;
+static uint32_t s_pool_cb_free_result;
+static int s_pool_cb_free_ran;
+static void pool_cb_free_callback(void) {
+    CpuState cpu = {0};
+    cpu.r[4] = s_pool_cb_free_pool;
+    cpu.r[5] = s_pool_cb_free_addr;
+    s_pool_cb_free_result = sr_syscall(&cpu, s_pool_cb_free_nid);
+    s_pool_cb_free_ran = 1;
+}
+
+static void test_pool_cb_waiter_takes_block_freed_by_its_callback(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int vpl = 0; vpl < 2; ++vpl) {
+        const char *what = vpl ? "VPL" : "FPL";
+        char msg[192];
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *owner = fixture_thread(0x6a10u + (uint32_t)vpl * 4u, TH_RUNNING, 32);
+        TCB *thread = fixture_thread(0x6a11u + (uint32_t)vpl * 4u, TH_READY, 40);
+        owner->started = thread->started = 1;
+        s_cur = (int)(owner - s_tcb);
+        const uint32_t held_out = 0x00271040u, wait_out = 0x00271044u;
+        uint32_t pool = vpl ? selftest_vpl_create(0x100u) : selftest_fpl_create(64u, 1u);
+        expect(pool != 0u && pool < 0x80000000u, "pool CB free: the pool is created");
+        uint32_t rc = vpl ? selftest_vpl_try_allocate(pool, 0xc0u, held_out)
+                          : selftest_fpl_try_allocate(pool, held_out);
+        expect(rc == 0u, "pool CB free: the owner takes the pool's only block");
+        const uint32_t held = MEM_R32(held_out);
+
+        SelftestPoolWaiterCtx w; memset(&w, 0, sizeof w);
+        w.uid = thread->uid; w.tcb = thread; w.pool_uid = pool; w.outptr = wait_out;
+        w.req_size = 0xc0u; w.is_cb = 1;
+        MEM_W32(wait_out, 0xfeedfaceu);
+        thread->coro = sr_coro_create(vpl ? selftest_vpl_waiter_fiber_body
+                                          : selftest_fpl_waiter_fiber_body, &w, (size_t)4 << 20);
+        expect(thread->coro != NULL, "pool CB free: the waiter coroutine is created");
+        if (!thread->coro) return;
+        kernel_nested_resume(thread);
+        snprintf(msg, sizeof msg, "pool CB free: the %s CB waiter blocks on the empty pool", what);
+        expect(!w.returned && thread->state == TH_WAIT_OBJ && thread->wait_obj == pool, msg);
+
+        s_oracle_mode = 1;
+        s_kernel_nested_callback = pool_cb_free_callback;
+        s_pool_cb_free_nid = vpl ? NID_VPL_FREE : NID_FPL_FREE;
+        s_pool_cb_free_pool = pool;
+        s_pool_cb_free_addr = held;
+        s_pool_cb_free_ran = 0;
+        s_pool_cb_free_result = 0xffffffffu;
+        s_cur = (int)(thread - s_tcb);
+        uint32_t callback = issue339_create_pending_callback();
+        kernel_nested_resume(thread);
+        expect(s_pool_cb_free_ran && s_pool_cb_free_result == 0u,
+               "pool CB free: the waiter's callback frees the held block");
+        snprintf(msg, sizeof msg,
+                 "pool CB free: the %s CB waiter returns 0 with the block its callback freed", what);
+        expect(w.returned && w.ret == 0u && MEM_R32(wait_out) == held, msg);
+        if (!w.returned)
+            fprintf(stderr, "pool CB free: %s waiter state=%d wait_obj=0x%x out=0x%08x\n", what,
+                    (int)thread->state, thread->wait_obj, MEM_R32(wait_out));
+
+        CpuState cpu = {0}; cpu.r[4] = callback;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_CALLBACK);
+        s_kernel_nested_callback = NULL;
+        s_oracle_mode = 0;
+        if (thread->coro) { sr_coro_destroy(thread->coro); thread->coro = NULL; }
+        s_cur = (int)(owner - s_tcb);
+        (void)(vpl ? selftest_vpl_delete(pool) : selftest_fpl_delete(pool));
+        s_cur = -1;
+    }
+}
+
+static uint32_t s_vpl_inner_sema, s_vpl_inner_result;
+static int s_vpl_inner_returned;
+
+static void vpl_wait_on_semaphore_callback(void) {
+    CpuState cpu = {0};
+    cpu.r[4] = s_vpl_inner_sema;
+    cpu.r[5] = 1u;
+    s_vpl_inner_result = sr_syscall(&cpu, NID_CNW_WAIT_SEMA);
+    s_vpl_inner_returned = 1;
+}
+
+static void destroy_vpl_fixture_waiter(TCB *thread) {
+    if (!thread || !thread->coro) return;
+    sched_release_thread_resources(thread);
+    sr_coro_destroy(thread->coro);
+    thread->coro = NULL;
+}
+
+/* Synthetic scheduler interleave, not a PSP callback ordering measurement. */
+static void test_vpl_free_serves_waiter_behind_parked_callback(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *owner = fixture_thread(0x6a30u, TH_RUNNING, 32);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+    const uint32_t held_out = 0x00271200u, first_out = held_out + 4u;
+    const uint32_t next_out = held_out + 8u;
+    uint32_t pool = selftest_vpl_create(0x200u);
+    expect(selftest_vpl_try_allocate(pool, 0x1d8u, held_out) == 0u,
+           "VPL callback skip: owner takes the whole pool");
+    uint32_t held = MEM_R32(held_out);
+    CpuState cpu = {0};
+    cpu.r[7] = 1u;
+    s_vpl_inner_sema = sr_syscall(&cpu, NID_CNW_CREATE_SEMA);
+    expect(s_vpl_inner_sema != 0u && s_vpl_inner_sema < 0x80000000u,
+           "VPL callback skip: creates a separate empty semaphore");
+
+    SelftestPoolWaiterCtx first = {
+        .uid = 0x6a31u, .pool_uid = pool, .outptr = first_out, .req_size = 0x40u, .is_cb = 1,
+    };
+    SelftestPoolWaiterCtx next = {
+        .uid = 0x6a32u, .pool_uid = pool, .outptr = next_out, .req_size = 0x1d8u,
+    };
+    first.tcb = fixture_thread(first.uid, TH_READY, 40);
+    next.tcb = fixture_thread(next.uid, TH_READY, 41);
+    first.tcb->started = next.tcb->started = 1;
+    first.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &first, (size_t)4 << 20);
+    next.tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, &next, (size_t)4 << 20);
+    expect(first.tcb->coro && next.tcb->coro, "VPL callback skip: creates both coroutines");
+    if (!first.tcb->coro || !next.tcb->coro) goto done;
+    MEM_W32(first_out, 0xfeedfaceu);
+    MEM_W32(next_out, 0xfeedfaceu);
+    kernel_nested_resume(first.tcb);
+    kernel_nested_resume(next.tcb);
+    expect(first.tcb->state == TH_WAIT_OBJ && first.tcb->wait_obj == pool &&
+               next.tcb->state == TH_WAIT_OBJ && next.tcb->wait_obj == pool,
+           "VPL callback skip: both allocations really block on the pool");
+
+    s_oracle_mode = 1;
+    s_kernel_nested_callback = vpl_wait_on_semaphore_callback;
+    s_vpl_inner_returned = 0;
+    s_vpl_inner_result = ~0u;
+    s_cur = (int)(first.tcb - s_tcb);
+    (void)issue339_create_pending_callback();
+    kernel_nested_resume(first.tcb);
+    expect(!s_vpl_inner_returned && first.tcb->state == TH_WAIT_OBJ &&
+               first.tcb->wait_obj == s_vpl_inner_sema,
+           "VPL callback skip: the first waiter parks on a different object inside its callback");
+
+    s_cur = (int)(owner - s_tcb);
+    expect(selftest_vpl_free(pool, held) == 0u, "VPL callback skip: owner frees the only block");
+    expect(first.tcb->state == TH_WAIT_OBJ && first.tcb->wait_obj == s_vpl_inner_sema,
+           "VPL callback skip: FreeVpl does not wake or satisfy the inner semaphore wait");
+    expect(next.tcb->state == TH_READY,
+           "VPL callback skip: the next eligible waiter becomes ready during the same FreeVpl");
+    if (next.tcb->state == TH_READY) kernel_nested_resume(next.tcb);
+    expect(next.returned && next.ret == 0u && MEM_R32(next_out) == held,
+           "VPL callback skip: the eligible waiter receives the whole freed block");
+    if (next.returned && next.ret == 0u) {
+        s_cur = (int)(owner - s_tcb);
+        cpu.r[4] = s_vpl_inner_sema; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u,
+               "VPL callback skip: progress makes the callback's semaphore ready");
+        if (first.tcb->state == TH_READY) kernel_nested_resume(first.tcb);
+        expect(s_vpl_inner_returned && s_vpl_inner_result == 0u && !first.returned &&
+                   first.tcb->state == TH_WAIT_OBJ && first.tcb->wait_obj == pool,
+               "VPL callback skip: the outer wait remains live after the callback returns");
+        s_cur = (int)(owner - s_tcb);
+        expect(selftest_vpl_free(pool, MEM_R32(next_out)) == 0u,
+               "VPL callback skip: the second block return can serve the callback waiter");
+        if (first.tcb->state == TH_READY) kernel_nested_resume(first.tcb);
+        expect(first.returned && first.ret == 0u && MEM_R32(first_out) != 0xfeedfaceu,
+               "VPL callback skip: the first waiter receives its block when it fits");
+    }
+
+done:
+    destroy_vpl_fixture_waiter(first.tcb);
+    destroy_vpl_fixture_waiter(next.tcb);
+    s_cur = (int)(owner - s_tcb);
+    (void)selftest_vpl_delete(pool);
+    cpu.r[4] = s_vpl_inner_sema;
+    (void)sr_syscall(&cpu, NID_WSV_DELETE_SEMA);
+    s_kernel_nested_callback = NULL;
+    s_oracle_mode = 0;
+    s_cur = -1;
+}
+
+/* PSPAutotests tests/threads/vpl/priority.{c,expected}, e37443a681c6, PRIORITY / half.
+ * The strongest thread observes the next block already charged even though that thread
+ * has yet to run. Check the pool through ReferVplStatus in each resumed guest invocation. */
+static void test_vpl_priority_reserves_blocks_before_waiters_run(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *owner = fixture_thread(0x6a40u, TH_RUNNING, 8);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+    const uint32_t held_out = 0x00271400u;
+    CpuState cpu = {0};
+    cpu.r[5] = 2u; cpu.r[6] = 0x100u; cpu.r[7] = 0x1020u;
+    uint32_t pool = sr_syscall(&cpu, NID_VPL_CREATE);
+    expect(selftest_vpl_try_allocate(pool, 0x780u, held_out) == 0u &&
+               selftest_vpl_try_allocate(pool, 0x780u, held_out + 4u) == 0u,
+           "VPL priority half: the two original blocks occupy 0xf10 pool bytes");
+    SelftestPoolWaiterCtx waiters[7] = {0};
+    for (size_t i = 0; i < 7u; ++i) {
+        SelftestPoolWaiterCtx *w = &waiters[i];
+        w->uid = 0x6a41u + (uint32_t)i;
+        w->tcb = fixture_thread(w->uid, TH_READY, 0x18 - (int)i);
+        w->tcb->started = 1;
+        w->pool_uid = pool;
+        w->req_size = 0x800u - (uint32_t)i * 0x100u;
+        w->outptr = held_out + 8u + (uint32_t)i * 4u;
+        w->status_ptr = 0x00271500u + (uint32_t)i * 0x40u;
+        w->status_result = ~0u;
+        MEM_W32(w->outptr, 0xfeedfaceu);
+        w->tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, w, (size_t)4 << 20);
+        expect(w->tcb->coro != NULL, "VPL priority half: creates a real waiter coroutine");
+        if (!w->tcb->coro) goto done;
+        kernel_nested_resume(w->tcb);
+        expect(w->tcb->state == TH_WAIT_OBJ && w->tcb->wait_obj == pool,
+               "VPL priority half: each request blocks in arrival order");
+    }
+
+    s_cur = (int)(owner - s_tcb);
+    expect(selftest_vpl_free(pool, MEM_R32(held_out + 4u)) == 0u,
+           "VPL priority half: free the second original block");
+    expect(waiters[6].tcb->state == TH_READY && waiters[5].tcb->state == TH_READY,
+           "VPL priority half: both fitting priority waiters are ready before either runs");
+
+    const uint32_t free_sizes[7] = {0x70u, 0x170u, 0x270u, 0x370u, 0x470u, 0x570u, 0x368u};
+    const uint32_t wait_counts[7] = {0u, 1u, 2u, 3u, 4u, 5u, 5u};
+    for (size_t remaining = 7u; remaining > 0u; --remaining) {
+        size_t i = remaining - 1u;
+        SelftestPoolWaiterCtx *w = &waiters[i];
+        expect(w->tcb->state == TH_READY, "VPL priority half: the PSP-observed recipient is ready");
+        if (w->tcb->state != TH_READY) break;
+        kernel_nested_resume(w->tcb);
+        expect(w->returned && w->ret == 0u && MEM_R32(w->outptr) != 0xfeedfaceu,
+               "VPL priority half: the recipient receives its own block");
+        expect(w->status_result == 0u && MEM_R32(w->status_ptr + 40u) == 0x1000u &&
+                   MEM_R32(w->status_ptr + 44u) == free_sizes[i] &&
+                   MEM_R32(w->status_ptr + 48u) == wait_counts[i],
+               "VPL priority half: the recipient observes PSP free size and wait count");
+        if (!w->returned || w->ret) break;
+        s_cur = (int)(owner - s_tcb);
+        expect(selftest_vpl_free(pool, MEM_R32(w->outptr)) == 0u,
+               "VPL priority half: returning the recipient's block can admit the next priority");
+    }
+
+done:
+    for (size_t i = 0; i < 7u; ++i) destroy_vpl_fixture_waiter(waiters[i].tcb);
+    s_cur = (int)(owner - s_tcb);
+    (void)selftest_vpl_delete(pool);
+    s_cur = -1;
+}
+
+/* PSPAutotests e37443a681c6, PRIORITY / whole and FIFO / whole. In the priority
+ * case only the first three arrivals are needed to reproduce the observation
+ * before unblocking. The FIFO control also checks the first resumed receiver. */
+static void test_vpl_whole_pool_priority_arrival(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int priority = 0; priority < 2; ++priority) {
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *owner = fixture_thread(0x6a60u, TH_RUNNING, 8);
+        owner->started = 1;
+        s_cur = (int)(owner - s_tcb);
+        const uint32_t held_out = 0x00271900u;
+        CpuState cpu = {0};
+        cpu.r[5] = 2u; cpu.r[6] = priority ? 0x100u : 0u; cpu.r[7] = 0x1020u;
+        uint32_t pool = sr_syscall(&cpu, NID_VPL_CREATE);
+        expect(selftest_vpl_try_allocate(pool, 0x980u, held_out) == 0u,
+               "VPL whole arrival: the original allocation leaves 0x678 free bytes");
+
+        SelftestPoolWaiterCtx waiters[7] = {0};
+        size_t count = priority ? 3u : 7u;
+        for (size_t i = 0; i < count; ++i) {
+            SelftestPoolWaiterCtx *w = &waiters[i];
+            w->uid = 0x6a61u + (uint32_t)i;
+            w->tcb = fixture_thread(w->uid, TH_READY, 0x18 - (int)i);
+            w->tcb->started = 1;
+            w->pool_uid = pool;
+            w->req_size = 0x800u - (uint32_t)i * 0x100u;
+            w->outptr = held_out + 4u + (uint32_t)i * 4u;
+            w->status_ptr = 0x00271a00u + (uint32_t)i * 0x40u;
+            w->status_result = ~0u;
+            MEM_W32(w->outptr, 0xfeedfaceu);
+            w->tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, w, (size_t)4 << 20);
+            expect(w->tcb->coro != NULL, "VPL whole arrival: creates a real waiter coroutine");
+            if (!w->tcb->coro) goto done;
+            kernel_nested_resume(w->tcb);
+        }
+
+        expect(waiters[0].tcb->state == TH_WAIT_OBJ && waiters[1].tcb->state == TH_WAIT_OBJ,
+               "VPL whole arrival: the two oldest requests do not fit initially");
+        SelftestPoolWaiterCtx *third = &waiters[2];
+        if (priority) {
+            expect(third->returned && third->ret == 0u && MEM_R32(third->outptr) != 0xfeedfaceu,
+                   "VPL priority whole: the stronger fitting arrival returns before the first free");
+            expect(third->status_result == 0u && MEM_R32(third->status_ptr + 44u) == 0x70u &&
+                       MEM_R32(third->status_ptr + 48u) == 2u,
+                   "VPL priority whole: the arrival observes PSP free size 0x70 and two waiters");
+        } else {
+            expect(!third->returned && third->tcb->state == TH_WAIT_OBJ &&
+                       third->tcb->wait_obj == pool && MEM_R32(third->outptr) == 0xfeedfaceu,
+                   "VPL FIFO whole: the same fitting arrival cannot pass the older non-fitting requests");
+            s_cur = (int)(owner - s_tcb);
+            expect(selftest_vpl_free(pool, MEM_R32(held_out)) == 0u &&
+                       waiters[0].tcb->state == TH_READY &&
+                       waiters[1].tcb->state == TH_READY && third->tcb->state == TH_WAIT_OBJ,
+                   "VPL FIFO whole: the explicit free grants the first two requests in queue order");
+            SelftestPoolWaiterCtx *second = &waiters[1];
+            if (second->tcb->state == TH_READY) kernel_nested_resume(second->tcb);
+            expect(second->returned && second->ret == 0u && second->status_result == 0u &&
+                       MEM_R32(second->status_ptr + 44u) == 0xf0u &&
+                       MEM_R32(second->status_ptr + 48u) == 5u,
+                   "VPL FIFO whole: the stronger of those two sees PSP free size 0xf0 and five waiters");
+        }
+
+done:
+        for (size_t i = 0; i < count; ++i) destroy_vpl_fixture_waiter(waiters[i].tcb);
+        s_cur = (int)(owner - s_tcb);
+        (void)selftest_vpl_delete(pool);
+        s_cur = -1;
+    }
+}
+
+/* A reservation belongs to the invocation until it returns to guest code. */
+static void test_vpl_abandoned_reservation_serves_next_waiter(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *owner = fixture_thread(0x6a50u, TH_RUNNING, 32);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+    const uint32_t held_out = 0x00271800u, info = held_out + 0x40u;
+    uint32_t pool = selftest_vpl_create(0x200u);
+    expect(selftest_vpl_try_allocate(pool, 0x1d8u, held_out) == 0u,
+           "VPL abandoned grant: owner exhausts the pool");
+    SelftestPoolWaiterCtx waiters[2] = {0};
+    for (size_t i = 0; i < 2u; ++i) {
+        SelftestPoolWaiterCtx *w = &waiters[i];
+        w->uid = 0x6a51u + (uint32_t)i;
+        w->tcb = fixture_thread(w->uid, TH_READY, 40);
+        w->tcb->started = 1;
+        w->pool_uid = pool;
+        w->req_size = 0x1d8u;
+        w->outptr = held_out + 4u + (uint32_t)i * 4u;
+        MEM_W32(w->outptr, 0xfeedfaceu);
+        w->tcb->coro = sr_coro_create(selftest_vpl_waiter_fiber_body, w, (size_t)4 << 20);
+        expect(w->tcb->coro != NULL, "VPL abandoned grant: creates the waiter coroutine");
+        if (!w->tcb->coro) goto done;
+        kernel_nested_resume(w->tcb);
+        expect(w->tcb->state == TH_WAIT_OBJ && w->tcb->wait_obj == pool,
+               "VPL abandoned grant: waiter parks on the full pool");
+    }
+
+    s_cur = (int)(owner - s_tcb);
+    expect(selftest_vpl_free(pool, MEM_R32(held_out)) == 0u &&
+               waiters[0].tcb->state == TH_READY && waiters[1].tcb->state == TH_WAIT_OBJ,
+           "VPL abandoned grant: one released whole block reserves for the first waiter");
+    CpuState cpu = {0};
+    MEM_W32(info, 52u);
+    cpu.r[4] = pool; cpu.r[5] = info;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(info + 44u) == 0u &&
+               MEM_R32(info + 48u) == 1u,
+           "VPL abandoned grant: the unconsumed reservation is already charged");
+    cpu.r[4] = waiters[0].uid;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_TERMINATE_THREAD) == 0u,
+           "VPL abandoned grant: terminate the first waiter before it can receive the pointer");
+    expect(MEM_R32(waiters[0].outptr) == 0xfeedfaceu && waiters[1].tcb->state == TH_READY,
+           "VPL abandoned grant: the same allocation becomes available to the second waiter");
+    if (waiters[1].tcb->state == TH_READY) kernel_nested_resume(waiters[1].tcb);
+    expect(waiters[1].returned && waiters[1].ret == 0u &&
+               MEM_R32(waiters[1].outptr) == MEM_R32(held_out),
+           "VPL abandoned grant: the second waiter receives the reclaimed block");
+
+done:
+    for (size_t i = 0; i < 2u; ++i) destroy_vpl_fixture_waiter(waiters[i].tcb);
+    s_cur = (int)(owner - s_tcb);
+    (void)selftest_vpl_delete(pool);
     s_cur = -1;
 }
 
@@ -73514,6 +73976,25 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--pool-waiters") == 0) {
+        test_fpl_blocking_waits();
+        test_vpl_nonblocking_roundtrip();
+        test_vpl_block_count_bounded_by_pool_size();
+        test_vpl_blocking_waits();
+        test_pool_cb_waiter_takes_block_freed_by_its_callback();
+        test_pool_released_waiter_leaves_queue();
+        test_vpl_free_serves_every_waiter_that_fits();
+        test_vpl_free_serves_waiter_behind_parked_callback();
+        test_vpl_priority_reserves_blocks_before_waiters_run();
+        test_vpl_whole_pool_priority_arrival();
+        test_vpl_abandoned_reservation_serves_next_waiter();
+        test_pool_delete_tears_down_before_waking();
+        test_pool_priority_attribute_orders_waiters();
+        fprintf(stderr, "pool-waiters: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--io-append-progress") == 0) {
         test_fd_append_progress();
         fprintf(stderr, "io-append-progress: %d checks, %d failures\n", s_checks, s_failures);
@@ -74054,8 +74535,14 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_highmem_pool();
     test_psp_measured_safe_scalar_tls_20261117();
     test_vpl_blocking_waits();
+    test_pool_cb_waiter_takes_block_freed_by_its_callback();
     test_fpl_create_size_product_does_not_wrap();
     test_pool_released_waiter_leaves_queue();
+    test_vpl_free_serves_every_waiter_that_fits();
+    test_vpl_free_serves_waiter_behind_parked_callback();
+    test_vpl_priority_reserves_blocks_before_waiters_run();
+    test_vpl_whole_pool_priority_arrival();
+    test_vpl_abandoned_reservation_serves_next_waiter();
     test_pool_uids_come_from_the_shared_pool();
     test_partition_alloc_size_zero_refused();
     test_partition_low_refused_when_block_records_full();
