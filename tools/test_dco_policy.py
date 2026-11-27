@@ -293,6 +293,13 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             ("Assisted-by:", "never", "Co-Authored-By:", "docs/AI_USAGE.md"),
             "the agent commit trailer rule",
         )
+        # The import exception keeps its five conditions resident (CONTRIBUTING.md holds a copy).
+        self.assertRuleStated(
+            _blocks(_section(content, 4)),
+            ("never copy or line-by-line translate", "exact upstream revision", "`PROVENANCE.md`", "LOCAL DELTA",
+             "modification note", "`CREDITS.md`", "admitted", "Incompatible licences stay out"),
+            "the import rule and its conditions",
+        )
 
         section_3 = _section(content, 3)
         section_3_blocks = _blocks(section_3)
@@ -333,6 +340,11 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             _blocks(_section(content, 7)),
             ("docs/ARCHITECTURE.md#current-execution-contract", "re-check", "live source", "never a resume descriptor"),
             "section 7's pointer to the execution contract",
+        )
+        self.assertRuleStated(
+            _blocks(_section(content, 7)),
+            ("`--state-resume`", "LLE flags", "byte-identical", "load-bearing ABI", "`r[31]`", "SR_CPUSTATE_ABI_VERSION"),
+            "section 7's resident opt-in and ABI rules",
         )
         section_7_blocks = _blocks(_execution_contract())
         last_position = -1

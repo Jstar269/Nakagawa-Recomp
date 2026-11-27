@@ -132,9 +132,10 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
   private record, expand a wildcard, edit hashes to self-attest, or use `--no-verify` to bypass a publication
   failure. `--provenance-self-consistency` is a tripwire, not an attestation; release readiness requires the
   external trusted ledger.
-- Only the maintainer's admission adds or removes a public path. An admission binds a path to its origin claim, so
-  later edits need none while that claim holds; changing a byte-identical import, or recording it as LOCAL DELTA,
-  needs the maintainer's approval of the new bytes ([admission](CONTRIBUTING.md#what-admission-means-for-your-pull-request),
+- Only the maintainer's admission adds or removes a public path (it changes `assets/public_source_profile.json`;
+  `tools/contrib_refresh.py` refuses it). An admission binds a path to its origin claim, so later edits need none
+  while that claim holds; changing a byte-identical import, or recording it as LOCAL DELTA, needs the maintainer's
+  approval of the new bytes ([admission](CONTRIBUTING.md#what-admission-means-for-your-pull-request),
   [byte-identical rows](docs/PUBLICATION_READINESS.md#byte-identical-manifest-rows)).
 - A commit carries the regenerated controls for the paths it changes and nothing more; a refresh after merging
   `main` is its own commit. Never hand-edit the three provenance controls: `PUBLIC_EXPORT.json`,
@@ -145,10 +146,11 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
 - **Import rules.** Write implementation from specifications, public references and project-owned measurements;
   never copy or line-by-line translate upstream source except as follows. Source under a GPL-3.0-or-later
   compatible licence (such as FFmpeg, uofw, PPSSPP, JPCSP, MIT, BSD, Apache-2.0, zlib, CC0) may be vendored or
-  adapted without a per-import decision, only as
-  [Importing compatible source](CONTRIBUTING.md#importing-compatible-source) requires. Emulator-derived units are `derived-translated`, never "independent". Behaviour
-  claims need tests and an honest evidence label; emulator-derived behavior is not PSP measurement or independent
-  evidence. Claims of PSP hardware semantics still need applicable PSP evidence. Incompatible licences stay out.
+  adapted without a per-import decision: pinned to an exact upstream revision, listed in a `PROVENANCE.md`
+  manifest as byte-identical or LOCAL DELTA, notices kept (adapted files add a modification note), credited in
+  `CREDITS.md`, and admitted ([how](CONTRIBUTING.md#importing-compatible-source)). Emulator-derived units are
+  `derived-translated`, never "independent". Behaviour claims need tests and an honest evidence label;
+  emulator-derived behavior is not PSP measurement or independent evidence. Claims of PSP hardware semantics still need applicable PSP evidence. Incompatible licences stay out.
 - Do not rewrite working inherited code only to make it original. Say "clean-room" or "independent" only when its
   trusted record supports it ([independence model](docs/provenance/INDEPENDENCE_MODEL.md)); prefer
   "project-authored".
@@ -214,10 +216,11 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
 Before changing the interpreter, dispatch, codegen, resume at a PC, the `src/rt/recomp.h` ABI, the LLE flags or HLE
 argument reads, read [Current execution contract](docs/ARCHITECTURE.md#current-execution-contract) and re-check
 live source; PR numbers are navigation, not evidence. Its rules bind: the interpreter floor is not broadened without
-a new contract and test; live `$ra` is never a resume descriptor; HLE code never reads past the public signature;
-an emulator-derived second-tier cell is allowed only under its conditions there and never fills an unknown NID or
-unowned dispatch, enables save-data and flash writes whose behavior is unmeasured, or supplies behavior with no
-public reference.
+a new contract and test; live `$ra` is never a resume descriptor; `--state-resume` and the LLE flags are opt-in and
+default output stays byte-identical; `src/rt/recomp.h` is a load-bearing ABI (`$ra` is `r[31]`; `CpuState` is
+versioned by `SR_CPUSTATE_ABI_VERSION`); HLE code never reads past the public signature; an emulator-derived
+second-tier cell is allowed only under its conditions there and never fills an unknown NID or unowned dispatch,
+enables save-data and flash writes whose behavior is unmeasured, or supplies behavior with no public reference.
 
 ## 8. Workspace, branch, and worktree lifecycle
 
