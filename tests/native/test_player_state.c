@@ -805,6 +805,8 @@ typedef struct {
     char memstick[1024];
     char display[256];  /* "SR_RESOLUTION_SCALE=1;SR_PRESENT_SCALING=sharp;..." (#2150) */
     char ace[256];      /* SR_ACE */
+    char logic_60[16];
+    char acceptance_frames[16];
     bool marker_present;
     bool valid;
 } RepeatLaunchReport;
@@ -836,6 +838,10 @@ static RepeatLaunchReport read_repeat_launch_report(const char *path) {
             copy_report_value(report.display, sizeof(report.display), line + 8);
         } else if (strncmp(line, "ACE=", 4) == 0) {
             copy_report_value(report.ace, sizeof(report.ace), line + 4);
+        } else if (strncmp(line, "LOGIC_60=", 9) == 0) {
+            copy_report_value(report.logic_60, sizeof(report.logic_60), line + 9);
+        } else if (strncmp(line, "ACCEPTANCE_FRAMES=", 18) == 0) {
+            copy_report_value(report.acceptance_frames, sizeof(report.acceptance_frames), line + 18);
         } else if (strcmp(line, "MARKER_PRESENT=1") == 0) {
             report.marker_present = true;
             report.valid = true;
@@ -1906,7 +1912,11 @@ static int repeat_launch_child_mode(void) {
                                value ? value : "<unset>") >= 0;
         }
         const char *ace = getenv("SR_ACE");
-        ok = ok && fprintf(report, "\nACE=%s\n", ace ? ace : "<unset>") >= 0;
+        const char *logic_60 = getenv("SR_EXPERIMENTAL_60HZ");
+        const char *acceptance_frames = getenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES");
+        ok = ok && fprintf(report, "\nACE=%s\nLOGIC_60=%s\nACCEPTANCE_FRAMES=%s\n",
+                           ace ? ace : "<unset>", logic_60 ? logic_60 : "<unset>",
+                           acceptance_frames ? acceptance_frames : "<unset>") >= 0;
     }
     if (fclose(report) != 0) ok = 0;
     if (!ok) return 4;
@@ -14775,6 +14785,130 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+static void test_acceptance_launch_uses_stock_package(const char *self_executable) {
+    const char sep = nk_platform_path_separator();
+    const char *disc_id = "TEST00001";
+    const char *title_id = "synthetic-allegrex-v1";
+    const char *timing_id = "fixture-60hz";
+    const char *executable = "synthetic-allegrex-v1.exe";
+    char root[NK_MAX_PATH], iso[NK_MAX_PATH], report_path[NK_MAX_PATH];
+    char declaration_dir[NK_MAX_PATH + 32];
+    char declaration[NK_MAX_PATH + 64], data_root[NK_MAX_PATH + 64];
+    static const char timing_declaration[] =
+        "{\"id\":\"fixture-60hz\",\"target_title_id\":\"synthetic-allegrex-v1\"}";
+    const char *scratch = native_test_get_root();
+    snprintf(root, sizeof(root), "%s%cacceptance-runtime", scratch, sep);
+    snprintf(iso, sizeof(iso), "%s%cacceptance.iso", scratch, sep);
+    snprintf(declaration_dir, sizeof(declaration_dir), "%s%cenhancements", root, sep);
+    snprintf(declaration, sizeof(declaration), "%s%ctest00001-60hz.json", declaration_dir, sep);
+    snprintf(data_root, sizeof(data_root), "%s%ctests%cfixtures%cprofile_zero", root, sep, sep, sep);
+    snprintf(report_path, sizeof(report_path), "%s%cacceptance-report.txt", scratch, sep);
+    assert(nk_platform_mkdir_p(declaration_dir) && nk_platform_mkdir_p(data_root));
+    write_text_file(declaration, timing_declaration);
+    write_iso_with_fixture_eboot(iso, NULL, 0u, 0u);
+
+    char media[256];
+    snprintf(media, sizeof(media),
+             "{\"executable\":{\"path\":\"PSP_GAME/SYSDIR/EBOOT.BIN\","
+             "\"sha256\":\"%s\"},\"modules\":[]}", FIXTURE_SHA256);
+    write_runtime_package_fixture_with_source_media(root, disc_id, title_id,
+        SR_CPUSTATE_ABI_VERSION, executable, FIXTURE_SHA256, self_executable, media);
+    write_runtime_package_fixture_variant(root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION,
+        executable, FIXTURE_SHA256, self_executable, media, 0, false, timing_id, timing_id);
+
+    PlayerApp *app = calloc(1, sizeof(*app));
+    assert(app);
+    player_app_settings_init_default(&app->settings);
+    nk_library_init(&app->library);
+    NkGameEntry entry = {0};
+    snprintf(entry.disc_id, sizeof(entry.disc_id), "%s", disc_id);
+    snprintf(entry.title_id, sizeof(entry.title_id), "%s", title_id);
+    snprintf(entry.title_name, sizeof(entry.title_name), "Synthetic acceptance");
+    snprintf(entry.iso_path, sizeof(entry.iso_path), "%s", iso);
+    snprintf(entry.selected_executable, sizeof(entry.selected_executable), "EBOOT.BIN");
+    entry.status = NK_STATUS_IDENTIFIED;
+    assert(nk_library_add_or_update(&app->library, &entry) == NK_OK);
+    player_app_sync_library(app);
+    assert(app->game_count == 1);
+    player_app_set_runtime_root(app, root);
+    player_app_refresh_title_enhancements(app);
+    assert(app->title_enhancements[0].available);
+    app->launch_headless = true;
+    native_test_set_env("NK_REPEAT_LAUNCH_REPORT_FILE", report_path);
+    native_test_set_env("SR_EXPERIMENTAL_60HZ", "9");
+    native_test_set_env("SR_ACE", "invalid-inherited-ace");
+
+    /* Ordinary Authentic, ordinary Ace, checkpoint while Ace is saved, and
+       another ordinary Ace run through the unchanged selection. */
+    static const struct {
+        bool saved_timing;
+        uint32_t frames;
+        bool timing;
+        bool missing_declaration;
+    } cases[] = {
+        {false, 0, false, false}, {true, 0, true, false}, {true, 3, false, false},
+        {true, 0, true, false}, {true, 3, false, true},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (i == 1) player_app_set_title_60hz(app, 0, true);
+        if (cases[i].missing_declaration) {
+            assert(remove(declaration) == 0);
+            player_app_refresh_title_enhancements(app);
+            assert(player_app_title_60hz_blocked(app, 0));
+            assert(!player_app_launch_game(app, 0));
+            assert(strcmp(app->last_error.error_code, "ENHANCEMENT_UNAVAILABLE") == 0);
+        }
+        app->headless_accept_presented_frames = cases[i].frames;
+        assert(player_app_launch_game(app, 0));
+        assert(app->launch_session.package_launch && app->is_game_running);
+        assert(strcmp(app->launch_session.enhancement_package_id,
+                      cases[i].timing ? timing_id : "") == 0);
+        char expected_executable[128];
+        snprintf(expected_executable, sizeof(expected_executable), "%cpackages%c%s%s%s%c%s",
+                 sep, sep, disc_id, cases[i].timing ? "-enhanced-" : "",
+                 cases[i].timing ? timing_id : "", sep, executable);
+        const char *chosen_executable = app->launch_session.executable_path;
+        size_t path_length = strlen(chosen_executable);
+        size_t expected_length = strlen(expected_executable);
+        assert(path_length >= expected_length &&
+               strcmp(chosen_executable + path_length - expected_length, expected_executable) == 0);
+        assert(app->running_play_mode == (cases[i].timing ? PLAYER_PLAY_ACE : PLAYER_PLAY_AUTHENTIC));
+        assert(nk_launch_wait(&app->launch_session, 10000) == 0);
+        RepeatLaunchReport report = read_repeat_launch_report(report_path);
+        assert(report.valid && remove(report_path) == 0);
+        assert(strcmp(report.logic_60, cases[i].timing ? "1" : "0") == 0);
+        assert(strcmp(report.acceptance_frames, cases[i].frames ? "3" : "<unset>") == 0);
+        assert(cases[i].timing ? strncmp(report.ace, "v1;tier=ace;", 12) == 0
+                               : strcmp(report.ace, "off") == 0);
+        assert(player_app_title_60hz_saved(app, disc_id) == cases[i].saved_timing);
+        assert(strcmp(app->games[0].enhancement_package_id,
+                      cases[i].saved_timing && !cases[i].missing_declaration ? timing_id : "") == 0);
+        app->launch_time_ms = 1000u;
+        assert(player_app_monitor_game_session(app, 1600u));
+        assert(!app->is_game_running);
+    }
+
+    /* The valid timing package must never answer a missing stock package. */
+    write_text_file(declaration, timing_declaration);
+    player_app_refresh_title_enhancements(app);
+    assert(strcmp(app->games[0].enhancement_package_id, timing_id) == 0);
+    char stock_manifest[NK_MAX_PATH + 64];
+    snprintf(stock_manifest, sizeof(stock_manifest), "%s%cpackages%c%s%cpackage.json",
+             root, sep, sep, disc_id, sep);
+    assert(remove(stock_manifest) == 0);
+    app->headless_accept_presented_frames = 3;
+    assert(!player_app_launch_game(app, 0));
+    assert(strcmp(app->last_error.error_code, "RUNTIME_PACKAGE_NOT_READY") == 0);
+    assert(nk_platform_path_missing(report_path) && !app->is_game_running);
+    assert(player_app_title_60hz_saved(app, disc_id));
+
+    native_test_set_env("NK_REPEAT_LAUNCH_REPORT_FILE", NULL);
+    native_test_set_env("SR_EXPERIMENTAL_60HZ", NULL);
+    native_test_set_env("SR_ACE", NULL);
+    free(app);
+    printf("[PLAYER_STATE_TEST] acceptance selects the stock runtime package PASS\n");
+}
+
 /* A package's cache digests are taken over canonical JSON (sorted keys at every
  * level, objects inside arrays included), as canonical_json() in
  * tools/nk_core/package_cache.py computes them, so the same content in another
@@ -16079,6 +16213,84 @@ static void test_achievement_badge_cache(void) {
            "files go PASS\n");
 }
 
+/* #2744, first half: the storage for one shared Memory Stick is in the tree, and no launch uses
+   it. A package launch with no SR_MEMSTICK still gets <saves>/<DISC_ID>, the folder the Saves
+   page works on (Back up, Restore, Add a save, Open folder, Remove), whatever the layout record
+   says, and preparing a launch makes none of the shared layout. This fails when the launch root
+   moves to the shared stick before the Saves page does. */
+static void assert_package_launch_root_is_the_saves_page_folder(const GameRecord *game,
+                                                                 const char *runtime_root) {
+    static const char *const cases[] = {"no layout record", "a MOVING record",
+                                        "a READY record and its stick"};
+    const char sep = nk_platform_path_separator();
+    char saves[NK_MAX_PATH], expected[NK_MAX_PATH + MAX_DISC_ID_LEN + 2];
+    NkMemstickPaths paths;
+    bool had_memstick_env;
+    char *old_memstick_env = capture_environment_value("SR_MEMSTICK", &had_memstick_env);
+    set_environment_value("SR_MEMSTICK", "");
+    assert(game && game->disc_id[0]);
+    assert(nk_platform_get_path(NK_PATH_SAVES, saves, sizeof(saves)));
+    assert(native_test_path_within(saves, native_test_get_root()));
+    assert(nk_memstick_layout_paths(saves, &paths));
+    snprintf(expected, sizeof(expected), "%s%c%s", saves, sep, game->disc_id);
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.stick));
+
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (i != 0u) {
+            NkMemstickLayout layout;
+            assert(nk_memstick_layout_init(&layout, i == 1u ? NK_MEMSTICK_STATE_MOVING
+                                                            : NK_MEMSTICK_STATE_READY, "test"));
+            assert(nk_memstick_layout_write(saves, &layout, NULL, 0u) == NK_MEMSTICK_LAYOUT_OK);
+            nk_memstick_layout_free(&layout);
+            if (i == 2u) assert(nk_platform_mkdir_p(paths.stick));
+        }
+        NkLaunchSession session;
+        NkResult prepared = nk_launch_prepare_session(&session, game, runtime_root);
+        if (prepared != NK_OK) {
+            fprintf(stderr, "default launch root, %s: prepare failed: %s\n", cases[i],
+                    session.last_error);
+        }
+        assert(prepared == NK_OK && session.package_launch);
+
+        /* The Saves page's folder is <saves>/<DISC_ID>, and the launch root is that folder. */
+        char folder[NK_MAX_PATH], folder_real[NK_MAX_PATH], launch_real[NK_MAX_PATH];
+        assert(player_app_save_folder(game, folder, sizeof(folder)));
+        assert(strcmp(folder, expected) == 0);
+        /* Preparing the launch made its root; a folder that does not exist is compared as named. */
+        if (!nk_platform_real_path(folder, folder_real, sizeof(folder_real))) {
+            snprintf(folder_real, sizeof(folder_real), "%s", folder);
+        }
+        if (!nk_platform_real_path(session.memstick_root, launch_real, sizeof(launch_real))) {
+            snprintf(launch_real, sizeof(launch_real), "%s", session.memstick_root);
+        }
+        if (strcmp(launch_real, folder_real) != 0) {
+            fprintf(stderr, "default launch root, %s: the launch uses %s, the Saves page %s\n",
+                    cases[i], launch_real, folder_real);
+        }
+        assert(strcmp(launch_real, folder_real) == 0);
+        nk_launch_stop(&session);
+
+        /* Preparing a launch makes nothing of the shared layout. */
+        if (i == 0u) {
+            assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.stick));
+        }
+        assert(nk_platform_path_missing(paths.staging) &&
+               nk_platform_path_missing(paths.migration) &&
+               nk_platform_path_missing(paths.kept_copies) &&
+               nk_platform_path_missing(paths.lock) && nk_platform_path_missing(paths.claims));
+    }
+
+    /* Leave the profile as it was found: later cases start with no layout record. */
+    assert(nk_remove_utf8(paths.record) == 0);
+    assert(nk_platform_remove_empty_dir(paths.stick));
+    assert(nk_platform_path_missing(paths.record) && nk_platform_path_missing(paths.record_temp) &&
+           nk_platform_path_missing(paths.stick));
+    restore_environment_value("SR_MEMSTICK", old_memstick_env, had_memstick_env);
+    free(old_memstick_env);
+    printf("[PLAYER_STATE_TEST] a package launch's default root is the Saves page's "
+           "<saves>/<DISC_ID>, with no layout record, MOVING and READY PASS\n");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -16215,6 +16427,7 @@ int main(int argc, char **argv) {
     test_license_folder_request();
     test_library_card_status_text();
     test_enhanced_package_variants();
+    test_acceptance_launch_uses_stock_package(self_executable);
     test_package_cache_digest_ignores_key_order();
     test_package_case_sibling_is_outside();
     test_play_mode_settings();
@@ -21248,6 +21461,9 @@ int main(int argc, char **argv) {
         char slot_sentinel[NK_MAX_PATH + 64];
         slot_sentinel[0] = '\0';
 
+        /* Before anything here makes a save folder: the default root itself (#2744). */
+        assert_package_launch_root_is_the_saves_page_folder(&rep->games[0], user_root);
+
         /* The per-disc save slot is created here, inside this run's temporary
            root, as the pre-existing state the repeat contract starts from. A
            sentinel file in it must still exist after the second launch. Launch
@@ -22209,14 +22425,15 @@ int main(int argc, char **argv) {
            hidden for the rest of the session, and the next launch reads its own path. */
         {
             static const struct {
-                bool vulkan_started, gpu_ge_started;
+                bool vulkan_started, gpu_ge_started, vulkan_cpu;
                 NkRenderFallback fallback;
                 const char *names;
             } forced[] = {
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
-                {true, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
-                {true, true, NK_RENDER_FALLBACK_NONE, NULL},
-                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
+                {true, false, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
+                {true, true, true, NK_RENDER_FALLBACK_VULKAN_CPU, "Vulkan is running on the CPU"},
+                {true, true, false, NK_RENDER_FALLBACK_NONE, NULL},
+                {false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
             };
             bool render_ok = true;
             for (size_t f = 0; f < sizeof(forced) / sizeof(forced[0]); ++f) {
@@ -22227,7 +22444,8 @@ int main(int argc, char **argv) {
                 char line[160];
                 char timed[192];
                 NkRenderPath path = nk_render_path_from_init(true, forced[f].vulkan_started,
-                                                             true, forced[f].gpu_ge_started);
+                                                             true, forced[f].gpu_ge_started,
+                                                             forced[f].vulkan_cpu);
                 set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
                 bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
                                 rep->boot_event_file_path[0] != '\0';
@@ -22258,7 +22476,8 @@ int main(int argc, char **argv) {
                             shown && heading == want_heading && text == want_text &&
                             strcmp(heading, "Drawn in software") == 0 &&
                             strstr(text, forced[f].names) != NULL &&
-                            strstr(text, "Internal resolution setting has no effect") != NULL;
+                            (strstr(text, "Internal resolution setting has no effect") != NULL) ==
+                                (forced[f].fallback != NK_RENDER_FALLBACK_VULKAN_CPU);
                         /* Another game's page has no notice for this launch. */
                         render_ok = render_ok && rep->game_count > 1 &&
                             !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
@@ -22308,8 +22527,8 @@ int main(int argc, char **argv) {
             char words[384];
             bool effects_ok = true;
             int failed_pass = -1;
-            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
-            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false);
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true, false);
+            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false, false);
             assert(rep->game_count > 1);
             assert(player_render_effects_text(0x1FFu, words, sizeof(words)) &&
                    strcmp(words, all_effects) == 0);
@@ -22423,7 +22642,7 @@ int main(int argc, char **argv) {
             const char *disc = rep->games[0].disc_id;
             const char *heading, *text;
             char line[256], event[300], old_events[NK_MAX_PATH];
-            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true, false);
             const NkRenderFallbackEvent points = {
                 NK_RENDER_EFFECT_POINT, 360u, 5000u, 20000u, 0u, 200u
             };

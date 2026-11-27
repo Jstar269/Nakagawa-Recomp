@@ -816,6 +816,28 @@ static void block(uint32_t uid) {
     sr_flight_record(SR_FLIGHT_CLASS_SCHED, SR_FLIGHT_KIND_SCHED_BLOCK, uid, uid, 0u, 0u);
 }
 
+/* A store as recomp.h's store helpers report it: the context of a thread with ra and sp,
+ * or (has_cpu 0) a store with no current register file and no current thread. */
+static uint32_t watch_uid;
+static uint32_t current_uid(void) { return watch_uid; }
+
+static void watch(uint32_t pc, uint32_t addr, uint32_t value, uint32_t width, uint32_t old,
+                  int has_cpu) {
+    SrWatchHit hit;
+    memset(&hit, 0, sizeof hit);
+    hit.pc = pc;
+    hit.addr = addr;
+    hit.value = value;
+    hit.width = width;
+    hit.old_value = old;
+    hit.has_cpu = has_cpu ? 1u : 0u;
+    hit.ra = has_cpu ? 0x08804abcu : 0u;
+    hit.sp = has_cpu ? 0x09ffe0c0u : 0u;
+    hit.thread = 0xdeadu; /* the recorder takes the thread from its source, never the caller */
+    watch_uid = has_cpu ? 0x0415u : 0u;
+    sr_watch_store(&hit);
+}
+
 static void draw(uint32_t list, uint32_t vertices) {
     sr_flight_record(SR_FLIGHT_CLASS_GE, SR_FLIGHT_KIND_GE_DRAW, list, list + 4u * vertices, 3u,
                      vertices);
@@ -824,6 +846,7 @@ static void draw(uint32_t list, uint32_t vertices) {
 int main(int argc, char **argv) {
     const char *scenario = argc > 1 ? argv[1] : "";
     sr_flight_init();
+    sr_watch_set_thread_source(current_uid);
     if (strcmp(scenario, "pc") == 0) {
         pick(0x10u);
         hle(0x12345678u, PC_A, FIRST_ARGUMENT, 0u);
@@ -839,11 +862,11 @@ int main(int argc, char **argv) {
         sr_flight_record(SR_FLIGHT_CLASS_PRESENT, SR_FLIGHT_KIND_PRESENT_SET_FRAMEBUF,
                          0x04000000u, 3u, 512u, 1u);
     } else if (strcmp(scenario, "watch") == 0) {
-        sr_watch_store(0x08800100u, 0x08a00000u, 0x11223344u, 4u); /* first write */
-        sr_watch_store(0x08800104u, 0x08a00000u, 0x11223344u, 4u); /* same bytes: nothing */
-        sr_watch_store(0x08800108u, 0x08a00010u, 0x55u, 1u);       /* outside the range */
-        sr_watch_store(0x0880010cu, 0x08a00002u, 0x99u, 1u);       /* 0x22 -> 0x99 */
-        sr_watch_store(0x08800110u, 0x08a00006u, 0xaabbccddu, 4u); /* straddles the end */
+        watch(0x08800100u, 0x08a00000u, 0x11223344u, 4u, 0u, 1); /* first write */
+        watch(0x08800104u, 0x08a00000u, 0x11223344u, 4u, 0x11223344u, 1); /* same bytes: nothing */
+        watch(0x08800108u, 0x08a00010u, 0x55u, 1u, 0u, 1);       /* outside the range */
+        watch(0x0880010cu, 0x08a00002u, 0x99u, 1u, 0x22u, 1);    /* 0x22 -> 0x99 */
+        watch(0x08800110u, 0x08a00006u, 0xaabbccddu, 4u, 0u, 0); /* straddles the end; no cpu */
     } else if (strcmp(scenario, "checkpoint") == 0) {
         for (uint32_t uid = 1u; uid <= 4u; ++uid) {
             pick(uid);
@@ -962,7 +985,19 @@ class RecorderTriggerModeTests(unittest.TestCase):
             (0x0880010C, 0x08A00002, 1 | flight_diff.WATCH_KNOWN_BIT, 0x99),
             (0x08800110, 0x08A00006, 4, 0xAABBCCDD),
         ])
-        self.assertEqual(stderr.count("SR_WATCH: pc="), 4, "the stderr report is unchanged")
+        self.assertEqual(stderr.count("SR_WATCH: pc="), 4, "one report per overlapping store")
+        # #2809: the old fields keep their order, so the old prefix still matches, and the
+        # context is appended after them.
+        lines = [line for line in stderr.splitlines() if line.startswith("SR_WATCH: pc=")]
+        self.assertEqual(lines[0],
+                         "SR_WATCH: pc=0x08800100 addr=0x08a00000 val=0x11223344 width=4 vblank=0"
+                         " ra=0x08804abc sp=0x09ffe0c0 thread=0x00000415 old=0x00000000")
+        self.assertEqual(lines[2],
+                         "SR_WATCH: pc=0x0880010c addr=0x08a00002 val=0x00000099 width=1 vblank=0"
+                         " ra=0x08804abc sp=0x09ffe0c0 thread=0x00000415 old=0x00000022")
+        self.assertEqual(lines[3],
+                         "SR_WATCH: pc=0x08800110 addr=0x08a00006 val=0xaabbccdd width=4 vblank=0"
+                         " ra=none sp=none thread=0x00000000 old=0x00000000")
 
     def test_watch_mode_fires_at_the_first_change_and_checkpoint_at_a_later_one(self):
         first, _, _ = self._run("watch", "watch;16", "watch", "0x08a00000:8", tag="watch-first")

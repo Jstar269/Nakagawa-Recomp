@@ -13,6 +13,7 @@
    is using. */
 
 #include "nk_overlay.h"
+#include "nk_ui_text.h"
 #include "nk_ui_widgets.h"
 
 #include <string.h>
@@ -104,9 +105,9 @@ static int menu_compact_ace_lines(NkUi *ui, const NkOverlayModel *model, float r
 
 NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"},
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Resume"}
+        {NK_UI_PROMPT_ACT_MOVE, NK_UI_STR(OVERLAY_PROMPT_MOVE)},
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(OVERLAY_PROMPT_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(OVERLAY_PROMPT_RESUME)}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkOverlayAction result = nk_overlay_action(NK_OVERLAY_ACT_NONE, 0);
@@ -126,7 +127,7 @@ NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOv
         NkUiLayout head = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
                                             nk_overlay_fit(), compact ? 0.0f : NK_UI_SPACE_1);
         if (nk_ui_begin_container(ui, MENU_ID_HEAD, &head, NULL)) {
-            nk_ui_eyebrow(ui, MENU_ID_EYEBROW, "Game paused");
+            nk_ui_eyebrow(ui, MENU_ID_EYEBROW, NK_UI_STR(OVERLAY_MENU_EYEBROW));
             if (nonempty(model->title_name) != NULL) {
                 NkUiTextStyle title = nk_ui_type(NK_UI_TYPE_TITLE, theme->paper);
                 title.wrap = true;
@@ -135,7 +136,8 @@ NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOv
                                             compact ? 1 : 2),
                            &title);
             } else {
-                nk_ui_text_role(ui, MENU_ID_TITLE, "Paused", NK_UI_TYPE_TITLE, theme->paper);
+                nk_ui_text_role(ui, MENU_ID_TITLE, NK_UI_STR(OVERLAY_MENU_TITLE_UNNAMED), NK_UI_TYPE_TITLE,
+                                theme->paper);
             }
             if (nonempty(model->disc_id) != NULL) {
                 nk_ui_text_role(ui, MENU_ID_DISC, model->disc_id, NK_UI_TYPE_DATA, theme->muted);
@@ -170,28 +172,28 @@ NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOv
                                               compact ? NK_UI_SPACE_2 : NK_UI_SPACE_3);
         column.padding_top = compact ? 0.0f : NK_UI_SPACE_2;
         if (nk_ui_begin_container(ui, MENU_ID_ACTIONS, &column, NULL)) {
-            if (nk_ui_button(ui, NK_OVERLAY_ID_RESUME, "Resume",
+            if (nk_ui_button(ui, NK_OVERLAY_ID_RESUME, NK_UI_STR(OVERLAY_BUTTON_RESUME),
                              NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_GROW |
                                  (compact ? 0u : NK_UI_BUTTON_LARGE))) {
                 result = nk_overlay_action(NK_OVERLAY_ACT_RESUME, 0);
             }
-            if (nk_ui_button(ui, NK_OVERLAY_ID_SETTINGS, "Settings",
+            if (nk_ui_button(ui, NK_OVERLAY_ID_SETTINGS, NK_UI_STR(OVERLAY_MENU_SETTINGS),
                              NK_UI_BUTTON_GROW | entry_size)) {
                 nk_overlay_go(state, NK_OVERLAY_SCREEN_SETTINGS, 0u);
             }
-            if (nk_ui_button(ui, NK_OVERLAY_ID_CONTROLS, "Controls",
+            if (nk_ui_button(ui, NK_OVERLAY_ID_CONTROLS, NK_UI_STR(OVERLAY_MENU_CONTROLS),
                              NK_UI_BUTTON_GROW | entry_size)) {
                 nk_overlay_go(state, NK_OVERLAY_SCREEN_CONTROLS, 0u);
             }
-            if (model->developer && nk_ui_button(ui, NK_OVERLAY_ID_VRAM, "VRAM viewer",
+            if (model->developer && nk_ui_button(ui, NK_OVERLAY_ID_VRAM, NK_UI_STR(OVERLAY_MENU_VRAM),
                                                  NK_UI_BUTTON_GROW | entry_size)) {
                 nk_overlay_go(state, NK_OVERLAY_SCREEN_VRAM, 0u);
             }
-            if (model->developer && nk_ui_button(ui, NK_OVERLAY_ID_PROFILE, "Profile",
+            if (model->developer && nk_ui_button(ui, NK_OVERLAY_ID_PROFILE, NK_UI_STR(OVERLAY_MENU_PROFILE),
                                                  NK_UI_BUTTON_GROW | entry_size)) {
                 nk_overlay_go(state, NK_OVERLAY_SCREEN_PROFILE, 0u);
             }
-            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT, "Quit to library",
+            if (nk_ui_button(ui, NK_OVERLAY_ID_QUIT, NK_UI_STR(OVERLAY_MENU_QUIT),
                              NK_UI_BUTTON_GROW | entry_size)) {
                 nk_overlay_go(state, NK_OVERLAY_SCREEN_QUIT, 0u);
             }
@@ -218,7 +220,10 @@ static void controls_table(NkUi *ui, NkUiId id, const NkOverlayControlRow *rows,
     NkUiLayout table = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(), nk_overlay_fit(),
                                          0.0f);
     float cell_width = (table_width - CONTROLS_PSP_WIDTH - 2.0f * CONTROLS_CELL_GAP) / 2.0f;
-    static const char *const heads[3] = {"PSP", "Keyboard", "Controller"};
+    static const char *const heads[3] = {
+        NK_UI_STR(OVERLAY_CONTROLS_HEAD_PSP), NK_UI_STR(OVERLAY_CONTROLS_HEAD_KEYBOARD),
+        NK_UI_STR(OVERLAY_CONTROLS_HEAD_CONTROLLER)
+    };
     size_t i;
     if (!nk_ui_begin_container(ui, id, &table, NULL)) return;
     for (i = 0; i <= count; ++i) {
@@ -270,8 +275,8 @@ static void controls_table(NkUi *ui, NkUiId id, const NkOverlayControlRow *rows,
 NkOverlayAction nk_overlay_page_controls(NkUi *ui, NkOverlayState *state,
                                          const NkOverlayModel *model) {
     static const NkUiPromptItem prompts[] = {
-        {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
-        {NK_UI_PROMPT_ACT_BACK, "Back"}
+        {NK_UI_PROMPT_ACT_CONFIRM, NK_UI_STR(OVERLAY_PROMPT_SELECT)},
+        {NK_UI_PROMPT_ACT_BACK, NK_UI_STR(OVERLAY_PROMPT_BACK)}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkOverlayAction result = nk_overlay_action(NK_OVERLAY_ACT_NONE, 0);
@@ -284,10 +289,10 @@ NkOverlayAction nk_overlay_page_controls(NkUi *ui, NkOverlayState *state,
     if (count > NK_OVERLAY_MAX_CONTROL_ROWS) count = NK_OVERLAY_MAX_CONTROL_ROWS;
     inner = nk_overlay_page_begin(ui, model, split ? 880.0f : 640.0f);
     if (inner <= 0.0f) return result;
-    nk_ui_eyebrow(ui, CONTROLS_ID_EYEBROW, "Game paused \xC2\xB7 Controls");
-    nk_ui_text_role(ui, CONTROLS_ID_TITLE, "Controls", NK_UI_TYPE_TITLE, theme->paper);
+    nk_ui_eyebrow(ui, CONTROLS_ID_EYEBROW, NK_UI_STR(OVERLAY_CONTROLS_EYEBROW));
+    nk_ui_text_role(ui, CONTROLS_ID_TITLE, NK_UI_STR(OVERLAY_CONTROLS_TITLE), NK_UI_TYPE_TITLE, theme->paper);
     if (count == 0u) {
-        nk_ui_text_role(ui, CONTROLS_ID_NOTE, "No controls are mapped for this game.",
+        nk_ui_text_role(ui, CONTROLS_ID_NOTE, NK_UI_STR(OVERLAY_CONTROLS_NONE),
                         NK_UI_TYPE_BODY, theme->muted);
     } else if (split) {
         NkUiLayout tables = nk_overlay_layout(NK_UI_LAYOUT_ROW, nk_overlay_grow(),
@@ -306,12 +311,9 @@ NkOverlayAction nk_overlay_page_controls(NkUi *ui, NkOverlayState *state,
     {
         NkUiTextStyle foot = nk_ui_type(NK_UI_TYPE_FOOTNOTE, theme->dim);
         foot.wrap = true;
-        nk_ui_text(ui, CONTROLS_ID_FOOT,
-                   "Esc, F1 or the controller's Guide button opens this menu. In Enhanced and "
-                   "Ace, hold Tab or press F9 to fast forward. Change the controller buttons in "
-                   "the library's Settings.", &foot);
+        nk_ui_text(ui, CONTROLS_ID_FOOT, NK_UI_STR(OVERLAY_CONTROLS_FOOT), &foot);
     }
-    if (nk_ui_button(ui, NK_OVERLAY_ID_CONTROLS_BACK, "Back", 0u) ||
+    if (nk_ui_button(ui, NK_OVERLAY_ID_CONTROLS_BACK, NK_UI_STR(OVERLAY_BUTTON_BACK), 0u) ||
         nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
         nk_overlay_go(state, NK_OVERLAY_SCREEN_MENU, NK_OVERLAY_ID_CONTROLS);
     }
