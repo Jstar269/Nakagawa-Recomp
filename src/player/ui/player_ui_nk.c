@@ -4464,6 +4464,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     int pixel_h = 0;
     int window_w = 0;
     int window_h = 0;
+    NkUiPixelRect safe_px;
+    SDL_Rect safe_area;
     float display_scale;
     float point_to_pixel;
     double now_s;
@@ -4501,8 +4503,18 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     }
     display_scale = SDL_GetWindowDisplayScale(window);
     if (!(display_scale > 0.0f)) display_scale = 1.0f;
-    player->viewport.pixel_w = pixel_w;
-    player->viewport.pixel_h = pixel_h;
+    /* The UI is laid out and drawn inside the window's safe area: on Android, the app draws
+       edge to edge, and a control under the gesture-navigation area lost its taps to the
+       system's back gesture. Everywhere else the safe area is the whole window. */
+    safe_px = (NkUiPixelRect){ 0, 0, pixel_w, pixel_h };
+    if (SDL_GetWindowSafeArea(window, &safe_area)) {
+        safe_px = player_ui_safe_pixel_rect(
+            window_w, window_h, pixel_w, pixel_h,
+            (NkUiPixelRect){ safe_area.x, safe_area.y, safe_area.x + safe_area.w,
+                             safe_area.y + safe_area.h });
+    }
+    player->viewport.pixel_w = safe_px.x1 - safe_px.x0;
+    player->viewport.pixel_h = safe_px.y1 - safe_px.y0;
     player->viewport.display_scale = display_scale;
     {
         /* Prompts follow the last input device ("Match input"), and an Automatic
@@ -4527,6 +4539,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     scale = nk_ui_scale_for_viewport(&player->viewport);
     point_to_pixel = window_w > 0 ? (float)pixel_w / (float)window_w
                                   : display_scale;
+    nk_ui_sdl_input_set_event_origin(&player->input, (float)safe_px.x0 / point_to_pixel,
+                                     (float)safe_px.y0 / point_to_pixel);
     nk_ui_sdl_input_set_event_scale(&player->input,
                                     point_to_pixel / scale.density);
     nk_ui_set_viewport(player->ui, &player->viewport);
@@ -5480,8 +5494,18 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         (void)SDL_SetRenderDrawColor(renderer, (Uint8)(page >> 24), (Uint8)(page >> 16),
                                      (Uint8)(page >> 8), 255u);
     }
-    (void)SDL_RenderClear(renderer);
-    if (!nk_ui_sdlr_render(player->backend, draw_list)) return false;
+    (void)SDL_RenderClear(renderer);   /* the whole window, the viewport aside */
+    {
+        SDL_Rect ui_rect = { safe_px.x0, safe_px.y0, safe_px.x1 - safe_px.x0,
+                             safe_px.y1 - safe_px.y0 };
+        bool inset = ui_rect.x != 0 || ui_rect.y != 0 || ui_rect.w != pixel_w ||
+                     ui_rect.h != pixel_h;
+        bool drawn;
+        if (inset) (void)SDL_SetRenderViewport(renderer, &ui_rect);
+        drawn = nk_ui_sdlr_render(player->backend, draw_list);
+        if (inset) (void)SDL_SetRenderViewport(renderer, NULL);
+        if (!drawn) return false;
+    }
     SDL_RenderPresent(renderer);
     return true;
 }

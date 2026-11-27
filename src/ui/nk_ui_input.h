@@ -287,6 +287,8 @@ union SDL_Event;
 typedef struct {
     NkUiInput input;
     float event_scale;        /* window-event units to logical UI pixels */
+    float event_origin_x;     /* where the UI starts in the window, in window-event units */
+    float event_origin_y;
     float stick_x;            /* the left stick of stick_device */
     float stick_y;
     int stick_device;         /* the pad whose stick values these are; it owns a held direction */
@@ -302,6 +304,11 @@ void nk_ui_sdl_input_init(NkUiSdlInput *state);
 /* Multiplier from SDL mouse/wheel coordinates to logical UI pixels: the window pixel
    density divided by NkUiScale.density. Values that are not finite and positive reset to 1. */
 void nk_ui_sdl_input_set_event_scale(NkUiSdlInput *state, float scale);
+/* Where the UI's top-left corner is in the window, in SDL mouse/wheel coordinates (0, 0
+   until set): a host that draws the UI inside the window's safe area (system bars, gesture
+   areas, a display cutout) sets that area's corner, which is taken off every position
+   before event_scale. Values that are not finite reset to 0. */
+void nk_ui_sdl_input_set_event_origin(NkUiSdlInput *state, float x, float y);
 /* Converts an SDL_GetGamepadButtonLabel value (an SDL_GamepadButtonLabel) to the
    project vocabulary. Unknown values give NK_UI_LABEL_UNKNOWN. */
 NkUiButtonLabel nk_ui_sdl_button_label(int sdl_gamepad_button_label);

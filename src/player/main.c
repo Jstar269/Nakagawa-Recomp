@@ -7397,6 +7397,12 @@ static int player_open_window(PlayerRun *run) {
     PlayerApp *app = &run->app;
     nk_title_manifest_set_cancel_check(player_closing, NULL);
 
+    /* Android: the system's Back reaches the launcher only as SDLK_AC_BACK, which goes back
+       one view as Esc does (player_back_as_escape) and, on the library, quits as Esc does.
+       Untrapped, the system also ended the launcher on every Back, whatever page was open.
+       The hint does nothing on other hosts. */
+    (void)SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+
     /* Initialize SDL3 */
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());

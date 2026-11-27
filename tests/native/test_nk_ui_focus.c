@@ -2107,6 +2107,40 @@ static int test_sdl_translation(void) {
     n = tr(&s, &e, 8.6);
     CHECK(n == 1 && g_out[0].dir == NK_UI_DIR_LEFT, "flipped wheels reverse");
 
+    /* A UI drawn inside the window's safe area (#3215): every position is taken from that
+       area's corner, then scaled, for the mouse, a tap and the wheel alike. */
+    nk_ui_sdl_input_set_event_origin(&s, 40.0f, 30.0f);
+    memset(&e, 0, sizeof(e));
+    e.type = SDL_EVENT_MOUSE_MOTION;
+    e.motion.x = 260.0f;
+    e.motion.y = 150.0f;
+    n = tr(&s, &e, 8.7);
+    CHECK(n == 1 && g_out[0].type == NK_UI_EV_POINTER && g_out[0].x == 110.0f &&
+          g_out[0].y == 60.0f, "mouse motion from the safe area's corner");
+    memset(&e, 0, sizeof(e));
+    e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    e.button.which = SDL_TOUCH_MOUSEID;
+    e.button.button = SDL_BUTTON_LEFT;
+    e.button.down = true;
+    e.button.x = 60.0f;
+    e.button.y = 50.0f;
+    n = tr(&s, &e, 8.71);
+    CHECK(n >= 1 && g_out[n - 1u].type == NK_UI_EV_POINTER && g_out[n - 1u].x == 10.0f &&
+          g_out[n - 1u].y == 10.0f, "a tap from the safe area's corner");
+    e.button.down = false;
+    (void)tr(&s, &e, 8.72);
+    memset(&e, 0, sizeof(e));
+    e.type = SDL_EVENT_MOUSE_WHEEL;
+    e.wheel.y = 1.0f;
+    e.wheel.mouse_x = 40.0f;
+    e.wheel.mouse_y = 30.0f;
+    n = tr(&s, &e, 8.73);
+    /* After the tap, the wheel first says the mouse is the input again. */
+    CHECK(n >= 1 && g_out[n - 1u].type == NK_UI_EV_WHEEL && g_out[n - 1u].x == 0.0f &&
+          g_out[n - 1u].y == 0.0f, "the wheel from the safe area's corner");
+    nk_ui_sdl_input_set_event_origin(&s, NAN, INFINITY);
+    CHECK(s.event_origin_x == 0.0f && s.event_origin_y == 0.0f, "a non-finite corner resets to 0");
+
     /* Text. */
     memset(&e, 0, sizeof(e));
     e.type = SDL_EVENT_TEXT_INPUT;

@@ -180,6 +180,31 @@ bool player_ui_host_is_pc(NkHostKind host) {
     return host != NK_HOST_ANDROID;
 }
 
+/* One edge in output pixels: a window-point edge times pixel / window, rounded up for a
+   leading edge and down for a trailing one, then kept inside [0, pixel]. */
+static int player_ui_safe_edge(int point, int window, int pixel, bool leading) {
+    long long scaled = (long long)point * (long long)pixel;
+    long long edge = scaled / window;
+    if (leading && scaled % window > 0) edge++;
+    if (!leading && scaled % window < 0) edge--;
+    if (edge < 0) edge = 0;
+    if (edge > pixel) edge = pixel;
+    return (int)edge;
+}
+
+NkUiPixelRect player_ui_safe_pixel_rect(int window_w, int window_h, int pixel_w, int pixel_h,
+                                        NkUiPixelRect safe_points) {
+    NkUiPixelRect whole = { 0, 0, pixel_w > 0 ? pixel_w : 0, pixel_h > 0 ? pixel_h : 0 };
+    NkUiPixelRect safe;
+    if (window_w <= 0 || window_h <= 0 || pixel_w <= 0 || pixel_h <= 0) return whole;
+    safe.x0 = player_ui_safe_edge(safe_points.x0, window_w, pixel_w, true);
+    safe.y0 = player_ui_safe_edge(safe_points.y0, window_h, pixel_h, true);
+    safe.x1 = player_ui_safe_edge(safe_points.x1, window_w, pixel_w, false);
+    safe.y1 = player_ui_safe_edge(safe_points.y1, window_h, pixel_h, false);
+    if (safe.x1 <= safe.x0 || safe.y1 <= safe.y0) return whole;
+    return safe;
+}
+
 PlayerUiActionKind player_ui_top_bar(NkUi *ui, NkUiId id, PlayerUiRoute active) {
     NkUiSection sections[3];
     int chosen;

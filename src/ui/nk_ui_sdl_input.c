@@ -40,6 +40,22 @@ void nk_ui_sdl_input_set_event_scale(NkUiSdlInput *state, float scale) {
     }
 }
 
+void nk_ui_sdl_input_set_event_origin(NkUiSdlInput *state, float x, float y) {
+    if (state != NULL) {
+        state->event_origin_x = isfinite(x) ? x : 0.0f;
+        state->event_origin_y = isfinite(y) ? y : 0.0f;
+    }
+}
+
+/* A window-event position in logical UI pixels: from the UI's origin, then scaled. */
+static inline float nk_ui_sdl_x(const NkUiSdlInput *state, float x) {
+    return (x - state->event_origin_x) * state->event_scale;
+}
+
+static inline float nk_ui_sdl_y(const NkUiSdlInput *state, float y) {
+    return (y - state->event_origin_y) * state->event_scale;
+}
+
 #ifndef NK_UI_WITH_SDL3
 
 NkUiButtonLabel nk_ui_sdl_button_label(int sdl_gamepad_button_label) {
@@ -192,8 +208,8 @@ static size_t nk_ui_sdl_pad_button(NkUiSdlInput *state, const SDL_GamepadButtonE
 static size_t nk_ui_sdl_wheel(NkUiSdlInput *state, const SDL_MouseWheelEvent *w,
                               NkUiEvent *out, size_t cap) {
     float flip = w->direction == SDL_MOUSEWHEEL_FLIPPED ? -1.0f : 1.0f;
-    float px = w->mouse_x * state->event_scale;
-    float py = w->mouse_y * state->event_scale;
+    float px = nk_ui_sdl_x(state, w->mouse_x);
+    float py = nk_ui_sdl_y(state, w->mouse_y);
     size_t n = 0u;
     state->wheel_acc_x += w->x * flip;
     state->wheel_acc_y += w->y * flip;
@@ -302,8 +318,8 @@ size_t nk_ui_sdl_input_translate(NkUiSdlInput *state, const union SDL_Event *eve
         return nk_ui_input_device_change(&state->input, device, family, false, out, cap);
     }
     case SDL_EVENT_MOUSE_MOTION:
-        return nk_ui_input_pointer(&state->input, event->motion.x * state->event_scale,
-                                   event->motion.y * state->event_scale,
+        return nk_ui_input_pointer(&state->input, nk_ui_sdl_x(state, event->motion.x),
+                                   nk_ui_sdl_y(state, event->motion.y),
                                    state->input.pointer_down, out, cap);
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -313,8 +329,8 @@ size_t nk_ui_sdl_input_translate(NkUiSdlInput *state, const union SDL_Event *eve
         if ((event->button.which == SDL_TOUCH_MOUSEID ||
              event->button.which == SDL_PEN_MOUSEID) &&
             event->button.button == SDL_BUTTON_LEFT) {
-            return nk_ui_input_touch(&state->input, event->button.x * state->event_scale,
-                                     event->button.y * state->event_scale,
+            return nk_ui_input_touch(&state->input, nk_ui_sdl_x(state, event->button.x),
+                                     nk_ui_sdl_y(state, event->button.y),
                                      event->button.down, out, cap);
         }
         /* The mouse's back button is Back, as Esc is. */
@@ -326,8 +342,8 @@ size_t nk_ui_sdl_input_translate(NkUiSdlInput *state, const union SDL_Event *eve
         if (event->button.button != SDL_BUTTON_LEFT) {
             return 0u;
         }
-        return nk_ui_input_pointer(&state->input, event->button.x * state->event_scale,
-                                   event->button.y * state->event_scale,
+        return nk_ui_input_pointer(&state->input, nk_ui_sdl_x(state, event->button.x),
+                                   nk_ui_sdl_y(state, event->button.y),
                                    event->button.down, out, cap);
     case SDL_EVENT_MOUSE_WHEEL:
         return nk_ui_sdl_wheel(state, &event->wheel, out, cap);

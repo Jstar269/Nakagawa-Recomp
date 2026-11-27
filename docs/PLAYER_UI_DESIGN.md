@@ -250,7 +250,11 @@ The launcher offers it as Settings > Accessibility > Text size; the in-game over
 screens are laid out on at least its
 1280 x 720 design size (`NkUiViewport.min_logical_w` / `min_logical_h`): a smaller window, down to the 960 x 540
 minimum, lowers the density so the same layout is drawn smaller, instead of pushing buttons and the prompt bar off
-the window. A larger window keeps its density and gains room. Clay clips at most 100 containers per layout: shorten
+the window. A larger window keeps its density and gains room. The window here is its safe area
+(`SDL_GetWindowSafeArea`, `player_ui_safe_pixel_rect`): on Android the app draws edge to edge, so the launcher lays
+out and draws inside the area the system bars, the gesture-navigation insets and a display cutout leave, and pointer
+positions are taken from that area's corner (`nk_ui_sdl_input_set_event_origin`). The page colour still fills the
+whole window. On the desktop the safe area is the whole window. Clay clips at most 100 containers per layout: shorten
 long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
 value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
 One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,

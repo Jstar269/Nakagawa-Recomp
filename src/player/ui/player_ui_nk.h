@@ -1782,6 +1782,15 @@ void player_ui_apply_display(NkUi *ui, NkUiViewport *viewport, const PlayerUiDis
    images. Android is a phone, tablet, headset or handheld, whose window takes none. */
 bool player_ui_host_is_pc(NkHostKind host);
 
+/* Where the launcher draws its UI, in output pixels (x0, y0 inclusive; x1, y1 exclusive):
+   the window's safe area (SDL_GetWindowSafeArea, in window points; edges x0 y0 x1 y1),
+   scaled from the window's size to the output's and rounded inward, so no control sits
+   under a system bar, a gesture area or a display cutout. The page colour still fills the
+   whole window. The whole output when the window or the output has no size, or when the
+   safe area leaves nothing inside the output. */
+NkUiPixelRect player_ui_safe_pixel_rect(int window_w, int window_h, int pixel_w, int pixel_h,
+                                        NkUiPixelRect safe_points);
+
 /* The build date for an epoch (Unix seconds, UTC) as MM-DD-YYYY. Returns false
    for a negative epoch or a short buffer. */
 bool player_ui_build_date(long long epoch, char *out, size_t cap);

@@ -11669,6 +11669,32 @@ static void test_input_chip_words(void) {
 /* Android is a phone, tablet, headset or handheld, not "this PC", and its window takes no
    dropped files: on it the launcher's main path says "this device" and offers no drop. The
    host comes in the model (nk_platform_host_kind at run time), so both wordings run here. */
+/* The launcher draws inside the window's safe area (#3215): an Android app draws edge to edge,
+   and a footer control under the 78 px gesture-navigation inset lost its taps to the system's
+   back gesture. The area is scaled from window points to output pixels and rounded inward. */
+static void test_safe_area_pixel_rect(void) {
+    NkUiPixelRect r;
+    /* A desktop window: the safe area is the whole window, so nothing moves. */
+    r = player_ui_safe_pixel_rect(1280, 720, 1280, 720, (NkUiPixelRect){ 0, 0, 1280, 720 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 1280 && r.y1 == 720, "a whole-window safe area");
+    /* A phone in landscape, 2342 x 1080 pixels: a status-bar inset at the top and the
+       gesture-navigation inset at the bottom. */
+    r = player_ui_safe_pixel_rect(2342, 1080, 2342, 1080, (NkUiPixelRect){ 0, 161, 2342, 1002 });
+    CHECK(r.x0 == 0 && r.y0 == 161 && r.x1 == 2342 && r.y1 == 1002,
+          "the system-bar and gesture insets are left out");
+    /* Points to pixels at 2x, with odd edges rounded inward. */
+    r = player_ui_safe_pixel_rect(1000, 500, 1999, 1000, (NkUiPixelRect){ 31, 41, 969, 461 });
+    CHECK(r.x0 == 62 && r.y0 == 82 && r.x1 == 1937 && r.y1 == 922,
+          "scaled to the output and rounded inward");
+    /* Out of range is kept inside the output; nothing left, or no size, is the whole. */
+    r = player_ui_safe_pixel_rect(800, 600, 800, 600, (NkUiPixelRect){ -20, -5, 900, 700 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 800 && r.y1 == 600, "kept inside the output");
+    r = player_ui_safe_pixel_rect(800, 600, 800, 600, (NkUiPixelRect){ 400, 300, 400, 600 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 800 && r.y1 == 600, "an empty safe area is the whole");
+    r = player_ui_safe_pixel_rect(0, 600, 800, 600, (NkUiPixelRect){ 10, 10, 20, 20 });
+    CHECK(r.x0 == 0 && r.y0 == 0 && r.x1 == 800 && r.y1 == 600, "a window with no size is the whole");
+}
+
 static void test_host_words_on_android(void) {
     NkUiTextBackend text = screen_test_text_backend();
     NkUiConfig config;
@@ -12739,6 +12765,7 @@ int main(int argc, char **argv) {
     test_binding_labels_fit();
     test_input_chip_words();
     test_host_words_on_android();
+    test_safe_area_pixel_rect();
     test_library_touch_prompts();
     test_build_bar_shows_compiled_parts();
     test_library_demos();
