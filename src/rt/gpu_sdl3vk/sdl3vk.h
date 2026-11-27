@@ -30,6 +30,9 @@ extern "C" {
  * failure (caller falls back to the GDI path). */
 int  sdl3vk_init(const char *title);
 
+/* Whether the running Vulkan presenter selected a CPU device. */
+bool sdl3vk_uses_cpu(void);
+
 /* Raise the initialized SDL window. On Windows, also request OS foreground activation. */
 bool sdl3vk_raise_window(void);
 

@@ -90,6 +90,7 @@ static SDL_Gamepad     *s_pad;
 static VkInstance       s_inst;
 static VkSurfaceKHR     s_surf;
 static VkPhysicalDevice s_pdev;
+static bool             s_cpu_device;
 static VkDevice         s_dev;
 static uint32_t         s_qfam;
 static VkQueue          s_queue;
@@ -1174,6 +1175,7 @@ int sdl3vk_init(const char *title) {
         VkPhysicalDeviceProperties pp;
         vkGetPhysicalDeviceProperties(s_pdev, &pp);
         fprintf(stderr, "sdl3vk: using %s\n", pp.deviceName);
+        s_cpu_device = pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
         s_max_image_dim = pp.limits.maxImageDimension2D;
     }
     {
@@ -1985,6 +1987,8 @@ static void poll_input_on_this_stack(void *arg) {
 static void poll_input(int *quit) {
     sr_coro_call_on_thread_stack(poll_input_on_this_stack, quit);
 }
+
+bool sdl3vk_uses_cpu(void) { return s_dev && s_cpu_device; }
 
 int sdl3vk_get_vk(Sdl3VkInfo *out) {
     if (!s_dev || !out) return 0;
@@ -3874,6 +3878,7 @@ void sdl3vk_shutdown(void) {
     s_queue = VK_NULL_HANDLE;
     s_dev = VK_NULL_HANDLE;
     s_pdev = VK_NULL_HANDLE;
+    s_cpu_device = false;
     if (s_surf)        vkDestroySurfaceKHR(s_inst, s_surf, NULL);
     s_surf = VK_NULL_HANDLE;
     if (s_validation_msgr && s_validation_destroy) {
