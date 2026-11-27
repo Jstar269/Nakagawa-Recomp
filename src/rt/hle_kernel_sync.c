@@ -811,6 +811,7 @@ void hle_register_msgpipe_handlers(void) {
 }
 #define PSP_MBX_ATTR_PRIORITY          0x400u
 #define PSP_MBX_ATTR_THREAD_PRIORITY   0x100u
+#define PSP_MBX_ERROR_DUPLICATE_MSG    0x800201c9u
 
 /* Rewrite guest-visible circular next links so first->...->last->first matches
  * host delivery order (HARDWARE_ORACLE.md: FIFO mailboxes link packets circularly). */
@@ -968,6 +969,12 @@ static uint32_t h_SendMbx(CpuState *s) {
     /* Validate the whole accessed packet span: the circular relink writes
      * next@0 and priority mailboxes read msgPriority@4. */
     if (!msg || !sr_guest_span_writable(msg, 8u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    /* pspautotests tests/threads/mbx/send/send.expected, "Send twice" (PSP-recorded):
+     * a packet that is already queued is refused and the queue is left unchanged. Only queued
+     * packets are checked: sending again a packet handed straight to a receiver (below) is
+     * UNMEASURED and is accepted here. */
+    for (int i = 0; i < m->nmsgs; i++)
+        if (m->msgs[i] == msg) return PSP_MBX_ERROR_DUPLICATE_MSG;
     /* The first waiter still blocked on the mailbox is handed the packet here (#3066): its
      * address is stored where that receiver's call returns it and the receiver is readied with
      * result 0, as SignalSema hands its count over (sema_hand_over). The packet never joins the
