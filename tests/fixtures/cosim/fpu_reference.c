@@ -23,7 +23,8 @@
  * cvt.s.w results. Mul.s infinity*zero is the repository's explicit canonical
  * qNaN result, not a host-NaN assumption. The ctc1 write rule (FCR31 bits 25..31
  * do not exist) is the project's own PSP-3000 measurement PSP-FPU-CC-001, indexed
- * in docs/HARDWARE_ORACLE.md. SQRT.S follows PSPAutotests commit
+ * in docs/HARDWARE_ORACLE.md; bits 18..22 read back 0 in pspautotests e37443a6
+ * tests/cpu/fpu/fcr.expected (recorded on a PSP). SQRT.S follows PSPAutotests commit
  * e37443a681c6a4d562f32b6b48e1f4e36cd69c97 tests/cpu/fpu/roundmode.expected
  * (recorded on a PSP): under each of the four RM values the finite positive
  * results are the correctly rounded roots, and -1.0 and -inf give 0x7fc00000.
@@ -889,8 +890,10 @@ unsigned fpu_reference_bc1(unsigned tf, unsigned condition) {
 
 /* FCR31 after a guest ctc1 of `written`. The PSP FPU implements FCC0 only: a
  * ctc1 of 0xFE800000 (every MIPS IV condition bit) reads back 0x00800000 on a
- * PSP-3000 (PSP-FPU-CC-001), so bits 25..31 are dropped. Every other bit is kept;
- * no other bit was measured as unwritable. */
+ * PSP-3000 (PSP-FPU-CC-001), so bits 25..31 are dropped. Bits 18..22 are dropped
+ * too: pspautotests e37443a6 tests/cpu/fpu/fcr.expected (recorded on a PSP) reads
+ * a ctc1 of 0x00400000, 0x00200000 or 0x001C0000 back as 0. Bits 0..17, 23 and
+ * 24 are kept; bit 17 (cause E) is unrecorded, since writing it traps. */
 uint32_t fpu_reference_ctc1(uint32_t written) {
-    return written & 0x01ffffffu;
+    return written & 0x0183ffffu;
 }
