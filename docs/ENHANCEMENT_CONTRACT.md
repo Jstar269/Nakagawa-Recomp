@@ -315,6 +315,22 @@ Many PSP titles run a 30 Hz game-logic loop by waiting two VBLANK intervals per 
 2. **Off at run time unless opted in.** Every rewritten site is emitted twice: the stock statement and its rewrite. The rewrite runs only when the process starts with `SR_EXPERIMENTAL_60HZ=1`; any other value runs the stock statements, so a package build with the toggle off executes the authentic instruction stream. The player sets it per title: "60 FPS game logic" on the title page, shown only for a title with a usable enhancement package, is off by default and saved as the list `enhancement_60hz_discs` in the player's settings file (no other key turns it on). A title with it on launches its enhanced package with `SR_EXPERIMENTAL_60HZ=1`; with it off, the player launches the authentic `packages/<disc_id>` with `SR_EXPERIMENTAL_60HZ=0`, even when an enhanced package exists. Started with `--experimental-60hz`, the player turns it on for every title that has an enhancement package and does not resolve to Authentic (section 10.5), for that session only; the flag is never written to the settings file.
 3. **No faster guest clock.** System time, RTC and audio sample clocks are untouched. Only the sites the package lists change.
 
+The build snapshots the selected declaration before computing its package key and generating code.
+An enhanced package records a versioned source fingerprint alongside its validated declaration
+digest. The player selects the current user or shipped declaration for that title and checks the
+fingerprint when it checks library readiness and again before starting the runtime. A combined
+timing and culling package checks both. JSON whitespace, member order, and equivalent string escapes
+leave the fingerprint unchanged, including equivalent spellings of JSON real numbers within the
+player's declaration size limit. A declaration with the same ID and different contents requires
+a rebuild. The build also snapshots and records the byte digest of any adjacent symbol map it
+uses. Adding, removing or changing that map requires a rebuild. Published declarations resolve
+against their own site map. An explicit guest symbol map takes precedence over adjacent files for
+private declarations. The builder snapshots its bytes and records their digest in the enhanced AOT
+key. The installed package records that build input by digest, and launch continues to check the
+selected declaration files without reading unused adjacent maps. An older enhanced package that
+lacks the declaration identity needs one rebuild to record it.
+Authentic packages have no declaration fingerprint requirement.
+
 ### 9.2. Site Transforms
 
 Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, the SHA-256 `stock_digest` of the stock little-endian instruction word, and a `transform`. `plan_site_rewrite()` in `tools/enhancement_package.py` gives each (transform, instruction) pair exactly one rewrite, chosen from the transform and the instruction encoding alone; a pair without one refuses the whole package. A site is one word, or two words (`word_count: 2`) that build a float constant: `lui rt, hi` followed by `ori rt, rt, lo` of the same register. A pair takes one of the scaling transforms below, applied to the whole 32-bit value and rounded to nearest, and both words are rewritten (`plan_float_pair_rewrite()`).
@@ -1648,10 +1664,23 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   until its content has held still for 300 presents (a font cache that has finished typing, a streaming slot that
   settled); then it is dumped again. A texture skipped as a movie picture or for its changing address is looked at
   again once that no longer holds, so a texture the game loads where a movie played is not lost. A file already in
-  the folder is never written again or replaced:
+  the folder is never written again or replaced, with one exception below:
   each PNG (compressed with fixed-Huffman deflate, `sr_png_encode_rgba`) is written to a temporary file and moved
   into place only while no file has the name (`sr_file_publish_new_tagged`, `nk_rename_noreplace_utf8`), so an image
-  the player enlarges in place is kept even when it is saved during the dump. Every file call is the platform layer's
+  the player enlarges in place is kept even when it is saved during the dump. The exception is a mip level's file
+  the dump wrote itself: a level from 1 up is named for level 0's content, not its own, so the game can change
+  the level under the same name. When a later dump finds such a file holding another level than the one drawn,
+  a worker replaces it (written whole to a temp file and renamed over it), counted in `written=`, under the file
+  limit and the budget of disk bytes a new file has (the check's own reads and decodes are host memory beyond
+  that budget), but only when
+  the file is the dump's own: a PNG at the level's size whose bytes are what the dump's encoder makes of its
+  pixels. Any other file at the name (an enlarged image, or one another program saved, at any size) is the
+  player's and is kept as it is, counted in `already_there=`, as is a file that already holds the level drawn.
+  A replacement that cannot be made (the temp file cannot be written, or the host refuses the rename, as Windows
+  does over a file the player marked read-only or holds open) removes its temp file and keeps the old file,
+  counted in `already_there=` and said once a stretch in a `TEX_DUMP: note:` line; it does not stop the dump.
+  Level 0's file is named for its own content, so it is never outdated. The check and the rename are not one
+  step: a file the player saves at that name in between is replaced. Every file call is the platform layer's
   wide-path one, so a user data folder under a user name that is not ASCII works. Nothing the guest can observe
   changes: each texture is decoded from guest memory, on the guest thread, into a buffer of its own, and written to
   disk, never to guest memory; files are written only inside the folder. The encode and the write run on the
@@ -1694,7 +1723,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   calls `sr_texdump_exit_finish` beside its video recording's finish (`SR_EXIT_AT_VBLANK`, `SR_WATCHDOG_EXIT`, the
   `SR_FBDUMP` capture exit and its no-framebuffer stop, an unsupported import, an unregistered NID, a guest fault,
   a failed route check, a refused `SR_SAMPLE_SPEC`, the libfont start-up stop, an enhancement data mismatch, and a
-  failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). An end reached on a
+  failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). One `_Exit` finishes
+  neither: the verify harness's `--hard-exit` (`src/rt/verify_harness.c`, a verify build's own test program), which
+  links no renderer, display or player, so no dump or recording can run there. An end reached on a
   thread other than the one that draws does not wait and says what it leaves. A crash, or an `abort()`, finishes
   nothing: what was queued is lost and a temp file can be left. The PNG encoder's CRC table is constant, so the
   workers share no state while they encode.
@@ -1793,7 +1824,15 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   is written on its next draw. Its `dump-exit` cell holds 20 levels with the workers and calls what the exit at
   `SR_EXIT_AT_VBLANK` calls: every level is written whole by both workers at once, each file's CRCs right, and no
   temp file is left. Its `dump-stuck` cell holds both workers with jobs that do not finish: the end gives up after
-  its bounded wait and counts the levels it left. `hle-thread-selftest` runs two real stops in a child process, an
+  its bounded wait and counts the levels it left. Its `dump-thread` cell ends the run on another thread with
+  nothing being written, and `dump-thread-busy` with a level held by the workers: that end neither waits nor
+  takes the job back, counts the level as left and leaves the dump's state alone, and the drawing thread's own end
+  then lets the file land. Its `dump-redump` cell dumps a mip-mapped texture, changes level 1 only and dumps
+  again: level 1's file is replaced and level 0's left byte for byte; drawn unchanged, both are left and counted
+  as there; the player's level 1 enlarged 2 times (in noise, and in one flat colour the dump's own encoder wrote,
+  small enough that only the size check keeps it), and one at the level's size that another program saved, are
+  each kept byte for byte; and an outdated file of the dump's own whose rename the host refuses (a test seam in
+  the rename's place) is kept, said once, and the dump goes on with nothing counted as failed. `hle-thread-selftest` runs two real stops in a child process, an
   unregistered NID (status 7) and `SR_WATCHDOG_EXIT` (status 1), with a probe in the dump's place, and requires
   that each reaches `sr_texdump_exit_finish` before the process ends. `tex-scale-selftest` checks the work jobs
   themselves: each runs once, on a worker thread, never the submitter's, and knows it is on one; held jobs stay
@@ -2559,13 +2598,13 @@ The runtime says over the picture when it draws the game a slower way than the r
 shows in Authentic mode too and that the user can dismiss it. It is not an enhancement and no play mode turns it on
 or off: it is a host-window fact, and it changes no guest byte, no capture and no recording (section 10.2).
 
-- **When.** Only for the two start-up fallbacks the `render_path` boot event names
-  ([`docs/DEBUGGING.md`](DEBUGGING.md#performance-issues)): `gdi_presenter` (SDL3/Vulkan did not start, so the
-  Windows GDI window shows a software-drawn picture) and `software_ge` (the GPU renderer was asked for and did not
-  start). A path that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is no fallback and shows nothing. The
-  notice has the heading the player's game page uses for the same fact, "Drawn in software", one sentence that says
-  what did not start, that the game may run slower and that updating the graphics driver may help, and the way to
-  hide it.
+- **When.** The start-up fallback is named in the `render_path` boot event
+  ([debugging guide](DEBUGGING.md#performance-issues)). `gdi_presenter` means SDL3/Vulkan did not start and the
+  Windows GDI window shows a software-drawn picture. `software_ge` means the requested Vulkan GE renderer did
+  not start. `vulkan_cpu` means the Vulkan presenter selected a CPU device and takes precedence over
+  `software_ge`. An explicitly selected GDI or software GE path alone does not trigger the notice.
+  The notice shares the player's "Drawn in software" heading and explains why the game may run slower and
+  how to hide the notice.
 - **Not in the window.** An effect the GPU renderer hands to the software rasterizer while the game runs (a
   `render_fallback` event) is named on the game's page in the player, not over the picture: the in-game UI is made
   at start so that no present pays for it, an authentic run with nothing to say at start makes none, and the notice

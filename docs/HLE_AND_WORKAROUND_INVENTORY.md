@@ -46,16 +46,16 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **720** (dedicated **673**, fake_success **3**, controlled_unsupported **44**).
-Semantic handler census: **650** handlers across **30** API families, covering **680** handler-associated NID registrations.
+Registered NIDs: **720** (dedicated **675**, fake_success **3**, controlled_unsupported **42**).
+Semantic handler census: **652** handlers across **30** API families, covering **682** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 421 | 434 |
+| `partial` | 425 | 438 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 211 | 215 |
+| `unreviewed` | 209 | 213 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -73,7 +73,7 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 | `sceImpose` | 0 | 0 | 0 | 0 | 2 | 2 | 2 |
 | `sceIo` | 2 | 29 | 0 | 0 | 3 | 34 | 34 |
 | `sceKernel` | 3 | 149 | 0 | 0 | 39 | 191 | 209 |
-| `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
+| `sceMp3` | 0 | 2 | 0 | 0 | 20 | 22 | 22 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
 | `sceNet` | 0 | 48 | 0 | 0 | 13 | 61 | 61 |
@@ -83,13 +83,13 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 | `scePsmf` | 0 | 4 | 0 | 0 | 14 | 18 | 18 |
 | `sceReg` | 0 | 15 | 0 | 0 | 0 | 15 | 15 |
 | `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
-| `sceSas` | 0 | 3 | 0 | 1 | 24 | 28 | 32 |
+| `sceSas` | 0 | 5 | 0 | 1 | 22 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
 | `sceUtility` | 0 | 25 | 0 | 0 | 12 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 1 | 0 | 0 | 1 | 2 | 3 |
-| **Total** | **14** | **421** | **1** | **3** | **211** | **650** | **680** |
+| **Total** | **14** | **425** | **1** | **3** | **209** | **652** | **682** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1147,6 +1147,15 @@ Semantic handler census: **650** handlers across **30** API families, covering *
 - **`h_WakeupThread`** (`sceKernel`): `sceKernelWakeupThread` (0xd59ead2f)
   - Limitation: the cited cells cover wakeup-count accumulation and a sleeping target; specific invalid-target errors, repeated wakeup order, and interactions with termination are not all established
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B3-01: wakeups accumulate while the target is not sleeping)
+- **`h_Mp3LowLevelDecode`** (`sceMp3`): `sceMp3LowLevelDecode` (0xe3ee2c81)
+  - Limitation: PPSSPP-derived, not PSP-measured. Bytes used are the leading zero bytes plus the frame, as PPSSPP's bundled FFmpeg and JPCSP both report (a PPSSPP build on libavcodec 57.48.101 or later reports the whole window). A non-header start, too few bytes or an ID3v1 tag returns 0 with no PCM as in PPSSPP, where JPCSP returns 0x80672001. A frame running past the 4096-byte window stops by name. A reserved handle without low-level Init decodes with its own decoder. Bad pointers return -1, and the 4096 source bytes and 4608 PCM bytes must be mapped (runtime safety policy).
+  - Evidence: PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelDecode, one frame from at most 4096 source bytes into stereo s16, the bytes used and PCM bytes written, result 0
+  - Evidence: PPSSPP bundled FFmpeg b87f7c6d522d (libavcodec 57.24.102) libavcodec/mpegaudiodec_template.c decode_frame: leading zero bytes plus one frame are the bytes used; JPCSP 00ac4d6daedd Mp3Decoder.java agrees
+  - Evidence: tests/native/hle_thread_selftest.c:test_mp3_low_level
+- **`h_Mp3LowLevelInit`** (`sceMp3`): `sceMp3LowLevelInit` (0x1b839b83)
+  - Limitation: PPSSPP-derived, not PSP-measured. Takes any handle number without sceMp3InitResource and ignores its second argument, as the #2640 checklist asks; JPCSP instead requires a reserved handle 0 or 1. A low-level context does not count against the two reserved handles, and the stream and format calls answer its number as an unused one.
+  - Evidence: PPSSPP 0028f30da6784570264a41ef6cce1c3963692ea7 Core/HLE/sceMp3.cpp sceMp3LowLevelInit, a context under any caller-chosen handle number, replacing one already held there
+  - Evidence: tests/native/hle_thread_selftest.c:test_mp3_low_level
 - **`h_MpegAtracDecode`** (`sceMpeg`): `sceMpegAtracDecode` (0x800c44df)
   - Limitation: decodes the frame the last sceMpegGetAtracAu held with the project's ATRAC3+ bridge into 2048 stereo s16 samples (a mono stream duplicated); refuses with no held frame or an undecodable frame, with unmeasured error values; not measured on this project's PSP
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_atrac_au_decode
@@ -1599,6 +1608,10 @@ Semantic handler census: **650** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)
   - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
+- **`h_SasCoreWithMix`** (`sceSas`): `__sceSasCoreWithMix` (0x50a14dfc)
+  - Limitation: this status covers the measured cells only: PSP-SAS-003 is one acceptance-eligible launch on a PSP-3000 (system software 6.61, game context) of the probe built from 3872796c, 204 cells and the done record all PASS, and it calls __sceSasCoreWithMix once per cell on a core of grain 256 initialised fresh, over caller PCM (i - 256) * 97 in shorts 0..511; the selftest replays those calls and asserts the published words in the three windows the probe reads: with no voice keyed, (0x1000, 0x1000) returns 0 and leaves the buffer unchanged, (0x800, 0x800) returns 0 and halves it (0x9f00 becomes 0xcf80), and (0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return 0x80420018 and leave it untouched (sas-mix-w-zero-neg-calls, sas-mix-w-over-calls, sas-mix-w-extreme-calls); with voice 0 keyed at 0x1000, (0, 0) returns 0 and leaves the voice alone (0x06fe) and (0x1000, 0x1000) adds it to the caller's PCM (0x9f61 + 0x06fe = 0xa65f); in raw output mode (1), (0x1000, 0x1000) returns 0x80000004 and leaves the buffer untouched (sas-mix-w-raw-unity-calls); the handler accepted every gain and mixed in raw mode until #2807; it now refuses a gain below 0 or above 0x1000 on either side, then raw mode, and reports the first refusal of each kind in a process by name; the record measures that rule only in part, since of its four bounds a cell isolates only the right side's lower one (sas-mix-w-zero-neg-calls), the over and extreme cells being out of range on both sides, and its one raw-mode cell uses good gains; the rest of the rule follows a capture of 2026-11-26 on the same console that is CAPTURED, not measured, and no manifest record (one boot, one run of a probe extension that is not in the public tree; docs/HARDWARE_ORACLE.md, PSP-SAS-003 extension capture 2026-11-26), which test_sas_core_with_mix_capture_20261126_cells and test_sas_core_with_mix_capture_20261126_voice_advance replay by argument: each bound alone is refused with 0x80420018 ((-1, 0x1000), (0x1000, -1), (0x1001, 0x1000), (0x1000, 0x1001) and six more pairs with one bad side), the gain check answers before the raw-mode check (in raw mode (0x2000, 0x3000) and (0, -0x1000) return 0x80420018, and (0x800, 0x800) and (0, 0) return 0x80000004), raw mode set through the SetOutputmode export is refused like raw mode set at init, a refused call of either kind leaves voices that are playing where they were while an accepted one advances them one grain, and each side's sample becomes the floor of the sample times the gain over 4096, odd samples included; unmeasured and not captured: the order of the gain and raw-mode checks against the core, address and dispatch checks, the XMB context and other consoles; they are not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_withmix_cells
 - **`h_SasSetADSR`** (`sceSas`): `__sceSasSetADSR` (0x019b25eb)
   - Limitation: this status covers the measured cells only: in PSP-SAS-002 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 06a6c942c) __sceSasSetADSR with mask 0xf on voice 0 before KeyOn returns 0 for the table baseline (attack 0x00400000, decay 0x00100000, sustain 0x00004000, release 0x00040000) in all 32 rows of sas-adsr-m00-calls..sas-adsr-m31-calls, and for the rates of the expatk and expatk-g64 runs (0x00020000, 0x00100000, 0, 0x00040000) and of the bound and bound-half runs (0x00400000, 0x00100000, 0, 0x00100000); the selftest replays those calls and asserts those words, and in the bound runs the rates act as linear steps: the attack reaches the top within one grain and the decay holds 0x30000000 from grain 2 to grain 15; the refusals (a mask above 0xf, a negative rate) and other masks are unmeasured, and the absolute heights after KeyOn are not claimed, since the one the record publishes (expatk, 0x00a76d9d) moves with the key-on delay this runtime does not model (#1296); they are not reviewed here (#2807)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
@@ -1614,6 +1627,10 @@ Semantic handler census: **650** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-002: sas-adsr-*)
   - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_mode_psp_sas_002_table
   - Evidence: tests/native/hle_thread_selftest.c:test_sas_adsr_psp_sas_002_curve_runs
+- **`h_SasSetVolume`** (`sceSas`): `__sceSasSetVolume` (0x440ca7d8)
+  - Limitation: this status covers the measured cells only: in PSP-SAS-003 (one acceptance-eligible launch on a PSP-3000, system software 6.61, game context, of the probe built from 3872796c) __sceSasSetVolume sets voice 0 of a fresh core of grain 256, which plays a flat VAG held at the envelope's top, and the probe reads the grain after four warm-up grains; the selftest replays those calls and asserts the published words: with no volume set after the core's init every plane peaks at 0x06fe (output mode 0 and raw mode 1), 0 on all four sides is silent, 0x800 gives 0x037f, (0, 0, 0x1000, 0x1000) in raw mode leaves the dry planes 0 and the send planes at 0x06fe, -0x1000 on any side returns 0 and plays that side inverted, +0x1001 and -0x1001 on any side return 0x80420018 and keep the previous volume (0x800, so 0x037f on every plane), and a second init of the core after it restores 0x06fe; the handler already answered all of these, so #2807 changes no code here; the inverted value is not claimed: the PSP plays 0xf901 and this runtime 0xf902, because its mixer (__sceSasCore, unreviewed) applies the envelope to the sample before the volume; other volumes, the core and voice-index refusals, a call on a sounding voice, the XMB context and other consoles are unmeasured and not reviewed here (#2807)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAS-003: sas-mix-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_sas_mix_psp_sas_003_volume_cells
 - **`h_UmdActivate`** (`sceUmd`): `sceUmdActivate` (0xc6183d47)
   - Limitation: the callback argument follows PPSSPP (0x22 when no compiled SDK version is set, 0x32 otherwise) and is host-selftested, not hardware measured; the activation result and argument checks are not hardware measured either
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_unregister_callback

@@ -16,7 +16,10 @@
  * which here only re-arms the slice, so a call that yields is reported SKIP preempted.
  * --frozen-clock fixes the verifier's clock at zero, to test the rate budget.
  * --hard-exit ends the run with _Exit, which skips atexit, after the report call the
- * runtime's own _Exit paths make (SR_VERIFY_REPORT_NOW).
+ * runtime's own _Exit paths make (SR_VERIFY_REPORT_NOW). It is the one _Exit that finishes
+ * neither a video recording nor a texture dump (sr_texdump_exit_finish): the harness links no
+ * GE renderer, display or player, so neither can be running here
+ * (tools/test_dispatch_fatal_policy.py names this exception).
  * --selftest-corrupt FIELD changes that compared field of the translated side at each
  * syscall or import stop (sr_end_state_selftest_corrupt in src/rt/end_state_compare.h), so
  * the checker must report it; src/rt/snapshot_runner.c takes the same option, and the gate
@@ -201,6 +204,7 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "verify_harness: %u call spec(s) done, %u yield(s)\n", ncalls, s_yields);
     if (hard_exit) {
+        /* No recording or texture dump to finish: nothing linked here can start one (above). */
         fflush(stderr);
         SR_VERIFY_REPORT_NOW();
         _Exit(0);

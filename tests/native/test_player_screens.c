@@ -1235,7 +1235,7 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
            this page pushed the prompt bar off the window. The render case adds #2151's notice
-           with the longer of its two sentences (player_render_notice_text); the effects case
+           with the longest of its sentences (player_render_notice_text); the effects case
            the longest sentence player_render_effects_text writes, every effect named. The
            font note case is the Authentic page with the font note (player_app_font_note). */
         static PlayerUiTitle fixture;

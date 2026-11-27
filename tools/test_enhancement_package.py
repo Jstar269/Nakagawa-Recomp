@@ -3244,20 +3244,113 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
 
         timing, hook = self._write_pkg("pkg.json"), self._hook_pkg("hook.json")
         alone = package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(timing)})
-        self.assertEqual(sorted(alone), ["enhancement_package_epoch", "enhancement_package_id",
-                                         "enhancement_package_sha256"])
+        self.assertEqual(sorted(alone), [
+            "enhancement_declaration_sha256_v1", "enhancement_package_epoch",
+            "enhancement_package_id", "enhancement_package_sha256",
+        ])
+        timing_declaration = enhancement_package.load_package(timing)
+        timing.write_bytes(json.dumps(timing_declaration, sort_keys=True, indent=2).encode() + b"\r\n")
+        self.assertEqual(
+            package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(timing)}), alone,
+        )
         both = package_cache.enhancement_package_options(
             {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
         self.assertEqual({k: v for k, v in both.items() if k in alone}, alone)
         self.assertEqual(both["code_hook_package_id"], "synth.widen.clip")
         self.assertEqual(both["code_hook_package_sha256"],
                          enhancement_package.compute_package_digest(enhancement_package.load_and_validate_package(hook)))
+        self.assertEqual(both["code_hook_declaration_sha256_v1"],
+                         package_cache.enhancement_declaration_fingerprint(
+                             enhancement_package.load_package(hook)))
         self.assertNotIn("code_hook_symbol_map_sha256", both)
         # Its symbols sidecar names its sites, so an edited one is a different build.
         hook.with_suffix(".symbols.json").write_text('{"synth_scene_cache": "0x00001200"}', encoding="utf-8")
         named = package_cache.enhancement_package_options(
             {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
         self.assertEqual(named["code_hook_symbol_map_sha256"], package_cache.sha256_file(hook.with_suffix(".symbols.json")))
+
+    def test_explicit_symbol_map_has_precedence_over_adjacent_maps(self) -> None:
+        from nk_core import package_cache
+
+        timing, hook = self._write_pkg("pkg.json"), self._hook_pkg("hook.json")
+        for path in (timing, hook):
+            path.with_suffix(".symbols.json").write_text('{"synth_site": "0x00001200"}', encoding="utf-8")
+        environment = {"ENHANCEMENT_PACKAGE": str(timing),
+                       "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)}
+        enabled = package_cache.enhancement_package_options(environment)
+        self.assertIn("enhancement_symbol_map_sha256", enabled)
+        self.assertIn("code_hook_symbol_map_sha256", enabled)
+        guest_map = self.root / "guest-symbols.json"
+        guest_map.write_text('{"synth_site": "0x00001204"}', encoding="utf-8")
+        map_sha = package_cache.sha256_file(guest_map)
+        make_path = guest_map.as_posix().replace(" ", "\\ ")
+        for explicit in (
+            {"SYMBOL_MAP": guest_map.as_posix()},
+            {"SYMBOL_MAP": "ignored.json", "MAKEFLAGS": f"SYMBOL_MAP={make_path}"},
+            {"MAKEFLAGS": "SYMBOL_MAP=ignored.json",
+             "CODEGEN_USER_ARGS": f'--symbol-map=ignored.json --symbol-map "{guest_map.as_posix()}"'},
+            {"CODEGEN_USER_ARGS": "--symbol-map=ignored.json", "MAKEFLAGS":
+             f"CODEGEN_USER_ARGS=--symbol-map\\ {make_path}"},
+        ):
+            with self.subTest(explicit=explicit):
+                used = package_cache.enhancement_package_options(environment | explicit)
+                self.assertIs(used["enhancement_explicit_symbol_map"], True)
+                self.assertEqual(used["enhancement_explicit_symbol_map_sha256"], map_sha)
+                self.assertNotIn("enhancement_symbol_map_sha256", used)
+                self.assertNotIn("code_hook_symbol_map_sha256", used)
+
+    def test_explicit_map_bytes_change_cli_and_planner_aot_keys(self) -> None:
+        from types import SimpleNamespace
+
+        import codegen
+        import nk_cli
+        import title_codegen_plan
+        from nk_core import package_cache
+
+        declaration = self._write_pkg("timing.json")
+        package = enhancement_package.load_and_validate_package(declaration)
+        symbol = package["sites"][0]["function"]
+        guest_map = self.root / "explicit.map"
+        environment = {"SYMBOL_MAP": str(guest_map), "ENHANCEMENT_PACKAGE": str(declaration)}
+        base = 0x08810000
+        manifest = {"executable": {"base": base, "entry": base}}
+        plan = {
+            "environment": {"GAME_BASE": f"0x{base:08x}", "GAME_ENTRY": f"0x{base:08x}",
+                            "TITLE_EXTRA_SPANS": ""},
+            "codegen_profile": "none",
+        }
+
+        def aot_digest(options: dict[str, Any]) -> str:
+            result = package_cache.build_cache_key(
+                input_hashes={"manifest": {"sha256": "a" * 64},
+                              "executable": {"sha256": "b" * 64}, "modules": []},
+                codegen_options=options, analyzer_sha256="synthetic-analyzer",
+                codegen_sha256="synthetic-codegen", compiler="synthetic-compiler",
+                target="synthetic-target", runtime_source_digest="synthetic-runtime",
+            )["aot"]["digest"]
+            assert isinstance(result, str)
+            return result
+
+        def keys(address: int) -> tuple[str, str, str]:
+            guest_map.write_text(f"{symbol} = 0x{address:08x};\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, environment, clear=True):
+                cli = nk_cli._package_codegen_options(manifest, environment)
+                planner = title_codegen_plan._cache_codegen_options(
+                    plan, selected_optional=set(), funcs_per_chunk=2000,
+                    enhancement_package_path=declaration,
+                )
+            _, resolved = codegen._package_symbol_map(
+                SimpleNamespace(sec=lambda _: None), package, declaration,
+                codegen.load_symbol_map(guest_map), guest_map, None, None, None,
+            )
+            self.assertEqual(resolved[symbol], address)
+            stock = nk_cli._package_codegen_options(manifest, {"SYMBOL_MAP": str(guest_map)})
+            return aot_digest(cli), aot_digest(planner), aot_digest(stock)
+
+        before, after = keys(base), keys(base + 0x40)
+        self.assertNotEqual(before[0], after[0])
+        self.assertNotEqual(before[1], after[1])
+        self.assertEqual(before[2], after[2])
 
     def test_an_inherited_code_hook_package_is_ambient(self) -> None:
         from nk_core import package_cache
@@ -4872,6 +4965,39 @@ class TestCodeHookBesideTiming(unittest.TestCase):
 
     def _elf(self, tmp: Path) -> None:
         self.elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.ENTRY)
+
+    def test_adjacent_symbol_map_moves_the_generated_rewrite(self) -> None:
+        from nk_core import package_cache
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.words[self.RELAY] = self.COUNT
+            self._elf(root)
+            path = root / "timing.json"
+            path.write_text(json.dumps(self._timing(self._count_site("SYNTH_COUNT", "synth_count", 0))),
+                            encoding="utf-8")
+            sidecar = path.with_suffix(".symbols.json")
+            options = []
+            generated = []
+            for target in (self.TIMER, self.RELAY):
+                sidecar.write_text(json.dumps(self.symbols | {"synth_count": f"0x{target:08x}"}),
+                                   encoding="utf-8")
+                options.append(package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(path)}))
+                output = root / f"out-{target}" / "out.c"
+                output.parent.mkdir()
+                rc, info, files = TestEnhancementAotCodegenAndCache._run_codegen(
+                    root / "synth.elf", output, [f"--enhancement-package={path}"])
+                self.assertEqual(rc, 0, info)
+                self.assertIn(
+                    f"if (nk_enhancement_on()) {{ sr_begin(s, 0x{target:08x}u, 0x2404001eu); "
+                    "s->r[4] = (0u + 0x0000003cu);",
+                    files["out_0.c"].decode("utf-8"),
+                )
+                self.assertTrue(files)
+                generated.append(files)
+            first, second = options
+            self.assertEqual([key for key in first if first[key] != second[key]], ["enhancement_symbol_map_sha256"])
+            self.assertNotEqual(generated[0], generated[1])
 
     def test_the_hook_package_adds_only_its_site_and_its_header_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

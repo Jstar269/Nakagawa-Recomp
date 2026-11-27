@@ -297,6 +297,15 @@ line. It finishes in minutes, and a documentation
 change usually takes seconds. It is a *subset*: `make check` and `make readiness` remain the
 authoritative gates, and CI still runs the hosted matrix.
 
+The Python test modules run in one `unittest` process, whose time limit is six times their
+measured seconds in `tools/ci_test_weights.json`, and never less than 30 minutes. A process that
+takes longer is stopped and reported as a `FAIL` naming `UNITTEST_TIME_LIMIT` and its modules. Set
+`CONTRIB_TEST_JOBS` to a larger number to run up to that many processes in parallel, packed by
+those measured seconds as the hosted shards are (one process per 300 measured seconds at most).
+The modules that change tracked files (that file's `separate` groups) then run afterwards in a
+process of their own. Each process gets its own scaled limit. Parallel processes share your
+checkout and memory, so use them only when nothing else is running.
+
 It is a local pre-push helper with its own smaller gate set — not a representation of the hosted
 matrix, and not evidence that a pull request is ready to merge. A green `contrib-check` does **not**
 stand in for:

@@ -1179,6 +1179,18 @@ static int launch_loose_roots_transport(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc == 5 && (strcmp(argv[1], "--ace-declaration-fingerprint") == 0 ||
+                      strcmp(argv[1], "--ace-declaration-symbol-map") == 0)) {
+        NkEnhancementDeclarationIdentity declaration;
+        if (!nk_title_manifest_enhancement_declaration_identity(
+                argv[2], argv[3], argv[4], true, &declaration)) {
+            puts("DECLARATION_REFUSED");
+            return 1;
+        }
+        puts(strcmp(argv[1], "--ace-declaration-symbol-map") == 0
+             ? declaration.symbol_map_sha256 : declaration.fingerprint);
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "--launch-loose-roots") == 0) {
         return launch_loose_roots_transport(argc, argv);
     }
