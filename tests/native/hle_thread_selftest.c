@@ -56436,6 +56436,8 @@ static uint32_t selftest_fpl_refer_status(uint32_t uid, uint32_t info) {
     return sr_syscall(&cpu, 0xd8199e4cu); /* sceKernelReferFplStatus */
 }
 
+static void test_fpl_aligned_pool_wakes_waiter_with_aligned_block(void);
+
 static void test_fpl_create_alignment_option(void) {
     extern void sr_hle_test_partition_reset(void);
     reset_fixture();
@@ -56457,6 +56459,9 @@ static void test_fpl_create_alignment_option(void) {
              "(fpl/allocate.expected), got %d", (int)(a2 - a1));
     expect(a2 - a1 == 32u, msg);
     expect((a1 & 31u) == 0u && (a2 & 31u) == 0u, "FPL alignment 32: both blocks are 32-byte aligned");
+    expect(selftest_fpl_free(pool, a1 + 0x10u) == 0x80000103u,
+           "FPL alignment 32: FreeFpl of an address a blockSize past a block, between two strides, "
+           "is refused with ILLEGAL_ADDR");
     MEM_W32(info, 56u);
     expect(selftest_fpl_refer_status(pool, info) == 0u && MEM_R32(info + 40u) == 0x10u &&
                MEM_R32(info + 44u) == 8u && MEM_R32(info + 48u) == 6u,
@@ -56490,6 +56495,15 @@ static void test_fpl_create_alignment_option(void) {
         expect(pool != 0u && pool < 0x80000000u, msg);
         if ((int32_t)pool > 0) (void)selftest_fpl_delete(pool);
     }
+
+    /* An option pointer the guest cannot read is refused, not ignored (UNMEASURED code, the
+     * project's model; see h_CreateFpl). */
+    pool = selftest_fpl_create_opt(0x10u, 2u, 0xfffffff0u);
+    snprintf(msg, sizeof msg, "FPL unreadable option pointer is ILLEGAL_ADDR 0x80000103, got 0x%08x", pool);
+    expect(pool == 0x80000103u, msg);
+    if ((int32_t)pool > 0) (void)selftest_fpl_delete(pool);
+
+    test_fpl_aligned_pool_wakes_waiter_with_aligned_block();
 }
 
 /* A waiter that, once its first allocate returns, allocates from the same pool again. */
@@ -56511,6 +56525,65 @@ static void pool_retry_waiter_body(void *arg) {
     }
     s_pool_parks++;
     selftest_park_on_scheduler();
+}
+
+/* #3060's waiter path on a pool with alignment 32: a FreeFpl hands its block, which lies on a
+ * stride, straight to the blocked waiter, and the waiter's next allocate blocks again. */
+static void test_fpl_aligned_pool_wakes_waiter_with_aligned_block(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x101u, TH_RUNNING, 8);   /* never preempted by the waiter */
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t opt = 0x00271500u, out1 = 0x00271480u, out2 = 0x00271484u;
+    char msg[192];
+    MEM_W32(opt + 0u, 8u);
+    MEM_W32(opt + 4u, 32u);
+    const uint32_t pool = selftest_fpl_create_opt(0x10u, 2u, opt);
+    expect(pool != 0u && pool < 0x80000000u, "FPL aligned waiter: the pool is created");
+    expect(selftest_fpl_allocate(pool, out1, 0u) == 0u, "FPL aligned waiter: the owner takes block 0");
+    const uint32_t b0 = MEM_R32(out1);
+    expect(selftest_fpl_allocate(pool, out1, 0u) == 0u, "FPL aligned waiter: the owner takes block 1");
+    const uint32_t b1 = MEM_R32(out1);
+
+    PoolRetryCtx a;
+    memset(&a, 0, sizeof a);
+    a.tcb = fixture_thread(0x13au, TH_READY, 16);
+    a.tcb->started = 1;
+    a.pool = pool;
+    a.outptr = out2;
+    MEM_W32(out2, 0u);
+    a.tcb->coro = sr_coro_create(pool_retry_waiter_body, &a, (size_t)4 << 20);
+    s_cur = (int)(a.tcb - s_tcb);
+    sr_coro_switch(a.tcb->coro);
+    expect(a.returned == 0 && a.tcb->state == TH_WAIT_OBJ, "FPL aligned waiter: the waiter blocks");
+
+    s_cur = (int)(cur - s_tcb);
+    expect(selftest_fpl_free(pool, b1) == 0u, "FPL aligned waiter: the owner frees block 1");
+    expect(a.tcb->state == TH_READY, "FPL aligned waiter: the free readies the waiter");
+    s_cur = (int)(a.tcb - s_tcb);
+    a.tcb->state = TH_RUNNING;
+    sr_coro_switch(a.tcb->coro);
+    const uint32_t got = MEM_R32(out2);
+    snprintf(msg, sizeof msg, "FPL aligned waiter: the waiter gets block 1 (0x%08x), 32-byte aligned "
+             "and one stride after block 0 (0x%08x); got ret 0x%08x addr 0x%08x",
+             b1, b0, a.ret[0], got);
+    expect(a.returned == 1 && a.ret[0] == 0u && got == b1 && (got & 31u) == 0u && got - b0 == 32u,
+           msg);
+    expect(a.tcb->state == TH_WAIT_OBJ, "FPL aligned waiter: its next allocate blocks again");
+
+    s_cur = (int)(cur - s_tcb);
+    expect(selftest_fpl_delete(pool) == 0u, "FPL aligned waiter: the pool deletes");
+    s_cur = (int)(a.tcb - s_tcb);
+    a.tcb->state = TH_RUNNING;
+    sr_coro_switch(a.tcb->coro);
+    expect(a.returned == 2 && a.ret[1] == 0x800201b5u,
+           "FPL aligned waiter: the delete ends the second wait with WAIT_DELETE");
+    sr_coro_destroy(a.tcb->coro);
+    a.tcb->coro = NULL;
+    s_cur = -1;
 }
 
 typedef struct {

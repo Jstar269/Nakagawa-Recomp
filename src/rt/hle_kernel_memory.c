@@ -382,6 +382,8 @@ static uint32_t fpl_wait_ended(uint32_t uid, uint32_t thread_uid, uint32_t resul
     return result;
 }
 
+static int s_fpl_bad_opt_noted;   /* the unreadable-option refusal has been logged this run */
+
 static uint32_t h_CreateFpl(CpuState *s) {
     /* a0=name, a1=partition, a2=attr, a3=blockSize. 5th arg (numBlocks) is in t0 (r8). */
     char name[32] = {0};
@@ -401,7 +403,23 @@ static uint32_t h_CreateFpl(CpuState *s) {
      * and the stride with no option or an alignment below 4 (here blockSize itself; PPSSPP
      * rounds it up to 4). */
     uint32_t align = 1u;
-    if (opt && sr_guest_span_readable(opt, 8u) && MEM_R32(opt) >= 4u) {
+    if (opt) {
+        /* An option struct the guest cannot read (its size word, or the alignment word that size
+         * names) is refused with SCE_KERNEL_ERROR_ILLEGAL_ADDR, as sceKernelCreateTlspl refuses
+         * its options. UNMEASURED: no recording shows CreateFpl with an unreadable option
+         * pointer; the code is a project model, logged once per run so the refusal is visible. */
+        if (!sr_guest_span_readable(opt, 4u) ||
+            (MEM_R32(opt) >= 4u && !sr_guest_span_readable(opt, 8u))) {
+            if (!s_fpl_bad_opt_noted) {
+                s_fpl_bad_opt_noted = 1;
+                fprintf(stderr, "HLE: sceKernelCreateFpl: option pointer 0x%08x is not readable; "
+                                "returning SCE_KERNEL_ERROR_ILLEGAL_ADDR (UNMEASURED, project model)\n",
+                        opt);
+            }
+            return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+        }
+    }
+    if (opt && MEM_R32(opt) >= 4u) {
         align = MEM_R32(opt + 4u);
         if ((align & (align - 1u)) != 0u) return SCE_KERNEL_ERROR_ILLEGAL_ARGUMENT;
         if (align == 0u) align = 1u;
