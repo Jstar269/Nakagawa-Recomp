@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **562** (declared in `recomp.h`: 477)
-- reach class: emitter-reached 91, production-runtime-only 428, selftest-only 0, address-only 8, none 35
-- provenance class of the home definition: declared-only 1, project_authored_attested 54, upstream_derived 507
+- helpers: **563** (declared in `recomp.h`: 478)
+- reach class: emitter-reached 91, production-runtime-only 429, selftest-only 0, address-only 8, none 35
+- provenance class of the home definition: declared-only 1, project_authored_attested 54, upstream_derived 508
 
 ## Helpers
 
@@ -602,6 +602,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_w8` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_w8_pc` | `rt/recomp.h` | yes | emitter-reached (via `MEM_W8_PC`) | `rt/recomp.h`: upstream_derived |
 | `sr_w8_pc_slow` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
+| `sr_watch_armed_store` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_window_title_format` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_window_title_sanitize` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_window_title_utf8_len` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
