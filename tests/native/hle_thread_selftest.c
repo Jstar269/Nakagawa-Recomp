@@ -31482,6 +31482,48 @@ static void run_worker(TCB *worker) {
     s_cur = -1;
 }
 
+/* A thread in sceKernelSleepThread reports waitType 1 (sleep) and waitId 0: PSPAutotests
+ * tests/threads/threads/refer.expected, recorded on a PSP ("slumber after start: ... wait=1 for
+ * 0", in both SDK layouts); PPSSPP sleeps with WAITTYPE_SLEEP and wait id 0. The scheduler's
+ * own sleep marker (the thread's uid as its wait object) is not the guest-visible waitId. */
+static void test_refer_thread_status_sleep_wait_id(void) {
+    extern uint32_t sr_hle_test_refer_thread_run_status(CpuState *s);
+    enum {
+        NID_REFER_THREAD_STATUS = 0x17c1684eu,
+        SLEEPER = 0x13cu,
+        INFO = 0x08302000u,
+        RUN_INFO = 0x08303000u,
+    };
+    reset_fixture();
+    sr_hle_init();
+    TCB *sleeper = fixture_thread(SLEEPER, TH_WAIT_OBJ, 32);
+    sleeper->started = 1;
+    sleeper->sleeping = 1;
+    sleeper->wait_obj = sleeper->uid;   /* what sched_thread_sleep records */
+    sleeper->wake = SCHED_WAIT_FOREVER;
+
+    MEM_W32(INFO, (uint32_t)sizeof(SrThreadInfo));
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = SLEEPER;
+    cpu.r[5] = INFO;
+    expect(sr_syscall(&cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(INFO + 0x28u) == PSP_THREAD_WAITING &&
+               MEM_R32(INFO + 0x44u) == PSP_WAIT_SLEEP,
+           "ReferThreadStatus reports a sleeping thread as waiting in sleep");
+    expect(MEM_R32(INFO + 0x48u) == 0u,
+           "ReferThreadStatus reports waitId 0 for a sleeping thread (refer.expected)");
+
+    MEM_W32(RUN_INFO, 0x2cu);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = SLEEPER;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u &&
+               MEM_R32(RUN_INFO + 0x0cu) == PSP_WAIT_SLEEP && MEM_R32(RUN_INFO + 0x10u) == 0u,
+           "ReferThreadRunStatus reports waitId 0 for a sleeping thread");
+    reset_fixture();
+}
+
 static void test_exit_thread_does_not_wake_launcher(int launcher_wakeups) {
     reset_fixture();
 
@@ -31520,7 +31562,7 @@ static void test_exit_thread_does_not_wake_launcher(int launcher_wakeups) {
            "launcher status remains queryable");
     expect(launcher_status.status == PSP_THREAD_WAITING &&
            launcher_status.waitType == PSP_WAIT_SLEEP &&
-           launcher_status.waitId == launcher->uid,
+           launcher->wait_obj == launcher->uid && launcher_status.waitId == 0u,
            "unrelated sleeping launcher stays asleep on its own wait object");
     expect(launcher_status.wakeupCount == (uint32_t)launcher_wakeups,
            "ExitThread preserves the launcher's existing wakeup count exactly");
@@ -32486,6 +32528,86 @@ static void test_refer_run_and_callback_status_check_their_span(void) {
            "ReferCallbackStatus answers ILLEGAL_ADDR for an unmapped info pointer");
     (void)b1_call(0xedba5844u, cb, 0u, 0u, 0u);
     s_cur = -1;
+}
+
+/* sceKernelCancelWakeupThread and sceKernelReferThreadRunStatus name a thread, so a UID that
+ * names none answers UNKNOWN_THID (0x80020198), the code every other thread call returns
+ * (sched.c) and the one PPSSPP's kernelObjects.Get<PSPThread> gives both calls
+ * (Core/HLE/sceKernelThread.cpp). 0x800201A0 is UNKNOWN_TEID, the thread-event-handler code.
+ * Not PSP-measured here.
+ * Error precedence (#3071 review): the thread is looked up before the output pointer, so an
+ * unknown UID answers UNKNOWN_THID with a null output and with an unwritable one, and a known
+ * thread with a null output still answers 0. PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, sceKernelReferThreadRunStatus).
+ * This selftest build leaves both NIDs unregistered (SR_HLE_THREAD_SELFTEST compiles out
+ * hle_register_init_kernel_thread_1, which registers 0xfccfad26 and 0xffc36a14), so the cells
+ * call the production handlers through the test-build-only wrappers
+ * sr_hle_test_cancel_wakeup_thread and sr_hle_test_refer_thread_run_status that
+ * hle_kernel_thread.c exports under SR_HLE_THREAD_SELFTEST, not through sr_syscall; the
+ * dispatch path itself is not exercised here.
+ * MUTANT: look the thread up only inside the non-null output branch -- an unknown UID with a
+ * null output answers 0. */
+extern uint32_t sr_hle_test_cancel_wakeup_thread(CpuState *s);
+static void test_cancel_wakeup_and_run_status_unknown_thread(void) {
+    enum {
+        RUN_INFO = 0x08302000u,
+        TEST_UNKNOWN_THID = 0x80020198u,
+    };
+    TCB *self = wsv_begin();
+    TCB *other = fixture_thread(0x1e1u, TH_READY, 40);
+    other->started = 1;
+    other->wakeups = 2;
+    CpuState cpu;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == 2u && other->wakeups == 0,
+           "CancelWakeupThread returns and clears a thread's banked wakeups");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == TEST_UNKNOWN_THID,
+           "CancelWakeupThread answers UNKNOWN_THID for a UID that names no thread");
+    other->deleted = 1;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    expect(sr_hle_test_cancel_wakeup_thread(&cpu) == TEST_UNKNOWN_THID,
+           "CancelWakeupThread answers UNKNOWN_THID for a deleted thread");
+
+    MEM_W32(RUN_INFO, 0xa5a5a5a5u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID &&
+               MEM_R32(RUN_INFO) == 0xa5a5a5a5u,
+           "ReferThreadRunStatus answers UNKNOWN_THID for a UID that names no thread");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus answers UNKNOWN_THID for an unknown UID with a null output");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x7fffffffu;
+    cpu.r[5] = 0x0c000000u;          /* unmapped */
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus checks the UID before an unwritable output pointer");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_UNKNOWN_THID,
+           "ReferThreadRunStatus answers UNKNOWN_THID for a deleted thread with a null output");
+    other->deleted = 0;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u,
+           "ReferThreadRunStatus with a known thread and a null output still answers 0");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = other->uid;
+    cpu.r[5] = 0x0c000000u;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0x80000103u,
+           "ReferThreadRunStatus with a known thread and an unwritable output is ILLEGAL_ADDR");
+    (void)self;
+    reset_fixture();
 }
 
 /* -------------------------------------------------------------------------
@@ -73467,6 +73589,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_netconf_calls_with_no_dialog_started();
     test_gamedata_install_calls_with_no_dialog_started();
     test_game_sharing_calls_with_no_dialog_started();
+    test_refer_thread_status_sleep_wait_id();
     test_exit_thread_does_not_wake_launcher(0);
     test_exit_thread_does_not_wake_launcher(2);
     test_explicit_exit_status_exact((int32_t)0x800201acu, 0x800200d2u);
@@ -73562,6 +73685,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_check_thread_stack_contract();
     test_refer_thread_status();
     test_refer_run_and_callback_status_check_their_span();
+    test_cancel_wakeup_and_run_status_unknown_thread();
     test_change_current_thread_attr();
     test_suspend_resume_errors_and_ready_thread();
     test_change_thread_priority_contract();
