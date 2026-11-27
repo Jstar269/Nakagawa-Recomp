@@ -57,10 +57,10 @@ change, a manual run, the nightly schedule, a merge group) used to need 23 jobs,
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
 shard makes 16, a fourth Windows group makes 17, the short coverage upload job
-(`coverage_upload`), which starts only after the Python shards end, makes 18, two more Windows
-groups (#3166) make 20, and installer and
+(`coverage_upload`), which starts only after the Python shards end, makes 18, two more `native_tools` parts (#3166) make 20, two more Windows
+groups (#3166) make 22, and installer and
 Windows-runtime changes add one path-gated Windows installer job. The nightly schedule and a manual
-run add the informational C coverage job (`c_coverage`): 22 jobs in all, with the installer job
+run add the informational C coverage job (`c_coverage`): 24 jobs in all, with the installer job
 they also run. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
@@ -84,7 +84,7 @@ The jobs:
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
 | `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
 | `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
-| `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
+| `native_tools` | 3 parts, 7.9-9.2 min | 5 parts since #3166 ([Native gates in parallel parts](#native-gates-in-parallel-parts)): `core`, `translation`, `gpu`, `player`, `routes`, expected 6.4-12.9 min |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7), medians 7.3-25.0 min over the 20 full runs of 2026-11-25 to 2026-11-26 (smoke 25.0, selftests 20.1, routes 13.6, ladder-fuzz 7.3); since #3166, 6 groups, expected 9.3-13.6 min (smoke-ladder-fuzz 13.1, player 10.1, homebrew 10.5, cosim 9.3, selftests 12.4, each the sum of its steps' medians, about half a minute under a whole job; routes unchanged at its measured 13.6), not yet measured |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
@@ -467,7 +467,7 @@ not a substantive gate.
 
 ### Native gates in parallel parts
 
-The `native_tools` job runs as three matrix parts, as `windows_runtime` does (#694). Run
+The `native_tools` job runs as five matrix parts, as `windows_runtime` does (#694). Run
 serially, its gates took about 14.4 minutes and set the length of every CI run, while its
 setup took about 25 seconds with warm caches. Every part repeats that setup: the apt
 packages, the pinned SDL3 and SDL3_ttf installs, PSPDEV and the build directory. Each
@@ -482,14 +482,9 @@ gate runs in exactly one part with the command it had in the serial job:
   and deterministic and reads no outside input; `native-core-tests` runs the same harness at 100
   iterations without a sanitizer.
 - `translation`: the HLE, scheduler and dispatch selftests, cosimulation and its mutation
-  corpus, the GPU selftests on lavapipe, the interpreter, VFPU, strbuf and ATRAC3+
+  corpus, the interpreter, VFPU, strbuf and ATRAC3+
   selftests, the microtest codegen gates, and the analysis IR module gate
-  (`tools/test_analysis_ir.py`'s `AnalysisIrModuleGateTests`). It reproduces the embedded
-  SPIR-V byte for byte with the pinned compilers: the FSR 3 sets with the DXC release and the
-  GPU backend's and player UI's GLSL sets with the Vulkan SDK 1.4.363.0 glslc
-  (`tools/shader_embed.py`, `DXC_RELEASE` and `GLSLC_RELEASE`). Each archive is checked against
-  the SHA-256 written in the workflow before it is unpacked, and a SKIP (any other compiler)
-  fails the step. The Python shards have no
+  (`tools/test_analysis_ir.py`'s `AnalysisIrModuleGateTests`). The Python shards have no
   PSPDEV and report that gate's showcase half as `NOT_RUN`; this part builds the showcase
   PRXs with PSPDEV and sets `NK_ANALYSIS_IR_SHOWCASE_REQUIRED=1`, so a missing PSPDEV fails
   the step instead of skipping it.
@@ -497,21 +492,44 @@ gate runs in exactly one part with the command it had in the serial job:
   the single scheduler and HLE thread runs: it reruns the three `sched_selftest_*` binaries
   and `hle_thread_selftest` they built `SELFTEST_REPEAT` times (default 20), stops at the
   first failure and prints the iteration and binary that failed (#1846). Pull requests, pushes,
-  merge groups and manual runs skip it, so their time is unchanged. The nightly schedule also
+  merge groups and manual runs skip it, so their time is unchanged.
+- `gpu`: the GPU selftests on lavapipe: the snapshot sync selftest, the lavapipe check and the
+  capture selftest, the coherence and VRAM view identity selftests, texture scaling, the Ace
+  and mip chain selftests and their mutants, the FSR 3 pass selftest and frame generation's
+  refusal. It reproduces the embedded
+  SPIR-V byte for byte with the pinned compilers: the FSR 3 sets with the DXC release and the
+  GPU backend's and player UI's GLSL sets with the Vulkan SDK 1.4.363.0 glslc
+  (`tools/shader_embed.py`, `DXC_RELEASE` and `GLSLC_RELEASE`). Each archive is checked against
+  the SHA-256 written in the workflow before it is unpacked, and a SKIP (any other compiler)
+  fails the step. The nightly schedule also
   runs `gpu-coherence-twin-mutants` on lavapipe: its fourteen mutants each build their own
   coherence selftest, which is too long for every run.
 - `player`: present pacing, the player UI tests and regressions, the CMake player and its
   Release build, the showcase and the two player smokes that stage its ISO.
 
-The `player` part also builds the pinned PSPSDK `gu-cube` sample offline and runs it through a fresh
+The `routes` part builds the pinned PSPSDK `gu-cube` sample offline and runs it through a fresh
 native player profile under Xvfb and lavapipe. It checks the refused filename, package validation,
 120 accepted presents and changing cube pixels. The environment requires the test to run.
 [Homebrew corpus](COMPATIBILITY.md#homebrew-corpus) gives the local command.
+The same part runs the profile-zero production route (`make profile-zero-e2e` with
+`NK_PROFILE_ZERO_REQUIRED=1`). Both build their own player and guest under a scratch build root,
+so neither reads what a `player` step built.
 
 Steps that read what an earlier step built share its part. `needs.native_tools.result`
 aggregates the parts, so `CI required` fails when any part fails.
 `tools/test_public_ci_wiring.py` (`NativeToolsPartitionTests`) fails if a serial gate is
-dropped, runs in more than one part, or changes its command.
+dropped, runs in more than one part, or changes its command, and pins the steps of the `gpu`
+and `routes` parts by name.
+
+Until #3166 the job ran three parts. Over the 20 newest successful first-attempt full runs
+(2026-11-25 20:44 to 2026-11-26 18:05 UTC), `translation` was the longest `native_tools` part (median
+20.1 minutes, p90 25.8) and `player` took 16.1, so the GPU steps moved from `translation` to
+`gpu` and the `gu-cube` smoke and the profile-zero route from `player` to `routes`. No step
+moved in the workflow or changed anything but its part. Expected minutes per part, the step
+medians plus the part's setup (no hosted run has measured this layout): `core` 12.9,
+`translation` 8.4, `gpu` 12.4, `player` 10.7, `routes` 6.4. The `gpu` part now compiles
+`build/ge.o` itself, which the `translation` part's HLE steps used to build first; that compile
+is not in the estimate.
 
 The native core suite (`native-core-tests`: in `native_tools`' `core` part, in `linux_gcc16`,
 in `windows_runtime`'s `routes` group, and in the nightly and manual `c_coverage` job) includes
@@ -1035,7 +1053,7 @@ Some generators are listed but not run, and `--list` says why:
 - embedded shaders (`make shaders GLSLC=...`): regenerating needs `glslc`, whose
   version the manifest records; `make shader-verify` checks the committed files
   of both glslc sets, the GPU backend's (`psp`) and the player UI's (`ui`), and
-  `native_tools`' `translation` part recompiles both with that glslc;
+  `native_tools`' `gpu` part recompiles both with that glslc;
 - profile-zero prebuilt digests: rebuilding needs the pinned PSPDEV toolchain;
   CI checks `SHA256SUMS`;
 - the import-stub census and the benchmark report: both need private inputs
@@ -2194,7 +2212,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 20 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 22 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.
@@ -2390,7 +2408,7 @@ developer runs locally, without private inputs:
   gate rebuilds the fixture itself and fails if any byte differs from `SHA256SUMS`.
   The make target runs the route case at the full test tier, and the step sets
   `NK_PROFILE_ZERO_REQUIRED=1`, so a missing Vulkan SDK or SDL3 fails it rather than
-  skipping it. The `player` part of `native_tools` runs the same gate on Linux, where
+  skipping it. The `routes` part of `native_tools` runs the same gate on Linux, where
   PSPDEV is installed and the guest is rebuilt from source. On both hosts the gate also
   runs each package on the deterministic guest clock and compares digests of its
   result file, save and first rasterized frame with the values pinned in
