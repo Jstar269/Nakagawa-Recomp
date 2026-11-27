@@ -7233,6 +7233,16 @@ def _symbol_names(symbol_map_path, name_imports, symbols, import_nids, emitted, 
     return renames, symbol_table
 
 
+# The generated image is compiled with only the build directory and src/rt on its include
+# path (mk/pipeline.mk), so it declares the src/core diagnostic itself rather than including
+# nk_shared_helpers.h. The declaration must stay identical to the one in that header.
+TIMING_RUN_OBSERVED_PROTOTYPE = (
+    "void nk_shared_timing_run_observed(bool timing, const char *disc_id, const char *disc_version,\n"
+    "                                   const char *executable_sha256, const char *declaration_id,\n"
+    "                                   const char *declaration_sha256, const char *symbol_map_sha256);"
+)
+
+
 def _timing_run_observation(elf, identity):
     """Emit only observations tied to the verified primary image's startup."""
     if identity is None:
@@ -7272,7 +7282,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     ]
     timing_run_observation = _timing_run_observation(elf, options.timing_run_identity)
     if timing_run_observation:
-        main_out.extend(('#include "nk_shared_helpers.h"', ""))
+        main_out.extend((TIMING_RUN_OBSERVED_PROTOTYPE, ""))
     if ENHANCEMENT_PKG_META is not None:
         main_out.append(
             f"/* AOT Enhancement Epoch: {ENHANCEMENT_PKG_META['epoch']} "

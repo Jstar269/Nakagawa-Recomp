@@ -992,9 +992,25 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                     )
                     self.assertEqual(wait, [f"0x{explicit_wait:08x}"])
                 exe = out / "startup.exe"
+                # The generated image gets the package build's include path: the build
+                # directory and src/rt only (mk/pipeline.mk), never src/core.
+                main_obj = out / "out.o"
+                compiler = _run([
+                    GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(out), "-I", str(ROOT / "src/rt"),
+                    "-c", "-o", str(main_obj), str(out / "out.c"),
+                ], capture_output=True, text=True)
+                self.assertEqual(compiler.returncode, 0, compiler.stderr)
+                if revision:
+                    # Its own declaration must stay compatible with the runtime header's.
+                    checked = _run([
+                        GCC, "-std=c11", "-D_GNU_SOURCE", "-fsyntax-only", "-I", str(out),
+                        "-I", str(ROOT / "src/rt"),
+                        "-include", str(ROOT / "src/core/nk_shared_helpers.h"), str(out / "out.c"),
+                    ], capture_output=True, text=True)
+                    self.assertEqual(checked.returncode, 0, checked.stderr)
                 compiler = _run([
                     GCC, "-std=c11", "-D_GNU_SOURCE", "-I", str(ROOT / "src/rt"),
-                    "-I", str(ROOT / "src/core"), "-o", str(exe), str(harness), str(out / "out.c"),
+                    "-I", str(ROOT / "src/core"), "-o", str(exe), str(harness), str(main_obj),
                     str(ROOT / "src/core/nk_shared_helpers.c"),
                 ], capture_output=True, text=True)
                 self.assertEqual(compiler.returncode, 0, compiler.stderr)
@@ -3339,7 +3355,7 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
                     plan, selected_optional=set(), funcs_per_chunk=2000,
                     enhancement_package_path=declaration,
                 )
-            _, resolved = codegen._package_symbol_map(
+            _, resolved, _ = codegen._package_symbol_map(
                 SimpleNamespace(sec=lambda _: None), package, declaration,
                 codegen.load_symbol_map(guest_map), guest_map, None, None, None,
             )
