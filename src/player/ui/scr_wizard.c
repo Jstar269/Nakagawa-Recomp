@@ -112,8 +112,10 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     float inner;
     char line[256];
+    bool pc;
     if (ui == NULL || model == NULL) return result;
     theme = nk_ui_theme(ui);
+    pc = player_ui_host_is_pc(model->host);
     inner = scr_flow_begin(ui, model->logical_width > 80.0f ? model->logical_width : 1280.0f,
                        model->logical_height > 80.0f ? model->logical_height : 800.0f, 860.0f);
     if (inner <= 0.0f) return result;
@@ -129,20 +131,24 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
         };
         wizard_text(ui, 0u, NK_UI_STR(WIZARD_WELCOME_TITLE), NK_UI_TYPE_TITLE_XL, theme->paper);
         wizard_text(ui, 1u,
-                    NK_UI_STR(WIZARD_WELCOME_INTRO),
+                    pc ? NK_UI_STR(WIZARD_WELCOME_INTRO) : NK_UI_STR(WIZARD_WELCOME_INTRO_DEVICE),
                     NK_UI_TYPE_BODY_L, theme->muted);
         if (scr_wizard_box_begin(ui, 0u)) {
             nk_ui_eyebrow(ui, WIZ_ID_TEXT + 2u, NK_UI_STR(WIZARD_REQUIREMENTS_HEADING));
             wizard_text(ui, 3u, NK_UI_STR(WIZARD_DISC_REQUIREMENT), NK_UI_TYPE_BODY_S,
                         theme->paper);
-            wizard_text(ui, 4u, NK_UI_STR(WIZARD_GRAPHICS_REQUIREMENT), NK_UI_TYPE_BODY_S,
-                        theme->paper);
-            wizard_text(ui, 5u, NK_UI_STR(WIZARD_INPUT_REQUIREMENT), NK_UI_TYPE_BODY_S,
-                        theme->paper);
+            wizard_text(ui, 4u,
+                        pc ? NK_UI_STR(WIZARD_GRAPHICS_REQUIREMENT)
+                           : NK_UI_STR(WIZARD_GRAPHICS_REQUIREMENT_DEVICE),
+                        NK_UI_TYPE_BODY_S, theme->paper);
+            wizard_text(ui, 5u,
+                        pc ? NK_UI_STR(WIZARD_INPUT_REQUIREMENT)
+                           : NK_UI_STR(WIZARD_INPUT_REQUIREMENT_DEVICE),
+                        NK_UI_TYPE_BODY_S, theme->paper);
             nk_ui_end_container(ui);
         }
         wizard_text(ui, 6u,
-                    NK_UI_STR(WIZARD_PRIVACY_NOTE),
+                    pc ? NK_UI_STR(WIZARD_PRIVACY_NOTE) : NK_UI_STR(WIZARD_PRIVACY_NOTE_DEVICE),
                     NK_UI_TYPE_CAPTION, theme->muted);
         wizard_buttons(ui, WIZ_ID_BUTTONS, buttons, 2u, &result);
         break;
@@ -222,7 +228,8 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
                                 NK_UI_TYPE_BODY_S, theme->warning);
                 } else {
                     wizard_text(ui, 5u,
-                                NK_UI_STR(WIZARD_DROP_DISC_HINT),
+                                pc ? NK_UI_STR(WIZARD_DROP_DISC_HINT)
+                                   : NK_UI_STR(WIZARD_DROP_DISC_HINT_DEVICE),
                                 NK_UI_TYPE_BODY_S, theme->muted);
                 }
             }

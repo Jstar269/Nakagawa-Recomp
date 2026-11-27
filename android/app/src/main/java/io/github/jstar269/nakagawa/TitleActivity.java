@@ -3,11 +3,13 @@
 
 package io.github.jstar269.nakagawa;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.os.Process;
 import android.util.Log;
 
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLSurface;
 
 /**
  * One title's runtime, in the ":title" process. SDL calls nk_android_title_main() in the title's
@@ -126,6 +128,12 @@ public class TitleActivity extends SDLActivity {
     }
 
     /** SDL3 always; a library the APK ships by name, while SDL dlopen()s a built one by path. */
+    /** SDL's surface, without its accelerometer request on a device that has none. */
+    @Override
+    protected SDLSurface createSDLSurface(Context context) {
+        return new NakagawaHost.Surface(context);
+    }
+
     @Override
     protected String[] getLibraries() {
         if (mLibraryName.isEmpty()) return new String[] { "SDL3" };

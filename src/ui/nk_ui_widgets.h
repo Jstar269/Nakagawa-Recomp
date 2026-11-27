@@ -144,6 +144,9 @@ float nk_ui_prompt_glyph_size(const NkUi *ui, NkUiPromptAction action, float hei
    project-drawn form; without one the style's image is used when the host set one. */
 bool nk_ui_prompt_glyph_in(NkUi *ui, NkUiId id, NkUiPromptStyle style, NkUiPromptAction action,
                            const char *label, float height);
+/* A prompt-bar action tapped in touch mode: its key's event in the next frame, or, for
+   Back, nk_ui_take_prompt_back. Confirm and Move are ignored. */
+void nk_ui_prompt_tap(NkUi *ui, NkUiPromptAction action);
 
 /* ---- Text helpers ------------------------------------------------------------ */
 /* ASCII letters upper-cased into frame storage (labels and chips are caps). */
@@ -219,12 +222,17 @@ typedef struct {
     const char *label;
 } NkUiPromptItem;
 
-/* Prompt bar: a one-line hint on the left and glyph + label prompts on the right. */
+/* Prompt bar: a one-line hint on the left and glyph + label prompts on the right. In touch
+   mode (NkUiPrefs.touch) every action but Confirm and Move is a button with its label
+   instead, and a tap on it does what the action's key does (nk_ui_prompt_tap). */
 void nk_ui_prompt_bar(NkUi *ui, NkUiId id, const char *hint,
                       const NkUiPromptItem *items, size_t count);
 
 /* The input chip text for the current prompt style. */
 const char *nk_ui_input_label(NkUiPromptStyle style);
+/* The input chip text for the active input: TOUCH in touch mode, else the prompt
+   style's (nk_ui_input_label). */
+const char *nk_ui_input_chip_label(const NkUi *ui);
 
 /* ---- Dialogs and progress ---------------------------------------------------------- */
 /* A dialog card: raised surface, strong edge, dialog radius, the padding and gap

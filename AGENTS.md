@@ -1,24 +1,22 @@
 # AGENTS.md — Nakagawa Recomp
 
-The policy for AI agents and human contributors in this repository. Scoped instruction files (`CLAUDE.md` and
-`.github/copilot-instructions.md`, which only point here, and `.github/instructions/c-generated.instructions.md`
-for generated C) may add guidance but never weaken a rule here; there is no nested `AGENTS.md`
-([how tools read this file](docs/AI_USAGE.md#how-each-tool-reads-these-rules)). Personal instruction files and tool
-settings stay untracked. **Where to start** covers most tasks; Sections 1 to 11 are the full contract. The
-maintainer keeps the rules for their own agents and workspace outside this repository; those rules only add to
-this file and never relax it.
+The policy for AI agents and human contributors in this repository. Scoped instruction files (`CLAUDE.md`,
+`.github/copilot-instructions.md`, `.github/instructions/c-generated.instructions.md`) may add guidance but never
+weaken a rule here; there is no nested `AGENTS.md`
+([how tools read this file](docs/AI_USAGE.md#how-each-tool-reads-these-rules)). Personal instruction files and tool settings stay
+untracked. The maintainer keeps the rules for their own agents and workspace outside this repository; those rules
+only add to this file and never relax it.
 
 ## Where to start
 
 Nakagawa Recomp is a static recompiler for PSP games. Users bring their own game; this repository contains no game
 data and never will.
 
-1. Read this file and the contracts for the area you change ([`docs/README.md`](docs/README.md) maps areas to
-   guides). Before changing provenance or publication controls, CI, or codegen, read
+1. Read the contracts for the area you change ([`docs/README.md`](docs/README.md) maps areas to guides). Before
+   changing provenance or publication controls, CI, or codegen, read
    [`docs/PUBLICATION_READINESS.md`](docs/PUBLICATION_READINESS.md), [`docs/CI.md`](docs/CI.md), or
-   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and Section 7. Read [`README.md`](README.md) and
-   [`docs/CODE_TOUR.md`](docs/CODE_TOUR.md) when the task needs design context; its
-   [The pieces](docs/CODE_TOUR.md#the-pieces) table is the map of the code.
+   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and Section 7. Design context: [`README.md`](README.md) and
+   [`docs/CODE_TOUR.md`](docs/CODE_TOUR.md), whose [The pieces](docs/CODE_TOUR.md#the-pieces) table maps the code.
 2. Work from an issue ([`docs/STATUS.md`](docs/STATUS.md) summarizes them); for more than a small fix, comment there
    first. An issue you file gets a label and a milestone ([which](CONTRIBUTING.md#start-here)).
 3. Branch from freshly fetched `origin/main` after the Section 1 preflight.
@@ -31,15 +29,13 @@ change.
 
 ### Build and test
 
-**Windows 11** is the supported desktop platform ([`docs/SETUP.md`](docs/SETUP.md); mind the
-[`PATH` order](docs/SETUP.md#path-order)); **Linux** is Ubuntu 24.04 or WSL 2
-([`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md)). Once: `python -m pip install .` and
-`python tools/nk_doctor.py --scope build`. Then `mingw32-make contrib-check` (Linux: `make CC=gcc native-core-tests`,
-then `make contrib-check`) and `python -m unittest tools.test_<name>` for each module you touch; hosted CI runs the
-whole suite. One native selftest: `mingw32-make GAME_NAME=ci BUILD_DIR=build/windows-runtime CC=gcc
+Set up with [`docs/SETUP.md`](docs/SETUP.md) (Windows 11; mind the [`PATH` order](docs/SETUP.md#path-order)) or
+[`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md). Then `mingw32-make contrib-check` (Linux:
+`make CC=gcc native-core-tests`, then `make contrib-check`) and `python -m unittest tools.test_<name>` for each module
+you touch. One native selftest: `mingw32-make GAME_NAME=ci BUILD_DIR=build/windows-runtime CC=gcc
 hle-thread-selftest` (Linux: `make CC=gcc hle-thread-selftest`; more in
-[Quick recipes](docs/DEBUGGING.md#quick-recipes)). `contrib-check` runs the gates your changes need; it is not
-hosted CI, and `SKIP` is not a pass ([results](CONTRIBUTING.md#the-fast-path-one-command)).
+[Quick recipes](docs/DEBUGGING.md#quick-recipes)). `contrib-check` is not hosted CI, and `SKIP` is not a pass
+([results](CONTRIBUTING.md#the-fast-path-one-command)).
 
 ### Hard limits
 
@@ -101,8 +97,6 @@ expected. Edits to existing files: [`contrib-refresh`](CONTRIBUTING.md#provenanc
 - One branch per pull request, named for its topic (`docs/...`, `fix/...`, `lle/...`, `oracle/...`) with a date or
   issue suffix. Leave other people's unmerged work alone.
 - By default, stop and report after a bounded implementation, its tests, or its pull request.
-- Only the maintainer integrates and lands pull requests, and only on a head whose full required hosted CI is
-  green (Section 10); green quick checks alone never land a head.
 - Reserve open `good first issue` tasks for contributors and honor existing claims. A maintainer's agent takes an
   unclaimed starter task only when the maintainer names that specific task in the current turn. For a tracker
   with several tasks, the maintainer names the individual line.
@@ -144,8 +138,9 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
   approval of the new bytes ([admission](CONTRIBUTING.md#what-admission-means-for-your-pull-request),
   [byte-identical rows](docs/PUBLICATION_READINESS.md#byte-identical-manifest-rows)).
 - A commit carries the regenerated controls for the paths it changes and nothing more; a refresh after merging
-  `main` is its own commit. Never hand-edit `PUBLIC_EXPORT.json`, `assets/public_provenance_ledger.json` or the
-  profile. Preserve SPDX, copyright, upstream and third-party notices.
+  `main` is its own commit. Never hand-edit the three provenance controls: `PUBLIC_EXPORT.json`,
+  `assets/public_provenance_ledger.json` and `assets/public_source_profile.json`. Preserve SPDX, copyright, upstream
+  and third-party notices.
 - End agent commits with one `Assisted-by: <tool> (<model>)` line per tool, never `Co-Authored-By:`
   ([form](docs/AI_USAGE.md#disclosing-ai-help-in-commits)).
 - **Import rules.** Write implementation from specifications, public references and project-owned measurements;
@@ -153,9 +148,9 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
   compatible licence (such as FFmpeg, uofw, PPSSPP, JPCSP, MIT, BSD, Apache-2.0, zlib, CC0) may be vendored or
   adapted without a per-import decision: pinned to an exact upstream revision, listed in a `PROVENANCE.md`
   manifest as byte-identical or LOCAL DELTA, notices kept (adapted files add a modification note), credited in
-  `CREDITS.md`, and admitted. Emulator-derived units are `derived-translated`, never "independent". Behaviour
-  claims need tests and an honest evidence label; emulator-derived behavior is not PSP measurement or independent
-  evidence. Claims of PSP hardware semantics still need applicable PSP evidence. Incompatible licences stay out.
+  `CREDITS.md`, and admitted ([how](CONTRIBUTING.md#importing-compatible-source)). Emulator-derived units are
+  `derived-translated`, never "independent". Behaviour claims need tests and an honest evidence label;
+  emulator-derived behavior is not PSP measurement or independent evidence. Claims of PSP hardware semantics still need applicable PSP evidence. Incompatible licences stay out.
 - Do not rewrite working inherited code only to make it original. Say "clean-room" or "independent" only when its
   trusted record supports it ([independence model](docs/provenance/INDEPENDENCE_MODEL.md)); prefer
   "project-authored".
@@ -187,14 +182,9 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
 - **Offline by default.** The player and runtime connect only through a documented opt-in feature
   ([Network use](docs/SETUP.md#network-use)). The maintainer approves opt-in network features in principle
   (#1139, #1316, #2632); that does not authorize an upload, or any connection before the player has opted in to
-  the feature, each of which needs its own maintainer decision. A host that an approved opt-in feature needs may be
-  added without a separate decision when all of this holds: it is contacted only after that feature's opt-in; it
-  receives nothing beyond what the feature's consent text names; and the pull request names the host and lists it
-  in the feature's public issue, its consent text, `docs/SETUP.md` Network use and the allowlist test
-  `tools/test_prereq_fetcher.py`. A first-run question may offer a documented opt-in feature: nothing connects
-  before the player answers, and no answer means off. Each feature's public issue must name its hosts, payload,
-  consent and data boundaries; before it ships it is off by default, listed in `docs/SETUP.md` Network use and in
-  the allowlist test. The reserved `network_mode` setting accepts only `"offline"`.
+  the feature, each of which needs its own maintainer decision. Before adding a host, a first-run question or an
+  opt-in feature, read and meet [the opt-in checklist](docs/SETUP.md#adding-an-opt-in-host-or-feature); anything
+  outside it needs a maintainer decision. The reserved `network_mode` setting accepts only `"offline"`.
 - A user-started transfer may move their own packages and saves directly to their own devices, never through a
   server. Nothing uploads game code or data, decrypted modules, packages, saves or guest memory, or shares anything
   built from a user's game. No telemetry. Tests never touch the internet. Network HLE stays fail-closed; no setting
@@ -223,32 +213,14 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
 
 ## 7. Current execution contract
 
-Re-check live source before changing these; PR numbers are navigation, not evidence
-([details](docs/ARCHITECTURE.md)).
-
-- **PR #118:** the interpreter is a fail-closed floor: only analyzer-owned spans run, unsupported forms fail closed; not an all-Allegrex interpreter.
-- **PR #126:** a `jr`/`jalr` target is latched at transfer, before link writes and the delay slot.
-- **PR #127:** `dispatch_call` carries `target` and `resume_pc`; CALL and TAIL differ; live `$ra` is not a resume descriptor.
-- **PR #128:** cosimulation compares AOT/interpreter state, CALL/TAIL cells included; its negative corpus fails closed; a build-only mutant is not a valid semantic kill.
-- **Issue #2172:** resume at a PC is native re-entry and opt-in (`codegen.py --state-resume`; default output stays
-  byte-identical; [contract](docs/ARCHITECTURE.md#resume-at-a-pc-direct-save-states)): a parked thread is a frame
-  list (body entry, resume point and kind, entry `$sp`) read from its return-boundary records, never from live
-  `$ra` or host frames; anything not exactly describable or resumable is refused by name, and it does not extend
-  the interpreter floor.
-- Nested interpreted calls outside that floor are unproven; broader claims need a new contract and test.
-- `src/rt/recomp.h` is a load-bearing ABI: `$ra` is `r[31]`; `CpuState` is versioned by `SR_CPUSTATE_ABI_VERSION`.
-- Chunk count is dynamic; `FUNCS_PER_CHUNK` is not a fixed ABI.
-- LLE CPU and import seam are opt-in (`--lle-cpu`, `--lle-import-seam`; the seam implies `--lle-cpu`); default
-  output stays byte-identical.
-- An unmeasured cell normally stops by name. A limited second tier may use a public PPSSPP or JPCSP implementation
-  for a known, named cell whose exact behavior it supports, unless the issue prohibits emulator-derived work:
-  record the repository, exact upstream revision and symbol; classify adapted code `derived-translated`; label it
-  in code `PPSSPP-derived, not PSP-measured` or `JPCSP-derived, not PSP-measured`; add a production-path
-  regression; log first use once per run. A PSP measurement for the same scope supersedes it, and it proves
-  neither PSP behavior nor independence. It never fills an unknown NID or unowned dispatch, enables save-data and
-  flash writes whose behavior is unmeasured, or supplies behavior with no public reference; those stay named
-  fail-closed boundaries, and Section 3 still forbids device writes.
-- HLE arguments 1-4 are `A0`-`A3`, 5-8 `t0`-`t3` (`stack_arg`), 9+ the stack; never read past the public signature.
+Before changing the interpreter, dispatch, codegen, resume at a PC, the `src/rt/recomp.h` ABI, the LLE flags or HLE
+argument reads, read [Current execution contract](docs/ARCHITECTURE.md#current-execution-contract) and re-check
+live source; PR numbers are navigation, not evidence. Its rules bind: the interpreter floor is not broadened without
+a new contract and test; live `$ra` is never a resume descriptor; `--state-resume` and the LLE flags are opt-in and
+default output stays byte-identical; `src/rt/recomp.h` is a load-bearing ABI (`$ra` is `r[31]`; `CpuState` is
+versioned by `SR_CPUSTATE_ABI_VERSION`); HLE code never reads past the public signature; an emulator-derived
+second-tier cell is allowed only under its conditions there and never fills an unknown NID or unowned dispatch,
+enables save-data and flash writes whose behavior is unmeasured, or supplies behavior with no public reference.
 
 ## 8. Workspace, branch, and worktree lifecycle
 
@@ -265,24 +237,19 @@ Re-check live source before changing these; PR numbers are navigation, not evide
 evidence; report each as `PASS`, `FAIL`, `SKIP`, `BLOCKED`, or `NOT_RUN`.
 
 - Run `contrib-check`, then the focused gate for each changed surface and the full gates that apply, both in
-  [CONTRIBUTING.md](CONTRIBUTING.md#the-full-gates) (on Linux, `make CC=gcc` for `mingw32-make`).
-- A publication or provenance change always runs `tools/policy_sync.py`, both publication-audit legs
-  (`python tools/publish_audit.py --tracked-only --worktree --public-scope --provenance-self-consistency`, and again
-  without `--worktree`), and `tools/modified_file_notice_audit.py`.
-- A workflow or configuration change runs `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted
-  matrix on its own head; while `NK_CI_TIERS` is `on`, its reviewer adds the `ci-full-matrix` label for that.
-- Hosted CI runs the quick checks on a Draft and the full checks before a head lands
-  ([Quick and full checks](docs/CI.md#quick-and-full-checks)). The focused local gates are the first evidence for
-  a Python, native or Windows change: run them before the push.
+  [The full gates](CONTRIBUTING.md#the-full-gates) (on Linux, `make CC=gcc` for `mingw32-make`). A publication or
+  provenance change always runs its row's gates; a workflow or configuration change runs its row's gates, the full
+  applicable hosted matrix on its own head included. The focused local gates are the first evidence for a Python,
+  native or Windows change: run them before the push.
 - Before the first push, check [Findings to pre-empt](.github/REVIEW.md#findings-to-pre-empt), and build native code
   in a Linux shell such as WSL (hosted Linux builds it with and without SDL3).
 
 ## 10. PR and integration authorization
 
 - With a pull request in scope, open a Draft after the first valid commit and mark it Ready once finished (tests
-  and checks run, template filled); a finished PR never stays a Draft, and a Draft is never batched. What runs on a
-  Draft and on a Ready PR: [Quick and full checks](docs/CI.md#quick-and-full-checks). A contributor's agent leaves
-  Ready to its person.
+  and checks run, template filled); a finished PR never stays a Draft, and a Draft is never batched. Hosted CI runs
+  the quick checks on a Draft and the full checks before a head lands
+  ([Quick and full checks](docs/CI.md#quick-and-full-checks)). A contributor's agent leaves Ready to its person.
 - Ready means finished, not approved. A substantive correction after Ready, including resolving a real conflict in
   content that is not generated, returns the PR to Draft for fresh exact-head validation. A clean merge of `main`,
   or one whose conflicts are only generated content, by the author or the integrator, is not a substantive
@@ -290,12 +257,12 @@ evidence; report each as `PASS`, `FAIL`, `SKIP`, `BLOCKED`, or `NOT_RUN`.
 - Group related work in one PR, unrelated changes in separate PRs; never stack PRs.
 - An author merges `main` only for a real conflict in content that is not generated, or when the maintainer or the
   integrator asks; not for GitHub's `BEHIND` state, a `CI_DEFINITION_BEHIND` verdict, or a conflict confined to
-  generated content: the three provenance controls (`PUBLIC_EXPORT.json`, `assets/public_provenance_ledger.json`,
-  `assets/public_source_profile.json`) and what `python tools/regen_all.py --list` names (outputs it marks skipped
-  stay the author's). A merge preserves newer-main behavior, regenerates only the controls it requires, reruns the
+  generated content: the three provenance controls (Section 4) and what `python tools/regen_all.py --list` names
+  (outputs it marks skipped stay the author's). A merge preserves newer-main behavior, regenerates only the controls it requires, reruns the
   affected gates and freezes the exact head. Every merge of `main` and every control refresh forces new hosted CI
   and review. Never rebase or force-push a pushed branch.
-- **Integration** is the maintainer's. The integrator may merge `main` into a handed-off PR, resolve
+- **Integration** is the maintainer's: only the maintainer integrates and lands pull requests, and green quick
+  checks alone never land a head. The integrator may merge `main` into a handed-off PR, resolve
   generated-content conflicts and refresh controls to produce a head hosted CI can test, and lands only a head (a
   landing batch's or the PR's own) whose full required hosted CI is green. GitHub runs no CI on a conflicting PR,
   so until then the evidence is the author's local gates. A failure in the PR's own change goes back to its author;
@@ -305,29 +272,6 @@ evidence; report each as `PASS`, `FAIL`, `SKIP`, `BLOCKED`, or `NOT_RUN`.
 
 ## 11. Reporting and cleanup
 
-End an implementation task with exact facts, not a play-by-play. Fields that do not apply say `N/A`; a
-contributor's agent puts its branch name in `LANE`.
-
-```text
-LANE:
-MISSION:
-BASE_SHA:
-HEAD_SHA:
-PR:
-STATUS: DRAFT / READY / BLOCKED
-RESULT:
-ROOT_CAUSE:
-CHANGED_FILES:
-NEW_PATH_PROVENANCE:
-FAILING_BEFORE:
-TESTS:
-PRIVATE_ACCEPTANCE:
-HARDWARE:
-UNRESOLVED:
-DISCOVERED_FOLLOWUPS:
-NOT_PERFORMED:
-READY_QUALITY: YES/NO
-```
-
-`NOT_PERFORMED` names each tag, release, asset, version, hardware or private-input operation intentionally not
-performed, or says `none`.
+End an implementation task with exact facts, not a play-by-play, in the
+[report template](docs/AI_USAGE.md#the-final-report) (read it before reporting). `NOT_PERFORMED` names each tag,
+release, asset, version, hardware or private-input operation intentionally not performed, or says `none`.

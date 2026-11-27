@@ -3145,9 +3145,6 @@ void sr_hle_release_thread_resources(uint32_t thread_uid) {
         for (size_t i = 0, n = fpl_slot_count(); i < n; i++) {
             if (fpl_slot(i)->used) fpl_remove_waiter(fpl_slot(i), thread_uid);
         }
-        for (size_t i = 0, n = vpl_slot_count(); i < n; i++) {
-            if (vpl_slot(i)->used) vpl_remove_waiter(vpl_slot(i), thread_uid);
-        }
         for (int i = 0; i < TLSPL_MAX; i++) {
             if (s_tlspls[i].used) tlspl_release_thread(&s_tlspls[i], thread_uid);
         }

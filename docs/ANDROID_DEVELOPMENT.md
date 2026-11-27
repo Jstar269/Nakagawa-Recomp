@@ -176,7 +176,12 @@ adb logcat -s nakagawa nakagawa-title SDL
 `<app files>` is `/data/user/0/io.github.jstar269.nakagawa/files`. Add
 `--esa env "SR_GESTAT=1,SR_EXIT_AT_VBLANK=600"` for the runtime's frame counters and a bounded
 run. The runtime's and the player's standard output and error go to the system log under the
-tags `nakagawa-title` and `nakagawa`.
+tags `nakagawa-title` and `nakagawa`, at the info level. The launcher also writes its own to
+`<app files>/Nakagawa/logs/player-output.txt`, in the app's own folder: each start sets the
+earlier file aside as `player-output.1.txt` (up to `player-output.4.txt`), and a file that reaches
+1 MiB is set aside the same way. That file has every line even on a device whose firmware keeps
+no info lines in its system log. A title started from the launcher writes to the run log the
+launcher names in the same `logs` folder.
 
 `adb install --abi arm64-v8a` installs the arm64 libraries instead, which an x86_64 Google APIs
 image runs through its ARM translation layer: a functional check of the arm64 build, not a
@@ -283,6 +288,16 @@ adb logcat -d -v time -s nakagawa nakagawa-title SDL > nakagawa-android.log
 The `-s` filter keeps only the launcher's, the title runtime's and SDL's lines, so other apps'
 lines and the rest of the system log stay out. Do not attach a full `adb logcat` or a bug report
 from Developer options: those carry other apps' data and account details.
+
+Some devices' firmware keeps no info lines in the system log, so the capture above has none of
+the launcher's. The launcher's own log file has them all; a debug build lets `adb` copy it:
+
+```bash
+adb exec-out run-as io.github.jstar269.nakagawa cat files/Nakagawa/logs/player-output.txt > player-output.txt
+```
+
+The run before is in `player-output.1.txt`. Read it before you attach it: it lists the
+app's own folders and the titles you added.
 
 ## Native tests on a device
 
