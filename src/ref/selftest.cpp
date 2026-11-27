@@ -1078,6 +1078,32 @@ void TestJumpTargetLowBitsIgnored() {
 	Check("jr null + 3 stop", (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
 	Check("jr null + 3 stop pc", res.pc, base);
 	Check("jr null + 3 no slot", s.r[T2], 0u);
+
+	// The low bits clear on the value latched at the transfer (PR #126), before the link
+	// write and the delay slot: a jalr whose link register is its target register, and a jr
+	// whose delay slot rewrites its target register, still reach the aligned old target.
+	for (int form = 0; form < 2; form++) {
+		Memory lm;
+		lm.Write32(target, I(0x09, ZERO, T2, 0x111));  // addiu t2, zero, 0x111
+		lm.Write32(target + 4, SYSCALL);
+		ref::CpuState ls;
+		ls.r[T0] = target + 2;
+		StepResult lr = RunWords(&lm, &ls, {
+			form ? R(T0, 0, 0, 0, 0x08) : R(T0, 0, T0, 0, 0x09),  // jr t0 / jalr t0, t0
+			form ? I(0x09, ZERO, T0, 0x41) : 0u,                  // addiu t0, zero, 0x41 / nop
+			SYSCALL,
+		}, base, 8);
+		const char *name = form ? "jr slot rewrites rs +2" : "jalr rd==rs +2";
+		char what[64];
+		std::snprintf(what, sizeof what, "%s stop", name);
+		Check(what, (uint32_t)lr.reason, (uint32_t)StopReason::kSyscall);
+		std::snprintf(what, sizeof what, "%s stop pc", name);
+		Check(what, lr.pc, target + 4);
+		std::snprintf(what, sizeof what, "%s ran the aligned old target", name);
+		Check(what, ls.r[T2], 0x111u);
+		std::snprintf(what, sizeof what, "%s register after", name);
+		Check(what, ls.r[T0], form ? 0x41u : base + 8);
+	}
 }
 
 // c.cond.s orders denormals from their raw bits, as sr_fpu_condition_s does for the generated
