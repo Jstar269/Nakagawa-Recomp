@@ -206,7 +206,7 @@ class RecompLauncherManifestPlayerTests(unittest.TestCase):
 
     def assert_player_arguments(self, arguments: list[str]) -> dict[str, str]:
         """Every argument is one player option, written --name=value or --name; returns them."""
-        given = {}
+        given: dict[str, str] = {}
         for argument in arguments:
             name, equals, value = argument.partition("=")
             self.assertIn(name, self.options, f"{argument}: not an option of nakagawa_player")
@@ -268,8 +268,12 @@ class RecompLauncherManifestPlayerTests(unittest.TestCase):
         self.assertIn('"settings.json"', PLAYER_STATE_C.read_text(encoding="utf-8"))
         # A file the launcher makes must carry a schema version the player reads.
         header = PLAYER_STATE_H.read_text(encoding="utf-8")
-        current = int(re.search(r"#define NK_PLAYER_SETTINGS_SCHEMA_VERSION (\d+)", header)[1])
-        version = int(json_literal(config["ensure"]["schema_version"]))
+        found = re.search(r"#define NK_PLAYER_SETTINGS_SCHEMA_VERSION (\d+)", header)
+        assert found is not None, "NK_PLAYER_SETTINGS_SCHEMA_VERSION is not defined"
+        current = int(found[1])
+        schema_version = json_literal(config["ensure"]["schema_version"])
+        assert isinstance(schema_version, (int, str)), schema_version
+        version = int(schema_version)
         self.assertTrue(1 <= version <= current, version)
         # The player never updates itself under the launcher, which brings every release.
         self.assertEqual(config["always"], {"check_updates_at_start": "false"})
