@@ -320,6 +320,7 @@ returns through its callee's `jr $ra` instead.
 | `link` / `linkr` | `jal` and `jalr` link semantics with a conventional `$ra`-preserving frame |
 | `jrslot` / `jrtail` | a computed call and a computed tail call whose delay slots rewrite the target register |
 | `jrlow` / `jrlowx` / `jrlowtail` | a `jalr` to an entry + 2 (and + 1 into an interpreted callee, lane MIXED) whose callee returns to its resume PC + 3, and a `jr` to an entry + 3: the PSP clears bits 1:0 of the target (pspautotests e37443a6 `tests/cpu/jump/unaligned.expected`, recorded on a PSP), which the harness checks in both lanes |
+| `cslot_call` / `cslot_branch` / `cslot_dst` | a branch onto the delay slot of a `jal`, and of a conditional branch, whose next word is another entry: the slot runs once as an ordinary word and the guest goes on into that entry (the conditional form stops at the entry only in the split lane) |
 | `hilo` | `HI`/`LO` through signed and unsigned multiply (they differ in the high word only) |
 | `llsc` | `ll`/`sc` and the link bit: an unlinked `sc` fails, a linked one stores and reports 1, `sc` leaves the link set, `ll $zero` links, an atomic-increment retry loop, and `sc` whose `rt` is its own base |
 | `fpu` | scalar FPU over the #120 helper path, re-run under all four FCR31 rounding modes and with FS set |
@@ -471,6 +472,14 @@ changes no register and no byte of memory: only the yield-point count and the se
 The rule that a point's label sits at function scope has no mutant: the fixture has no body it
 would change, so `StateResumeTests` in `tools/test_codegen_continuations.py` pins it on constructed
 bodies.
+
+Two generator mutants take the continuation away from a delay slot that a branch lands on when
+the next word is another entry (#3128). The first does it for every transfer and runs in the
+ordinary lane, where `cslot_call` must diverge: the body returns to its caller after the slot
+instead of entering the next cell. The second keeps the call form right and runs in the lane with
+every body split, where `cslot_branch`'s body must diverge; the campaign reports it first in the
+chain that starts in `cslot_call`, which then stops after 9 traced instructions of the
+interpreter's 12.
 
 Two interpreter guards are not killed by this gate, and each is layering rather than a
 hole:

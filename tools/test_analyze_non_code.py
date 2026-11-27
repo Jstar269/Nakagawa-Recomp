@@ -1247,12 +1247,15 @@ class PublicFixtureTest(unittest.TestCase):
     # lines: each cell's transfer ends in a `goto` to the word after the entry, and that word
     # carries a label. The fixed-address executable's `jal`s are not relocated, so no body
     # there is entered at a delay slot.
+    # #3128's cells (`cslot_call`, `cslot_branch`, `cslot_dst`) and their entry calls move the
+    # other cells. They come with no codegen change: on the old and on the expanded inputs
+    # main's codegen and this one write identical files.
     # Every digest changes because a jr/jalr latches its target with bits 1:0 clear, as the PSP
     # runs it (`_t = (s->r[N] & ~3u)`, codegen.emit_latched_target); nothing else in any output
     # differs. The cosim guest also gains the jrlow cells.
     MAIN_DIGESTS = {
-        ("cosim", "prx"): "d22ec5fd997c4ac0c755868c932f9ad7a1284997203b94df429443e2f73847c6",
-        ("cosim", "exec"): "db8321c4645965ba12c683613d43b111c541fd677ee12c890ec83b5b52fc3cb9",
+        ("cosim", "prx"): "86630fc984e4aaffa4df35d8cf246390d8089ef9bfd5fdb5f96923159b6113fb",
+        ("cosim", "exec"): "99eae9bcdad437707dbd6c4263d4a06cb2660ec3c5b1c3b1af78de68c446b71f",
         ("display_smoke", "prx"): "9d003fad6b10ceb2246b75b9fd15a1f9da009f9da2769e69b4c117c9dfa2dce2",
         ("display_smoke", "exec"): "bf16654d5c6c04009194ebd52145c9392b773760e9e920fc7f08f1957d40201e",
         ("production_smoke", "prx"): "d7708c6c84d4e8bf47988cce66ebee1223435360883b268e49d2feac7333197d",
