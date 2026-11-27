@@ -726,6 +726,14 @@ coroutine stack has a `PROT_NONE` guard band below it, as Windows fiber stacks h
 so an overrun that escapes the check faults instead of writing into the next guest thread's
 stack.
 
+A `jr` or `jalr` latches its target register at the transfer, before its link write and delay
+slot (PR #126), with bits 1:0 cleared: the PSP runs a jump to an aligned address + 1, + 2 or + 3
+from the aligned word and links next+0 (pspautotests e37443a6 `tests/cpu/jump/unaligned.expected`,
+recorded on a PSP). The null code pointer check, the dispatch and the return-boundary comparison
+judge that aligned address, in generated code and in the interpreter alike, so a target that is
+still unowned or null once cleared stops by that name. A dispatch entered at a misaligned address
+by any other route stays the named `misaligned-control-target` stop.
+
 A guest TAIL transfer (`j`, `jr` on a register other than `$ra`, `jalr $zero`, a non-calling
 branch out of the body, or a fall-through into another entry) does not nest (#855). The body records the
 transfer in one runtime slot (`sr_tail_record`) and returns, and whoever invoked that body

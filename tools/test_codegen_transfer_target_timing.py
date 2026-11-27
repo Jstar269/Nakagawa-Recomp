@@ -68,7 +68,7 @@ class TransferTargetTimingTests(unittest.TestCase):
                 0x100C: NOP,
             }
         )
-        capture = text.index("uint32_t _t = s->r[8];")
+        capture = text.index("uint32_t _t = (s->r[8] & ~3u);")
         slot = text.index("s->r[8] = (s->r[9] + 0u);")
         call = text.index("if (dispatch_call_checked(s, _t, 0x00001008u)) return;")
         self.assertLess(capture, slot, "jalr target captured after its delay slot")
@@ -98,7 +98,7 @@ class TransferTargetTimingTests(unittest.TestCase):
                 0x100C: NOP,
             }
         )
-        capture = text.index("uint32_t _t = s->r[25];")
+        capture = text.index("uint32_t _t = (s->r[25] & ~3u);")
         slot = text.index("s->r[25] = (s->r[9] + 0u);")
         call = text.index("sr_tail_record(s, _t, NULL,")
         self.assertLess(capture, slot, "jr target captured after its delay slot")
@@ -126,7 +126,7 @@ class TransferTargetTimingTests(unittest.TestCase):
                 0x100C: NOP,
             }
         )
-        capture = text.index("uint32_t _t = s->r[8];")
+        capture = text.index("uint32_t _t = (s->r[8] & ~3u);")
         link = text.index("s->r[8] = 0x00001008u;")
         call = text.index("if (dispatch_call_checked(s, _t, 0x00001008u)) return;")
         self.assertLess(capture, link, "jalr read its target after writing the link")
@@ -149,7 +149,7 @@ class TransferTargetTimingTests(unittest.TestCase):
                 0x100C: NOP,
             }
         )
-        capture = text.index("uint32_t _t = s->r[8];")
+        capture = text.index("uint32_t _t = (s->r[8] & ~3u);")
         slot = text.index("s->r[8] = (s->r[9] + 0u);")
         self.assertLess(capture, slot, "jalr target captured after its delay slot")
         self.assertNotIn("s->r[0] = 0x00001008u;", text)
@@ -173,7 +173,7 @@ class TransferTargetTimingTests(unittest.TestCase):
             0x1000: JR_RA,
             0x1004: addu(31, 8, 0),  # slot rewrites live $ra after the transfer
         })
-        capture = text.index("uint32_t _sr_return_target = s->r[31];")
+        capture = text.index("uint32_t _sr_return_target = (s->r[31] & ~3u);")
         record = text.index("SR_AOT_RETURN_CAPTURE(s, _sr_return_target);")
         slot = text.index("s->r[31] = (s->r[8] + 0u);")
         self.assertLess(capture, record)
@@ -197,6 +197,41 @@ class TransferTargetTimingTests(unittest.TestCase):
         transfer_report = text.index("sr_begin(s, 0x00001000u")
         slot_report = text.index("sr_begin(s, 0x00001004u")
         self.assertLess(transfer_report, slot_report)
+
+
+class TargetLowBitsTests(unittest.TestCase):
+    """A jr/jalr latches its target with bits 1:0 clear.
+
+    The PSP ignores the low two bits of a register jump target: a jr or jalr to an
+    aligned address + 1, + 2 or + 3 runs the aligned word and links next+0
+    (pspautotests e37443a6 tests/cpu/jump/unaligned.expected, recorded on a PSP:
+    `ran=003`, `link=next+0`). Every later use of the latched value, the null code
+    pointer check, the dispatch and the return capture, sees the aligned address; the
+    cosim cells `jrlow`, `jrlowx` and `jrlowtail` run it against the interpreter.
+    """
+
+    def _emit(self, words, start=0x1000, end=0x1030, known=None):
+        elf = FakeElf(words)
+        known = known if known is not None else {start}
+        return "\n".join(codegen.emit_function(elf, start, [(start, end)], known))
+
+    def test_every_register_transfer_latches_an_aligned_target(self):
+        cases = (
+            ("jalr ra", {0x1000: jalr(31, 8), 0x1004: NOP, 0x1008: JR_RA, 0x100C: NOP},
+             "uint32_t _t = (s->r[8] & ~3u);"),
+            ("jalr zero", {0x1000: jalr(0, 8), 0x1004: NOP},
+             "uint32_t _t = (s->r[8] & ~3u);"),
+            ("jr rs", {0x1000: jr(25), 0x1004: NOP}, "uint32_t _t = (s->r[25] & ~3u);"),
+            ("jr ra", {0x1000: JR_RA, 0x1004: NOP},
+             "uint32_t _sr_return_target = (s->r[31] & ~3u);"),
+        )
+        for name, words, latch in cases:
+            with self.subTest(name):
+                text = self._emit(words)
+                self.assertIn(latch, text)
+                self.assertNotIn("= s->r[8];", text)
+                self.assertNotIn("= s->r[25];", text)
+                self.assertNotIn("= s->r[31];", text)
 
 
 class SelfLoopJumpTests(unittest.TestCase):
@@ -245,7 +280,7 @@ class NullCodePointerCheckTests(unittest.TestCase):
     def test_jalr_checks_before_link_and_slot(self):
         text = self._emit({0x1000: jalr(31, 8), 0x1004: addu(8, 9, 0),
                            0x1008: JR_RA, 0x100C: NOP})
-        capture = text.index("uint32_t _t = s->r[8];")
+        capture = text.index("uint32_t _t = (s->r[8] & ~3u);")
         check = text.index("SR_CODE_POINTER(s, _t, 0x00001000u);")
         link = text.index("s->r[31] = 0x00001008u;")
         slot = text.index("s->r[8] = (s->r[9] + 0u);")
@@ -258,7 +293,7 @@ class NullCodePointerCheckTests(unittest.TestCase):
                            0x1008: JR_RA, 0x100C: NOP})
         check = text.index("SR_CODE_POINTER(s, _t, 0x00001000u);")
         slot = text.index("s->r[25] = (s->r[9] + 0u);")
-        self.assertLess(text.index("uint32_t _t = s->r[25];"), check)
+        self.assertLess(text.index("uint32_t _t = (s->r[25] & ~3u);"), check)
         self.assertLess(check, slot, "null check after the jr delay slot")
 
     def test_static_call_to_offset0_and_returns_carry_no_check(self):
