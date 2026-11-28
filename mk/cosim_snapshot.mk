@@ -6,7 +6,7 @@
 # See NOTICE.md for upstream lineage and modification provenance.
 
 # Split out of the root Makefile (#1531), text unchanged: the AOT/interpreter cosimulation, snapshot execution, form sweep and verify gates.
-# The root Makefile includes it where the text used to be, so evaluation order is unchanged.
+# The root Makefile includes it at a fixed point among its mk/ files; make reads them in that order, so moving the include can change what `:=` assignments and rule prerequisites see.
 
 # ---- AOT <-> interpreter cosimulation gate ---------------------------------------
 #

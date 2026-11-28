@@ -6,7 +6,7 @@
 # See NOTICE.md for upstream lineage and modification provenance.
 
 # Split out of the root Makefile (#1531), text unchanged: the VFPU fuzzers, verify, run_elf and the shader checks.
-# The root Makefile includes it where the text used to be, so evaluation order is unchanged.
+# The root Makefile includes it at a fixed point among its mk/ files; make reads them in that order, so moving the include can change what `:=` assignments and rule prerequisites see.
 
 # vfpu_fuzz — build and run the VFPU differential fuzzer (generated codegen vs sr_vfpu_interp).
 # Generates the per-game cases header from the ELF, then links a standalone harness that drives

@@ -26866,10 +26866,10 @@ static unsigned long capture_test_flip(CpuState *cpu, uint32_t *vcount) {
     return s_cap_arm_calls;
 }
 
-/* SR_FBSNAP_WINDOWS is self-sufficient (issue #57 capture policy). The slot owner used to
- * be decided from the SR_FBSNAP switch alone, before the windows were read, so a run with
- * only SR_FBSNAP_WINDOWS armed nothing. With SR_FBSNAP unset, a window must select the
- * FBSNAP slot and arm every present inside it under its vblank name; an explicit
+/* SR_FBSNAP_WINDOWS is self-sufficient (issue #57 capture policy). The slot owner is
+ * decided after the windows are read, not from the SR_FBSNAP switch alone, so a run that
+ * sets only SR_FBSNAP_WINDOWS still arms its windows. With SR_FBSNAP unset, a window must
+ * select the FBSNAP slot and arm every present inside it under its vblank name; an explicit
  * SR_FBSNAP=0 still disables FBSNAP. Every arm is refused after it is recorded, so the
  * harness writes no legacy snapshot file. */
 static void test_display_capture_windows_alone_select_fbsnap(void) {

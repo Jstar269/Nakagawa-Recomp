@@ -47,7 +47,6 @@ CODEGEN_PROFILE_ARG ?=
 GAME_EXTRA_ELFS ?=
 GAME_PSP_HEADER ?=
 EXTRA_ELF_ARGS  = $(foreach elf,$(GAME_EXTRA_ELFS),--extra-elf=$(elf))
-PSP_HEADER_ARG  = $(if $(strip $(GAME_PSP_HEADER)),--psp-header=$(GAME_PSP_HEADER),)
 # Environment forms: the switch carries no pathname bytes at all.
 PSP_HEADER_ENV_ARG = $(if $(strip $(GAME_PSP_HEADER)),--env-psp-header,)
 EXTRA_ELF_ENV_ARG  = $(if $(strip $(GAME_EXTRA_ELFS)),--env-extra-elfs,)
@@ -670,10 +669,10 @@ endif
 # The resolution runs through the interpreter this build already requires at
 # parse time (see the VULKAN_SDK discovery above) and never through a bare
 # `$(shell git ...)`: make spawns a missing program itself, so on a host without
-# git the old default logged `process_begin: CreateProcess(NULL, git
-# rev-parse HEAD, ...) failed` and then quietly built a binary with NO recorded
+# git a bare call logs `process_begin: CreateProcess(NULL, git
+# rev-parse HEAD, ...) failed` and then quietly builds a binary with NO recorded
 # identity. The Windows runtime compile gate runs in an MSYS2 shell with no git
-# on PATH and hit exactly that. A host with no git now resolves an empty
+# on PATH and hits exactly that. A host with no git resolves an empty
 # identity and a clean log, which is the documented state for a source drop:
 # tools/flight_diff.py refuses an identity-less bundle fail closed, and it never
 # falls back to a clock.
@@ -741,8 +740,9 @@ DISPLAY_SMOKE_BASE0_FIXTURE := $(DISPLAY_SMOKE_BASE0_DIR)/fixture
 # The AOT-gap mode of the same fixture: identical guest addresses, but the
 # helper is omitted from native emission (--omit-aot) so region A reaches it
 # through the ordinary production dispatch() seam. The address must match
-# HELPER in tests/fixtures/production_smoke/generate.py (it moved to 0x08804068 when
-# the sceImpose language round trip extended region A).
+# HELPER in tests/fixtures/production_smoke/generate.py (0x08804068; it follows
+# region A, which includes the sceImpose language round trip, so growing
+# region A moves it).
 PRODUCTION_SMOKE_GAP_DIR       := $(BUILD_ROOT)/production-smoke-gap
 PRODUCTION_SMOKE_GAP_FIXTURE   := $(PRODUCTION_SMOKE_GAP_DIR)/fixture
 PRODUCTION_SMOKE_GAP_MAP       := $(PRODUCTION_SMOKE_GAP_DIR)/production_smoke_gap.map

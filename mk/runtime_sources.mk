@@ -6,7 +6,7 @@
 # See NOTICE.md for upstream lineage and modification provenance.
 
 # Split out of the root Makefile (#1531), text unchanged: object lists, link flags and the HLE, presenter and vendored-codec source sets.
-# The root Makefile includes it where the text used to be, so evaluation order is unchanged.
+# The root Makefile includes it at a fixed point among its mk/ files; make reads them in that order, so moving the include can change what `:=` assignments and rule prerequisites see.
 
 # HLE ATRAC decode (h_AtracDecodeData). The codec-specific decoder bridges
 # and imported FFmpeg n4.4 decoder TUs
