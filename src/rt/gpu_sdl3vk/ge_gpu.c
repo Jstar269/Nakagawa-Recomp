@@ -289,6 +289,9 @@ typedef struct {
     /* With a scaled copy bound (tex_scale.h): the entry's unscaled set, which a draw that maps one
      * texel to one pixel binds instead (xs_onetoone_plain). VK_NULL_HANDLE otherwise. */
     VkDescriptorSet dset_plain;
+    /* A render target read through a palette (pal_get, #3216): the palette's set, bound as set 3.
+     * VK_NULL_HANDLE for every other batch, which never reads set 3. */
+    VkDescriptorSet pset;
     uint32_t first, count;
 } Batch;
 
@@ -386,6 +389,7 @@ typedef struct { PipeKey key; VkPipeline pipe; int used; } PipeEnt;
 
 #define TEX_FILTER_VARIANTS 4u
 #define FIXED_FILTER_DESCRIPTOR_SETS (TEX_FILTER_VARIANTS * (MAX_TGT + 1u) + 1u)
+#define PAL_SLOTS 16u                      /* palettes of render targets read as CLUT32 (pal_get) */
 
 /* TFLT stores independent min and mag base filters in bits 0 and 8. */
 static unsigned tex_filter_variant(uint32_t tflt) {
@@ -3115,6 +3119,10 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
 #ifdef SR_GPU_COHERENCE_SELFTEST
     s_selftest_record_commands.dst_set_binds++;
 #endif
+    /* set 3: the palette of a render target read as CLUT32 (psp.frag u_pal). Every pipeline's
+     * fragment shader names the set, so each pass binds one: white until a batch brings its own. */
+    VkDescriptorSet cur_pal = s_white_set;
+    vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 3, 1, &cur_pal, 0, NULL);
 
     VkPipeline cur = VK_NULL_HANDLE;
     /* Dynamic state and set 0 belong to this command buffer and this compatible layout. A fresh
@@ -3146,6 +3154,10 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
         VkRect2D sc = { { b->sx * scale, b->sy * scale },
                         { (uint32_t)(b->sw * scale), (uint32_t)(b->sh * scale) } };
         VkDescriptorSet dset = twin ? twin_dset(b) : b->dset;
+        if (b->pset && b->pset != cur_pal) {
+            cur_pal = b->pset;
+            vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 3, 1, &cur_pal, 0, NULL);
+        }
         BatchCommandEmit emit = batch_command_state_update(&batch_state, dset, &sc, b->bconst);
         if (emit.scissor) {
             vkCmdSetScissor(s_cmd, 0, 1, &sc);
@@ -7809,6 +7821,75 @@ static DepthEnt *depth_containing(uint32_t a) {
 static int hook_vram_read(uint32_t addr, uint32_t bytes);
 
 /* Build pipeline key + push constants for the current GE state. Always succeeds. */
+/* ---- palettes of render targets read as CLUT32 (#3216) -----------------------------------
+ * A title may draw into an 8888 target and then sample it as a CLUT32 texture: each texel's four
+ * bytes are one index, and CLUTFORMAT's shift and mask pick the byte that reads the palette (a
+ * colour ramp applied one channel per pass). The target's image is bound directly and psp.frag
+ * does the lookup, so nothing is read back or decoded. The shader shifts the texel and keeps the
+ * low eight bits; the table here already holds, for each of those 256 values, the entry ge.c's
+ * clut_index picks ((value & mask) | start, inside CLUT RAM), which is the same entry because the
+ * mask has eight bits. Only an 8888 CLUT is handled: its entries are the image's bytes as they
+ * are. Other reads keep the VRAM decoder. */
+typedef struct {
+    int used;
+    uint64_t key;
+    uint32_t lru;
+    VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler smp;
+    VkImageLayout layout;
+    VkDescriptorSet set;
+} PalEnt;
+static PalEnt s_pal[PAL_SLOTS];
+static uint32_t s_pal_clock;
+
+static void pal_release(void) {
+    for (unsigned i = 0; i < PAL_SLOTS; i++) {
+        PalEnt *e = &s_pal[i];
+        if (e->set) vkFreeDescriptorSets(s_dev, s_dpool_fix, 1, &e->set);
+        if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
+        if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
+        if (e->img) vkDestroyImage(s_dev, e->img, NULL);
+        if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
+    }
+    memset(s_pal, 0, sizeof(s_pal));
+    s_pal_clock = 0;
+}
+
+/* The set of the loaded CLUT under the current CLUTFORMAT, or VK_NULL_HANDLE when it cannot be
+ * made (the caller then decodes from VRAM). */
+static VkDescriptorSet pal_get(const GeState *g) {
+    if ((g->clut_fmt & 3u) != 3u) return VK_NULL_HANDLE;
+    const uint64_t key = clut_hash();          /* the CLUT RAM and the whole CLUTFORMAT word */
+    PalEnt *e = NULL;
+    for (unsigned i = 0; i < PAL_SLOTS; i++) {
+        if (s_pal[i].used && s_pal[i].key == key) { s_pal[i].lru = ++s_pal_clock; return s_pal[i].set; }
+        if (!e || (e->used && (!s_pal[i].used || s_pal[i].lru < e->lru))) e = &s_pal[i];
+    }
+    uint32_t table[256];
+    const uint32_t mask = (g->clut_fmt >> 8) & 0xFFu, start = ((g->clut_fmt >> 16) & 0x1Fu) << 4;
+    for (uint32_t v = 0; v < 256u; v++)
+        memcpy(&table[v], &g->clutram[(((v & mask) | start) & 0xFFu) * 4u], 4);
+    if (!e->img) {
+        static const TexMipKey no_mip;
+        if (!tex_make(256, 1, 1u, 0u, 0, 0, 1, 1, &no_mip, &e->img, &e->mem, &e->view, &e->smp)) return VK_NULL_HANDLE;
+        e->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        e->set = make_descriptor(e->view, e->smp, s_dpool_fix);
+        if (!e->set) {
+            vkDestroySampler(s_dev, e->smp, NULL); vkDestroyImageView(s_dev, e->view, NULL);
+            vkDestroyImage(s_dev, e->img, NULL); vkFreeMemory(s_dev, e->mem, NULL);
+            memset(e, 0, sizeof(*e));
+            return VK_NULL_HANDLE;
+        }
+    } else if ((s_nbatch || s_nwbatch) && !submit_pending()) {
+        /* The slot's image is another palette's, which queued batches (wing batches too) still
+         * read: they are recorded before the new entries are uploaded. */
+        return VK_NULL_HANDLE;
+    }
+    e->used = 0;
+    if (!tex_upload_level(e->img, &e->layout, 0u, 1, table, 256, 1)) return VK_NULL_HANDLE;
+    e->used = 1; e->key = key; e->lru = ++s_pal_clock;
+    return e->set;
+}
+
 static void build_state(int persp, int sprite, Batch *b) {
     uint64_t key_started = cpu_profile_now();
     if (s_cpu_profile) s_cpu_profile_stats.state_key_builds++;
@@ -8033,6 +8114,8 @@ static void build_state(int persp, int sprite, Batch *b) {
      * RAM-texture cache, or white for untextured */
     b->dset = s_white_set;
     b->tsrc = NULL; b->tsnap = 0; b->tvar = (uint8_t)filter_variant;
+    b->pset = VK_NULL_HANDLE;
+    uint32_t pal_shift = 0u;               /* cfg.x bits 3-7 for a palette read */
     if (textured) {
         uint64_t lookup_started = cpu_profile_now();
         Target *src = is_vram(g->tex_addr) ? target_containing(vram_off(g->tex_addr)) : NULL;
@@ -8071,9 +8154,14 @@ static void build_state(int persp, int sprite, Batch *b) {
              * It decodes guest VRAM through the view, as ge.c does, once every target's pixels the
              * view can reach are there. */
             const int view_read = (g->tex_addr & 0x00200000u) != 0u;
-            if (src->gpu_valid && !depth_read && !view_read && !nortt && !ge_tex_mip_active(g) &&
-                g->tex_fmt == src->fmt &&
-                !g->tex_swizzle && (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
+            const int plain_read = src->gpu_valid && !depth_read && !view_read && !nortt && !ge_tex_mip_active(g) &&
+                !g->tex_swizzle && (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0;
+            /* An 8888 target read as CLUT32 with nearest filtering both ways (#3216): the same
+             * direct bind, with the palette as set 3 (pal_get). A filtered read would blend
+             * palette entries, which the shader does not do: it decodes from VRAM. */
+            VkDescriptorSet pset = (plain_read && g->tex_fmt == 7u && src->fmt == 3u && filter_variant == 0u &&
+                                    (g->tex_filter & 0x101u) == 0u) ? pal_get(g) : VK_NULL_HANDLE;
+            if (plain_read && (g->tex_fmt == src->fmt || pset)) {
                 uint32_t pix = toff / bpp_s;
                 /* The texture's own size and clamp bits (#2052): psp.frag clamps or wraps each texel
                  * index at them, as ge.c does, not at the image's edge. A direct bind never has mip
@@ -8083,6 +8171,11 @@ static void build_state(int persp, int sprite, Batch *b) {
                 b->pc.cfg[1] |= (int32_t)(((g->tex_wrap & 1u) | (((g->tex_wrap >> 8) & 1u) << 1) |
                                            ((g->tex_filter & 1u) << 2) | (((g->tex_filter >> 8) & 1u) << 3)) << 24);
                 s_cnt_rtt_direct++;
+                if (pset) {
+                    b->pset = pset;
+                    b->pc.cfg[1] |= (int32_t)(1u << 28);
+                    pal_shift = (g->clut_fmt >> 2) & 0x1Fu;
+                }
                 if (src == s_cur) {
                     /* feedback loop: sample a snapshot copy; reuse the previous snapshot
                      * while nothing new has rendered into the target */
@@ -8101,7 +8194,7 @@ static void build_state(int persp, int sprite, Batch *b) {
                         cmd_submit_wait(SR_PERF_GE_TARGET_READBACK_TRANSITION);
                     }
                     /* The twin's pass samples the source's twin (twin_dset). These conditions
-                     * are the twin sampling rule too (same psm, so no CLUT; no swizzle; no
+                     * are the twin sampling rule too (same psm, or the palette read; no swizzle; no
                      * mips; bufw == stride; pixel-aligned; no reordering view): any other read
                      * goes through VRAM in both passes. The source's twin may still be the
                      * presenter's blit source, and one that is behind its image is re-seeded
@@ -8175,7 +8268,7 @@ static void build_state(int persp, int sprite, Batch *b) {
         if (s_cpu_profile) s_cpu_profile_stats.snapshot_requests++;
         if (sr_perf_enabled) sr_perf_ge_event(SR_PERF_GE_SNAPSHOT_REQUEST, 1);
     }
-    b->pc.cfg[0] = (int32_t)((g->tex_func & 7) | ((uint32_t)flags << 8));
+    b->pc.cfg[0] = (int32_t)((g->tex_func & 7) | (pal_shift << 3) | ((uint32_t)flags << 8));
 }
 
 /* ---- built-state template (state rebuilt per CHANGE, not per primitive) ------------------ */
@@ -8360,7 +8453,7 @@ static int batch_extends(const Batch *last, const Batch *b, uint32_t first) {
     return last->first + last->count == first && !memcmp(&last->key, &b->key, sizeof(b->key)) &&
            last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
            !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
-           !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset;
+           !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset && last->pset == b->pset;
 }
 
 static void depth_blind_pair(const Batch *b, Batch *colour, Batch *stencil) {
@@ -10445,10 +10538,10 @@ static int gegpu_init_parts(void) {
     dpc.maxSets = tex_sets; dpc.poolSizeCount = 1; dpc.pPoolSizes = &dps;
     dpc.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;   /* LRU eviction */
     VKC(vkCreateDescriptorPool(s_dev, &dpc, NULL, &s_dpool_tex));
-    /* the targets' and snapshot's sets, the white set, and s_dst_set */
+    /* the targets' and snapshot's sets, the white set, s_dst_set, and the palettes' sets */
     VkDescriptorPoolSize dpsf = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                  FIXED_FILTER_DESCRIPTOR_SETS + 1u };
-    dpc.maxSets = FIXED_FILTER_DESCRIPTOR_SETS + 1u; dpc.pPoolSizes = &dpsf;
+                                  FIXED_FILTER_DESCRIPTOR_SETS + 1u + PAL_SLOTS };
+    dpc.maxSets = FIXED_FILTER_DESCRIPTOR_SETS + 1u + PAL_SLOTS; dpc.pPoolSizes = &dpsf;
     dpc.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     VKC(vkCreateDescriptorPool(s_dev, &dpc, NULL, &s_dpool_fix));
 
@@ -10466,9 +10559,10 @@ static int gegpu_init_parts(void) {
     VKC(vkCreateDescriptorPool(s_dev, &tdpc, NULL, &s_tnl_dpool));
 
     VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushPC) };
-    VkDescriptorSetLayout set_layouts[3] = { s_dlayout, s_tnl_dlayout, s_dst_dlayout };
+    /* Set 3 is a palette (pal_get): one sampled image, so it shares set 0's layout. */
+    VkDescriptorSetLayout set_layouts[4] = { s_dlayout, s_tnl_dlayout, s_dst_dlayout, s_dlayout };
     VkPipelineLayoutCreateInfo plc = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plc.setLayoutCount = 3; plc.pSetLayouts = set_layouts;
+    plc.setLayoutCount = 4; plc.pSetLayouts = set_layouts;
     plc.pushConstantRangeCount = 1; plc.pPushConstantRanges = &pcr;
     VKC(vkCreatePipelineLayout(s_dev, &plc, NULL, &s_playout));
     if (s_dst_interlock) {
@@ -10482,7 +10576,7 @@ static int gegpu_init_parts(void) {
         VkDescriptorSetLayoutCreateInfo rlc = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         rlc.bindingCount = 2; rlc.pBindings = rb;
         VKC(vkCreateDescriptorSetLayout(s_dev, &rlc, NULL, &s_rmw_dlayout));
-        VkDescriptorSetLayout rmw_layouts[3] = { s_dlayout, s_tnl_dlayout, s_rmw_dlayout };
+        VkDescriptorSetLayout rmw_layouts[4] = { s_dlayout, s_tnl_dlayout, s_rmw_dlayout, s_dlayout };
         plc.pSetLayouts = rmw_layouts;
         VKC(vkCreatePipelineLayout(s_dev, &plc, NULL, &s_playout_rmw));
         VkDescriptorPoolSize rps[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2u * MAX_TGT },
@@ -10773,6 +10867,7 @@ static void gegpu_release(void) {
         if (s_snap_set[i]) vkFreeDescriptorSets(s_dev, s_dpool_fix, 1, &s_snap_set[i]);
     if (s_dst_set) vkFreeDescriptorSets(s_dev, s_dpool_fix, 1, &s_dst_set);
     s_dst_set = VK_NULL_HANDLE;
+    pal_release();
     if (s_dpool_tex) vkDestroyDescriptorPool(s_dev, s_dpool_tex, NULL);
     if (s_dpool_fix) vkDestroyDescriptorPool(s_dev, s_dpool_fix, NULL);
     if (s_twin || s_cnt_twin_alloc_fail)

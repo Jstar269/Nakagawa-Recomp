@@ -1546,13 +1546,13 @@ static uint32_t h_CtrlButtons(void) {
      * closed on their first frame (walkthrough B16, reproduced with a plain mouse click). There
      * the pulse runs only when the user named it (SR_PAD, SR_PADPERIOD, SR_PADWIDTH or
      * SR_PADSTART). Headless runs (the offscreen sink, a dummy video driver, an acceptance
-     * launch) and runs with an explicit SR_PAD or a route/pad script keep today's behaviour.
+     * launch) and runs with an explicit SR_PAD or a route/pad script keep the pulse.
      *
      * A connected pad is not the only way a human drives this runtime: the keyboard path is
      * equally live, and gui_pad_present() is false for it (it reports gamepad presence only;
      * the GDI fallback sets it to 0 unconditionally while read_keys() still delivers live
      * keyboard state, and the SDL3 path likewise ORs keyboard state into the buttons while
-     * s_pad_present tracks the gamepad alone). A keyboard player therefore used to get a
+     * s_pad_present tracks the gamepad alone). Without a latch a keyboard player would get a
      * synthesised START for `width` vblanks every `period` -- 4.00 s on the defaults --
      * which opens the pause menu over and over and makes the session unplayable. So latch
      * the first live input from ANY source and stop synthesising from then on. The latch

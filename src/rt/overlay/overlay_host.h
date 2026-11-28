@@ -73,10 +73,8 @@ NkOverlayFonts *nk_overlay_fonts_create(const char *ui_root, char *error, size_t
 const NkUiTextBackend *nk_overlay_fonts_text(const NkOverlayFonts *fonts);
 void nk_overlay_fonts_destroy(NkOverlayFonts *fonts);
 
-/* The controller family the controls page names buttons for, and whether a pad is
-   connected now. */
+/* The controller family the controls page names buttons for. */
 NkUiPadFamily nk_overlay_host_pad_family(const NkOverlayHost *host);
-bool nk_overlay_host_pad_connected(const NkOverlayHost *host);
 
 /* The page that is up (NK_OVERLAY_SCREEN_MENU while closed) and the VRAM viewer's window,
    which the presenter decodes when a frame returns NK_OVERLAY_ACT_VRAM_VIEW (#314). NULL

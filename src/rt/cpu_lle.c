@@ -343,10 +343,10 @@ static void sr_cp0_delay_context(
  * ExcCode 5). In both, EPC is the faulting access itself, BadVAddr is the
  * effective address INCLUDING the misaligned low bits (base+2, not the aligned
  * base), the destination register is unchanged, and execution does not continue
- * past the access. These replace what was previously labelled synthetic here.
+ * past the access.
  *
- * (A3-02/03 left the delay-slot and halfword cases synthetic; A3-04 and A3-05
- * below have since measured both, so that caveat is gone rather than kept.)
+ * (A3-02/03 did not cover the delay-slot and halfword cases; A3-04 and A3-05
+ * below measure both.)
  *
  * MEASURED (runs PSP-A3-04 and PSP-A3-05, PSP-3000/6.61,
  * user-mode PRX probes via PSPLink; fixtures

@@ -426,6 +426,16 @@ into one target and read it back as a texture keep the scale in these cases:
   - A texture that starts inside the target, at a pixel-aligned offset, is read through that
     offset (`texsize.zw`): `rtt-scale-offset` runs the bloom-like pass with its buffer as a
     sub-rectangle of a 512-wide target.
+- **An 8888 target read as CLUT32 through an 8888 palette, with nearest filtering both ways**, is
+  bound directly too (#3216): a colour ramp a title applies to its own picture, one pass per
+  channel, many draws a frame. Each texel's four bytes are the index (red lowest, as in guest
+  VRAM), and CLUTFORMAT's shift and mask pick the byte that reads the palette. `psp.frag` shifts
+  the texel and reads `u_pal` (descriptor set 3, a 256 x 1 image `pal_get` builds from CLUT RAM
+  with the mask and start offset already applied); the shift rides in `cfg.x` bits 3 to 7 and
+  `cfg.y` bit 28 marks the read. Nothing is read back or decoded (`rtt-palette`, at 1x, 2x and
+  4x and with the native twin; four of its eight reads blend against the destination, on the
+  interlock path by default and on the snapshot path in its own leg). A filtered read, a 16-bit
+  palette, or a CLUT16 read of a 16-bit target still decodes from guest VRAM.
 - **A CPU read of a target a draw sampled** returns its top-left device samples in the target's own
   format, the readback-rows contract: 1x pixels, the software renderer's except where an edge
   passes between a guest pixel's centre and its top-left device sample (`rtt-scale` reads its
@@ -435,7 +445,8 @@ into one target and read it back as a texture keep the scale in these cases:
 A texture is a render-target read when its address lies inside the span of a colour target the
 GPU has drawn (one whose image is valid): from the target's base address, its stride times 272
 rows (`target_containing` in `ge_gpu.c`). The direct
-bind then needs all of these: the texture format equals the target's pixel format, the texture is
+bind then needs all of these: the texture format equals the target's pixel format (or the read
+is the palette read below), the texture is
 not swizzled and mipmapping is not active (a mipmap filter with a maximum level above 0), its
 buffer width equals the target's stride (or is 0), the texture address is pixel-aligned inside the
 target and in the 0x04000000 or 0x04400000 view of VRAM, and the target's image holds the guest's
@@ -444,8 +455,8 @@ target reads the target back to guest VRAM and decodes it there at 1x, the way t
 the effect shows 1x detail at any render scale. Those reads include:
 
 - a read in any texture format other than the target's pixel format: CLUT4, CLUT8, CLUT16,
-  CLUT32, DXT, or another direct-colour format (a 16-bit target read as 8888 or as another 16-bit
-  format, an 8888 target read as 16-bit);
+  CLUT32 (but for the palette read below), DXT, or another direct-colour format (a 16-bit target
+  read as 8888 or as another 16-bit format, an 8888 target read as 16-bit);
 - a swizzled read;
 - a read with mipmapping active;
 - a read with another buffer width;
@@ -517,12 +528,16 @@ depth value, of a buffer the GPU holds at render scale: the read is in a format 
 of the buffer's values (the target's own format, another format of the same size, CLUT16 of a
 16-bit target or CLUT32 of an 8888 target; for depth, a 16-bit format or CLUT16), so a scaled read
 is possible. These read at 1x only because no such path is implemented; #2279 stays open for them.
+One has its path: CLUT32 of an 8888 target through an 8888 palette with nearest filtering binds the
+target's image (the palette read above, #3216).
 What each path would need:
 
 - a 16-bit target read as another 16-bit format (5650, 5551, 4444): repack each filter tap from
   the target's format into the texture's, in the shader, before filtering;
-- CLUT16 of a 16-bit target, CLUT32 of an 8888 target: take each tap's value in the target's
-  format and look it up in the palette, a lookup that runs only in the texture decoder today;
+- CLUT16 of a 16-bit target, and CLUT32 of an 8888 target with linear filtering or a 16-bit
+  palette: take each tap's value in the target's format and look it up in the palette before
+  filtering (the shader's lookup handles one nearest tap of an 8888 target through an 8888
+  palette);
 - a swizzled read, or a read with another non-zero buffer width: find the target pixel that holds
   each tap's texel (a swizzled texture takes the buffer's 16-byte by 8-row blocks in another order;
   another width puts texture rows across the target's rows), and filter only between texels,
@@ -545,13 +560,14 @@ A depth read outside every colour target goes through the GE's CPU-read path
 at 1x through each of the three views. Like any texture outside every colour target, that 1x decode
 may then be upscaled by texture scaling when it is on; a read inside a colour target never is.
 
-`rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen of these reads at 1x, 2x and 4x: an 8888
-target read as 4444, CLUT8, CLUT4, DXT1, CLUT32, and in its own format swizzled, mipmapped and at
+`rtt-1x-reads` in `gpu-coherence-selftest` runs twelve of these reads at 1x, 2x and 4x: an 8888
+target read as 4444, CLUT8, CLUT4, DXT1, and in its own format swizzled, mipmapped and at
 half its buffer width; a 5650 target read as 5551 and as 8888; and Z, the targets' depth buffer,
 outside every colour target, as 4444 through the three views. None binds a target's image, each
 depth read commits depth the GPU wrote since the last commit, and the reading target's guest VRAM
 equals the software renderer's exactly. A control read in the target's own format binds its image
-directly. A read that gains a scaled path leaves this cell for one like `rtt-scale`. The reads the
+directly, and so does the cell's nearest CLUT32 read of the 8888 target (the palette read above),
+kept here as a second control beside `rtt-palette`. A read that gains a scaled path leaves this cell for one like `rtt-scale`. The reads the
 cell does not run, among them an unaligned read, CLUT16, DXT3 and DXT5, the other pairs of formats,
 and swizzled, mipmapped or other-width reads of a 16-bit target, take the same 1x path by the bind
 rule above.

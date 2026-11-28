@@ -1734,19 +1734,17 @@ int sr_hle_test_sema_state(uint32_t uid, int *count_out, int *max_out) {
 /* ---------------------------------------------------------------------------
  * Lightweight mutexes.
  *
- * These were previously registered as no-ops (Create -> h_CreateSema, every
- * other entry -> h_ok) under a comment justifying it as "single-threaded
- * recompiler".  That premise is false: this runtime schedules real PSP threads
- * cooperatively (src/rt/sched.c), and a retained boot trace shows two distinct
- * guest threads locking the same LwMutex, so the no-op registration silently
- * removed mutual exclusion between them.
+ * These must not be no-ops on the grounds that the recompiler is single-threaded:
+ * this runtime schedules real PSP threads cooperatively (src/rt/sched.c), and a
+ * retained boot trace shows two distinct guest threads locking the same LwMutex,
+ * so a no-op registration silently removes mutual exclusion between them.
  *
- * The old registration was also wrong on the ABI.  sceKernelCreateLwMutex takes
- * (workarea, name, attr, initialCount, opt), so routing it to h_CreateSema --
- * which reads (name, attr, initCount, maxCount) -- shifted every argument by
- * one register: the semaphore was created with count=attr and max=initialCount.
- * It returned the uid where the API returns 0 on success, and it never wrote
- * the caller's workarea at all.
+ * sceKernelCreateLwMutex must not be routed to h_CreateSema either.  It takes
+ * (workarea, name, attr, initialCount, opt), while h_CreateSema reads (name,
+ * attr, initCount, maxCount), so every argument would shift by one register:
+ * the semaphore would get count=attr and max=initialCount.  h_CreateSema also
+ * returns the uid where the API returns 0 on success, and never writes the
+ * caller's workarea.
  *
  * The workarea is the whole point of an LwMutex: it lives in guest memory and
  * the guest reads lockLevel/lockThread/uid out of it directly.  Layout is fixed

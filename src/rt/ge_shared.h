@@ -752,7 +752,6 @@ int       ge_zbuf_guest_span_bounds(uint32_t base, uint32_t stride,
                                      uint32_t *first, uint32_t *end);
 void      ge_zbuf_invalidate_guest_span(uint32_t addr, uint32_t bytes);
 void      ge_zbuf_note_external_write(void);
-void      ge_zbuf_invalidate_guest_range(uint32_t addr);
 GeState  *ge_state_ptr(void);
 /* Changes whenever GE state may have changed (each list command, init, replay restore), so a
  * consumer can keep values derived from GeState until it moves. */
