@@ -18,6 +18,7 @@
 #include "pgf_api.h"
 #include "archive_vfs.h"
 #include "nk_psp_aes.h"
+#include "nk_psp_builtin_keys.h"
 #include "nk_psp_container.h"
 #include "nk_psp_ec.h"
 #include "nk_psp_inflate.h"
@@ -2364,6 +2365,353 @@ static void test_fuzz_decrypt_boundary(unsigned iters) {
     nk_keystore_free(ks);
     printf("[FUZZ] Decryption boundary completed: %u/%u decrypted, 0 crashes\n",
            accepted, iters);
+    fflush(stdout);
+}
+
+/* ---- a file of a game disc image (#3235) ------------------------------- */
+
+/* One of the two user-module tags game discs and firmware both carry, with a
+ * fake key: the source rule is what these checks are about, not the key. */
+#define FUZZ_DISC_LIBRARY_TAG 0x457B06F0u
+#define FUZZ_DISC_SECTOR 2048u
+#define FUZZ_DISC_SECTORS 30u
+
+typedef struct FuzzDisc {
+    const uint8_t *data;
+    size_t size;
+} FuzzDisc;
+
+static int fuzz_disc_read_at(void *user, uint64_t offset, void *buf, size_t len) {
+    const FuzzDisc *disc = (const FuzzDisc *)user;
+    if (offset > disc->size || len > disc->size - (size_t)offset) return -1;
+    memcpy(buf, disc->data + (size_t)offset, len);
+    return 0;
+}
+
+/* The key set of build_keystore_json plus a recipe for FUZZ_DISC_LIBRARY_TAG. */
+static NkKeystore *fuzz_disc_keystore(void) {
+    uint8_t cmd1[16], vault[16], tag_key[16];
+    char cmd1_hex[33], vault_hex[33], tag_hex[33], json[1024], err[256];
+    NkKeystore *ks = nk_keystore_create();
+    int n;
+    fuzz_fake_key(cmd1, 1u);
+    fuzz_fake_key(vault, 2u);
+    fuzz_fake_key(tag_key, 3u);
+    fuzz_hex_encode(cmd1, sizeof(cmd1), cmd1_hex);
+    fuzz_hex_encode(vault, sizeof(vault), vault_hex);
+    fuzz_hex_encode(tag_key, sizeof(tag_key), tag_hex);
+    n = snprintf(json, sizeof(json),
+                 "{\"format\":\"" FUZZ_KEYSTORE_FORMAT "\",\"entries\":{"
+                 "\"kirk.cmd1.key\":\"%s\","
+                 "\"kirk.keyvault.%d\":\"%s\","
+                 "\"prx.tag.0x%08X\":{\"code\":%d,\"key\":\"%s\"},"
+                 "\"prx.tag.0x%08X\":{\"code\":%d,\"key\":\"%s\"}}}",
+                 cmd1_hex, FUZZ_PSP_CODE, vault_hex,
+                 (unsigned)FUZZ_PSP_TAG, FUZZ_PSP_CODE, tag_hex,
+                 (unsigned)FUZZ_DISC_LIBRARY_TAG, FUZZ_PSP_CODE, tag_hex);
+    assert(n > 0 && (size_t)n < sizeof(json) && ks != NULL);
+    assert(nk_keystore_load_json(ks, json, (size_t)n, err, sizeof(err)) == NK_PSP_OK);
+    return ks;
+}
+
+/* A container under FUZZ_DISC_LIBRARY_TAG (or another header tag) whose header
+ * declares the given module attribute and decrypt mode. */
+static size_t seal_disc_library(uint8_t *out, size_t cap, const uint8_t *payload,
+                                size_t payload_len, uint32_t tag, uint16_t attribute,
+                                uint8_t decrypt_mode) {
+    uint8_t cmd1_key[16], vault_key[16], tag_key[16];
+    fuzz_fake_key(cmd1_key, 1u);
+    fuzz_fake_key(vault_key, 2u);
+    fuzz_fake_key(tag_key, 3u);
+    return psp_seal_type2_as(out, cap, payload, payload_len, 0, (uint32_t)payload_len, tag,
+                             tag_key, vault_key, cmd1_key, attribute, decrypt_mode);
+}
+
+/* A disc image: PVD 16, root 17, PSP_GAME 18, SYSDIR 19, USRDIR 20, UPDATE 21,
+ * MODULE 22, PARAM.SFO 23 (left out when disc_id is NULL), `library` at 24 and
+ * `other` at 26. SYSDIR/EBOOT.BIN, SYSDIR/LIB.PRX, SYSDIR/UPDATE/EBOOT.BIN and
+ * USRDIR/MODULE/LIB.PRX all name the library's extent, so the same bytes are
+ * offered at each path; USRDIR/MODULE/OTHER.PRX names `other`. Synthetic bytes
+ * only. */
+static size_t build_fuzz_disc(uint8_t *image, size_t cap, const char *disc_id,
+                              const uint8_t *library, size_t library_len,
+                              const uint8_t *other, size_t other_len) {
+    enum { ROOT = 17, GAME = 18, SYSDIR = 19, USRDIR = 20, UPDATE = 21, MODULE = 22,
+           SFO = 23, FILE0 = 24 };
+    static const uint8_t dot = 0, dotdot = 1;
+    size_t total = (size_t)FUZZ_DISC_SECTORS * FUZZ_DISC_SECTOR;
+    uint8_t sfo[256];
+    size_t sfo_size = disc_id != NULL
+        ? psp_seal_sfo(sfo, sizeof(sfo), "UG", disc_id, "Synthetic disc") : 0u;
+    uint8_t *dir;
+    size_t off;
+    assert(cap >= total && library_len <= 2u * FUZZ_DISC_SECTOR &&
+           other_len <= 2u * FUZZ_DISC_SECTOR);
+    memset(image, 0, total);
+    dir = image + 16u * FUZZ_DISC_SECTOR;
+    dir[0] = 1u;
+    memcpy(dir + 1, "CD001", 5);
+    dir[6] = 1u;
+    append_iso_record(dir + 156, &dot, 1, ROOT, FUZZ_DISC_SECTOR, true);
+
+    dir = image + (size_t)ROOT * FUZZ_DISC_SECTOR;
+    off = append_iso_record(dir, &dot, 1, ROOT, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, &dotdot, 1, ROOT, FUZZ_DISC_SECTOR, true);
+    append_iso_record(dir + off, "PSP_GAME", 8, GAME, FUZZ_DISC_SECTOR, true);
+
+    dir = image + (size_t)GAME * FUZZ_DISC_SECTOR;
+    off = append_iso_record(dir, &dot, 1, GAME, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, &dotdot, 1, ROOT, FUZZ_DISC_SECTOR, true);
+    if (sfo_size != 0u) {
+        off += append_iso_record(dir + off, "PARAM.SFO;1", 11, SFO, (uint32_t)sfo_size, false);
+        memcpy(image + (size_t)SFO * FUZZ_DISC_SECTOR, sfo, sfo_size);
+    }
+    off += append_iso_record(dir + off, "SYSDIR", 6, SYSDIR, FUZZ_DISC_SECTOR, true);
+    append_iso_record(dir + off, "USRDIR", 6, USRDIR, FUZZ_DISC_SECTOR, true);
+
+    dir = image + (size_t)SYSDIR * FUZZ_DISC_SECTOR;
+    off = append_iso_record(dir, &dot, 1, SYSDIR, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, &dotdot, 1, GAME, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, "EBOOT.BIN;1", 11, FILE0, (uint32_t)library_len, false);
+    off += append_iso_record(dir + off, "LIB.PRX;1", 9, FILE0, (uint32_t)library_len, false);
+    append_iso_record(dir + off, "UPDATE", 6, UPDATE, FUZZ_DISC_SECTOR, true);
+
+    dir = image + (size_t)UPDATE * FUZZ_DISC_SECTOR;
+    off = append_iso_record(dir, &dot, 1, UPDATE, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, &dotdot, 1, SYSDIR, FUZZ_DISC_SECTOR, true);
+    append_iso_record(dir + off, "EBOOT.BIN;1", 11, FILE0, (uint32_t)library_len, false);
+
+    dir = image + (size_t)USRDIR * FUZZ_DISC_SECTOR;
+    off = append_iso_record(dir, &dot, 1, USRDIR, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, &dotdot, 1, GAME, FUZZ_DISC_SECTOR, true);
+    append_iso_record(dir + off, "MODULE", 6, MODULE, FUZZ_DISC_SECTOR, true);
+
+    dir = image + (size_t)MODULE * FUZZ_DISC_SECTOR;
+    off = append_iso_record(dir, &dot, 1, MODULE, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, &dotdot, 1, USRDIR, FUZZ_DISC_SECTOR, true);
+    off += append_iso_record(dir + off, "LIB.PRX;1", 9, FILE0, (uint32_t)library_len, false);
+    append_iso_record(dir + off, "OTHER.PRX;1", 11, FILE0 + 2, (uint32_t)other_len, false);
+
+    memcpy(image + (size_t)FILE0 * FUZZ_DISC_SECTOR, library, library_len);
+    memcpy(image + (size_t)(FILE0 + 2) * FUZZ_DISC_SECTOR, other, other_len);
+    return total;
+}
+
+/* Whether a disc path names something at or below PSP_GAME/SYSDIR/UPDATE. */
+static bool fuzz_path_in_update(const char *path) {
+    static const char prefix[] = "PSP_GAME/SYSDIR/UPDATE";
+    size_t n = sizeof(prefix) - 1u;
+    if (strlen(path) < n) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = path[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        if (c != prefix[i]) return false;
+    }
+    return path[n] == '\0' || path[n] == '/';
+}
+
+static int fuzz_disc_member(const NkKeystore *ks, const uint8_t *image, size_t size,
+                            const char *member, uint8_t **out, size_t *out_size,
+                            char *message, size_t message_size) {
+    FuzzDisc disc = { image, size };
+    NkPsarSource source = { fuzz_disc_read_at, &disc, size };
+    NkPspCtx ctx;
+    int rc;
+    nk_psp_ctx_init(&ctx, ks);
+    rc = nk_container_decrypt_disc_member(&ctx, &source, member, out, out_size);
+    if (message != NULL && message_size > 0u) snprintf(message, message_size, "%s", ctx.message);
+    assert((rc == NK_PSP_OK) == (*out != NULL));
+    return rc;
+}
+
+/* The source rule of the disc route: a library module read from PSP_GAME/USRDIR of a game
+ * disc image opens; the same bytes as loose bytes, under PSP_GAME/SYSDIR, in the disc's
+ * UPDATE folder or on an image with no game identity do not; a kernel or VSH header does
+ * not; another listed tag does not. Then mutated images and paths: no crash, no read
+ * outside the image, and nothing decrypts from UPDATE whatever the image says. */
+static void test_fuzz_disc_member(unsigned iters) {
+    static uint8_t image[FUZZ_DISC_SECTORS * FUZZ_DISC_SECTOR];
+    static uint8_t work[FUZZ_DISC_SECTORS * FUZZ_DISC_SECTOR];
+    static const char *const members[] = {
+        "PSP_GAME/USRDIR/MODULE/LIB.PRX", "PSP_GAME/USRDIR/MODULE/OTHER.PRX",
+        "PSP_GAME/SYSDIR/LIB.PRX", "PSP_GAME/SYSDIR/EBOOT.BIN",
+        "PSP_GAME/SYSDIR/UPDATE/EBOOT.BIN", "psp_game/sysdir/update/eboot.bin",
+        "PSP_GAME/USRDIR/../SYSDIR/UPDATE/EBOOT.BIN", "PSP_GAME/USRDIR/MODULE",
+        "PSP_GAME/USRDIR/MODULE/NONE.PRX", "PSP_GAME/USRDIR", "", "/", "PSP_GAME\\USRDIR\\X.PRX",
+    };
+    NkKeystore *ks = fuzz_disc_keystore();
+    uint8_t elf[256], library[1024], sce[1024 + 0x40], other[1024];
+    size_t elf_len = build_tiny_elf(elf, sizeof(elf));
+    size_t library_len, sce_len, other_len, size;
+    uint8_t *out = NULL;
+    size_t out_size = 0;
+    char message[256];
+    unsigned accepted = 0;
+
+    printf("[FUZZ] Testing the disc-file decryption boundary (%u iterations)...\n", iters);
+    fflush(stdout);
+
+    library_len = seal_disc_library(library, sizeof(library), elf, elf_len,
+                                    FUZZ_DISC_LIBRARY_TAG, 0x0006u, 4u);
+    /* The ~SCE outer header the disc libraries carry. */
+    memset(sce, 0, 0x40u);
+    memcpy(sce, "~SCE", 4);
+    put32le(sce + 4, 0x40u);
+    memcpy(sce + 0x40u, library, library_len);
+    sce_len = library_len + 0x40u;
+
+    /* From PSP_GAME/USRDIR of a game disc image: opened, wrapped or bare, any letter case. */
+    size = build_fuzz_disc(image, sizeof(image), "TEST93235", sce, sce_len, library, library_len);
+    assert(fuzz_disc_member(ks, image, size, "PSP_GAME/USRDIR/MODULE/LIB.PRX", &out, &out_size,
+                            NULL, 0) == NK_PSP_OK);
+    assert(out_size == elf_len && memcmp(out, elf, elf_len) == 0);
+    free(out);
+    assert(fuzz_disc_member(ks, image, size, "psp_game/usrdir/module/other.prx", &out, &out_size,
+                            NULL, 0) == NK_PSP_OK);
+    assert(out_size == elf_len && memcmp(out, elf, elf_len) == 0);
+    free(out);
+
+    /* The same bytes held by the caller: refused before any key lookup, though the key
+       store holds a recipe for the tag. */
+    {
+        NkPspCtx ctx;
+        NkContainerInfo info;
+        nk_psp_ctx_init(&ctx, ks);
+        assert(nk_container_decrypt(&ctx, sce, sce_len, &out, &out_size) == NK_PSP_ERR_FIRMWARE);
+        assert(out == NULL && ctx.missing_entry[0] == '\0');
+        assert(strstr(ctx.message, "only when it reads it from PSP_GAME/USRDIR") != NULL);
+        nk_psp_ctx_init(&ctx, ks);
+        assert(nk_container_decrypt(&ctx, library, library_len, &out, &out_size) ==
+               NK_PSP_ERR_FIRMWARE);
+        nk_psp_ctx_init(&ctx, ks);
+        assert(nk_container_probe(&ctx, library, library_len, &info) == NK_PSP_ERR_FIRMWARE);
+    }
+
+    /* On the disc but outside PSP_GAME/USRDIR; and the UPDATE folder, by path alone. */
+    assert(fuzz_disc_member(ks, image, size, "PSP_GAME/SYSDIR/LIB.PRX", &out, &out_size,
+                            message, sizeof(message)) == NK_PSP_ERR_FIRMWARE);
+    assert(strstr(message, "only when it reads it from PSP_GAME/USRDIR") != NULL);
+    assert(fuzz_disc_member(ks, image, size, "PSP_GAME/SYSDIR/EBOOT.BIN", &out, &out_size,
+                            NULL, 0) == NK_PSP_ERR_FIRMWARE);
+    for (unsigned i = 4u; i <= 5u; i++) {
+        assert(fuzz_disc_member(ks, image, size, members[i], &out, &out_size, message,
+                                sizeof(message)) == NK_PSP_ERR_FIRMWARE);
+        assert(strstr(message, "PSP_GAME/SYSDIR/UPDATE holds") != NULL);
+    }
+    /* By path alone: the image is never read (this source fails every read). */
+    {
+        FuzzDisc none = { NULL, 0 };
+        NkPsarSource source = { fuzz_disc_read_at, &none, 0 };
+        NkPspCtx ctx;
+        nk_psp_ctx_init(&ctx, ks);
+        assert(nk_container_decrypt_disc_member(&ctx, &source, members[4], &out, &out_size) ==
+               NK_PSP_ERR_FIRMWARE);
+        nk_psp_ctx_init(&ctx, ks);
+        assert(nk_container_decrypt_disc_member(&ctx, &source, members[0], &out, &out_size) ==
+               NK_PSP_ERR_FORMAT);
+    }
+    /* Paths that are not one plain file below the program folders. */
+    assert(fuzz_disc_member(ks, image, size, members[6], &out, &out_size, NULL, 0) ==
+           NK_PSP_ERR_FORMAT);
+    assert(fuzz_disc_member(ks, image, size, members[7], &out, &out_size, NULL, 0) ==
+           NK_PSP_ERR_INPUT);
+    assert(fuzz_disc_member(ks, image, size, members[8], &out, &out_size, NULL, 0) ==
+           NK_PSP_ERR_INPUT);
+    for (unsigned i = 9u; i < sizeof(members) / sizeof(members[0]); i++) {
+        assert(fuzz_disc_member(ks, image, size, members[i], &out, &out_size, NULL, 0) ==
+               NK_PSP_ERR_FORMAT);
+    }
+
+    /* An image with no PSP_GAME/PARAM.SFO is not read as a game disc. */
+    size = build_fuzz_disc(image, sizeof(image), NULL, sce, sce_len, library, library_len);
+    assert(fuzz_disc_member(ks, image, size, members[0], &out, &out_size, message,
+                            sizeof(message)) == NK_PSP_ERR_FIRMWARE);
+    assert(strstr(message, "it is not read as a game disc") != NULL);
+
+    /* A library tag whose header declares kernel or VSH mode, or no user-module mode. */
+    {
+        static const struct { uint16_t attribute; uint8_t mode; } not_user[] = {
+            { 0x1006u, 4u }, { 0x0800u, 4u }, { 0x0006u, 2u }, { 0x0006u, 3u }, { 0x0000u, 0u },
+        };
+        for (unsigned i = 0; i < sizeof(not_user) / sizeof(not_user[0]); i++) {
+            other_len = seal_disc_library(other, sizeof(other), elf, elf_len,
+                                          FUZZ_DISC_LIBRARY_TAG, not_user[i].attribute,
+                                          not_user[i].mode);
+            size = build_fuzz_disc(image, sizeof(image), "TEST93235", sce, sce_len, other,
+                                   other_len);
+            assert(fuzz_disc_member(ks, image, size, members[1], &out, &out_size, message,
+                                    sizeof(message)) == NK_PSP_ERR_FIRMWARE);
+            assert(strstr(message, "is not a plain user-mode library module") != NULL);
+        }
+    }
+
+    /* Every other listed tag is refused from a game disc as from anywhere. */
+    for (size_t i = 0; i < nk_psp_firmware_tag_count; i++) {
+        uint32_t tag = nk_psp_firmware_tags[i].tag;
+        bool library_tag = false;
+        for (size_t k = 0; k < nk_psp_disc_library_tag_count; k++) {
+            library_tag = library_tag || nk_psp_disc_library_tags[k].tag == tag;
+        }
+        other_len = seal_disc_library(other, sizeof(other), elf, elf_len, tag, 0x0006u, 4u);
+        {
+            NkPspCtx ctx;
+            nk_psp_ctx_init(&ctx, ks);
+            assert(nk_container_decrypt(&ctx, other, other_len, &out, &out_size) ==
+                   NK_PSP_ERR_FIRMWARE);
+        }
+        if (library_tag) continue;
+        size = build_fuzz_disc(image, sizeof(image), "TEST93235", sce, sce_len, other, other_len);
+        assert(fuzz_disc_member(ks, image, size, members[1], &out, &out_size, NULL, 0) ==
+               NK_PSP_ERR_FIRMWARE);
+    }
+    /* The two library tags are both in the refusal list. */
+    for (size_t k = 0; k < nk_psp_disc_library_tag_count; k++) {
+        bool listed = false;
+        for (size_t i = 0; i < nk_psp_firmware_tag_count; i++) {
+            listed = listed || nk_psp_firmware_tags[i].tag == nk_psp_disc_library_tags[k].tag;
+        }
+        assert(listed);
+    }
+    assert(nk_psp_disc_library_tag_count == 2u);
+
+    /* Mutated images and paths. */
+    size = build_fuzz_disc(image, sizeof(image), "TEST93235", sce, sce_len, library, library_len);
+    for (unsigned i = 0; i < iters; i++) {
+        size_t cur_size = size;
+        const char *member = members[fuzz_rand32() % (sizeof(members) / sizeof(members[0]))];
+        char path[96];
+        uint8_t *mutated;
+        int rc;
+        memcpy(work, image, size);
+        if (fuzz_rand32() % 4u != 0u) {
+            /* Mostly inside the descriptor, directory and header sectors. */
+            unsigned edits = (fuzz_rand32() % 4u) + 1u;
+            for (unsigned e = 0; e < edits; e++) {
+                size_t at = (16u + fuzz_rand32() % 14u) * FUZZ_DISC_SECTOR + fuzz_rand32() % 0x160u;
+                work[at] = (uint8_t)fuzz_rand32();
+            }
+        } else {
+            mutate_buffer(work, &cur_size, size);
+        }
+        snprintf(path, sizeof(path), "%s", member);
+        if (fuzz_rand32() % 8u == 0u && path[0] != '\0') {
+            path[fuzz_rand32() % strlen(path)] = (char)(fuzz_rand32() % 0x80u);
+        }
+        mutated = fuzz_exact_copy(work, cur_size);
+        out = NULL;
+        out_size = 0;
+        rc = fuzz_disc_member(ks, mutated, cur_size, path, &out, &out_size, NULL, 0);
+        if (rc == NK_PSP_OK) {
+            assert(out_size >= 4u && memcmp(out, "\x7f" "ELF", 4) == 0);
+            /* Nothing opens through the UPDATE folder's name, whatever the image holds. */
+            assert(!fuzz_path_in_update(path));
+            accepted++;
+        }
+        free(out);
+        free(mutated);
+    }
+    nk_keystore_free(ks);
+    printf("[FUZZ] Disc-file boundary completed: %u/%u decrypted, 0 crashes\n", accepted, iters);
     fflush(stdout);
 }
 
@@ -5185,6 +5533,7 @@ int main(int argc, char **argv) {
     test_fuzz_pgf(run[4]);
     test_fuzz_archive_vfs(run[5]);
     test_fuzz_decrypt_boundary(run[6]);
+    test_fuzz_disc_member(run[6]);
     test_fuzz_keystore(run[7]);
     test_fuzz_inflate(run[8]);
     test_fuzz_kirk(run[9]);

@@ -10410,22 +10410,32 @@ static bool player_is_usable_mips_elf32(const char *path, bool module) {
    destination is the user's and is never replaced. The result is written
    beside it, checked against the shared PSP ELF32/MIPS layout rule, and only
    then renamed into place, so a failed or interrupted run leaves nothing.
-   Firmware is refused by the boundary before any key is read. Returns the
-   named result (nk_psp_status_name, or VALIDATION_FAILURE, OUTPUT_EXISTS,
+   Firmware is refused by the boundary before any key is read. The boundary reads the
+   file out of the image itself, by its path inside it (member_path), so it knows the
+   bytes came from the user's disc: that is what lets it open a library module the game
+   ships under PSP_GAME/USRDIR and still refuse the same bytes from anywhere else (#3235).
+   Returns the named result (nk_psp_status_name, or VALIDATION_FAILURE, OUTPUT_EXISTS,
    RESOURCE_LIMIT); "VALIDATED_DECRYPTED" means the file is in place. shared_keys, when
-   not NULL, is a keystore already holding the built-in tables, so a module check loads
-   them once rather than once per module (audit 2026-11-17); else the call loads its own. */
-static const char *player_decrypt_disc_file(const char *iso_path, uint32_t lba,
+   not NULL, is a keystore already holding the built-in tables (player_disc_keys_load), so
+   a module check loads them once rather than once per module (audit 2026-11-17); else the
+   call loads its own. */
+static bool player_disc_keys_load(NkKeystore *keys, bool module, char *error, size_t error_size) {
+    if (nk_keystore_load_builtin(keys, error, error_size) != NK_PSP_OK) return false;
+    /* The disc route's library-module recipes: a guest module can need them, the
+       executable never does. */
+    return !module ||
+           nk_keystore_load_builtin_disc_libraries(keys, error, error_size) == NK_PSP_OK;
+}
+
+static const char *player_decrypt_disc_file(const char *iso_path, const char *member_path,
                                             uint32_t size, const char *directory,
                                             const char *destination, bool module,
                                             const NkKeystore *shared_keys,
                                             char *detail, size_t detail_size) {
     char staged[NK_MAX_PATH * 2 + 340];
     char key_error[160];
-    unsigned char *input;
     uint8_t *plain = NULL;
     size_t plain_size = 0;
-    NkIsoReader *reader;
     NkKeystore *keys = NULL;
     NkPspCtx ctx;
     FILE *out;
@@ -10439,30 +10449,18 @@ static const char *player_decrypt_disc_file(const char *iso_path, uint32_t lba,
     }
     int written = snprintf(staged, sizeof(staged), "%s.decrypting", destination);
     if (written < 0 || (size_t)written >= sizeof(staged)) return "IO_FAILURE";
-    input = (unsigned char *)malloc(size);
-    if (input == NULL) return "RESOURCE_LIMIT";
-    reader = nk_iso_reader_open(iso_path);
-    if (reader == NULL || nk_iso_reader_read(reader, lba, 0, input, size) != (int)size) {
-        if (reader) nk_iso_reader_close(reader);
-        free(input);
-        if (detail && detail_size) snprintf(detail, detail_size, "the disc image could not be read");
-        return "IO_FAILURE";
-    }
-    nk_iso_reader_close(reader);
     if (shared_keys == NULL) {
+        key_error[0] = '\0';
         keys = nk_keystore_create();
-        if (keys == NULL ||
-            nk_keystore_load_builtin(keys, key_error, sizeof(key_error)) != NK_PSP_OK) {
-            nk_keystore_free(keys);
-            free(input);
+        if (keys == NULL || !player_disc_keys_load(keys, module, key_error, sizeof(key_error))) {
             if (detail && detail_size) snprintf(detail, detail_size, "%s", keys ? key_error : "out of memory");
+            nk_keystore_free(keys);
             return "INTERNAL_ERROR";
         }
     }
     nk_psp_ctx_init(&ctx, shared_keys ? shared_keys : keys);
-    rc = nk_container_decrypt(&ctx, input, size, &plain, &plain_size);
+    rc = nk_container_decrypt_disc_member_file(&ctx, iso_path, member_path, &plain, &plain_size);
     nk_keystore_free(keys);
-    free(input);
     if (rc != NK_PSP_OK) {
         if (detail && detail_size) snprintf(detail, detail_size, "%.300s", ctx.message);
         return nk_psp_status_name(rc);
@@ -10513,7 +10511,10 @@ static const char *player_decrypt_plain_reason(const char *status) {
         return "it uses an encryption Nakagawa doesn't cover yet";
     }
     if (strcmp(status, "FIRMWARE_OUT_OF_SCOPE") == 0) {
-        return "it is PSP system software, which Nakagawa never decrypts";
+        /* The library modules a game ships in its own folder on the disc are opened
+           (#3235); what stops here is system software, or a file signed as it that is
+           not one of those. */
+        return "it is PSP system software, or signed like it, which Nakagawa never decrypts";
     }
     if (strcmp(status, "MALFORMED_INPUT") == 0 || strcmp(status, "INTEGRITY_FAILURE") == 0 ||
         strcmp(status, "DECOMPRESS_FAILURE") == 0) {
@@ -10542,8 +10543,8 @@ static const char *player_decrypt_disc_eboot(const char *iso_path, const char *d
         if (detail && detail_size) snprintf(detail, detail_size, "EBOOT.BIN could not be found on the disc");
         return "IO_FAILURE";
     }
-    return player_decrypt_disc_file(iso_path, lba, size, directory, elf_path, false, NULL,
-                                    detail, detail_size);
+    return player_decrypt_disc_file(iso_path, "PSP_GAME/SYSDIR/EBOOT.BIN", size, directory,
+                                    elf_path, false, NULL, detail, detail_size);
 }
 
 /* ---- PSN releases of UMD games (#295 phase 2) ------------------------------
@@ -12078,14 +12079,13 @@ static bool player_check_guest_modules(const GameRecord *game,
                 module_keys_tried = true;
                 module_keys = nk_keystore_create();
                 if (module_keys != NULL &&
-                    nk_keystore_load_builtin(module_keys, key_error, sizeof(key_error)) !=
-                        NK_PSP_OK) {
+                    !player_disc_keys_load(module_keys, true, key_error, sizeof(key_error))) {
                     nk_keystore_free(module_keys);
                     module_keys = NULL;
                 }
             }
             const char *status = player_decrypt_disc_file(
-                game->iso_path, module->lba, module->size, decrypted_dir,
+                game->iso_path, module->rel_path, module->size, decrypted_dir,
                 module_path, true, module_keys, decrypt_detail, sizeof(decrypt_detail));
             if (strcmp(status, "VALIDATED_DECRYPTED") == 0) {
                 input->encrypted_ready++;

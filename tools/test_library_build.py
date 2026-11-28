@@ -855,6 +855,48 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertTrue((folder / names["/".join(first)]).read_bytes().endswith(b"first"))
         self.assertTrue((folder / names["/".join(second)]).read_bytes().endswith(b"second"))
 
+    def test_decrypt_disc_has_the_engine_read_a_disc_library_out_of_the_image(self) -> None:
+        # #3235: with the built engine, decrypt_disc names the image and the member and the
+        # engine reads the bytes itself. A library module the game ships under
+        # PSP_GAME/USRDIR is decrypted (it was FIRMWARE_OUT_OF_SCOPE before), a module with
+        # a VSH firmware tag beside it still is, and no encrypted copy is staged anywhere.
+        from test_iso_parity import create_test_iso_with_module_tree
+        from test_psp_decrypt import (CC, DISC_LIBRARY_TAGS, build_tool, sce_wrap,
+                                      seal_disc_library, seal_with_builtin_table, tiny_elf)
+        if not CC:
+            self.skipTest("TOOLCHAIN_MISSING: no C compiler on PATH")
+        library = tiny_elf(b"NK3235-TOOLS")
+        program = tiny_elf(b"NK3235-EBOOT")
+        disc = self.discs / "disc-library.iso"
+        create_test_iso_with_module_tree(disc, {
+            "PSP_GAME/SYSDIR/EBOOT.BIN": seal_with_builtin_table(program),
+            "PSP_GAME/USRDIR/module/libfont.prx":
+                sce_wrap(seal_disc_library(library, DISC_LIBRARY_TAGS[1])),
+            "PSP_GAME/USRDIR/module/vshlike.prx":
+                sce_wrap(seal_disc_library(library, DISC_LIBRARY_TAGS[1], header_tag=0x380290F0)),
+        }, disc_id="TEST70065")
+        staged: list[str] = []
+        real_run = decrypt_tool.subprocess.run
+
+        def watching_run(cmd, *args, **kwargs):
+            folder = self.data / "titles" / "TEST70065" / "decrypted"
+            staged.extend(str(p) for p in folder.rglob("*.enc"))
+            return real_run(cmd, *args, **kwargs)
+
+        with mock.patch.object(decrypt_tool.subprocess, "run", side_effect=watching_run):
+            rows = decrypt_tool.decrypt_disc(disc, self.data, "TEST70065", build_tool())
+        by_name = {row["name"]: row for row in rows}
+        self.assertEqual({name: (row["status"], row["code"]) for name, row in by_name.items()},
+                         {"EBOOT.elf": (0, None), "libfont.prx": (0, None),
+                          "vshlike.prx": (10, "FIRMWARE_OUT_OF_SCOPE")})
+        self.assertEqual(by_name["libfont.prx"]["member"], "PSP_GAME/USRDIR/module/libfont.prx")
+        self.assertIn("flash0 VSH firmware module", by_name["vshlike.prx"]["message"])
+        folder = self.data / "titles" / "TEST70065" / "decrypted"
+        self.assertEqual((folder / "libfont.prx").read_bytes(), library)
+        self.assertEqual((folder / "EBOOT.elf").read_bytes(), program)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["EBOOT.elf", "libfont.prx"])
+        self.assertEqual(staged, [], "the engine reads the image; no encrypted copy is staged")
+
     def test_the_default_job_count_follows_the_cpus(self) -> None:
         self.assertEqual(library_build.default_jobs(None), 1)
         self.assertEqual(library_build.default_jobs(8), 1)

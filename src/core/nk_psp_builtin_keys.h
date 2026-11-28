@@ -6,6 +6,9 @@
  * the KIRK values the decryption boundary needs, so a user's own game disc
  * decrypts without a key file. Firmware containers are never decrypted: their
  * tags are listed only so the boundary can refuse them by name before any key lookup.
+ * Two user-module tags that firmware and game discs both carry have their own table,
+ * nk_psp_disc_library_tags: the boundary opens them only for a file it read itself from
+ * PSP_GAME/USRDIR of the user's game disc image (nk_container_decrypt_disc_member).
  */
 
 #ifndef NK_PSP_BUILTIN_KEYS_H
@@ -34,7 +37,7 @@ typedef struct NkPspBuiltinValue {
     size_t len;
 } NkPspBuiltinValue;
 
-/* A tag that only firmware containers carry, with what it is. */
+/* A tag the boundary refuses as firmware, with what it is. */
 typedef struct NkPspFirmwareTag {
     uint32_t tag;
     const char *what;
@@ -42,6 +45,9 @@ typedef struct NkPspFirmwareTag {
 
 extern const NkPspBuiltinTag nk_psp_builtin_tags[];
 extern const size_t nk_psp_builtin_tag_count;
+/* Library modules on a game's own disc; every tag here is also in nk_psp_firmware_tags. */
+extern const NkPspBuiltinTag nk_psp_disc_library_tags[];
+extern const size_t nk_psp_disc_library_tag_count;
 extern const NkPspBuiltinValue nk_psp_builtin_values[];
 extern const size_t nk_psp_builtin_value_count;
 extern const NkPspFirmwareTag nk_psp_firmware_tags[];

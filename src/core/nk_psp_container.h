@@ -15,8 +15,11 @@
  * Every key, seed or XOR pad arrives through the run-time KeyStore; a
  * missing entry fails closed naming the exact entry name required.
  * Firmware (an updater PSAR archive, a bare KIRK block in the IPL form, a
- * module whose tag only firmware containers carry) is refused with
- * NK_PSP_ERR_FIRMWARE before any key lookup.
+ * module whose tag is in nk_psp_firmware_tags) is refused with
+ * NK_PSP_ERR_FIRMWARE before any key lookup.  Two of those tags are also the
+ * tags of library modules games ship on their own disc; only
+ * nk_container_decrypt_disc_member, which reads the file out of the game's
+ * disc image itself, opens them (issue #3235).
  */
 
 #ifndef NK_PSP_CONTAINER_H
@@ -24,6 +27,7 @@
 
 #include "nk_psp_crypto.h"
 #include "nk_psp_keystore.h"
+#include "nk_psp_npumdimg.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,6 +83,33 @@ int nk_container_key_entries(const NkContainerInfo *info,
  */
 int nk_container_decrypt(NkPspCtx *ctx, const uint8_t *data, size_t size,
                          uint8_t **out, size_t *out_size);
+
+/* The largest program file the boundary reads out of a disc image. */
+#define NK_DISC_MEMBER_MAX_SIZE (64u * 1024u * 1024u)
+
+/*
+ * The same boundary for one file of a disc image, which this call reads
+ * itself: member_path is the file's path inside the image, '/'-separated,
+ * below PSP_GAME/SYSDIR or PSP_GAME/USRDIR (letters compare without case;
+ * any other path is NK_PSP_ERR_FORMAT, a file that is not there
+ * NK_PSP_ERR_INPUT).  Because the call knows where the bytes came from:
+ *   - anything at or below PSP_GAME/SYSDIR/UPDATE, the disc's system software
+ *     update, is NK_PSP_ERR_FIRMWARE by path, before the image is read;
+ *   - a file below PSP_GAME/USRDIR of an image that has a PSP_GAME/PARAM.SFO
+ *     with a DISC_ID may carry a tag of nk_psp_disc_library_tags when its
+ *     ~PSP header declares a user module (no kernel or VSH attribute bit,
+ *     decrypt mode 4) and it is not inside a PBP package.  The KeyStore must
+ *     hold those recipes (nk_keystore_load_builtin_disc_libraries).
+ * Every other firmware form and tag is refused exactly as
+ * nk_container_decrypt refuses it.
+ */
+int nk_container_decrypt_disc_member(NkPspCtx *ctx, const NkPsarSource *disc,
+                                     const char *member_path, uint8_t **out,
+                                     size_t *out_size);
+/* The file form: iso_path is a UTF-8 path to a plain ISO9660 image. */
+int nk_container_decrypt_disc_member_file(NkPspCtx *ctx, const char *iso_path,
+                                          const char *member_path, uint8_t **out,
+                                          size_t *out_size);
 
 #ifdef __cplusplus
 }

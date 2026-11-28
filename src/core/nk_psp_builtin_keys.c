@@ -21,11 +21,18 @@
  *     system menu index.dat): listed in nk_psp_firmware_tags only, so the
  *     boundary refuses them by name before any key lookup;
  *   - every flash0 firmware-module tag (the kernel families 0x4C94xxF0,
- *     0xCFEFxxF0 and 0x16D59E03, the VSH families 0x457BxxF0, 0x3802xxF0,
- *     0x76202403 and 0x0F037303), their keys and keyvault row 0x62, which
- *     only they name (removed 2026-11-17): listed in nk_psp_firmware_tags
- *     only, so an encrypted module copied from a console's flash0 is refused
- *     by name the same way;
+ *     0xCFEFxxF0 and 0x16D59E03, the user-module family 0x457BxxF0 with
+ *     0x76202403, the VSH family 0x3802xxF0 with 0x0F037303), their keys and
+ *     keyvault row 0x62, which only the kernel families name (removed
+ *     2026-11-17): listed in nk_psp_firmware_tags, so an encrypted module
+ *     copied from a console's flash0 is refused by name the same way. Two
+ *     of the user-module tags, 0x457B05F0 and 0x457B06F0, are also the tags
+ *     of the library modules games ship on their own disc (libfont.prx,
+ *     psmf.prx and others, issue #3235): their two keys are carried again,
+ *     in nk_psp_disc_library_tags only, a table the boundary reads for a
+ *     file it took itself from PSP_GAME/USRDIR of the user's game disc
+ *     image. Both tags stay in nk_psp_firmware_tags, so the same bytes
+ *     from any other source are refused before any key lookup;
  *   - the type-3 DRM BB patch tag, the SPRX decrypt-mode pad and the KIRK
  *     command-2 results, which need the installing console's context;
  *   - every KIRK value no game recipe or the amctrl subset uses (curve 2,
@@ -107,6 +114,11 @@ static const u8 pauth_98b83b5d_xor[] = {0xA9, 0x1E, 0xDD, 0x7B, 0x09, 0xBB, 0x22
 static const u8 pauth_f7aa47f6_1[] = {0xC5, 0xFB, 0x69, 0x03, 0x20, 0x7A, 0xCF, 0xBA, 0x2C, 0x90, 0xF8, 0xB8, 0x4D, 0xD2, 0xF1, 0xDE};
 static const u8 pauth_f7aa47f6_2[] = {0x3A, 0x6B, 0x48, 0x96, 0x86, 0xA5, 0xC8, 0x80, 0x69, 0x6C, 0xE6, 0x4B, 0xF6, 0x04, 0x17, 0x44};
 static const u8 pauth_f7aa47f6_xor[] = {0xA9, 0x1E, 0xDD, 0x7B, 0x09, 0xBB, 0x22, 0xB5, 0x9D, 0xA3, 0x30, 0x69, 0x13, 0x6E, 0x0E, 0xD8};
+
+/* The two user-module tag keys of the library modules games ship on their own disc
+ * (PrxDecrypter.cpp; nk_psp_disc_library_tags below is the only table that names them). */
+static const u8 keys280_1[] = {0x40, 0x9B, 0xC6, 0x9B, 0xA9, 0xFB, 0x84, 0x7F, 0x72, 0x21, 0xD2, 0x36, 0x96, 0x55, 0x09, 0x74};
+static const u8 keys300_1[] = {0x15, 0x07, 0x63, 0x26, 0xDB, 0xE2, 0x69, 0x34, 0x56, 0x08, 0x2A, 0x93, 0x4E, 0x4B, 0x8A, 0xB2};
 
 /* PRXDecrypter 144-byte tag keys (PrxDecrypter.cpp). */
 static const u32 g_key0[] = {
@@ -396,6 +408,16 @@ const NkPspBuiltinTag nk_psp_builtin_tags[] = {
 const size_t nk_psp_builtin_tag_count =
     sizeof(nk_psp_builtin_tags) / sizeof(nk_psp_builtin_tags[0]);
 
+/* The user-module tags measured on library modules of retail game discs (#3235). Not part
+ * of nk_psp_builtin_tags: nk_keystore_load_builtin_disc_libraries adds them for the disc
+ * route only, and both tags are in nk_psp_firmware_tags below for every other source. */
+const NkPspBuiltinTag nk_psp_disc_library_tags[] = {
+    {0x457B05F0, 0x5B, keys280_1, NULL, NULL},
+    {0x457B06F0, 0x5B, keys300_1, NULL, NULL},
+};
+const size_t nk_psp_disc_library_tag_count =
+    sizeof(nk_psp_disc_library_tags) / sizeof(nk_psp_disc_library_tags[0]);
+
 const NkPspBuiltinValue nk_psp_builtin_values[] = {
     {"kirk.cmd1.key", kirk1_key, sizeof(kirk1_key)},
     {"kirk.ecdsa.p", ec_p, sizeof(ec_p)},
@@ -473,23 +495,23 @@ const NkPspFirmwareTag nk_psp_firmware_tags[] = {
     {0x380291F0, "flash0 VSH firmware module"},
     {0x380292F0, "flash0 VSH firmware module"},
     {0x380293F0, "flash0 VSH firmware module"},
-    {0x457B05F0, "flash0 VSH firmware module"},
-    {0x457B06F0, "flash0 VSH firmware module"},
-    {0x457B08F0, "flash0 VSH firmware module"},
-    {0x457B0AF0, "flash0 VSH firmware module"},
-    {0x457B0BF0, "flash0 VSH firmware module"},
-    {0x457B0CF0, "flash0 VSH firmware module"},
-    {0x457B10F0, "flash0 VSH firmware module"},
-    {0x457B1EF0, "flash0 VSH firmware module"},
-    {0x457B28F0, "flash0 VSH firmware module"},
-    {0x457B80F0, "flash0 VSH firmware module"},
-    {0x457B81F0, "flash0 VSH firmware module"},
-    {0x457B82F0, "flash0 VSH firmware module"},
-    {0x457B83F0, "flash0 VSH firmware module"},
-    {0x457B90F0, "flash0 VSH firmware module"},
-    {0x457B91F0, "flash0 VSH firmware module"},
-    {0x457B92F0, "flash0 VSH firmware module"},
-    {0x457B93F0, "flash0 VSH firmware module"},
+    {0x457B05F0, "flash0 user-mode firmware module"},
+    {0x457B06F0, "flash0 user-mode firmware module"},
+    {0x457B08F0, "flash0 user-mode firmware module"},
+    {0x457B0AF0, "flash0 user-mode firmware module"},
+    {0x457B0BF0, "flash0 user-mode firmware module"},
+    {0x457B0CF0, "flash0 user-mode firmware module"},
+    {0x457B10F0, "flash0 user-mode firmware module"},
+    {0x457B1EF0, "flash0 user-mode firmware module"},
+    {0x457B28F0, "flash0 user-mode firmware module"},
+    {0x457B80F0, "flash0 user-mode firmware module"},
+    {0x457B81F0, "flash0 user-mode firmware module"},
+    {0x457B82F0, "flash0 user-mode firmware module"},
+    {0x457B83F0, "flash0 user-mode firmware module"},
+    {0x457B90F0, "flash0 user-mode firmware module"},
+    {0x457B91F0, "flash0 user-mode firmware module"},
+    {0x457B92F0, "flash0 user-mode firmware module"},
+    {0x457B93F0, "flash0 user-mode firmware module"},
     {0x495BE403, "system menu index.dat"},
     {0x4C940AF0, "flash0 kernel firmware module"},
     {0x4C940BF0, "flash0 kernel firmware module"},
@@ -531,7 +553,7 @@ const NkPspFirmwareTag nk_psp_firmware_tags[] = {
     {0x4C9495F0, "flash0 kernel firmware module"},
     {0x4C9496F0, "flash0 kernel firmware module"},
     {0x4C9497F0, "flash0 kernel firmware module"},
-    {0x76202403, "flash0 VSH firmware module"},
+    {0x76202403, "flash0 user-mode firmware module"},
     {0x862648D1, "Media Engine firmware image"},
     {0xCFEF05F0, "flash0 kernel firmware module"},
     {0xCFEF06F0, "flash0 kernel firmware module"},

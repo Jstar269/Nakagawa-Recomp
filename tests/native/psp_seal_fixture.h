@@ -54,12 +54,16 @@ static void psp_seal_put32le(uint8_t *p, uint32_t value) {
 }
 
 /* Seal payload under tag. tag_key is the recipe's 16-byte key, vault_key the
- * keyvault row its code names, cmd1_key the KIRK command-1 key. Returns the
- * container size (0x150 + payload rounded up to 16). */
-static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
-                             size_t payload_len, int compressed, uint32_t elf_size,
-                             uint32_t tag, const uint8_t tag_key[16],
-                             const uint8_t vault_key[16], const uint8_t cmd1_key[16]) {
+ * keyvault row its code names, cmd1_key the KIRK command-1 key. attribute is
+ * the header's module attribute (0x1000 kernel, 0x0800 VSH) and decrypt_mode
+ * its decrypt mode byte (4 is a user module), both under the container's
+ * integrity checks. Returns the container size (0x150 + payload rounded up
+ * to 16). */
+static size_t psp_seal_type2_as(uint8_t *out, size_t cap, const uint8_t *payload,
+                                size_t payload_len, int compressed, uint32_t elf_size,
+                                uint32_t tag, const uint8_t tag_key[16],
+                                const uint8_t vault_key[16], const uint8_t cmd1_key[16],
+                                uint16_t attribute, uint8_t decrypt_mode) {
     uint8_t a_key[16], c_key[16];
     uint8_t ctr[0x90], xorbuf[0x90], clear[0x40], t_kh[0x40], chain[0x60];
     uint8_t hdr_tail[0x30], metadata[0x10], digest[0x14], sha_input[0x150];
@@ -88,7 +92,7 @@ static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
     /* The 0x80-byte ~PSP header copy (CMD1 pre-data and prxHeader). */
     memset(out, 0, container_size);
     memcpy(out, "~PSP", 4);
-    psp_seal_put16le(out + 4, 0x0200u);
+    psp_seal_put16le(out + 4, attribute);
     psp_seal_put16le(out + 6, (uint16_t)(compressed ? 1u : 0u));
     memcpy(out + 0x0A, "synthetic", 9);
     out[0x26] = 1u;
@@ -104,6 +108,7 @@ static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
     psp_seal_put32le(out + 0x54, elf_size);
     psp_seal_put32le(out + 0x58, 0x100u);
     psp_seal_put32le(out + 0x78, 0x06060000u);
+    out[0x7C] = decrypt_mode;
 
     /* CMD1 header tail at 0x60: mode, ecdsa_hash, sizes and the padding. */
     memset(hdr_tail, 0, sizeof(hdr_tail));
@@ -186,6 +191,16 @@ static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
     memcpy(out + 0x140u, chain, 0x10u);
     psp_seal_put32le(out + 0x2C, (uint32_t)container_size);
     return container_size;
+}
+
+/* The same container with the header every other test uses: attribute 0x0200
+ * and no decrypt mode. */
+static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
+                             size_t payload_len, int compressed, uint32_t elf_size,
+                             uint32_t tag, const uint8_t tag_key[16],
+                             const uint8_t vault_key[16], const uint8_t cmd1_key[16]) {
+    return psp_seal_type2_as(out, cap, payload, payload_len, compressed, elf_size, tag,
+                             tag_key, vault_key, cmd1_key, 0x0200u, 0u);
 }
 
 /* ---- PSN UMD image (NPUMDIMG) inside a PBP ------------------------------ */

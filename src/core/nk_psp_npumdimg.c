@@ -25,7 +25,10 @@
  *     sector, with progress and cancel callbacks and a temp-file-then-rename
  *     step; the PBP identification, the PSOne/firmware refusals and the
  *     ISO9660/PARAM.SFO result check are project-authored (ECMA-119 and the
- *     PBP/SFO layouts).
+ *     PBP/SFO layouts);
+ *   - nk_psp_sfo_string and nk_psar_source_open_file give the PARAM.SFO
+ *     string reader and the file source to the disc-file boundary in
+ *     nk_psp_container.c (project-authored, issue #3235).
  */
 
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -701,6 +704,20 @@ static int open_source(NkPspCtx *ctx, const char *path, FILE **f, NkPsarSource *
     src->read_at = file_read_at;
     src->user = *f;
     return NK_PSP_OK;
+}
+
+int nk_psp_sfo_string(const uint8_t *sfo, size_t size, const char *key, char *out,
+                      size_t out_size)
+{
+    if (sfo == NULL || key == NULL || out == NULL || out_size == 0u) return -1;
+    return sfo_string(sfo, size, key, out, out_size);
+}
+
+int nk_psar_source_open_file(NkPspCtx *ctx, const char *path, FILE **f,
+                             NkPsarSource *src)
+{
+    if (ctx == NULL || path == NULL || f == NULL || src == NULL) return NK_PSP_ERR_INTERNAL;
+    return open_source(ctx, path, f, src);
 }
 
 int nk_pbp_identify_file(NkPspCtx *ctx, const char *pbp_path, NkPbpInfo *out)
