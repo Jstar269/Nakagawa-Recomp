@@ -5,8 +5,9 @@
 
 The target shares compiled core objects and expands its test-binary recipes as macros. These
 checks read the target's dry run, which lists every command Make would execute, so they hold
-without building anything: every test binary the target links is run by it, every binary it
-runs is linked by it, and the core sources compile once per flag set.
+without building anything: every test binary the dry run shows being linked is run after its
+link, every binary run on its own line is linked, and the core sources compile once per flag
+set. A recipe that names its binary through a shell variable is not seen.
 """
 
 from __future__ import annotations
@@ -31,6 +32,12 @@ ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_ROOT = tempfile.TemporaryDirectory(prefix="nk-native-core-dry-")
 unittest.addModuleCleanup(_SCRATCH_ROOT.cleanup)
 _SCRATCH = Path(_SCRATCH_ROOT.name).as_posix()
+
+
+# Linked to prove a link, never run: the Ace UI selftest's first build shows that the UI pass,
+# the keyboard model and nk_ui link without the rest of the renderer (mk/native_ui_tests.mk).
+_LINK_ONLY = frozenset({"ace_ui_selftest_s1"})
+
 
 def _make_program() -> str | None:
     for name in ("mingw32-make", "make"):
@@ -79,7 +86,7 @@ def _fold_root(command: str) -> str:
 
 def _test_runs(commands: list[str]) -> list[str]:
     return [
-        # A run may carry a shell tail (the SDL leg maps exit 77 to SKIP); compare the binary part.
+        # A run may carry a shell tail (the SDL leg maps exit 77 to SKIP); keep the binary part.
         command.split(";")[0].replace(".exe", "")
         for command in commands
         if command.startswith("build/") and " -o " not in command
@@ -104,23 +111,28 @@ class NativeCoreTestsContractTests(unittest.TestCase):
         cls.commands = _dry_run("native-core-tests")
 
     def test_every_test_binary_the_target_links_is_run(self) -> None:
-        """A selftest that is built and never run reports nothing. A run may sit inside a
-        shell wrapper or be handed to another program, so any later command naming the
-        binary counts."""
+        """A selftest that is built and never run reports nothing. A run is the binary in
+        command position: first on a line, or after a shell operator. An argument naming
+        it (``--exe build/...``) is not one, and neither is a longer name that starts
+        with it."""
+        checked = 0
         for index, command in enumerate(self.commands):
-            tokens = command.split()
-            if not tokens or tokens[0] != "gcc" or "-o" not in tokens:
-                continue
-            target = tokens[tokens.index("-o") + 1].strip('"')
-            name = os.path.basename(target).replace(".exe", "")
-            if target.endswith(".o") or not (name.startswith("test_") or "_selftest" in name):
-                continue  # an object file, or a helper program a test starts itself
-            with self.subTest(binary=os.path.basename(target)):
-                self.assertTrue(
-                    any(target in later for later in self.commands[index + 1:]
-                        if not later.startswith("gcc")),
-                    f"{target} is linked by native-core-tests and no later command runs it",
-                )
+            for link in re.finditer(r'\bgcc\b[^;&|]*?\s-o\s+"?(build/[^\s";&|]+)', command):
+                target = link.group(1)
+                name = os.path.basename(target).replace(".exe", "")
+                if target.endswith(".o") or not (name.startswith("test_") or "_selftest" in name):
+                    continue  # an object file, or a helper program a test starts itself
+                if name in _LINK_ONLY:
+                    continue
+                checked += 1
+                run = re.compile(r'(?:^|[;&|(]\s*)"?' + re.escape(target) + r'(?=$|[\s";&|)])')
+                candidates = [command[link.end():], *self.commands[index + 1:]]
+                with self.subTest(binary=os.path.basename(target)):
+                    self.assertTrue(
+                        any(run.search(later) for later in candidates),
+                        f"{target} is linked by native-core-tests and nothing after the link runs it",
+                    )
+        self.assertGreater(checked, 50, "the dry run names too few test-binary links to check")
 
     def test_nk_ui_core_is_compiled_and_run_by_native_core_tests(self) -> None:
         compile_commands = [command for command in self.commands

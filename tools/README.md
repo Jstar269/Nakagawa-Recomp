@@ -611,7 +611,7 @@ in issue #317. The measured result snapshot is in
 
 | Module | Purpose |
 | --- | --- |
-| `test_native_core_build.py` | Checks the native-core-tests dry run: every test binary linked is run and every binary run is linked, one compile per flag set. |
+| `test_native_core_build.py` | Checks the native-core-tests dry run: every test binary it shows being linked is run after its link and every binary run is linked, one compile per flag set. |
 | `test_build_graph_snapshot.py` | Tests for the read-only build graph snapshot. |
 | `test_build_system_parity.py` | Machine-checkable parity between the Makefile and the CMake build. |
 | `test_ci_paths.py` | Path-gated CI classification tests. |
