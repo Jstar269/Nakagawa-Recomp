@@ -45,7 +45,6 @@ static const char s_shipped_json[] =
     "{\"name\":\"SWAENET\",\"host\":\"132.226.189.224\",\"location\":\"Mumbai,India\",\"data_mode\":\"AemuPostoffice\"}\n"
     "]}\n";
 
-
 const char *nk_adhoc_list_status_text(NkAdhocListStatus status) {
     switch (status) {
     case NK_ADHOC_LIST_OK: return "Live list from PPSSPP.";

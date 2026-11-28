@@ -631,8 +631,8 @@ void nk_input_profile_init_default(NkInputProfile *profile) {
 /* Refuse a binding whose host index is outside the host device, before the
  * conflict pass runs: an out-of-range index handed in by a caller (the player,
  * a future writer) fails closed naming the field. Left to the conflict pass, it
- * would be reported as a conflict between two names it has no entry for,
- * formatting two NULL strings in place of the named diagnostic. */
+ * would be reported as a conflict on an "unknown" button or axis in place of
+ * the diagnostic that names the field. */
 static bool check_binding_index_range(
     const NkBindingSource *src,
     const char *owner_kind,
