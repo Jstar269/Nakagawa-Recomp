@@ -73,7 +73,8 @@ Enabled with `SR_GPU_GE=1`. Implementation:
 - **Guest VRAM stays authoritative**: at every flush point (GE list END, framebuffer
   retarget, texture-from-VRAM, CLUT-from-VRAM, present, software fallback) the target
   is rendered and written back to guest VRAM + the software z-buffer in the native
-  format (16-bit round trip is lossless). Anything unsupported — lines, points,
+  format (16-bit round trip is lossless). Anything unsupported — textured lines, clear-mode
+  points, textured points with mip levels,
   doubled-alpha blend factors, min/max/absdiff blend equations, two distinct FIX
   constants, partial-byte write masks — flushes and falls back to the software
   rasterizer in correct order. Presentation/snapshot code is unchanged.
@@ -95,7 +96,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   at a pixel stores a stencil that rejects every later one, with no depth write that could
   change which fragment passes): the pixel is that one fragment over the pre-batch
   destination, so its primitives share the batch, drawn last to first, and match `ge.c` with
-  one copy. On the interlock path (`VK_EXT_fragment_shader_interlock`
+  one copy. Points that read the destination share a batch until one lands on a guest pixel
+  an earlier point of the batch drew; that point opens the next batch, with a new copy
+  (`point_batch_place`), so points match `ge.c` on this path too. On the interlock path (`VK_EXT_fragment_shader_interlock`
   with `fragmentShaderPixelInterlock` and `fragmentStoresAndAtomics`) such batches run
   `psp_frag_rmw.inc`, `psp.frag` built with `-DSR_DST_INTERLOCK`. Each fragment loads the
   target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
