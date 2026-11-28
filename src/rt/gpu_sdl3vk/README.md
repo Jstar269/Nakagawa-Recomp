@@ -99,8 +99,10 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   with `fragmentShaderPixelInterlock` and `fragmentStoresAndAtomics`) such batches run
   `psp_frag_rmw.inc`, `psp.frag` built with `-DSR_DST_INTERLOCK`. Each fragment loads the
   target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
-  overlapping primitives match `ge.c`. These batches record in a depth-only render pass with
-  the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
+  overlapping primitives match `ge.c`, and a stencil state that reads its own writes keeps its
+  overlapping primitives in one batch (#3244; a depth-blind pair still splits, and a list that
+  also holds a batch the interlock refuses records the two in separate ops). These batches
+  record in a depth-only render pass with the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
   a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early.
   A run of these batches that holds one that writes depth and may still kill a fragment in the
   shader (the alpha test, the color test, the transform-mode depth range when it is narrower
