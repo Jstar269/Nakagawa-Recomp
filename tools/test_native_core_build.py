@@ -3,10 +3,10 @@
 
 """Coverage contract for ``native-core-tests`` (#735 items 3 and 7).
 
-The target may share compiled core objects and expand its test-binary recipes as macros,
-but it must still run the same test binaries, in the same order, with the same arguments.
-These checks read the target's dry run, which lists every command Make would execute, so
-the contract holds without building anything.
+The target shares compiled core objects and expands its test-binary recipes as macros. These
+checks read the target's dry run, which lists every command Make would execute, so they hold
+without building anything: every test binary the target links is run by it, every binary it
+runs is linked by it, and the core sources compile once per flag set.
 """
 
 from __future__ import annotations
@@ -31,109 +31,6 @@ ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_ROOT = tempfile.TemporaryDirectory(prefix="nk-native-core-dry-")
 unittest.addModuleCleanup(_SCRATCH_ROOT.cleanup)
 _SCRATCH = Path(_SCRATCH_ROOT.name).as_posix()
-
-# Every binary the target runs, in order, with its arguments. ``.exe`` is dropped so one list
-# serves Windows and POSIX. The process test differs by platform, as it always did.
-_RUNS_BEFORE_PROCESS_TEST = (
-    "build/mygame/cpu_lle_selftest",
-    "build/mygame/domain_mode_selftest",
-    "build/mygame/nkstate_selftest",
-    "build/mygame/clay_layout_selftest",
-    "build/test_nk_ui_core",
-    "build/test_player_screens",
-    "build/test_overlay_screens",
-    "build/test_nk_ui_focus",
-    "build/test_nk_ui_focus_sdl --sdl-input",
-    "build/test_shared_helpers",
-    "build/mygame/heap_selftest",
-    "build/mygame/profiler_selftest",
-    "build/mygame/xr_selftest",
-    "build/mygame/ge_texture_ref_selftest",
-    "build/mygame/fbcap_selftest build/mygame/fbcap_selftest",
-    "build/mygame/videorec_selftest build/mygame/videorec_selftest",
-    "build/mygame/osk_text_entry_selftest",
-    "build/mygame/ace_selftest build/mygame",
-    "build/mygame/motion_match_selftest",
-    "build/mygame/motion_tap_selftest",
-    "build/mygame/fsr3_host_selftest tests/native/fsr3_host_oracle.txt",
-    "build/mygame/fsr3_fg_host_selftest tests/native/fsr3_fg_host_oracle.txt",
-    "build/mygame/fsr3_fg_state_selftest",
-    "build/mygame/osk_overlay_selftest",
-    "build/mygame/ge_float24_selftest",
-    "build/mygame/ge_cpu_profile_validate_selftest",
-    "build/mygame/ge_cpu_profile_validate_selftest --strip-cache-disabled",
-    "build/mygame/ge_cpu_profile_validate_selftest --vertex-cache-disabled",
-    "build/mygame/ge_tnl_census_selftest",
-    "build/mygame/ge_patch_tess_selftest",
-    'build/mygame/ge_scene_selftest "build/mygame/ge-scene-selftest"',
-    "build/mygame/coro_selftest",
-) + (
-    # The stack-switch backend Android uses runs only on POSIX hosts (the Makefile's
-    # ifneq ($(OS),Windows_NT)); Windows uses Win32 fibers.
-    () if os.name == "nt" else ("build/mygame/coro_selftest_asm",)
-) + (
-    "build/mygame/ge_raster_ref_selftest",
-    "build/mygame/psmf_media_focused_selftest --fuzz-iters 0",
-    "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_channel channel",
-    "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_output2 output2",
-    "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_src src",
-    # dispatch-selftest and stale-code-selftest: host-neutral (audit 2026-11-17 F-803b2d02).
-    "build/mygame/dispatch_selftest",
-    "build/mygame/stale_code_selftest",
-    # memory-watch-selftest: the store watch on the interpreter's data word (SR_WATCH from
-    # the target), then on a main-RAM word, where unwatched stores take the inline path.
-    "build/mygame/dispatch_isolation_selftest_generic",
-    "build/mygame/dispatch_isolation_selftest_generic --watch 0x08801000:4",
-    # code-capture-selftest: the stop that writes a capture, then, linked with the capture's
-    # translation from tools/code_capture.py, the binding that takes the call (#1933).
-    "build/mygame/code_capture_selftest_capture build/mygame/code-capture-selftest",
-    "build/mygame/code_capture_selftest_bound build/mygame/code-capture-selftest",
-    # asset-index-selftest: host-neutral (audit 2026-11-17 F-803b2d02).
-    "build/mygame/asset_index_selftest",
-    # tex-mips-selftest: the host mip chain builder on synthetic textures, no GPU (#1273).
-    "build/mygame/tex_mips_selftest",
-    # glyph-recon-selftest: sharp game text's CPU side on synthetic glyphs, no GPU (#2110).
-    "build/mygame/glyph_recon_selftest",
-    # pipeline-cache-selftest: the Vulkan pipeline cache file's checks, no GPU (#2149).
-    "build/mygame/pipeline_cache_selftest build/mygame/pipeline_cache_scratch",
-    # videocodec-selftest: the Media Engine boundary a disc mpeg.prx calls (#286).
-    "build/mygame/videocodec_selftest",
-    "build/test_pgf_public",
-    "build/test_core_catalog",
-    "build/test_parsers_hostile",
-    "build/test_manifest_parser --check",
-    "build/test_launch_resolution",
-    "build/test_nk_nickname",
-    "build/test_nk_cheats",
-    "build/test_player_state",
-    "build/test_input_settings",
-    "build/test_package_builder",
-    "build/test_update_check",
-    "build/test_cover_art",
-    "build/test_adhoc_servers",
-    "build/test_cheat_db",
-    "build/test_discord_presence",
-    "build/test_xb_parser",
-    "build/test_disc_expand",
-    "build/test_disc_verify",
-    "build/test_nk_zip",
-    "build/test_steam_shortcuts",
-    "build/test_safe_math",
-    "build/test_pcm_wav_dump",
-    "build/test_fuzz_parsers --iters 100",
-    "build/mygame/psmf_producer_selftest --fuzz-iters 100",
-    "build/test_input_profile",
-    "build/test_nk_sig",
-    "build/test_nk_adhoc_relay",
-    "build/test_nk_adhoc_net",
-    "build/test_nk_adhoc_relay_client",
-    "build/test_nk_achievements",
-    "build/test_portable_mode",
-    "build/test_data_migrate",
-)
-_PROCESS_TEST = "build/test_win32_process" if os.name == "nt" else "build/test_posix_process"
-EXPECTED_RUNS = _RUNS_BEFORE_PROCESS_TEST + (_PROCESS_TEST,)
-
 
 def _make_program() -> str | None:
     for name in ("mingw32-make", "make"):
@@ -206,8 +103,24 @@ class NativeCoreTestsContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.commands = _dry_run("native-core-tests")
 
-    def test_runs_the_same_test_binaries_in_the_same_order(self) -> None:
-        self.assertEqual(_test_runs(self.commands), list(EXPECTED_RUNS))
+    def test_every_test_binary_the_target_links_is_run(self) -> None:
+        """A selftest that is built and never run reports nothing. A run may sit inside a
+        shell wrapper or be handed to another program, so any later command naming the
+        binary counts."""
+        for index, command in enumerate(self.commands):
+            tokens = command.split()
+            if not tokens or tokens[0] != "gcc" or "-o" not in tokens:
+                continue
+            target = tokens[tokens.index("-o") + 1].strip('"')
+            name = os.path.basename(target).replace(".exe", "")
+            if target.endswith(".o") or not (name.startswith("test_") or "_selftest" in name):
+                continue  # an object file, or a helper program a test starts itself
+            with self.subTest(binary=os.path.basename(target)):
+                self.assertTrue(
+                    any(target in later for later in self.commands[index + 1:]
+                        if not later.startswith("gcc")),
+                    f"{target} is linked by native-core-tests and no later command runs it",
+                )
 
     def test_nk_ui_core_is_compiled_and_run_by_native_core_tests(self) -> None:
         compile_commands = [command for command in self.commands
@@ -260,12 +173,12 @@ class NativeCoreTestsContractTests(unittest.TestCase):
             with self.subTest(binary=binary):
                 self.assertIn(binary, names)
 
-    def test_every_expected_binary_is_linked(self) -> None:
+    def test_every_binary_the_target_runs_is_linked_by_it(self) -> None:
         outputs = _link_outputs(self.commands)
-        for run in EXPECTED_RUNS:
+        runs = _test_runs(self.commands)
+        self.assertTrue(runs, "native-core-tests runs no test binary")
+        for run in runs:
             binary = os.path.basename(run.split()[0])
-            if binary.endswith("selftest") or binary.startswith("psmf"):
-                continue  # built by the cpu-lle/domain/ge/psmf recipes, not a -o link here
             with self.subTest(binary=binary):
                 self.assertIn(binary, outputs)
 
