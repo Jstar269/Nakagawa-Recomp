@@ -43,9 +43,9 @@
  *   - Left out: the product-code overrides (game_product_override), chat, the status log, the
  *     login timeout and the server's own sockets.
  *
- * lo_login was first carried over, with small edits, from an earlier version of this file; a
- * review of pull request #2549 found it, and on 2026-11-12 it was deleted and written again from
- * login_user_data.
+ * lo_login is written from login_user_data. Provenance note: a review of pull request #2549 found
+ * that an earlier lo_login had been carried over, with small edits, from an earlier version of
+ * this file, so on 2026-11-12 it was deleted and written again.
  *
  * The PDP half (sockets, datagram queues, delivery by MAC and port inside the sender's group,
  * counted drops) and nk_adhoc_drop_report are this project's own: PPSSPP's lobby server has no

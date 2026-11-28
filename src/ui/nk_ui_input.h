@@ -117,7 +117,6 @@ typedef struct {
 
 void nk_ui_input_init(NkUiInput *input);
 void nk_ui_input_set_repeat_rate(NkUiInput *input, NkUiRepeatRate rate);
-void nk_ui_input_set_repeat_config(NkUiInput *input, const NkUiRepeatConfig *config);
 /* Releases everything held (focus loss, pad removed): no stale repeat survives. */
 void nk_ui_input_reset(NkUiInput *input);
 

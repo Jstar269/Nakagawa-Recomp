@@ -30,7 +30,6 @@ extern "C" {
 /* Only host contacted for primary box art; docs/SETUP.md "Network use" and
    tools/test_prereq_fetcher.py mirror these constants. */
 #define NK_COVER_ART_HOST "thumbnails.libretro.com"
-#define NK_COVER_ART_SYSTEM "Sony - PlayStation Portable"
 #define NK_COVER_ART_BOXARTS_URL_PREFIX \
     "https://" NK_COVER_ART_HOST "/Sony%20-%20PlayStation%20Portable/Named_Boxarts/"
 

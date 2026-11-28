@@ -2611,7 +2611,6 @@ void player_app_wizard_back(PlayerApp *app);
 void player_app_wizard_cancel(PlayerApp *app);
 void player_app_wizard_reset_extraction(PlayerApp *app);
 bool player_app_wizard_take_extraction_request(PlayerApp *app);
-void player_app_wizard_request_cancel(PlayerApp *app);
 bool player_app_wizard_cancel_requested(const PlayerApp *app);
 void player_app_wizard_set_extraction_progress(PlayerApp *app, int percent,
                                                int files_extracted, int total_files,

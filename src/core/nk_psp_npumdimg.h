@@ -78,7 +78,6 @@ typedef struct NkNpumdimg NkNpumdimg;
  * NK_PSP_ERR_UNSUPPORTED (another package form), NK_PSP_ERR_FORMAT (not a
  * well-formed PBP) or NK_PSP_ERR_INPUT, with out filled as far as it got. */
 int nk_pbp_identify(NkPspCtx *ctx, const NkPsarSource *src, NkPbpInfo *out);
-const char *nk_pbp_payload_name(NkPbpPayload payload);
 
 /* Derive the image key from the 256-byte NPUMDIMG header, decrypt it,
  * check its layout and descramble the block table.  The KeyStore in ctx

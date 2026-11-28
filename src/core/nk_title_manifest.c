@@ -382,7 +382,6 @@ static bool is_valid_filename(const char *s) {
     }
     if (s[len - 1] == '.') return false;
 
-    /* Check Windows reserved names */
     if (manifest_reserved_device(s, len)) return false;
     return true;
 }
@@ -414,7 +413,6 @@ static bool is_valid_relative_path(const char *s, bool allow_plus) {
             if (!isalnum((unsigned char)c) && c != '.' && c != '_' && c != '-' &&
                 !(allow_plus && c == '+')) return false;
         }
-        /* Check Windows reserved */
         if (manifest_reserved_device(token, tlen)) return false;
         token = slash ? slash + 1 : NULL;
     }
@@ -552,7 +550,6 @@ static bool check_object_keys(
         if (err_buf) snprintf(err_buf, err_len, "%s: must be an object", path);
         return false;
     }
-    /* Check unknown keys */
     for (size_t i = 0; i < node->u.obj.count; i++) {
         const char *k = node->u.obj.members[i].key;
         bool ok = false;
@@ -567,7 +564,6 @@ static bool check_object_keys(
             return false;
         }
     }
-    /* Check required keys */
     if (required_keys) {
         for (int r = 0; required_keys[r]; r++) {
             if (!obj_get(node, required_keys[r])) {
@@ -1491,7 +1487,6 @@ static bool manifest_parse_runtime_bindings(ManifestParse *mp) {
             }
         }
 
-        /* Check expected_data_file_count */
         JsonNode *ef_node = obj_get(rb_node, "expected_data_file_count");
         if (ef_node) {
             uint32_t count = 0;
@@ -1502,7 +1497,6 @@ static bool manifest_parse_runtime_bindings(ManifestParse *mp) {
             mp->expected_file_count = count;
         }
 
-        /* Check dispatch_aliases */
         JsonNode *da_node = obj_get(rb_node, "dispatch_aliases");
         if (da_node) {
             if (da_node->type != JSON_ARRAY) {
@@ -1691,7 +1685,6 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
     bool collision_is_overlay = false;
     const char *collision_id = NULL;
 
-    /* Check against public canonical catalog */
     for (int i = 0; i < nk_title_catalog_count; i++) {
         const NkTitleEntry *pub = &nk_title_catalog_entries[i];
         if (strcmp(pub->id, temp->entry.id) == 0) {

@@ -726,11 +726,6 @@ int input_settings_get_conflict_count(const InputSettingsState *state) {
     return state ? state->conflict_count : 0;
 }
 
-const InputBindingConflict *input_settings_get_conflict(const InputSettingsState *state, int index) {
-    if (!state || index < 0 || index >= state->conflict_count) return NULL;
-    return &state->conflicts[index];
-}
-
 bool input_settings_is_control_conflicted(const InputSettingsState *state, int control_idx) {
     if (!state || control_idx < 0 || control_idx >= INPUT_CONTROL_DIGITAL_COUNT) return false;
     for (int i = 0; i < state->conflict_count; i++) {

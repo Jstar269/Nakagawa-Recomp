@@ -97,7 +97,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
                                  uint64_t validation_calls,
                                  const char *invalid_disc_message);
 
-/* One run's harness state: what main() used to keep in ui_test_* locals. */
+/* One run's harness state, kept here rather than in main() locals. */
 typedef struct PlayerUiTest {
     const char *events;
     const char *screenshot_path;

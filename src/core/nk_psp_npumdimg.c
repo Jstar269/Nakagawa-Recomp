@@ -146,17 +146,6 @@ static int sfo_string(const u8 *sfo, size_t size, const char *key, char *out,
 
 /* ------------------------------ PBP identify --------------------------- */
 
-const char *nk_pbp_payload_name(NkPbpPayload payload)
-{
-    switch (payload) {
-    case NK_PBP_PAYLOAD_NPUMDIMG: return "npumdimg";
-    case NK_PBP_PAYLOAD_PSONE: return "psone";
-    case NK_PBP_PAYLOAD_FIRMWARE: return "firmware";
-    case NK_PBP_PAYLOAD_OTHER: return "other";
-    default: return "unknown";
-    }
-}
-
 static const char *firmware_tag_name(u32 tag)
 {
     for (size_t i = 0; i < nk_psp_firmware_tag_count; i++) {

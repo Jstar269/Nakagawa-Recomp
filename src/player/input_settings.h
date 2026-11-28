@@ -358,11 +358,6 @@ bool input_settings_has_conflicts(const InputSettingsState *state);
 int input_settings_get_conflict_count(const InputSettingsState *state);
 
 /**
- * @brief Get conflict record by index.
- */
-const InputBindingConflict *input_settings_get_conflict(const InputSettingsState *state, int index);
-
-/**
  * @brief Check if a specific control is involved in a conflict.
  */
 bool input_settings_is_control_conflicted(const InputSettingsState *state, int control_idx);

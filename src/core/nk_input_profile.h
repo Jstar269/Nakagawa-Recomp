@@ -432,7 +432,6 @@ const char *nk_psp_stick_dir_name(NkPspStickDir dir);
 NkPspStickDir nk_psp_stick_dir_from_name(const char *name);
 
 const char *nk_psp_axis_name(NkPspAxis axis);
-NkPspAxis nk_psp_axis_from_name(const char *name);
 
 const char *nk_host_button_name(NkHostGamepadButton btn);
 NkHostGamepadButton nk_host_button_from_name(const char *name);

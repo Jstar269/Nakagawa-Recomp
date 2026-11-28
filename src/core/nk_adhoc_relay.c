@@ -19,10 +19,11 @@
  *     back as 0, as port 0 goes out as 0 (PPSSPP's reverse_port_simple subtracts the offset).
  *   - nk_relay_nickname_field_ok checks a raw 128-byte field without reading past it.
  * All the login checks (nk_relay_product_ok, nk_relay_mac_ok, nk_relay_nickname_ok and the checks
- * in nk_lobby_login) are written from PPSSPP's login_user_data; none is from aemu_postoffice. An
- * earlier version of this file carried them over, with small edits, from its 2026-11-06 version,
- * which followed aemu_postoffice; reviews of pull request #2549 found this, and on 2026-11-12 each
- * was deleted and written again from login_user_data, nk_relay_product_ok last. The session that
+ * in nk_lobby_login) are written from PPSSPP's login_user_data; none is from aemu_postoffice.
+ * Provenance note: reviews of pull request #2549 found that an earlier version of this file had
+ * carried them over, with small edits, from its 2026-11-06 version, which followed
+ * aemu_postoffice, so on 2026-11-12 each was deleted and written again from login_user_data,
+ * nk_relay_product_ok last. The session that
  * wrote nk_relay_product_ok again opened no aemu_postoffice source; it had read the old
  * product-check body earlier, while checking src/core/PROVENANCE.md's wording, and wrote the new
  * one from login_user_data without opening the old one again.

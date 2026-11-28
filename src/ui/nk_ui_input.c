@@ -47,12 +47,6 @@ void nk_ui_input_set_repeat_rate(NkUiInput *input, NkUiRepeatRate rate) {
     }
 }
 
-void nk_ui_input_set_repeat_config(NkUiInput *input, const NkUiRepeatConfig *config) {
-    if (input != NULL && config != NULL) {
-        input->config = *config;
-    }
-}
-
 void nk_ui_input_reset(NkUiInput *input) {
     if (input == NULL) {
         return;

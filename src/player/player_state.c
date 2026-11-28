@@ -192,7 +192,8 @@ void player_app_init(PlayerApp *app) {
     app->should_quit = false;
     snprintf(app->cover_art_cache_size_label, sizeof(app->cover_art_cache_size_label), "0 KB");
 
-    /* Initialize settings from disk or defaults */
+    /* Defaults first; player_app_load_settings then applies settings.json over
+       them when the file reads. */
     player_app_settings_init_default(&app->settings);
     player_app_load_settings(app, NULL);
     app->achievements_store_available = nk_platform_credential_store_available();
@@ -201,7 +202,6 @@ void player_app_init(PlayerApp *app) {
                  ? "Sign in to connect."
                  : "Sign-in requires Windows Credential Manager; this platform is unsupported.");
 
-    /* Initialize native library */
     nk_library_init(&app->library);
     NkResult lib_res = nk_library_load(&app->library, NULL);
     if (lib_res == NK_OK && app->library.count > 0) {
@@ -985,11 +985,10 @@ bool player_app_add_game(PlayerApp *app, const GameRecord *game) {
     if (replaced) player_merge_readded_game(replaced, &merged);
     game = &merged;
 
-    /* Both results used to be discarded before returning an unconditional
-       true, so a rejected insert (the 64-entry limit) or an unwritable or full
-       user-data directory still reported success. The entry then vanished on
-       the next start, having never been persisted. Report what actually
-       happened instead. */
+    /* Both the insert and the write report their result: a rejected insert
+       (the 64-entry limit) or an unwritable or full user-data directory must
+       not report success, or the entry vanishes on the next start, never
+       having been persisted. */
     /* A fresh add: the record's earlier hashes and tier go until the check below
        ends, since the file may hold other bytes now. */
     /* The add changes the library in memory before the file. When the file
@@ -2164,7 +2163,6 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         return NK_ERROR_GENERIC;
     }
 
-    /* Reset defaults first then apply fields */
     player_app_settings_init_default(&app->settings);
 
     NkJsonNode *scale_node = nk_json_obj_get(root, "resolution_scale");
@@ -3121,8 +3119,8 @@ static bool player_session_has_boot_event(const char *path) {
 }
 
 /* A running child that never writes a boot event never started: a process
- * whose first thread did not run, or one stuck before the runtime's main. The
- * player used to keep such a session as running with nothing on screen
+ * whose first thread did not run, or one stuck before the runtime's main. It is
+ * stopped and reported, not kept as a running session with nothing on screen
  * (#1290). Returns true when this tick stopped the child and raised the card. */
 static bool player_monitor_game_start(PlayerApp *app, uint64_t now_ms) {
     uint64_t elapsed_ms = now_ms >= app->launch_time_ms
@@ -10010,11 +10008,6 @@ bool player_app_wizard_take_extraction_request(PlayerApp *app) {
     if (!app || !app->wizard.extraction_requested) return false;
     app->wizard.extraction_requested = false;
     return true;
-}
-
-void player_app_wizard_request_cancel(PlayerApp *app) {
-    if (!app) return;
-    app->wizard.extraction_cancel_requested = true;
 }
 
 bool player_app_wizard_cancel_requested(const PlayerApp *app) {

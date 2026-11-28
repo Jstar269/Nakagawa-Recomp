@@ -84,7 +84,6 @@ NkAdhocListStatus nk_adhoc_list_parse(const char *text, size_t len, NkAdhocServe
 /* The copy shipped with the player: the relay entries of PPSSPP's assets/adhoc-servers.json at
  * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (name, host, location and data_mode only), read
  * through nk_adhoc_list_parse. */
-const char *nk_adhoc_list_shipped_json(void);
 NkAdhocListStatus nk_adhoc_list_load_shipped(NkAdhocServerList *out, NkAdhocListLogFn log,
                                              void *log_context);
 

@@ -901,10 +901,6 @@ NkZipStatus nk_zip_reader_open_memory_with(NkZipReader **out, const void *data, 
 
 size_t nk_zip_reader_count(const NkZipReader *reader) { return reader ? reader->count : 0; }
 
-uint64_t nk_zip_reader_total_bytes(const NkZipReader *reader) {
-    return reader ? reader->total : 0;
-}
-
 bool nk_zip_reader_entry(const NkZipReader *reader, size_t index, NkZipEntryInfo *out) {
     if (!reader || !out || index >= reader->count) return false;
     out->name = reader->entries[index].name;

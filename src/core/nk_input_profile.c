@@ -272,16 +272,6 @@ const char *nk_psp_axis_name(NkPspAxis axis) {
     return "unknown";
 }
 
-NkPspAxis nk_psp_axis_from_name(const char *name) {
-    if (!name) return (NkPspAxis)-1;
-    for (size_t i = 0; i < sizeof(kPspAxes) / sizeof(kPspAxes[0]); i++) {
-        if (nk_ascii_casecmp(name, kPspAxes[i].name) == 0) {
-            return kPspAxes[i].axis;
-        }
-    }
-    return (NkPspAxis)-1;
-}
-
 const char *nk_host_button_name(NkHostGamepadButton btn) {
     for (size_t i = 0; i < sizeof(kHostButtons) / sizeof(kHostButtons[0]); i++) {
         if (kHostButtons[i].btn == btn) return kHostButtons[i].name;
@@ -639,11 +629,10 @@ void nk_input_profile_init_default(NkInputProfile *profile) {
  * -------------------------------------------------------------------------- */
 
 /* Refuse a binding whose host index is outside the host device, before the
- * conflict pass runs. The conflict pass used to be the only place an
- * out-of-range index was caught, and it reported it as a conflict between two
- * names it no longer had, formatting two NULL strings where the named
- * diagnostic should have been. An out-of-range index handed in by a caller
- * (the player, a future writer) now fails closed naming the field. */
+ * conflict pass runs: an out-of-range index handed in by a caller (the player,
+ * a future writer) fails closed naming the field. Left to the conflict pass, it
+ * would be reported as a conflict between two names it has no entry for,
+ * formatting two NULL strings in place of the named diagnostic. */
 static bool check_binding_index_range(
     const NkBindingSource *src,
     const char *owner_kind,

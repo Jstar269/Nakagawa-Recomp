@@ -2826,7 +2826,6 @@ NkResult package_builder_start(
     snprintf(session->log_file_path, sizeof(session->log_file_path),
              "%s%cbuild_%s.log", ldir, nk_platform_path_separator(), session->disc_id);
 
-    /* Remove previous files if present */
     nk_remove_utf8(session->progress_file_path);
     nk_remove_utf8(session->log_file_path);
     session->progress_file_offset = 0;
