@@ -666,7 +666,7 @@ static int run_fixture(const char *dir)
     frames = m.frames;
 
     if (atrac3p_create(channels, block_align, &h) != 0 || !h) {
-        fprintf(stderr, "FAIL: fixture create (channels=%d block_align=%d) returned no handle\n",
+        fprintf(stderr, "FAIL: fixture create failed (channels=%d block_align=%d)\n",
                 channels, block_align);
         goto out;
     }

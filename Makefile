@@ -672,7 +672,7 @@ endif
 # git a bare call logs `process_begin: CreateProcess(NULL, git
 # rev-parse HEAD, ...) failed` and then quietly builds a binary with NO recorded
 # identity. The Windows runtime compile gate runs in an MSYS2 shell with no git
-# on PATH, so it would hit exactly that. A host with no git resolves an empty
+# on PATH and hits exactly that. A host with no git resolves an empty
 # identity and a clean log, which is the documented state for a source drop:
 # tools/flight_diff.py refuses an identity-less bundle fail closed, and it never
 # falls back to a clock.
@@ -740,8 +740,9 @@ DISPLAY_SMOKE_BASE0_FIXTURE := $(DISPLAY_SMOKE_BASE0_DIR)/fixture
 # The AOT-gap mode of the same fixture: identical guest addresses, but the
 # helper is omitted from native emission (--omit-aot) so region A reaches it
 # through the ordinary production dispatch() seam. The address must match
-# HELPER in tests/fixtures/production_smoke/generate.py (0x08804068; region A,
-# which includes the sceImpose language round trip, sets it, so growing region A moves it).
+# HELPER in tests/fixtures/production_smoke/generate.py (0x08804068; it follows
+# region A, which includes the sceImpose language round trip, so growing
+# region A moves it).
 PRODUCTION_SMOKE_GAP_DIR       := $(BUILD_ROOT)/production-smoke-gap
 PRODUCTION_SMOKE_GAP_FIXTURE   := $(PRODUCTION_SMOKE_GAP_DIR)/fixture
 PRODUCTION_SMOKE_GAP_MAP       := $(PRODUCTION_SMOKE_GAP_DIR)/production_smoke_gap.map

@@ -1031,8 +1031,7 @@ int main(void) {
      * deliberately owns none: that is what makes the rejection cases
      * exercise the fail-closed miss path instead of executing bytes. */
     if (!sr_exec_span_register(TEST_EXPORT, TEST_EXPORT + 0x1000u)) {
-        fprintf(stderr, "FAIL: export span [0x%08x, 0x%08x) rejected, expected accepted\n",
-                (unsigned)TEST_EXPORT, (unsigned)(TEST_EXPORT + 0x1000u));
+        fprintf(stderr, "FAIL: export span rejected\n");
         return 1;
     }
     test_defaults();
