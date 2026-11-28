@@ -106,8 +106,6 @@ Authors, human or agent, check these before requesting review; reviewers flag th
   `tools/tree_lint.py`.
 - **Linux native builds.** Native code and selftests build and link on hosted Linux with and without SDL3: no
   Windows-only library, and `-lm` wherever `<math.h>` is used (`native-core-tests`, `portable-core-objects`).
-- **Native test order.** A binary added to `native-core-tests` joins `EXPECTED_RUNS` in
-  `tools/test_native_core_build.py` at the position the target runs it.
 - **Markdown tables.** A blank line before and after, and one column style in every row, such as `| a | b |` over
   `| --- | --- |` (markdownlint MD058 and MD060; `npx --yes markdownlint-cli2@0.24.1 <file>`).
 - **Local-path words.** `tools/publish_audit.py` reports `LOCAL_PATH` for user-profile and temporary-directory
