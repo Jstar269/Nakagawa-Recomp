@@ -62,8 +62,8 @@ the cited section has the full rule.
 - It comes from a branch on the contributor's fork, with **Allow edits by maintainers** on, or from a maintainer
   agent's topic branch on `origin` (Section 8).
 - Its [template](.github/PULL_REQUEST_TEMPLATE.md) is filled in: the issue (`Tracks #123`), what was wrong and what
-  each change does, scope, uncertainty, private-input and hardware status, blockers,
-  and the exact commands run with results and the checks not run. "CI is green" is not a result; a local pass is
+  each change does, scope, uncertainty, private-input and hardware status, blockers, and the exact commands run
+  with results and the checks not run. "CI is green" is not a result; a local pass is
   not hosted CI.
 - Every AI-assisted commit ends with its `Assisted-by:` line (Section 4). The submitter confirms in the template
   the right to submit under GPL-3.0-or-later. A DCO sign-off is optional and only the person adds it
@@ -260,7 +260,8 @@ evidence; report each as `PASS`, `FAIL`, `SKIP`, `BLOCKED`, or `NOT_RUN`.
   generated content: the three provenance controls (Section 4) and what `python tools/regen_all.py --list` names
   (outputs it marks skipped stay the author's). A merge preserves newer-main behavior, regenerates only the controls it requires, reruns the
   affected gates and freezes the exact head. Every merge of `main` and every control refresh forces new hosted CI;
-  only a substantive correction needs a new review. Never rebase or force-push a pushed branch.
+  only a substantive correction needs a new review, apart from a CI-change approval a merge withdraws
+  ([Trusted CI verdict](docs/CI.md#trusted-ci-verdict)). Never rebase or force-push a pushed branch.
 - **Integration** is the maintainer's: only the maintainer integrates and lands pull requests, and green quick
   checks alone never land a head. The integrator may merge `main` into a handed-off PR, resolve
   generated-content conflicts and refresh controls to produce a head hosted CI can test, and lands only a head (a

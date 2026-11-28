@@ -511,6 +511,14 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(path=rel):
                 self.assertTrue((ROOT / rel).is_file(), f"documented gate path missing: {rel}")
 
+    def test_pull_request_template_asks_for_what_agents_md_says_it_carries(self):
+        # "What a good pull request looks like": the filled-in template carries scope,
+        # uncertainty, private-input and hardware status, and blockers.
+        template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+        for field in ("- Scope and uncertainty:", "- Private inputs and PSP hardware:", "- Blockers:"):
+            with self.subTest(field=field):
+                self.assertRegex(template, rf"(?m)^{re.escape(field)}")
+
     def test_single_pull_request_template_is_canonical(self):
         template = ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
         template_dir = ROOT / ".github" / "PULL_REQUEST_TEMPLATE"
