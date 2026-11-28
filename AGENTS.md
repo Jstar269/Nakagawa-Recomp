@@ -63,8 +63,7 @@ the cited section has the full rule.
   agent's topic branch on `origin` (Section 8).
 - Its [template](.github/PULL_REQUEST_TEMPLATE.md) is filled in: the issue (`Tracks #123`), what was wrong and what
   each change does, scope, uncertainty, private-input and hardware status, blockers, and the exact commands run
-  with results and the checks not run. "CI is green" is not a result; a local pass is
-  not hosted CI.
+  with results and the checks not run. "CI is green" is not a result; a local pass is not hosted CI.
 - Every AI-assisted commit ends with its `Assisted-by:` line (Section 4). The submitter confirms in the template
   the right to submit under GPL-3.0-or-later. A DCO sign-off is optional and only the person adds it
   ([DCO policy](docs/DCO_POLICY.md)); the agent never does.
