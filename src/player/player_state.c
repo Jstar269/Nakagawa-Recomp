@@ -10419,7 +10419,7 @@ static bool player_is_usable_mips_elf32(const char *path, bool module) {
    not NULL, is a keystore already holding the built-in tables (player_disc_keys_load), so
    a module check loads them once rather than once per module (audit 2026-11-17); else the
    call loads its own. */
-static bool player_disc_keys_load(NkKeystore *keys, bool module, char *error, size_t error_size) {
+bool player_disc_keys_load(NkKeystore *keys, bool module, char *error, size_t error_size) {
     if (nk_keystore_load_builtin(keys, error, error_size) != NK_PSP_OK) return false;
     /* The disc route's library-module recipes: a guest module can need them, the
        executable never does. */

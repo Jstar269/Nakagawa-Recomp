@@ -700,7 +700,9 @@ static int disc_dir_find(NkPspCtx *ctx, const NkPsarSource *disc, uint32_t dir_l
         }
         if (rec_len < 34u || rec_len > dir_size - pos) break;
         nlen = r[32];
-        if (33u + nlen <= rec_len) {
+        /* An associated file (flag 0x04) shares a name with its file and is
+           not it. The first other record of the name is the one taken. */
+        if (33u + nlen <= rec_len && (r[25] & 0x04u) == 0u) {
             const char *n = (const char *)r + 33;
             const char *semi = (const char *)memchr(n, ';', nlen);
             size_t cmp_len = semi != NULL ? (size_t)(semi - n) : (size_t)nlen;

@@ -101,7 +101,7 @@ The **Where** column of each table names the places a code can appear:
 | `CONTEXT_REQUIRED` | decrypt, player | The file is bound to the console that installed it (its fuse ID), which Nakagawa cannot take, so it is refused. |
 | `DECOMPRESS_FAILURE` | decrypt, player | The decrypted payload does not decompress; the file looks damaged or changed. |
 | `DISC_DECRYPT_MEMBER_MISSING` | decrypt | An encrypted file found on the disc image was gone when the tools came to decrypt it: the image changed or was cut short during the run. The disc's other files are still decrypted. |
-| `FIRMWARE_OUT_OF_SCOPE` | decrypt, player | The file is PSP system software, is in the disc's `PSP_GAME/SYSDIR/UPDATE` folder, or carries a tag firmware uses and is not one of the game's own library modules read from `PSP_GAME/USRDIR` of its disc image ([Encrypted executables](SETUP.md#encrypted-executables)). Nakagawa never decrypts firmware. |
+| `FIRMWARE_OUT_OF_SCOPE` | decrypt, player | The file is PSP system software, is read from the `PSP_GAME/SYSDIR/UPDATE` folder of a disc image, or carries a tag firmware uses and is not one of the game's own library modules read from `PSP_GAME/USRDIR` of its disc image ([Encrypted executables](SETUP.md#encrypted-executables)). Nakagawa never decrypts firmware. |
 | `INTEGRITY_FAILURE` | decrypt, player | The file's signature or hash check failed; the file looks damaged or changed. |
 | `IO_FAILURE` | decrypt, disc, player | The input could not be read or the output could not be written; for a disc image added from the command line, the library that chooses its folder could not be read. |
 | `KEY_FILE_INVALID` | decrypt, player | The supplied key file is missing or invalid. |

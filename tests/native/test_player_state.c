@@ -18000,6 +18000,40 @@ int main(int argc, char **argv) {
                 FILE *produced;
                 const PlayerPreflightCheck *blocking;
 
+                /* The second layer: a key store filled with the built-in tables alone,
+                   which is what every route but the disc route's guest modules uses,
+                   holds no recipe for either tag. Only the library loader adds them, and
+                   the player loads it for a guest module, never for the executable. */
+                {
+                    static const bool for_module[] = {false, false, true, true};
+                    for (int store = 0; store < 4; store++) {
+                        NkKeystore *probe_keys = nk_keystore_create();
+                        char load_error[160] = "";
+                        bool expect = store >= 2;
+                        assert(probe_keys != NULL);
+                        if (store == 0) { /* the loose route: nk_keystore_load_builtin alone */
+                            assert(nk_keystore_load_builtin(probe_keys, load_error,
+                                                            sizeof(load_error)) == NK_PSP_OK);
+                        } else if (store == 2) { /* the disc route's loader on top of it */
+                            assert(nk_keystore_load_builtin(probe_keys, load_error,
+                                                            sizeof(load_error)) == NK_PSP_OK);
+                            assert(nk_keystore_load_builtin_disc_libraries(
+                                       probe_keys, load_error, sizeof(load_error)) == NK_PSP_OK);
+                        } else { /* the player's own stores: executable, then guest module */
+                            assert(player_disc_keys_load(probe_keys, for_module[store], load_error,
+                                                         sizeof(load_error)));
+                        }
+                        assert(nk_psp_disc_library_tag_count == 2u);
+                        for (size_t t = 0; t < nk_psp_disc_library_tag_count; t++) {
+                            NkPrxTagEntry recipe;
+                            int missing = nk_keystore_get_prx_tag(
+                                probe_keys, nk_psp_disc_library_tags[t].tag, &recipe);
+                            assert(expect ? missing == 0 : missing != 0);
+                        }
+                        nk_keystore_free(probe_keys);
+                    }
+                }
+
                 for (uint32_t tag = 0x457B05F0u; tag <= 0x457B06F0u; tag += 0x100u) {
                     library_len = seal_with_disc_library_recipe(
                         library, sizeof(library), prx_bytes, sizeof(prx_bytes), tag, tag,

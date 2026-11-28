@@ -1585,6 +1585,12 @@ void player_saves_test_fail_rename(unsigned nth);
 void player_saves_test_fail_sync_dir(unsigned nth);
 #endif
 
+struct NkKeystore;
+/* Fills the key store of the disc check: the built-in game tables, and for a guest module
+   (module true) also the two library-module recipes of the disc route (#3235). The store
+   the executable is decrypted with never holds those two. False with a reason in error. */
+bool player_disc_keys_load(struct NkKeystore *keys, bool module, char *error, size_t error_size);
+
 /* The title's Memory Stick folder (not created): <saves>/<disc ID>, or the title ID or
  * "unidentified" for a record without one, as nk_launch.c chooses. */
 bool player_app_save_folder(const GameRecord *game, char *out, size_t out_size);

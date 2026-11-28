@@ -159,20 +159,22 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
     if out_dir is None:
         raise ValueError(f"{disc_id!r} is not a disc ID")
     iso = ii._plain_iso_path(iso, user_data_root)
-    decrypt_member: Callable[[str, bytes, Path, Path], tuple[int, str]]  # member, bytes, staged input, output
+    # member, its bytes (None when the engine reads them itself), staged input, output
+    decrypt_member: Callable[[str, Optional[bytes], Path, Path], tuple[int, str]]
     if runner is None:
         if tool is None:
             raise ValueError("decrypt_disc needs the nk_decrypt tool or a runner")
         tool_path = Path(tool)
 
-        def decrypt_member(member: str, _blob: bytes, _encrypted: Path,
+        def decrypt_member(member: str, _blob: Optional[bytes], _encrypted: Path,
                            destination: Path) -> tuple[int, str]:
             return _run_tool_member(tool_path, iso, member, destination)
     else:
         staged_runner = runner
 
-        def decrypt_member(_member: str, blob: bytes, encrypted: Path,
+        def decrypt_member(_member: str, blob: Optional[bytes], encrypted: Path,
                            destination: Path) -> tuple[int, str]:
+            assert blob is not None
             encrypted.write_bytes(blob)
             try:
                 return staged_runner(encrypted, destination)
@@ -218,8 +220,12 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
                     rows.append({**row, "status": -1, "code": "DISC_DECRYPT_MEMBER_MISSING",
                                  "message": "encrypted disc member disappeared after discovery"})
                     continue
-                lba, count = extent
-                blob = ii._read_iso_extent(stream, size, lba, count, 0, count)
+                # The engine reads the member out of the image itself; only a runner is
+                # handed the bytes.
+                blob = None
+                if runner is not None:
+                    lba, count = extent
+                    blob = ii._read_iso_extent(stream, size, lba, count, 0, count)
             staged_file = tempfile.NamedTemporaryFile(
                 prefix=f".{destination.name}.", suffix=".tmp", dir=out_dir, delete=False
             )

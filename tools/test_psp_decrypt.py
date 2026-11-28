@@ -2904,7 +2904,8 @@ class TestDiscLibraryModules(unittest.TestCase):
         })
         malformed = (
             "PSP_GAME/USRDIR/../SYSDIR/UPDATE/EBOOT.BIN", "PSP_GAME/USRDIR/./MODULE/LIBFONT.PRX",
-            "PSP_GAME\\USRDIR\\MODULE\\LIBFONT.PRX", "/PSP_GAME/USRDIR/MODULE/LIBFONT.PRX",
+            "PSP_GAME\\USRDIR\\MODULE\\LIBFONT.PRX", "PSP_GAME/USRDIR/MODULE\\LIBFONT.PRX",
+            "/PSP_GAME/USRDIR/MODULE/LIBFONT.PRX",
             "PSP_GAME//USRDIR/MODULE/LIBFONT.PRX", "PSP_GAME/USRDIR/MODULE/LIBFONT.PRX;1",
             "PSP_GAME/USRDIR/MODULE/LIBFONT.PRX/", "LIBFONT.PRX", "PSP_GAME/LIBFONT.PRX",
             "PSP_GAME/USRDIR", "UMD_DATA.BIN", "PSP_GAME/USRDIR/" + "A" * 300 + ".PRX",
@@ -2948,6 +2949,99 @@ class TestDiscLibraryModules(unittest.TestCase):
         self.assertEqual(out.returncode, 5, out.stdout + out.stderr)
         self.assertIn("INTEGRITY_FAILURE", out.stdout)
         self.assertFalse(dst.exists())
+
+    def test_a_changed_header_field_opens_nothing(self):
+        # The two header fields the rule reads, changed on a sealed library that is already
+        # on a game disc. Toward kernel or VSH, or away from the user decrypt mode, the
+        # refusal fires first; a change that still reads as a user module reaches the
+        # decryption, whose check of the sealed header matches no container type.
+        sealed = seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1])
+        image = build_disc_image({LIBRARY_MEMBER: sealed})
+        at = image.index(sealed)
+        self.assertEqual((image[at + 0x04], image[at + 0x05], image[at + 0x7C]), (0x06, 0x00, 4))
+        for name, offset, value in (("kernel_attribute", 0x05, 0x10), ("vsh_attribute", 0x05, 0x08),
+                                    ("kernel_mode", 0x7C, 2), ("no_mode", 0x7C, 0)):
+            with self.subTest(change=name):
+                changed = bytearray(image)
+                changed[at + offset] = value
+                out, dst = self._member("header_" + name, bytes(changed), LIBRARY_MEMBER)
+                self._refused_as_firmware(out, dst)
+                self.assertIn("is not a plain user-mode library module", out.stdout)
+        changed = bytearray(image)
+        changed[at + 0x04] = 0x02           # still no kernel or VSH bit: the rule lets it by
+        out, dst = self._member("header_user_attribute", bytes(changed), LIBRARY_MEMBER)
+        self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+        self.assertIn("MALFORMED_INPUT", out.stdout)
+        self.assertIn("its header is corrupt, was modified", out.stdout)
+        self.assertNotIn("DECRYPT_OK", out.stdout)
+        self.assertFalse(dst.exists())
+
+    def test_the_reader_takes_one_plain_file_record(self):
+        # The directory reader on records a well-formed game disc does not have.
+        other_elf = tiny_elf(b"NK3235-SECOND")
+        first = seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1])
+        second = seal_disc_library(other_elf, DISC_LIBRARY_TAGS[1])
+        image = build_disc_image({LIBRARY_MEMBER: first,
+                                  "PSP_GAME/USRDIR/MODULE/LIBFONU.PRX": second})
+
+        def record(data: bytes, stored_name: bytes) -> int:
+            needle = bytes([len(stored_name)]) + stored_name
+            at = data.index(needle)
+            self.assertEqual(data.find(needle, at + 1), -1, stored_name)
+            return at - 32
+
+        def refused_as_malformed(name: str, data: bytes, needle: str):
+            out, dst = self._member(name, data, LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+            self.assertIn("MALFORMED_INPUT", out.stdout)
+            self.assertIn(needle, out.stdout)
+            self.assertFalse(dst.exists())
+
+        library_record = record(image, b"LIBFONT.PRX;1")
+        self.assertEqual(struct.unpack_from("<I", image, library_record + 10)[0], len(first))
+
+        with self.subTest(case="a file stored in several extents"):
+            changed = bytearray(image)
+            changed[library_record + 25] |= 0x80
+            refused_as_malformed("multi_extent", bytes(changed), "stored in several extents")
+
+        for name, size in (("over_the_cap", 64 * 1024 * 1024 + 1), ("empty", 0)):
+            with self.subTest(case="a file size outside what a program file can be", size=name):
+                changed = bytearray(image)
+                struct.pack_into("<I", changed, library_record + 10, size)
+                refused_as_malformed("member_size_" + name, bytes(changed),
+                                     "outside what a program file can be")
+
+        module_dir = record(image, b"MODULE")
+        for name, size in (("over_the_cap", 1024 * 1024 + NP_SECTOR), ("empty", 0)):
+            with self.subTest(case="a directory of an impossible size", size=name):
+                changed = bytearray(image)
+                struct.pack_into("<I", changed, module_dir + 10, size)
+                refused_as_malformed("dir_size_" + name, bytes(changed),
+                                     "a directory of the disc image has an impossible size")
+
+        # Two records of one name: the first is the file. An associated file (flag 0x04)
+        # shares its file's name and is passed over.
+        twice = bytearray(image)
+        second_record = record(image, b"LIBFONU.PRX;1")
+        twice[second_record + 33:second_record + 33 + 13] = b"LIBFONT.PRX;1"
+        with self.subTest(case="two records of one name"):
+            out, dst = self._member("duplicate_first", bytes(twice), LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertEqual(dst.read_bytes(), self.elf)
+        with self.subTest(case="an associated file before the file"):
+            associated = bytearray(twice)
+            associated[library_record + 25] |= 0x04
+            out, dst = self._member("associated_first", bytes(associated), LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertEqual(dst.read_bytes(), other_elf)
+        with self.subTest(case="only an associated file of that name"):
+            associated = bytearray(image)
+            associated[library_record + 25] |= 0x04
+            out, dst = self._member("associated_only", bytes(associated), LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+            self.assertIn("no file at that path", out.stdout)
+            self.assertFalse(dst.exists())
 
 
 _LZRC_SEED_CLEAR = bytes(range(0x20, 0x60)) * 2 + b"NK295 synthetic literals. " * 6
