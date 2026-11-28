@@ -337,7 +337,7 @@ count"** (`waits.expected` L56/L57, L64/L65), and they are not a widened fix - t
 same fix observed through a second fixture. The PR-B/PR-C split was drawn on *hardware's*
 blocking classification, where invalid count is an immediate case because hardware
 validates the signal against `maxCount`. Nakagawa had no such validation, so
-`sceKernelWaitSema(sema, 9, NULL)` against a max-1 semaphore was simply a wait that could
+`sceKernelWaitSema(sema, 9, NULL)` against a max-1 semaphore was a wait that could
 never be satisfied, and it reached the same `m->count < need` decision point as the valid
 case through the same statement. Hardware's answer for those four cells is `CAN_NOT_WAIT`
 either way, so they were promoted rather than left pinned to a value the runtime no longer

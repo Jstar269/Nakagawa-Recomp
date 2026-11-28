@@ -746,9 +746,8 @@ drains it:
 
 Each drained body may record the next transfer, so a loop of tail transfers runs in constant host
 stack. A transfer to a computed target is one dispatch (`dispatch_tail_step`). That dispatch runs
-the direct transfers that follow it, which used to nest inside it, so exception and ERET flow
-they raise is still handled there. It hands only the next computed transfer back to the
-enclosing drain.
+the direct transfers that follow it and handles the exception and ERET flow they raise. It hands
+only the next computed transfer back to the enclosing drain.
 
 A callable body's entry-SP restore travels with its transfer, and each drain applies the first
 one recorded in its chain: the value the nested returns used to leave. A computed target still
