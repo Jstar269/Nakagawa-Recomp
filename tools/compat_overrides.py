@@ -377,8 +377,8 @@ TITLE_CONFIGURED_SCHEDULER_COMPAT: "list[dict]" = []
 # No dispatch binding is a numeric literal compiled into generic dispatch. A title
 # declares one as a typed entry in a validated title manifest's runtime_bindings block
 # (dispatch_aliases / callback_terminators), so it reaches dispatch() only as
-# configuration, and an unconfigured build applies none. The three bindings that were
-# generic-dispatch literals took that form and are now retired (listed below).
+# configuration, and an unconfigured build applies none. The three former literals are
+# retired; their addresses are in RETIRED_TITLE_CONFIGURED_DISPATCH below.
 #
 # A binding a title still declares is inventoried here, because moving an override
 # behind configuration makes it honest, not absent: its entry names the generic
@@ -497,8 +497,8 @@ DIAGNOSTIC_GROUPS: list[dict[str, Any]] = []
 # A different guest executable reaching h_DisplaySetMode would dispatch to
 # whatever happens to live at 0x00000bcc in ITS map.  Retiring them is tracked
 # by issue #363 (compatibility-debt surface) and the readiness record in
-# docs/PORTING.md.  #20 is not its tracker: it is a merged pull request about
-# sceSasCore routing.
+# docs/PORTING.md (not #20, an unrelated merged sceSasCore pull request
+# sometimes cited for it).
 # RETIRED_HLE_DIAGNOSTIC_GROUPS below are #363 decision (c): bespoke reads,
 # snapshots, and dumps were removed; use generic SR_TRACE_PC/SR_WATCH instead.
 RETIRED_HLE_DIAGNOSTIC_GROUPS = [
