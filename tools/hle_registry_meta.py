@@ -563,8 +563,8 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     # a stream that runs dry reports NO_MORE_DATA. They remain partial because
     # the player above them is host HLE, the picture path needs a host backend to
     # exist at all (the null backend yields no pictures by design), and no
-    # hardware-comparison tier has been measured for either getter. Since #286 they
-    # serve only a title that does not stage its own libpsmfplayer.prx: a staged,
+    # hardware-comparison tier has been measured for either getter. They serve only
+    # a title that does not stage its own libpsmfplayer.prx (#286): a staged,
     # translated player module owns the scePsmfPlayer library and reaches the media
     # boundary through sceMpeg.
     "h_PsmfGetVideo": {

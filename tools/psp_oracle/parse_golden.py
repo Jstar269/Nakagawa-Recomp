@@ -88,15 +88,12 @@ AUDIO_SEMANTIC_CASES = (
     "audio-src-reserve",
 )
 AUDIO_TERMINAL_CASE = "audio-done"
-AUDIO_HOST0_LOG = "host0:/audio_query_log.txt"
 
 AUDIO_SPEC = StreamSpec(
     test_id=AUDIO_EXPECTED_TEST_ID,
     semantic_cases=AUDIO_SEMANTIC_CASES,
     terminal_case=AUDIO_TERMINAL_CASE,
 )
-AUDIO_EXPECTED_CASES = AUDIO_SPEC.ordered_cases
-AUDIO_EXPECTED_TERMINAL_COUNT = AUDIO_SPEC.terminal_count
 AUDIO_OUT_COUNTS = {
     "audio-ch-reserve": 3,
     "audio-ch-query-before": 2,
@@ -1536,15 +1533,6 @@ _register_campaign_probe(
 # a reset removed, in the poll form and in the bounded blocking form, and sync types other
 # than 0 and 1 on an idle GE. A blocking record is qid, returned (0: no return within the
 # 200 ms bound), result, wait result, delete result and elapsed us.
-GE_SYNC_IDS_CASES = (
-    "ge-list-sync-unknown-poll", "ge-list-dequeue-unknown", "ge-list-sync-completed-poll",
-    "ge-sync-invalid-mode", "ge-list-sync-after-reenqueue", "ge-list-sync-stale-1",
-    "ge-list-sync-stale-2", "ge-list-sync-stale-3", "ge-draw-sync-idle-wait",
-    "ge-list-sync-after-draw-wait", "ge-list-sync-cancelled-poll",
-    "ge-draw-sync-after-reset-wait", "ge-list-sync-completed-wait",
-    "ge-list-sync-cancelled-wait", "ge-list-sync-unknown-wait", "ge-list-sync-stale-wait",
-    "ge-sync-quiesce",
-)
 GE_SYNC_IDS_OUT_COUNTS = {
     "ge-list-sync-unknown-poll": 4, "ge-list-dequeue-unknown": 2,
     "ge-list-sync-completed-poll": 7, "ge-sync-invalid-mode": 4,
@@ -1712,12 +1700,6 @@ _HLE_AUDIO_SRC_INVALID_CASES = (
     "src-reserve-invalid-samples-4096", "src-reserve-invalid-frequency",
     "src-reserve-invalid-channels-1", "src-reserve-invalid-channels-4",
 )
-_HLE_AUDIO_SRC_CASES = (
-    "src-release-unreserved", "src-output-unreserved", "src-reserve-valid",
-    "src-reserve-already-held", "src-output-blocking-0", "src-release-after-output",
-    "src-release-again", *_HLE_AUDIO_SRC_INVALID_CASES, "out2-then-src-reserve",
-    "src-then-out2-reserve", "src-final-cleanup", "out2-final-cleanup",
-)
 _register_campaign_probe(
     "hle-audio-src", "PSP-HLE-AUDIO-SRC-001", {
         "src-release-unreserved": 0, "src-output-unreserved": 2,
@@ -1788,15 +1770,6 @@ HLE_SAVEDATA_NODATA_ROWS = (
 )
 _register_campaign_probe(
     "hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", HLE_SAVEDATA_NODATA_ROWS,
-)
-_HLE_TIMER_ORDER_CASES = (
-    "alarm-same-delay-set", "alarm-same-delay-a", "alarm-same-delay-b",
-    "alarm-long-then-short-set", "alarm-long-event", "alarm-short-event",
-    "timer-order-vtimer-create", "timer-order-vtimer-handler",
-    "timer-order-vtimer-alarm-set", "timer-order-vtimer-event",
-    "timer-order-vtimer-alarm-event", "alarm-zero-set", "alarm-zero-event",
-    "alarm-same-delay-cleanup", "alarm-long-short-cleanup",
-    "timer-order-vtimer-cleanup", "alarm-zero-cleanup",
 )
 _register_campaign_probe(
     "hle-timer-order", "PSP-HLE-TIMER-ORDER-001", {
@@ -2929,7 +2902,6 @@ GE_RASTER_BOUNDS_ROWS = (
       for row in ((f"{cell}-draw", 9), *((f"{cell}-{read}", count) for read, count in reads))),
     ("vram-restore", 2),
 )
-GE_RASTER_BOUNDS_CASES = tuple(case for case, _count in GE_RASTER_BOUNDS_ROWS)
 _register_campaign_probe(
     "ge-raster-bounds", "PSP-GE-RASTER-002", GE_RASTER_BOUNDS_ROWS,
 )
@@ -2980,7 +2952,6 @@ def _ge_depth_bounds_rows() -> tuple[tuple[str, int], ...]:
 
 
 GE_DEPTH_BOUNDS_ROWS = _ge_depth_bounds_rows()
-GE_DEPTH_BOUNDS_CASES = tuple(case for case, _count in GE_DEPTH_BOUNDS_ROWS)
 _register_campaign_probe(
     "ge-depth-bounds", "PSP-GE-RASTER-004", GE_DEPTH_BOUNDS_ROWS,
 )
@@ -3788,7 +3759,6 @@ REGISTRY_MODELED_KEYS = frozenset({
     "summer_time", "adhoc_channel",
 })
 REGISTRY_TEST_ID = "PSP-REGISTRY-001"
-REGISTRY_HOST0_LOG = "host0:/registry_readonly_log.txt"
 
 
 @dataclass(frozen=True)
@@ -3929,7 +3899,6 @@ def _validate_registry_name(value: str, *, category: bool) -> None:
 # ---------------------------------------------------------------------------
 
 REGISTRY_FONT_TEST_ID = "PSP-REGISTRY-002"
-REGISTRY_FONT_HOST0_LOG = "host0:/registry_font_log.txt"
 REGISTRY_FONT_ROUTES = (("DATA", "FONT"), ("SYSPROFILE", "RESOLUTION"))
 REGISTRY_FONT_NAME_MAX = 26
 REGISTRY_FONT_KEYS_MAX = 64
@@ -4255,7 +4224,6 @@ def _s32(value: int) -> int:
 # ---------------------------------------------------------------------------
 
 FONT_FILES_TEST_ID = "PSP-FONTFILES-001"
-FONT_FILES_HOST0_LOG = "host0:/font_files_log.txt"
 FONT_FILES_ENTRIES_MAX = 64
 FONT_FILES_FILE_MAX = 16 * 1024 * 1024
 FONT_FILES_MATCH_ALL = 7
@@ -4465,7 +4433,6 @@ def parse_font_files_output(text: str, *, require_complete: bool = True) -> Font
 # ---------------------------------------------------------------------------
 
 FONT_LIST_TEST_ID = "PSP-FONTLIST-001"
-FONT_LIST_HOST0_LOG = "host0:/font_list_log.txt"
 FONT_LIST_ENTRIES_MAX = 64
 FONT_LIST_STYLE_BYTES = 168
 FONT_LIST_UNTOUCHED = 0xA5A5A5A5
@@ -4644,7 +4611,6 @@ def parse_font_list_output(text: str, *, require_complete: bool = True) -> FontL
 # ---------------------------------------------------------------------------
 
 UMDIO_TEST_ID = "PSP-UMDIO-001"
-UMDIO_HOST0_LOG = "host0:/umd_io_log.txt"
 UMDIO_OPENS = (
     ("umd0:", 0x1), ("umd1:", 0x1), ("umd:", 0x1), ("umd0:/", 0x1), ("umd1:/", 0x1),
     ("disc0:", 0x1), ("disc0:/", 0x1), ("disc0:/PSP_GAME", 0x1),
@@ -4765,7 +4731,6 @@ def parse_umd_io_output(text: str, *, require_complete: bool = True,
 # ---------------------------------------------------------------------------
 
 UMDRAW_TEST_ID = "PSP-UMDRAW-001"
-UMDRAW_HOST0_LOG = "host0:/umd_raw_read_log.txt"
 UMDRAW_RAW_FLAGS = 0x000F0001
 UMDRAW_READONLY_FLAGS = 0x00000001
 UMDRAW_IOFILEMGR_NIDS = (
@@ -4901,7 +4866,6 @@ CACHE_SEMANTIC_CASES = (
     "cache-wball",
 )
 CACHE_TERMINAL_CASE = "cache-done"
-CACHE_HOST0_LOG = "host0:/cache_alias_log.txt"
 
 CACHE_SPEC = StreamSpec(
     test_id=CACHE_EXPECTED_TEST_ID,
@@ -4915,8 +4879,6 @@ CACHE_OUT_COUNTS = {
     "cache-wball": 2,
     CACHE_TERMINAL_CASE: 1,
 }
-CACHE_EXPECTED_CASES = CACHE_SPEC.ordered_cases
-CACHE_EXPECTED_TERMINAL_COUNT = CACHE_SPEC.terminal_count
 
 
 @dataclass(frozen=True)
@@ -4993,7 +4955,6 @@ IO_SEMANTIC_CASES = (
     "io-errors",
 )
 IO_TERMINAL_CASE = "io-done"
-IO_HOST0_LOG = "host0:/io_matrix_log.txt"
 
 IO_SPEC = StreamSpec(
     test_id=IO_EXPECTED_TEST_ID,
@@ -5014,8 +4975,6 @@ IO_OUT_COUNTS = {
     "io-errors": 3,
     IO_TERMINAL_CASE: 1,
 }
-IO_EXPECTED_CASES = IO_SPEC.ordered_cases
-IO_EXPECTED_TERMINAL_COUNT = IO_SPEC.terminal_count
 
 
 @dataclass(frozen=True)
@@ -5405,7 +5364,6 @@ EXPECTED_ORDERED_CASES = EXPECTED_ALL_CASES + [SUMMARY_CASE]
 # ``PHASEB-COMPLETE`` is the terminal completion sentinel, never a semantic
 # measurement.  It carries the number of semantic cases the probe believes it
 # executed in ``out0`` (41 = 6 C + 4 D + 19 B + 12 A).
-PHASEB_EXPECTED_TERMINAL_COUNT = len(EXPECTED_ALL_CASES)
 PHASEB_SPEC = StreamSpec(
     test_id=PHASEB_EXPECTED_TEST_ID,
     semantic_cases=tuple(EXPECTED_ALL_CASES),

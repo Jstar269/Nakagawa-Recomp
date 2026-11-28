@@ -707,8 +707,8 @@ class _OmitAot:
 # replacement behavior: every address is translated from the guest ELF.  Keep the
 # profile explicit so unrelated zero-based MIPS ELFs do not inherit title addresses.
 #
-# Only resume entries are left.  The six callable seeds the profile used to add here
-# ("address-taken-tiny-leaf") are retired (#363): the analyzer finds a leaf entered only
+# The profile holds only resume entries and adds no callable seed (no
+# "address-taken-tiny-leaf" entry, #363): the analyzer finds a leaf entered only
 # through a pointer on its own (analyze._is_address_taken_entry and the data-pointer
 # census), so a callable entry comes from the image under every profile and no profile
 # adds one.
@@ -819,8 +819,8 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
                     "RESUME ROLE NOT CONFIRMED BY IMAGE: " + "; ".join(problems)
                 )
             callables = {a for a, info in catalog.items() if info.callable}
-            # The extent claim itself -- that the owner's recovered extent
-            # reaches the resume PC -- previously had no assertion anywhere.
+            # Assert the extent claim itself: the owner's recovered extent
+            # reaches the resume PC.
             if not entry_frame_balance.owner_covers(
                 elf, owner, addr, ranges, callables
             ):
@@ -2067,8 +2067,8 @@ def vreg_indices(reg, size):
     # Origin: written from PPSSPP's voffset-integrated addressing
     # (MIPSVFPUUtils.cpp). That lineage is real and is retained.
     #
-    # Authority: as of HQ-1 the correctness of this decode no longer rests on
-    # agreement with an emulator. It was measured on a PSP-3001 (6.61-ARK,
+    # Authority: the correctness of this decode rests on PSP measurement (HQ-1),
+    # not on agreement with an emulator. It was measured on a PSP-3001 (6.61-ARK,
     # 2/2 reproducible runs) and matched for all 128 scalar encodings and for
     # 14 selected wide encodings, including the two that discriminate between
     # candidate rules: triple width selects its row from bit 6 alone, and

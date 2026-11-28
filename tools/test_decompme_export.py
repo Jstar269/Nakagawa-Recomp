@@ -65,7 +65,7 @@ def _parse_min_obj(obj: bytes) -> dict:
 
 
 class TestMinMipsElfObject(unittest.TestCase):
-    def test_roundtrip(self):
+    def test_object_is_a_mips_rel_holding_the_exact_body_and_symbol(self):
         body = bytes(range(64)) * 3  # 192 bytes, not 4-aligned count-wise is fine
         obj = dx.min_mips_elf_object(body, name="f_deadbeef")
         p = _parse_min_obj(obj)

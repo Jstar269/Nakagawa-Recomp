@@ -667,9 +667,6 @@ class Elf:
         return out
 
 
-EXEC_SECTIONS = (".text", ".init", ".fini", ".sceStub.text", ".data", ".rodata.sceResident")
-
-
 EXTRA_SPAN_ENV = "TITLE_EXTRA_SPANS"
 
 
