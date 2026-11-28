@@ -24,6 +24,29 @@ Experimental pre-release: one game is playable so far. [See what works](docs/COM
 
 </div>
 
+## What Nakagawa is, and what it isn't
+
+Nakagawa Recomp is a tool you run on your own computer. It turns the program on a PSP disc you own into a native
+Windows program. It doesn't include any game.
+
+- **No game data in this repository.** There are no game files, no code generated from a game, no keys tied to a
+  console, no PSP firmware and none of the PSP's system fonts. The only keys here are the public game-decryption
+  tables PPSSPP also ships, with the firmware entries left out ([credits](CREDITS.md)), and Nakagawa never decrypts
+  firmware.
+- **You bring your own copy.** You add a disc image of a game you own. Nakagawa decrypts and recompiles it on your
+  own computer, and nothing uploads your game, its decrypted files, the program built from it or your saves, or
+  shares anything built from it.
+- **Offline by default, with no telemetry.** The player connects to the internet only for a feature you turn on, and
+  [Network use](docs/SETUP.md#network-use) lists each one with the host it reaches. (The opt-in achievements
+  feature, when you turn it on, sends RetroAchievements a hash that identifies the game, as that page explains.)
+- **Released games.** Nakagawa works from the compiled program on your disc and needs no game's source code. The
+  games it is developed and tested with are released PSP games, along with test programs the project wrote and public
+  PSPSDK sample programs.
+- **Free software, made with AI help.** Nakagawa is licensed GPL-3.0-or-later
+  ([license and lineage](#license-and-lineage)). It is built with the help of AI coding tools. Every commit they
+  helped with names them in an `Assisted-by:` line, and the project's rules require a person to understand and
+  verify that work ([AI use](docs/AI_USAGE.md)).
+
 ## Start here
 
 **Try it without a game:** [download v0.0.3](#download) for Windows 11, extract the ZIP and start
@@ -31,7 +54,10 @@ Experimental pre-release: one game is playable so far. [See what works](docs/COM
 and a small Breakout game, which need no game files.
 
 **To play a game you own:** drag its `.iso` into the player window, then press **BUILD PACKAGE** and **PLAY**. A
-first build takes several minutes.
+first build takes several minutes. [Download](#download) has the steps and what you need.
+
+**If you're stuck:** ask in [Help](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/help) on
+Discussions; [Getting help](#getting-help) says where each kind of question goes.
 
 **To help:** try a game you own and
 [report how far it gets](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports).
@@ -105,8 +131,8 @@ The ZIP isn't code-signed, so Windows may warn you the first time. The
 [how to check the download](docs/RELEASE_NOTES_v0.0.3.md#checking-your-download).
 
 **Updating from v0.0.2 or v0.0.1:** extract v0.0.3 into a new folder. It finds your library, saves and settings, and
-**Rebuild all** in the library rebuilds the games an older version built. Settings > **CHECK FOR UPDATES** asks GitHub for a
-newer version when you select it and links to its release page.
+**Rebuild all** in the library rebuilds the games an older version built. **CHECK FOR UPDATES** (Settings > Updates)
+asks GitHub for a newer version when you select it and links to its release page.
 
 You need:
 
@@ -147,16 +173,20 @@ for the PSP's system software, graphics and sound. The player is written in C wi
   own open fonts ([#313](https://github.com/Jstar269/nakagawa-recomp/issues/313)) unless you import the fonts from
   your own PSP in Settings > **PSP FONTS**, or with `python tools/nk_cli.py fonts import <folder>`
   ([how to copy them](docs/SETUP.md#copying-the-fonts-from-your-psp)).
-- The player works offline. It connects to the internet only when you agree: to fetch build tools when they
-  aren't already present, and to check for updates when you ask ([network use](docs/SETUP.md#network-use)).
+- The player works offline, and every connection it can make is opt-in and off by default. In v0.0.3 those are
+  fetching build tools when they aren't already present, and checking for and downloading updates when you ask. The
+  development version on `main` adds more opt-in features, such as achievements, cover art, online play and a cheat
+  database download; [network use](docs/SETUP.md#network-use) lists each one, the host it reaches and when.
 
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#pipeline) describes the pipeline, and
 [`docs/CODE_TOUR.md`](docs/CODE_TOUR.md) follows one game through the code.
 
 ## Build from source
 
-You need Windows 11 x64 with a Vulkan GPU, PowerShell 7.6+, MSYS2 UCRT64, CPython 3.15, the Vulkan SDK and Git.
-[`docs/SETUP.md`](docs/SETUP.md#prerequisites) lists the exact packages and the setup steps.
+You need Windows 11 x64 with a Vulkan GPU, PowerShell 7.6+, MSYS2 UCRT64, CPython 3.15 (3.14 is also accepted), the
+Vulkan SDK and Git.
+[`docs/SETUP.md`](docs/SETUP.md#prerequisites) lists the exact packages and the setup steps. To develop on Linux,
+follow [`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md); interactive play isn't supported there.
 
 A checkout of `main` is the development version: its player calls itself `0.1.0-dev`, the version in development
 after v0.0.3. To build the released version, check out the `v0.0.3` tag.
@@ -199,14 +229,42 @@ fixtures. It belongs in a decompilation project only when it rebuilds one functi
 the original bytes, which needs your own copy of the game. If you are unsure, open an issue here and describe what you
 saw.
 
+## Getting help
+
+Nakagawa Recomp is a small, early project run by one maintainer, and
+[GitHub Discussions](https://github.com/Jstar269/Nakagawa-Recomp/discussions) is the place to talk:
+
+- Stuck setting up the player or building a game: read [`docs/SETUP.md`](docs/SETUP.md) and
+  [`docs/YOUR_OWN_GAMES.md`](docs/YOUR_OWN_GAMES.md), then ask in
+  [Help](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/help).
+- How far a game gets: [Compatibility reports](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports),
+  one thread per game.
+- A bug: the [bug report form](https://github.com/Jstar269/Nakagawa-Recomp/issues/new?template=bug_report.yml),
+  after searching the [open issues](https://github.com/Jstar269/Nakagawa-Recomp/issues).
+- A security problem, or a rights-holder concern: privately, as [`SECURITY.md`](SECURITY.md) describes, never in a
+  public issue or discussion.
+
+Please don't share game files, decrypted files, private paths or personal data anywhere public.
+[`.github/SUPPORT.md`](.github/SUPPORT.md) lists every kind of question and where it goes.
+
 ## Contributing
 
 Testing is the most useful help right now: try a game you own and
 [report how far it gets](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports).
-Bugs go in [issues](https://github.com/Jstar269/Nakagawa-Recomp/issues), and
-[good first issues](https://github.com/Jstar269/Nakagawa-Recomp/labels/good%20first%20issue) are a place to start
-on code. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules and the checks to run. To carry the project on in a
-fork of your own, start with [`docs/FORKING.md`](docs/FORKING.md).
+
+For code, most work needs no game, no disc and no PSP: the repository tests itself with fixtures it generates.
+
+1. Set up on [Windows](docs/SETUP.md) or [Linux](docs/LINUX_DEVELOPMENT.md) and run `mingw32-make contrib-check`
+   (on Linux, `make contrib-check`).
+2. Pick an issue labelled [`good first issue`](https://github.com/Jstar269/Nakagawa-Recomp/labels/good%20first%20issue)
+   or [`no-disc-needed`](https://github.com/Jstar269/Nakagawa-Recomp/labels/no-disc-needed), or follow
+   [Contributing without a game disc](CONTRIBUTING.md#contributing-without-a-game-disc). For anything bigger than a
+   small fix, comment on the issue first.
+3. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules and the checks to run before you open a pull request. If you
+   use AI tools, [`docs/AI_USAGE.md`](docs/AI_USAGE.md) says how to disclose them in your commits.
+
+[`docs/CODE_TOUR.md`](docs/CODE_TOUR.md) follows one game through the code. To carry the project on in a fork of
+your own, start with [`docs/FORKING.md`](docs/FORKING.md).
 
 [All documentation](docs/README.md) · [Accessibility](ACCESSIBILITY.md) · [Getting help](.github/SUPPORT.md) ·
 [Security](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [AI use](docs/AI_USAGE.md)
