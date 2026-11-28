@@ -1475,14 +1475,6 @@ def build_route_report(
     }
 
 
-def text_report() -> str:
-    return render_markdown(build_census())
-
-
-def json_report() -> str:
-    return _canonical_json(build_census())
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", nargs="?", const=ROOT / "build" / "vfpu_census.json", type=Path)

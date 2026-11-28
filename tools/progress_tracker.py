@@ -103,11 +103,6 @@ def file_exists(rel: str) -> bool:
     return (REPO / rel).exists()
 
 
-def file_nonempty(rel: str) -> bool:
-    p = REPO / rel
-    return p.exists() and p.stat().st_size > 0
-
-
 def latest_log() -> str | None:
     """Returns the name of the most recently *modified* stderr_run*.log, or None.
 

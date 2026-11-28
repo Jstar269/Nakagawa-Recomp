@@ -394,11 +394,6 @@ def _i32(data: bytes, offset: int) -> int:
     return returned
 
 
-def _sign7(value: int) -> int:
-    value &= 0x7F
-    return value - 128 if value & 0x40 else value
-
-
 def _packed_size(count: int, bits: int) -> int:
     words = (count * bits + 31) // 32
     return words * 4

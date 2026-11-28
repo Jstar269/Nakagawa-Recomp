@@ -39,7 +39,7 @@ NOT_PROMOTED = [0x0003d334, 0x0003d370]
 
 
 class TestHardTerminator(unittest.TestCase):
-    def test_terminators(self):
+    def test_returns_and_unconditional_jumps_are_hard_terminators(self):
         self.assertTrue(analyze._is_hard_terminator(0x03e00008))  # jr $ra
         self.assertTrue(analyze._is_hard_terminator(0x00400008))  # jr $v0
         self.assertTrue(analyze._is_hard_terminator(0x00400009))  # jalr $zero, $v0 (unlinked)
@@ -289,7 +289,7 @@ def _computed_goto_words(index_def=0x30C3000C, inserted=(), la_low=0x24211030):
 class TestGprWrites(unittest.TestCase):
     """The register-write decoder the bounded-goto match walks backwards with."""
 
-    def test_classes(self):
+    def test_each_instruction_class_reports_its_gpr_writes(self):
         cases = {
             0x0C000400: None,                  # jal
             0x10400002: None,                  # beqz $v0

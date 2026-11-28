@@ -62,7 +62,7 @@ class DepFileParsingTests(unittest.TestCase):
             parsed = bgs._parse_d(d)
         self.assertEqual(parsed, {"C:/w/build/hst/a.o": ["src/rt/a.c", "C:/w/build/hst/gen.h", "src/rt/b.h"]})
 
-    def test_categorize(self) -> None:
+    def test_categorize_sorts_paths_into_unit_families(self) -> None:
         bd = "build/hst"
         self.assertEqual(bgs._categorize("src/rt/hle.c", bd, "hst"), "runtime_source")
         self.assertEqual(bgs._categorize("src/rt/recomp.h", bd, "hst"), "runtime_header")
