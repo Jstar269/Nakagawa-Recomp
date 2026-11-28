@@ -71,7 +71,9 @@
  *    a colour batch and a stencil batch (append_depth_blind);
  *    other states take the software rasterizer. A stencil state whose result depends on
  *    the stencil it overwrites (stencil_reads_own_writes) never shares a batch between
- *    primitives whose boxes meet, so each reads a snapshot holding the ones before it.
+ *    primitives whose boxes meet on the snapshot path, so each reads a snapshot holding the
+ *    ones before it. On the interlock path, which orders the fragments at each pixel, they
+ *    share it (interlock_orders, Batch.ordered), except in a depth-blind pair.
  *    The exception is a write-once state (stencil_write_once): the first fragment to pass
  *    at a pixel stores a stencil that rejects every later one, so the pixel is that fragment
  *    over the destination from before the run. Its primitives share the batch and are drawn
@@ -284,6 +286,10 @@ typedef struct {
     /* 1: a write-once stencil state (stencil_write_once). Primitives that overlap share the batch,
      * and the snapshot path draws its triangles last to first (submit_range). */
     uint8_t once;
+    /* 1: primitives whose boxes meet share this stencil batch that reads its own writes, because
+     * the interlock orders its fragments (interlock_orders). Its op must take the interlock
+     * (submit_list). */
+    uint8_t ordered;
     /* With a scaled copy bound (tex_scale.h): the entry's unscaled set, which a draw that maps one
      * texel to one pixel binds instead (xs_onetoone_plain). VK_NULL_HANDLE otherwise. */
     VkDescriptorSet dset_plain;
@@ -517,6 +523,9 @@ static unsigned long long s_cnt_rmw_zruns = 0;           /* runs that owned dept
 static unsigned long long s_cnt_twin_rmw_ops = 0;        /* interlock ops recorded into a twin too */
 /* Write-once stencil batches drawn last to first, and their triangles (submit_range). */
 static unsigned long long s_cnt_once_batches = 0, s_cnt_once_tris = 0;
+/* Primitives that joined a stencil batch that reads its own writes over a box they meet, because
+ * the interlock orders the batch's fragments (append, Batch.ordered). */
+static unsigned long long s_cnt_ordered_merges = 0;
 static VkImageUsageFlags s_target_usage = 0;              /* the last colour target's usage */
 
 static void target_note_drawn(Target *t, int x0, int y0, int x1, int y1) {
@@ -3367,7 +3376,7 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
  * batches before that batch and the batch itself, which is what a copy taken when its state was
  * built held; every other shader-blend batch reads the snapshot unchanged, because nothing drawn
  * since its copy touches the pixels it reads. Leaves the color image SHADER_READ_ONLY. */
-static int submit_list(Target *t, const Batch *arr, uint32_t n) {
+static int submit_list_ops(Target *t, const Batch *arr, uint32_t n) {
     if (n && op_rmw(t, arr, n)) {
         /* An interlock op (#2109): the whole list in one recording, no snapshot copy. */
         SnapRect drawn = batch_rect(&arr[0]);
@@ -3416,6 +3425,32 @@ static int submit_list(Target *t, const Batch *arr, uint32_t n) {
             s_snap_dirty_gen = t->render_gen;
             s_snap_srcgen = snap_rect_empty(&s_snap_dirty) ? t->render_gen : 0;
         }
+        i = j;
+    }
+    return ok;
+}
+
+/* Does batch `b` keep a whole list off the interlock (op_rmw)? */
+static int batch_refuses_rmw(const Batch *b) {
+    return batch_reads_dst(b) && rmw_refuses(b);
+}
+
+/* Render all pending batches into s_cur (submit_list_ops). A batch whose primitives share it
+ * because the interlock orders its fragments (Batch.ordered) must take the interlock, so a list
+ * that holds one and a batch rmw_refuses names is recorded as runs: each run of batches the
+ * interlock accepts is one op, and each run of batches it refuses keeps the snapshot path. The
+ * runs are recorded in list order, and each op leaves the snapshot's dirty box as one op of the
+ * whole list does, so the result is the list's. */
+static int submit_list(Target *t, const Batch *arr, uint32_t n) {
+    int ordered = 0;
+    for (uint32_t i = 0; i < n && !ordered; i++) ordered = arr[i].ordered;
+    if (!ordered || op_rmw(t, arr, n)) return submit_list_ops(t, arr, n);
+    int ok = 1;
+    for (uint32_t i = 0; ok && i < n;) {
+        const int refuses = batch_refuses_rmw(&arr[i]);
+        uint32_t j = i + 1u;
+        while (j < n && batch_refuses_rmw(&arr[j]) == refuses) j++;
+        ok = submit_list_ops(t, arr + i, j - i);
         i = j;
     }
     return ok;
@@ -8490,6 +8525,17 @@ static void append_depth_blind(const Batch *b, uint32_t first, uint32_t count, i
     s_tail_prims = *prim;
 }
 
+/* Will the interlock order the fragments of batch `b` into s_cur? Its op then takes the interlock
+ * (op_rmw: the target has its RMW objects, made with it and its depth binding, which a pending
+ * list never outlives, and rmw_refuses does not name the batch; submit_list records a batch the
+ * interlock accepts apart from one it refuses). psp.frag reads and writes each pixel inside
+ * the ordered interlock, in primitive order, and the depth test runs in the pipeline in the same
+ * order, or in the shader inside the interlock (rmw_shader_depth), so a primitive reads the
+ * colour, stencil and depth that the primitives before it in the batch left, as in ge.c. */
+static int interlock_orders(const Batch *b) {
+    return s_dst_interlock && s_cur && s_cur->rmw_set && s_cur->fb_rmw && !rmw_refuses(b);
+}
+
 static void append(Batch *b, uint32_t first, uint32_t count) {
     if (__builtin_expect(s_wing_dst != NULL, 0)) { append_wing(b, first, count); return; }
     if (s_cpu_profile) s_cpu_profile_stats.append_calls++;
@@ -8503,6 +8549,7 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
     const int self_dep = !(b->once && !b->key.tnl) && stencil_reads_own_writes(b);
     SnapRect prim = !self_dep ? k_snap_rect_empty
                   : b->key.tnl ? tnl_rect(b, first, count) : verts_rect(b, first, count);
+    b->ordered = 0;
     if (stencil_depth_blind(b)) {
         append_depth_blind(b, first, count, self_dep, &prim);
         return;
@@ -8511,9 +8558,15 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
         Batch *last = &s_batch[s_nbatch - 1];
         if (s_cpu_profile) s_cpu_profile_stats.append_compare_calls++;
         if (batch_extends(last, b, first)) {
-            if (!self_dep || !snap_rect_overlap(&s_tail_prims, &prim)) {
+            /* Where the boxes meet, the primitive shares the batch only when the interlock orders
+             * its fragments; on the snapshot path it would read the destination from before the
+             * batch. A depth-blind pair (above) splits on either path: its colour batch draws every
+             * primitive before its stencil batch writes the stencil they test. */
+            const int meets = self_dep && snap_rect_overlap(&s_tail_prims, &prim);
+            if (!meets || interlock_orders(b)) {
                 last->count += count;
                 if (self_dep) snap_rect_union(&s_tail_prims, &prim);
+                if (meets) { last->ordered = 1; s_cnt_ordered_merges++; }
                 if (s_cpu_profile) s_cpu_profile_stats.append_merges++;
                 return;
             }

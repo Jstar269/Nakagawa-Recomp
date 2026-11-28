@@ -1096,11 +1096,15 @@ native-core-tests: asset-index-selftest
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
-# drawn last to first, and at scale 1 on the interlock path). The dst-read cells run once more on
+# drawn last to first, and at scale 1 on the interlock path), and so does stencil-order (#3244:
+# stencil states that read their own writes, split on the snapshot path and one batch in interlock
+# order on the interlock path, at scales 1 and 4 on each, and with depth=32 on the interlock path,
+# where the shader-depth list keeps the snapshot path and splits). The dst-read cells run once more on
 # the interlock path with depth=32 (`--depth 32`): the depth-writing kill cells must keep the
 # snapshot path there, since the shader's depth copy is 16-bit. The dst-read cells then run with the
 # host twin on, native and full colour, on both paths at scales 1 and 4 (the twin's pass takes the
-# path the op took), and stencil-once with the native twin on the interlock path.
+# path the op took), stencil-once with the native twin on the interlock path, and stencil-order
+# with it on the interlock path at scales 1 and 4 and on the snapshot path at 4.
 # gpu-coherence-twin-mutants (below) proves the twin cells kill the twin's mutants. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
@@ -1272,6 +1276,11 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --dst-read snapshot --case stencil-once
 	$(GPU_COHERENCE_RUN) --dst-read snapshot --scale 4 --case stencil-once
 	$(GPU_COHERENCE_RUN) --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --case stencil-order
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --scale 4 --case stencil-order
+	$(GPU_COHERENCE_RUN) --dst-read interlock --case stencil-order
+	$(GPU_COHERENCE_RUN) --dst-read interlock --scale 4 --case stencil-order
+	$(GPU_COHERENCE_RUN) --depth 32 --dst-read interlock --case stencil-order
 	$(GPU_COHERENCE_RUN) --twin native --dst-read snapshot --case dst-read
 	$(GPU_COHERENCE_RUN) --twin native --dst-read snapshot --scale 4 --case dst-read
 	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case dst-read
@@ -1281,6 +1290,9 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_RUN) --twin 1 --dst-read interlock --scale 4 --case dst-read
 	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --case stencil-order
+	$(GPU_COHERENCE_RUN) --twin native --dst-read interlock --scale 4 --case stencil-order
+	$(GPU_COHERENCE_RUN) --twin native --dst-read snapshot --scale 4 --case stencil-order
 	$(GPU_COHERENCE_RUN) --case pipeline-minmax
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_RUN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
