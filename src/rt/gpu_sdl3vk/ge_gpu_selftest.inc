@@ -6267,48 +6267,70 @@ static int coherence_run_lines(void) {
  * writes over a striped depth buffer (depth compared too); under the color test; textured
  * (REPLACE) with nearest magnification and the alpha test, and with linear magnification, at
  * coordinates on texel edges and 1/16384 of a texel below one, which psp.frag's 1/4096 rounding
- * would move to the next texel without hook_point's placement; untextured under the
- * absolute-difference blend, which reads the destination (the shader-blend path, or the
- * interlock or snapshot route under --dst-read), one point per pixel; modulated with the colour
- * doubled and blended over the background, as the opening scene of Ys: The Oath in Felghana
+ * would move to the next texel without hook_point's placement; modulated with the colour doubled,
+ * dithered and blended over the background, as the opening scene of Ys: The Oath in Felghana
  * draws its points; in transform mode through a projection with w from 1.6 to 2.4, textured,
  * fogged and depth-ranged (points outside [minz, maxz] dropped), writing their fractional depth
- * under the ALWAYS test (depth compared too); and textured with mip levels,
- * which stays on ge.c. Exact kinds must equal ge.c bit for bit. Linear filtering and the
+ * under the ALWAYS test (depth compared too); a CLUT8 texture on a dithered 5551 target, blended
+ * by the palette's alpha (the title's target and dither); clamped coordinates; linear
+ * minification with nearest magnification, and the reverse (a point has no footprint, so
+ * magnification decides); whole colour channels masked; a transform list in clear mode with
+ * every point outside [minz, maxz], which ge.c drops before its clear-mode drawing, so the hook
+ * drops it before the clear-mode fallback and the list needs no readback; and two that stay on
+ * ge.c: textured with mip levels, and clear mode, which ge.c draws with its tests and without
+ * touching alpha (depth compared too). Three kinds read the
+ * destination with every pixel drawn twice by two different points of one primitive: the
+ * absolute-difference blend, a dithered source-alpha blend, and the stencil test on 4444
+ * (increment on pass, zero on fail). On the snapshot route a batch reads the destination from
+ * before it, so a point on a pixel its batch drew must open a batch of its own
+ * (point_batch_place). Exact kinds must equal ge.c bit for bit. Linear magnification and the
  * modulated, blended kind compute in floating point where ge.c truncates: each channel, alpha
  * included, within PTP_FLOAT_BOUND (the texel within 1, the product and the doubling within 1
  * more, the fixed-function blend within PARITY_FF_BOUND more). The alpha test is not run on a
  * modulated alpha here: a float alpha one step from ge.c's crosses the reference at some texels,
  * which is the fragment stage's, not the point's. */
 enum { PTP_FLAT_8888, PTP_FLAT_5650, PTP_FLAT_4444, PTP_DEPTH_8888, PTP_CTEST_8888, PTP_TEXN_8888,
-       PTP_TEXL_8888, PTP_ABSDIFF_8888, PTP_MODBLEND_8888, PTP_TRANSFORM_8888, PTP_MIP_8888, PTP_KINDS };
+       PTP_TEXL_8888, PTP_ABSDIFF_8888, PTP_MODBLEND_8888, PTP_TRANSFORM_8888, PTP_DITHBLEND_8888,
+       PTP_CLUT_5551, PTP_CLAMP_8888, PTP_MINLIN_8888, PTP_MAGLIN_8888, PTP_STENCIL_4444, PTP_MASK_8888,
+       PTP_ZRANGE_8888, PTP_MIP_8888, PTP_CLEAR_8888, PTP_KINDS };
 #define PTP_POINTS 2048u
 #define PTP_FLOAT_BOUND (2 + PARITY_FF_BOUND)
+#define PTP_CLUT (CTP_TEX + 0x800u)                     /* 256 8888 entries after the texture */
 
 static int dro_interlock_refused(void);
 
 static uint32_t ptp_fmt(int kind) {
-    return kind == PTP_FLAT_5650 ? 0u : kind == PTP_FLAT_4444 ? 2u : 3u;
+    return kind == PTP_FLAT_5650 ? 0u : kind == PTP_CLUT_5551 ? 1u
+         : kind == PTP_FLAT_4444 || kind == PTP_STENCIL_4444 ? 2u : 3u;
 }
 
 static int ptp_exact(int kind) {
-    return kind != PTP_TEXL_8888 && kind != PTP_MODBLEND_8888;
+    return kind != PTP_TEXL_8888 && kind != PTP_MODBLEND_8888 && kind != PTP_MAGLIN_8888;
+}
+
+/* The kinds whose every pixel two points of the list draw, the second over the first. */
+static int ptp_twice(int kind) {
+    return kind == PTP_ABSDIFF_8888 || kind == PTP_DITHBLEND_8888 || kind == PTP_STENCIL_4444;
+}
+
+static int ptp_transform(int kind) {
+    return kind == PTP_TRANSFORM_8888 || kind == PTP_ZRANGE_8888;
+}
+
+static int ptp_depth(int kind) {
+    return kind == PTP_DEPTH_8888 || kind == PTP_CLEAR_8888 || ptp_transform(kind);
+}
+
+static int ptp_textured(int kind) {
+    return kind == PTP_TEXN_8888 || kind == PTP_TEXL_8888 || kind == PTP_MODBLEND_8888 ||
+           kind == PTP_CLUT_5551 || kind == PTP_CLAMP_8888 || kind == PTP_MINLIN_8888 ||
+           kind == PTP_MAGLIN_8888 || kind == PTP_MIP_8888 || ptp_transform(kind);
 }
 
 /* Point `i`'s through-mode position: hashed on a 1/16 grid, with every few points a special
- * place. `apart`: each point in a pixel of its own (a 64 x 32 grid of cells 7 x 8 pixels, the
- * first column and row at negative fractions), for a blend that reads the destination: the
- * snapshot route gives every primitive of a batch the destination from before the batch, the
- * shader-blend approximation every primitive kind shares (ge_gpu.c, Blending). */
-static void ptp_pos(uint32_t i, int apart, float *x, float *y) {
+ * place. */
+static void ptp_pos(uint32_t i, float *x, float *y) {
     const uint32_t hx = wrap_hash(0x9A10u + i * 2u), hy = wrap_hash(0x9A11u + i * 2u);
-    if (apart) {
-        const uint32_t cx = i % 64u, cy = (i / 64u) % 32u;
-        const float fx = (float)(hx % 16u) / 16.0f, fy = (float)(hy % 16u) / 16.0f;
-        *x = cx ? (float)(cx * 7u + hx % 5u) + fx : -fx;
-        *y = cy ? (float)(cy * 8u + hy % 6u) + fy : -fy;
-        return;
-    }
     float px = 2.0f + (float)(hx % (474u * 16u)) / 16.0f, py = 2.0f + (float)(hy % (266u * 16u)) / 16.0f;
     switch (i % 16u) {
         case 1: px = floorf(px); py = floorf(py); break;                       /* pixel corners */
@@ -6335,7 +6357,9 @@ static float ptp_texel(uint32_t i, uint32_t salt) {
     }
 }
 
-static void ptp_texture(StpList *l, int linear, int mips) {
+static void ptp_texture(StpList *l, int kind) {
+    const int mips = kind == PTP_MIP_8888, clut = kind == PTP_CLUT_5551;
+    const int linear = kind == PTP_TEXL_8888 || kind == PTP_MODBLEND_8888;
     uint32_t *tex = (uint32_t *)SR_HOST(CTP_TEX);
     for (uint32_t i = 0; i < 16u * 16u + 8u * 8u; i++) tex[i] = wrap_hash(0x9C1u + i);
     stp_emit(l, 0xA0, CTP_TEX & 0x00FFFFFFu);
@@ -6347,19 +6371,33 @@ static void ptp_texture(StpList *l, int linear, int mips) {
         stp_emit(l, 0xA9, 8u | ((l1 & 0xFF000000u) >> 8));
         stp_emit(l, 0xB9, 3u | (3u << 8));
     }
-    stp_emit(l, 0xC0, 0); stp_emit(l, 0xC2, mips ? (1u << 16) : 0u); stp_emit(l, 0xC3, 3);
-    stp_emit(l, 0xC6, mips ? (4u | (1u << 8)) : linear ? (1u | (1u << 8)) : 0u);
-    stp_emit(l, 0xC7, 0);                                /* repeat both ways */
+    stp_emit(l, 0xC0, 0); stp_emit(l, 0xC2, mips ? (1u << 16) : 0u); stp_emit(l, 0xC3, clut ? 5u : 3u);
+    if (clut) {                                          /* the texture's bytes index 256 hashed entries */
+        uint32_t *pal = (uint32_t *)SR_HOST(PTP_CLUT);
+        for (uint32_t i = 0; i < 256u; i++) pal[i] = wrap_hash(0x9C7u + i);
+        stp_emit(l, 0xB0, PTP_CLUT & 0x00FFFFFFu);
+        stp_emit(l, 0xB1, (PTP_CLUT & 0xFF000000u) >> 8);
+        stp_emit(l, 0xC5, 3u | (0xFFu << 8));            /* 8888, shift 0, mask 0xFF */
+        stp_emit(l, 0xC4, 32u);                          /* 256 entries */
+    }
+    /* TEXFILTER: minification in bits 0-2, magnification in bit 8. */
+    stp_emit(l, 0xC6, mips ? (4u | (1u << 8)) : linear ? (1u | (1u << 8)) : kind == PTP_MINLIN_8888 ? 1u
+                     : kind == PTP_MAGLIN_8888 ? (1u << 8) : 0u);
+    stp_emit(l, 0xC7, kind == PTP_CLAMP_8888 ? (1u | (1u << 8)) : 0u);   /* clamp, or repeat both ways */
     stp_emit(l, 0xC8, 0);                                /* TEXLEVEL: automatic, no bias */
     stp_emit(l, 0xC9, 3u | (1u << 8));                   /* REPLACE, texel alpha */
     stp_emit(l, 0xCB, 0);
     stp_emit(l, 0x1E, 1);
 }
 
+static void ptp_dither(StpList *l) {
+    stp_emit(l, 0x20, 1);
+    stp_emit(l, 0xE2, 0x7531u); stp_emit(l, 0xE3, 0x1357u);
+    stp_emit(l, 0xE4, 0x9BDFu); stp_emit(l, 0xE5, 0xFDB9u);
+}
+
 static uint32_t ptp_list(uint32_t base, int kind) {
-    const int transform = kind == PTP_TRANSFORM_8888, depth = kind == PTP_DEPTH_8888 || transform;
-    const int textured = kind == PTP_TEXN_8888 || kind == PTP_TEXL_8888 || kind == PTP_MODBLEND_8888 ||
-                         transform || kind == PTP_MIP_8888;
+    const int transform = ptp_transform(kind), depth = ptp_depth(kind), textured = ptp_textured(kind);
     StpList l; stp_begin(&l, base, ptp_fmt(kind), depth);
     stp_emit(&l, 0x24, 0);                               /* no stencil test */
     stp_emit(&l, 0x21, 0);
@@ -6373,6 +6411,8 @@ static uint32_t ptp_list(uint32_t base, int kind) {
         stp_emit(&l, 0xDE, transform ? 1u : 7u);         /* ALWAYS (a fractional depth), GEQUAL */
         stp_emit(&l, 0xE7, 0u);                          /* depth writes on */
     }
+    if (kind == PTP_CLEAR_8888 || kind == PTP_ZRANGE_8888)
+        stp_emit(&l, 0xD3, 1u | 0x700u);                 /* clear colour, alpha and depth */
     if (kind == PTP_CTEST_8888) {
         stp_emit(&l, 0x27, 1);
         stp_emit(&l, 0xD8, 3u);                          /* not equal under the mask */
@@ -6383,20 +6423,32 @@ static uint32_t ptp_list(uint32_t base, int kind) {
         stp_emit(&l, 0x21, 1);
         stp_emit(&l, 0xDF, 5u << 8);                     /* |source - destination| */
     }
-    if (textured) ptp_texture(&l, kind == PTP_TEXL_8888 || kind == PTP_MODBLEND_8888, kind == PTP_MIP_8888);
+    if (kind == PTP_DITHBLEND_8888 || kind == PTP_CLUT_5551 || kind == PTP_MODBLEND_8888) {
+        ptp_dither(&l);
+        stp_emit(&l, 0x21, 1);
+        stp_emit(&l, 0xDF, 2u | (3u << 4));              /* source alpha, 1 - source alpha */
+    }
+    if (kind == PTP_STENCIL_4444) {                      /* passes where the stencil is not 0 */
+        stp_emit(&l, 0x24, 1);
+        stp_emit(&l, 0xDC, 3u | (0x00u << 8) | (0xFFu << 16));
+        stp_emit(&l, 0xDD, 1u | (0u << 8) | (4u << 16)); /* fail: zero; pass: increment */
+    }
+    if (kind == PTP_MASK_8888) {                         /* whole channels: green and alpha kept */
+        stp_emit(&l, 0xE8, 0x00FF00u);
+        stp_emit(&l, 0xE9, 0xFFu);
+    }
+    if (textured) ptp_texture(&l, kind);
     if (kind == PTP_TEXN_8888) {                        /* the texel's own alpha: exact */
         stp_emit(&l, 0x22, 1);
         stp_emit(&l, 0xDB, 6u | (0x7Fu << 8) | (0xFFu << 16));   /* alpha > 127 */
     }
-    if (kind == PTP_MODBLEND_8888) {
+    if (kind == PTP_MODBLEND_8888)
         stp_emit(&l, 0xC9, 0u | (1u << 8) | (1u << 16)); /* MODULATE, texel alpha, colour doubled */
-        stp_emit(&l, 0x21, 1);
-        stp_emit(&l, 0xDF, 2u | (3u << 4));              /* source alpha, 1 - source alpha */
-    }
     if (transform) {
         static const float ident43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
         /* Column-major: clip w = 0.5 z + 2, so rw differs from 1 and from point to point. */
         static const float proj[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0.5f, 0, 0, 0, 2 };
+        const int outside = kind == PTP_ZRANGE_8888;    /* depth 17768 .. 42768: all below minz */
         stp_emit(&l, 0x3A, 0);
         for (int k = 0; k < 12; k++) stp_emit(&l, 0x3B, tfz_f24(ident43[k]));
         stp_emit(&l, 0x3C, 0);
@@ -6413,8 +6465,8 @@ static uint32_t ptp_list(uint32_t base, int kind) {
         stp_emit(&l, 0x4D, (2048u - 136u) << 4);
         stp_emit(&l, 0x48, tfz_f24(1.0f)); stp_emit(&l, 0x49, tfz_f24(1.0f));
         stp_emit(&l, 0x4A, 0); stp_emit(&l, 0x4B, 0);
-        stp_emit(&l, 0xD6, 24000u);                      /* depth range: some points fall outside */
-        stp_emit(&l, 0xD7, 41000u);
+        stp_emit(&l, 0xD6, outside ? 50000u : 24000u);   /* depth range: some or all points outside */
+        stp_emit(&l, 0xD7, outside ? 60000u : 41000u);
         stp_emit(&l, 0x1F, 1);                           /* fog over view z -0.8 .. 0.8 */
         stp_emit(&l, 0xCD, tfz_f24(1.0f));
         stp_emit(&l, 0xCE, tfz_f24(0.6f));
@@ -6425,7 +6477,7 @@ static uint32_t ptp_list(uint32_t base, int kind) {
         for (uint32_t i = 0; i < PTP_POINTS; i++) {
             float x, y, z = (float)((wrap_hash(0x9D10u + i) >> 8) & 0xFFFFu);
             float u = ptp_texel(i, 0u), tv = ptp_texel(i, 1u);
-            ptp_pos(i, 0, &x, &y);
+            ptp_pos(i, &x, &y);
             uint32_t rgba = wrap_hash(0x9E10u + i);
             if (transform) {
                 /* Model coordinates that land on screen: clip x = x, w = 0.5 z + 2. */
@@ -6446,11 +6498,15 @@ static uint32_t ptp_list(uint32_t base, int kind) {
         stp_emit(&l, 0x1F, 0);
         stp_emit(&l, 0xD6, 0); stp_emit(&l, 0xD7, 0xFFFFu);
     } else {
+        /* Twice-drawn kinds: point i and point i + PTP_POINTS / 2 share a position, each with its
+         * own colour, so the second reads what the first left. */
+        const uint32_t places = ptp_twice(kind) ? PTP_POINTS / 2u : PTP_POINTS;
         ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(vaddr);
         for (uint32_t i = 0; i < PTP_POINTS; i++) {
             float x, y;
-            ptp_pos(i, kind == PTP_ABSDIFF_8888, &x, &y);
-            v[i] = (ParityGuestVtx){ wrap_hash(0x9E10u + i) | 0xFF000000u, x, y,
+            ptp_pos(i % places, &x, &y);
+            const uint32_t rgba = wrap_hash(0x9E10u + i);
+            v[i] = (ParityGuestVtx){ kind == PTP_DITHBLEND_8888 ? rgba : rgba | 0xFF000000u, x, y,
                                      (float)((wrap_hash(0x9D10u + i) >> 8) & 0xFFFFu) };
         }
         stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
@@ -6460,6 +6516,10 @@ static uint32_t ptp_list(uint32_t base, int kind) {
     stp_emit(&l, 0x22, 0);
     stp_emit(&l, 0x27, 0);
     stp_emit(&l, 0x21, 0);
+    stp_emit(&l, 0x20, 0);
+    stp_emit(&l, 0x24, 0);
+    stp_emit(&l, 0xD3, 0);
+    stp_emit(&l, 0xE8, 0); stp_emit(&l, 0xE9, 0);
     stp_end(&l);
     return 0x08040000u;
 }
@@ -6468,7 +6528,10 @@ static int coherence_run_points(void) {
     static const char *const names[PTP_KINDS] = { "flat-8888", "flat-5650", "flat-4444", "depth-8888",
                                                   "color-test-8888", "nearest-8888", "linear-8888",
                                                   "abs-diff-8888", "modulate-blend-8888", "transform-8888",
-                                                  "mips-8888" };
+                                                  "dither-blend-8888", "clut8-5551", "clamp-8888",
+                                                  "min-linear-8888", "mag-linear-8888", "stencil-4444",
+                                                  "color-mask-8888", "depth-range-clear-8888", "mips-8888",
+                                                  "clear-8888" };
     if (dro_interlock_refused()) {
         printf("gpu coherence selftest: SKIP points (SR_GPU_DST_READ=interlock was refused; the reason "
                "is printed above)\n");
@@ -6483,13 +6546,14 @@ static int coherence_run_points(void) {
     unsigned differing = 0, min_drawn = UINT32_MAX;
     for (int kind = 0; kind < PTP_KINDS && ok; kind++) {
         const uint32_t fmt = ptp_fmt(kind), bpp = fmt == 3u ? 4u : 2u;
-        const int stays = kind == PTP_MIP_8888, exact = ptp_exact(kind);
+        const int stays = kind == PTP_MIP_8888 || kind == PTP_CLEAR_8888, exact = ptp_exact(kind);
         const char *name = names[kind];
         const GeGpuReplayStats before = s_replay_stats;
         const int sync = ctp_run(base, fmt, ptp_list(base, kind), 1, gpu_out);
         const GeGpuReplayStats after = s_replay_stats;
         int zok = 1;
-        const int zkind = kind == PTP_DEPTH_8888 || kind == PTP_TRANSFORM_8888;
+        /* A list ge.c drew whole leaves no GPU depth; the colour comparison below skips it too. */
+        const int zkind = ptp_depth(kind) && !(stays && sync != GEGPU_SYNC_OK);
         if (zkind && sync == GEGPU_SYNC_OK) {
             Target *t = target_find_by_fba(vram_off(base));
             zok = t && t->dep && depth_to_cpu(t->dep);
@@ -6566,8 +6630,8 @@ static int coherence_run_points(void) {
         return 0;
     }
     printf("gpu coherence selftest: PASS %-22s lists=%d of %u points: fallback_prims=0 and no readback, "
-           "exact (linear and modulated-blended: max channel delta=%d, bound %d); mip levels: "
-           "ge.c; depth and transform lists' depth exact; min drawn=%u\n", "points", PTP_KINDS, PTP_POINTS, max_delta,
+           "exact (linear and modulated-blended: max channel delta=%d, bound %d); mip levels and "
+           "clear mode: ge.c; depth lists' depth exact; min drawn=%u\n", "points", PTP_KINDS, PTP_POINTS, max_delta,
            PTP_FLOAT_BOUND, min_drawn);
     return 1;
 }
