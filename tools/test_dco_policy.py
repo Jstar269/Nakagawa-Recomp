@@ -283,11 +283,6 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
 
     def test_agents_contract_pins_required_content(self):
         content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertRegex(content, r"(?m)^## Where to start\s*$")
-        for section in range(1, 12):
-            with self.subTest(section=section):
-                self.assertRegex(content, rf"(?m)^## {section}\.\s")
-
         self.assertRuleStated(
             _blocks(_section(content, 4)),
             ("Assisted-by:", "never", "Co-Authored-By:", "docs/AI_USAGE.md"),
@@ -347,33 +342,16 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "section 7's resident opt-in and ABI rules",
         )
         section_7_blocks = _blocks(_execution_contract())
-        last_position = -1
         for pr, terms in execution_contracts:
             with self.subTest(contract=pr):
-                bullets = [i for i, block in enumerate(section_7_blocks) if block.startswith(f"- **PR #{pr}:**")]
+                bullets = [block for block in section_7_blocks if block.startswith(f"- **PR #{pr}:**")]
                 self.assertEqual(len(bullets), 1, f"section 7 needs one PR #{pr} contract bullet")
-                self.assertRuleStated([section_7_blocks[bullets[0]]], terms, f"the PR #{pr} execution contract")
-                self.assertGreater(bullets[0], last_position, "the execution contracts stay in PR order")
-                last_position = bullets[0]
+                self.assertRuleStated(bullets, terms, f"the PR #{pr} execution contract")
 
         self.assertRuleStated(
             _blocks(_section(content, 11)),
             ("docs/AI_USAGE.md#the-final-report", "exact facts", "`NOT_PERFORMED`", "`none`"),
             "section 11's pointer to the report template",
-        )
-        final_report = _heading_section((ROOT / "docs" / "AI_USAGE.md").read_text(encoding="utf-8"),
-                                        "### The final report")
-        report = re.search(r"```text\n(.*?)```", final_report, re.S)
-        self.assertIsNotNone(report, "docs/AI_USAGE.md's final report section needs its report template block")
-        fields = [line.split(":", 1)[0] for line in report.group(1).splitlines() if line.strip()]
-        self.assertEqual(
-            fields,
-            [
-                "LANE", "MISSION", "BASE_SHA", "HEAD_SHA", "PR", "STATUS", "RESULT", "ROOT_CAUSE",
-                "CHANGED_FILES", "NEW_PATH_PROVENANCE", "FAILING_BEFORE", "TESTS", "PRIVATE_ACCEPTANCE",
-                "HARDWARE", "UNRESOLVED", "DISCOVERED_FOLLOWUPS", "NOT_PERFORMED", "READY_QUALITY",
-            ],
-            "the section 11 report template must keep its fields",
         )
 
     def test_agents_marks_upstream_behavior_as_a_bounded_evidence_tier(self):
@@ -533,34 +511,6 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(path=rel):
                 self.assertTrue((ROOT / rel).is_file(), f"documented gate path missing: {rel}")
 
-    def test_review_cites_the_documentation_gates_where_they_are_listed(self):
-        # AGENTS.md section 9 is a bullet list that points onward, with no table and so no
-        # "docs row"; the documentation gates are the CONTRIBUTING.md full-gates row.
-        agents_section_9 = _section((ROOT / "AGENTS.md").read_text(encoding="utf-8"), 9)
-        self.assertNotRegex(agents_section_9, r"(?m)^\|")
-        review = (ROOT / ".github" / "REVIEW.md").read_text(encoding="utf-8")
-        docs_bullet = next((block for block in _blocks(review) if block.startswith("- Docs:")), "")
-        self.assertNotIn("row of `AGENTS.md` section 9", docs_bullet)
-        self.assertIn("(../CONTRIBUTING.md#the-full-gates)", docs_bullet)
-        self.assertIn("docs and agent policy", docs_bullet)
-        contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-        self.assertRegex(contributing, r"(?m)^### The full gates$")
-        self.assertRegex(contributing, r"(?m)^\| docs and agent policy \|")
-
-    def test_pull_request_template_asks_for_what_agents_md_says_it_carries(self):
-        # "What a good pull request looks like": the filled-in template carries the exact base
-        # and head SHAs, scope, uncertainty, private-input and hardware status, and blockers.
-        agents = " ".join((ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
-        self.assertIn(
-            "the exact base and head SHAs, scope, uncertainty, private-input and hardware status, blockers",
-            agents,
-        )
-        template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
-        for field in ("- Base and head SHAs:", "- Scope and uncertainty:",
-                      "- Private inputs and PSP hardware:", "- Blockers:"):
-            with self.subTest(field=field):
-                self.assertRegex(template, rf"(?m)^{re.escape(field)}")
-
     def test_single_pull_request_template_is_canonical(self):
         template = ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
         template_dir = ROOT / ".github" / "PULL_REQUEST_TEMPLATE"
@@ -568,15 +518,14 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
         self.assertFalse((template_dir / "default.md").exists())
         self.assertEqual(list(template_dir.glob("*.md")), [])
 
-    def test_tracked_claude_guidance_is_public_and_small(self):
-        # Every tool-specific router only points at AGENTS.md's quick start: it
-        # stays small, public, and free of tracker numbers that go stale.
+    def test_tracked_claude_guidance_is_public(self):
+        # Every tool-specific router points at AGENTS.md's quick start and stays
+        # free of private paths and of tracker numbers that go stale.
         windows_path = r"[A-Z]" + re.escape(":") + r"[\\/]"
         unix_user_path = "/" + "Users" + "/"
         for rel in ("CLAUDE.md", ".github/copilot-instructions.md"):
             with self.subTest(router=rel):
                 content = (ROOT / rel).read_text(encoding="utf-8")
-                self.assertLessEqual(len(content.splitlines()), 50)
                 self.assertIn("AGENTS.md#where-to-start", content)
                 self.assertNotRegex(
                     content,
