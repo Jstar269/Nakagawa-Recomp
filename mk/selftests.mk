@@ -1054,8 +1054,8 @@ native-core-tests: asset-index-selftest
 # a quarter-size render target, its own or a sub-rectangle of a larger one, sampled back, linear,
 # at the render scale and not at 1x, then read by the CPU) and rtt-edge (a texture inside a target
 # clamps and repeats at its own size) run alone at scales 2 and 4, rtt-palette (#3216: an 8888
-# target read as CLUT32, bound directly with the palette looked up in the shader) at 2 and 4, with
-# the native twin and on the snapshot path, rtt-depth-alias (a depth read
+# target read as CLUT32, bound directly with the palette looked up in the shader, plain and blended
+# against the destination) at 2 and 4, with the native twin and on the snapshot path, rtt-depth-alias (a depth read
 # inside a colour target's span) at 4, and rtt-1x-reads (#2279: the render-target reads that
 # decode guest VRAM at 1x at every scale) and rtt-vram-view (a target read through each view of
 # VRAM) at 2 and 4 (the whole-suite run covers 1x). The 32-bit host depth buffer (#2051) runs

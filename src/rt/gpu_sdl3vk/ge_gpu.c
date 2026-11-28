@@ -7877,9 +7877,9 @@ static VkDescriptorSet pal_get(const GeState *g) {
             memset(e, 0, sizeof(*e));
             return VK_NULL_HANDLE;
         }
-    } else if (s_nbatch && !submit_pending()) {
-        /* The slot's image is another palette's, which queued batches still read: they are
-         * recorded before the new entries are uploaded. */
+    } else if ((s_nbatch || s_nwbatch) && !submit_pending()) {
+        /* The slot's image is another palette's, which queued batches (wing batches too) still
+         * read: they are recorded before the new entries are uploaded. */
         return VK_NULL_HANDLE;
     }
     e->used = 0;
@@ -8192,7 +8192,7 @@ static void build_state(int persp, int sprite, Batch *b) {
                         cmd_submit_wait(SR_PERF_GE_TARGET_READBACK_TRANSITION);
                     }
                     /* The twin's pass samples the source's twin (twin_dset). These conditions
-                     * are the twin sampling rule too (same psm, so no CLUT; no swizzle; no
+                     * are the twin sampling rule too (same psm, or the palette read; no swizzle; no
                      * mips; bufw == stride; pixel-aligned; no reordering view): any other read
                      * goes through VRAM in both passes. The source's twin may still be the
                      * presenter's blit source, and one that is behind its image is re-seeded

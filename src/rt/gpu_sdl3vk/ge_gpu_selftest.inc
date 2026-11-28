@@ -13676,30 +13676,40 @@ static int coherence_run_rtt_edge(void) {
  * read that 32 x 32 texture one texel to a pixel with nearest filtering through a 256-entry 8888
  * palette, each with another CLUTFORMAT: the red byte (shift 0), the green byte (shift 8), the
  * blue byte through a four-bit mask and a start offset (shift 16, mask 0x0F, start 1), and the
- * alpha byte (shift 24; the draws left the target's alpha, its stencil, at 0, so entry 0). A
- * title's colour ramp does this once per channel, many times a frame.
+ * alpha byte (shift 24; the draws left the target's alpha, its stencil, at 0, so entry 0). Four
+ * more sprites read it over a coloured band with the absolute-difference blend, which reads the
+ * destination (the interlock or the snapshot path, by the run), through shifts that are not whole
+ * bytes (4, 12 with a six-bit mask and a start offset, 20 and 28). A title's colour ramp does this
+ * once per channel, many times a frame.
  * Each read binds O's image directly and psp.frag looks the palette up: before, a read whose
  * format was not the target's read the target back and decoded it from guest VRAM. Checked at
- * every scale: all four sprites bound O directly, and M in guest VRAM equals the software
- * renderer's exactly, as does every device pixel of the sprites; the software colours are the
- * palette entries the indices pick. */
+ * every scale: all eight sprites bound O directly, and M in guest VRAM equals the software
+ * renderer's exactly, as does every device pixel of the sprites; the unblended software colours
+ * are the palette entries the indices pick. */
 #define RTP_CLUT 0x00103000u
 #define RTP_SIZE 32u
 static int coherence_run_rtt_palette(void) {
     const char *name = "rtt-palette";
-    enum { RTP_SPRITES = 4 };
+    enum { RTP_SPRITES = 8, RTP_PLAIN = 4 };   /* the last four blend against the destination */
     static const uint32_t quad_rgba[4] = { 0xC7A53C11u, 0x1E7BD2F4u, 0x5A0966B8u, 0x93E41F4Du };
     static const uint32_t clutfmt[RTP_SPRITES] = { 3u | (0u << 2) | (0xFFu << 8), 3u | (8u << 2) | (0xFFu << 8),
                                                    3u | (16u << 2) | (0x0Fu << 8) | (1u << 16),
-                                                   3u | (24u << 2) | (0xFFu << 8) };
+                                                   3u | (24u << 2) | (0xFFu << 8),
+                                                   3u | (4u << 2) | (0xFFu << 8),
+                                                   3u | (12u << 2) | (0x3Fu << 8) | (2u << 16),
+                                                   3u | (20u << 2) | (0xFFu << 8), 3u | (28u << 2) | (0xFFu << 8) };
     static const char *const sprite_name[RTP_SPRITES] = { "red byte", "green byte", "blue byte, mask 0x0F, start 1",
-                                                          "alpha byte (0)" };
+                                                          "alpha byte (0)", "blended, shift 4",
+                                                          "blended, shift 12, mask 0x3F, start 2", "blended, shift 20",
+                                                          "blended, shift 28" };
     const uint32_t oa = 0x04000000u | RTE_O, ma = 0x04000000u | RTE_M, stride = 512u;
     const uint32_t bytes = stride * FB_H * 4u;
     const uint32_t s = (uint32_t)s_scale, w = SCL_W, h = SCL_H;
     RttCVtx *cv = (RttCVtx *)SR_HOST(COH_SAMPLE_VERTS);
-    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 10);
-    const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 10u * (uint32_t)sizeof(RttCVtx);
+    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 12);
+    const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 12u * (uint32_t)sizeof(RttCVtx);
+    cv[10] = (RttCVtx){ 0xFF503020u, 0.0f, 152.0f, 0.0f };   /* the band under the blended sprites */
+    cv[11] = (RttCVtx){ 0xFF503020u, 512.0f, 200.0f, 0.0f };
     cv[0] = (RttCVtx){ 0xFF000000u, 0.0f, 0.0f, 0.0f };
     cv[1] = (RttCVtx){ 0xFF000000u, 512.0f, 272.0f, 0.0f };
     for (uint32_t q = 0; q < 4u; q++) {
@@ -13708,7 +13718,7 @@ static int coherence_run_rtt_palette(void) {
         cv[3u + 2u * q] = (RttCVtx){ quad_rgba[q], x0 + 16.0f, y0 + 16.0f, 0.0f };
     }
     for (uint32_t k = 0; k < RTP_SPRITES; k++) {
-        const float x0 = (float)(32u + 64u * k), y0 = 96.0f;
+        const float x0 = (float)(32u + 64u * (k % RTP_PLAIN)), y0 = k < RTP_PLAIN ? 96.0f : 160.0f;
         sv[2u * k] = (RawSpriteVtx){ 0.0f, 0.0f, x0, y0, 0.0f };
         sv[2u * k + 1u] = (RawSpriteVtx){ (float)RTP_SIZE, (float)RTP_SIZE, x0 + (float)RTP_SIZE, y0 + (float)RTP_SIZE, 0.0f };
     }
@@ -13745,6 +13755,8 @@ static int coherence_run_rtt_palette(void) {
     DL_EMIT(0x9D, stride | (0x04u << 16));
     DL_EMIT(0x01, cv_addr);
     DL_EMIT(0x04, (6u << 16) | 2u);                        /* black */
+    DL_EMIT(0x01, cv_addr + 10u * (uint32_t)sizeof(RttCVtx));
+    DL_EMIT(0x04, (6u << 16) | 2u);                        /* the band */
     DL_EMIT(0x1E, 1);                                      /* texture on: 32 x 32 inside O, CLUT32 */
     DL_EMIT(0xA0, RTE_O + (RTE_Y * stride + RTE_X) * 4u);
     DL_EMIT(0xA8, stride | (0x04u << 16));
@@ -13758,6 +13770,7 @@ static int coherence_run_rtt_palette(void) {
     DL_EMIT(0xB1, (RTP_CLUT & 0xFF000000u) >> 8);
     DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));            /* float UV and position, through */
     for (uint32_t k = 0; k < RTP_SPRITES; k++) {
+        if (k == RTP_PLAIN) { DL_EMIT(0x21, 1); DL_EMIT(0xDF, 5u << 8); }   /* blend: |source - destination| */
         DL_EMIT(0xC5, clutfmt[k]);
         DL_EMIT(0xC4, 0x20u);                              /* 256 8888 entries */
         DL_EMIT(0x01, sv_addr + 2u * k * (uint32_t)sizeof(RawSpriteVtx));
@@ -13809,7 +13822,7 @@ static int coherence_run_rtt_palette(void) {
 
     uint32_t compared = 0;
     for (uint32_t k = 0; ok && k < RTP_SPRITES; k++) {
-        const uint32_t x0 = 32u + 64u * k, y0 = 96u;
+        const uint32_t x0 = 32u + 64u * (k % RTP_PLAIN), y0 = k < RTP_PLAIN ? 96u : 160u;
         const uint32_t shift = (clutfmt[k] >> 2) & 0x1Fu, mask = (clutfmt[k] >> 8) & 0xFFu;
         const uint32_t start = ((clutfmt[k] >> 16) & 0x1Fu) << 4;
         uint32_t differ = 0, differ_dev = 0, wrong = 0;
@@ -13819,7 +13832,8 @@ static int coherence_run_rtt_palette(void) {
                 const uint32_t want = clut[((((quad_rgba[q] & 0x00FFFFFFu) >> shift) & mask) | start) & 0xFFu];
                 const uint32_t got = gpu_m[(size_t)gy * stride + gx], sw = sw_m[(size_t)gy * stride + gx];
                 compared++;
-                if ((sw & 0x00FFFFFFu) != (want & 0x00FFFFFFu)) wrong++;
+                if (k < RTP_PLAIN && (sw & 0x00FFFFFFu) != (want & 0x00FFFFFFu)) wrong++;
+                if (k >= RTP_PLAIN && (sw & 0x00FFFFFFu) == 0x00503020u) wrong++;   /* the band, undrawn */
                 if (got != sw && differ++ < 3u)
                     fprintf(stderr, "gpu coherence selftest [%s]: %s: guest pixel (%u,%u) = %08x, software %08x "
                             "(scale %u)\n", name, sprite_name[k], gx, gy, got, sw, s);
@@ -13830,7 +13844,7 @@ static int coherence_run_rtt_palette(void) {
         }
         if (wrong) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: %u software pixels do not have the colour of the palette "
-                    "entry the texel's index picks\n", name, sprite_name[k], wrong);
+                    "entry the texel's index picks (unblended) or still show the band (blended)\n", name, sprite_name[k], wrong);
             ok = 0;
         }
         if (differ || differ_dev) {
@@ -13843,9 +13857,10 @@ static int coherence_run_rtt_palette(void) {
     coherence_reset_targets();
     coherence_reset_depths();
     if (ok)
-        printf("gpu coherence selftest: PASS %-22s scale=%u an 8888 target read as CLUT32 through four CLUTFORMATs "
-               "(each byte, a mask and a start offset) binds the target directly with no readback; %u guest pixels and "
-               "their device pixels equal the software renderer's\n", name, s, compared);
+        printf("gpu coherence selftest: PASS %-22s scale=%u an 8888 target read as CLUT32 through eight CLUTFORMATs "
+               "(each byte, shifts inside a byte, masks and start offsets; four blended against the destination) binds "
+               "the target directly with no readback; %u guest pixels and their device pixels equal the software "
+               "renderer's\n", name, s, compared);
     return ok;
 }
 

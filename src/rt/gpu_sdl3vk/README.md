@@ -432,7 +432,8 @@ into one target and read it back as a texture keep the scale in these cases:
   the texel and reads `u_pal` (descriptor set 3, a 256 x 1 image `pal_get` builds from CLUT RAM
   with the mask and start offset already applied); the shift rides in `cfg.x` bits 3 to 7 and
   `cfg.y` bit 28 marks the read. Nothing is read back or decoded (`rtt-palette`, at 1x, 2x and
-  4x, with the native twin and on both destination-read paths). A filtered read, a 16-bit
+  4x and with the native twin; four of its eight reads blend against the destination, on the
+  interlock path by default and on the snapshot path in its own leg). A filtered read, a 16-bit
   palette, or a CLUT16 read of a 16-bit target still decodes from guest VRAM.
 - **A CPU read of a target a draw sampled** returns its top-left device samples in the target's own
   format, the readback-rows contract: 1x pixels, the software renderer's except where an edge
@@ -564,7 +565,8 @@ half its buffer width; a 5650 target read as 5551 and as 8888; and Z, the target
 outside every colour target, as 4444 through the three views. None binds a target's image, each
 depth read commits depth the GPU wrote since the last commit, and the reading target's guest VRAM
 equals the software renderer's exactly. A control read in the target's own format binds its image
-directly, and so does the cell's nearest CLUT32 read of the 8888 target (the palette read above). A read that gains a scaled path leaves this cell for one like `rtt-scale`. The reads the
+directly, and so does the cell's nearest CLUT32 read of the 8888 target (the palette read above),
+kept here as a second control beside `rtt-palette`. A read that gains a scaled path leaves this cell for one like `rtt-scale`. The reads the
 cell does not run, among them an unaligned read, CLUT16, DXT3 and DXT5, the other pairs of formats,
 and swizzled, mipmapped or other-width reads of a 16-bit target, take the same 1x path by the bind
 rule above.
