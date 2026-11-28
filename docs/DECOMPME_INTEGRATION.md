@@ -56,7 +56,7 @@ python tools/decompme_export.py place_game_here/EBOOT.elf --function 0x0005A648
 ```
 
 - **`target.o`** is a minimal little-endian MIPS ELF object (decomp.me's `target_obj`).
-  This is the robust path: decomp.me disassembles it server-side, so a local MIPS
+  It is the default input: decomp.me disassembles it server-side, so a local MIPS
   objdump is not required (this host ships none). Pass `--objdump <mips-objdump>` to
   additionally emit GNU-syntax `target.s`.
 - **`context.c`** currently supplies base PSP typedefs. When it is given a list of

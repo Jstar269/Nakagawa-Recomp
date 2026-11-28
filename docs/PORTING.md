@@ -289,9 +289,8 @@ The inventory is *not* an executable proof of unsupported-interpreter fail-close
 property is proven by the production interpreter floor (`src/rt/guest_interp.c`) through
 `tests/fixtures/cosim/cosim_selftest.c` (fail-closed negative corpus, control sweep, jalr link
 shape, form census) and `tests/native/dispatch_isolation_selftest.c`. Retirement work was
-tracked by [issue #98](https://github.com/Jstar269/nakagawa-recomp/issues/98), now closed. (This
-previously cited #20, which is a merged pull request about `sceSasCore` routing and has
-no relation to this surface — so the surface had no tracker at all.)
+tracked by [issue #98](https://github.com/Jstar269/nakagawa-recomp/issues/98), now closed. (#20
+is a merged pull request about `sceSasCore` routing and does not track this surface.)
 
 **Readiness criterion.** A newly supplied PSP executable from your own copy of a game should be
 able to receive a profile, run analysis, produce its target/import/capability census,

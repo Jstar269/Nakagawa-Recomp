@@ -296,7 +296,7 @@ This verifies that no new or removed public paths are introduced, keeps every ch
 and writes both controls in their committed form from the public controls alone; for an ordinary
 change neither file changes. Stage your own changes first: it refuses unstaged edits
 (`CANDIDATE_INDEX_STALE`), and it stages the controls it writes, so commit what it stages.
-`make contrib-refresh` (`mingw32-make contrib-refresh` on Windows) runs it. Note that `contrib_refresh.py` is a contributor
+`make contrib-refresh` (`mingw32-make contrib-refresh` on Windows) runs it. `contrib_refresh.py` is a contributor
 convenience, not provenance authorization; external trusted attestation still decides acceptance.
 
 The lower-level exact-path API remains available for narrowly scoped refresh

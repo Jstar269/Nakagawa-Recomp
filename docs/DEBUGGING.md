@@ -1267,7 +1267,7 @@ Every run now narrates it at load —
 ROUTE: step 1 (PRESS_WHILE) presses CROSS
 ```
 
-— so a route that stalls says which button it offered. Note that the boot prefix wants `START`
+— so a route that stalls says which button it offered. The boot prefix wants `START`
 (warning screens, intro movie) and title screens usually want `CROSS`; one press is not
 automatically the right one for the next screen.
 
