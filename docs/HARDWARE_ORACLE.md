@@ -1204,6 +1204,9 @@ One console is one data point; see §11. Nothing here closes issue #70
   `vc2i`. `vus2i.s/.p` are implemented in both lanes from an unrecorded PSP read (probe case `vfpu-vus2i`,
   which also read `vs2i`). The exact identity-prefix `vus2i.t` word `0xd03a8008` uses
   the later `PSP-VFPU-RESERVED-001` result. Other `.t` operand encodings and `.q` still stop.
+  `vuc2i` and `vc2i` with `.q` size bits (a source register field with neither the transpose nor the offset bit)
+  are taken in both lanes from the words pspautotests `e37443a6` recorded on a PSP, not from this run;
+  `check_pspautotests_byte_unpack_sizes` pins them.
 
 - **PSP-3000 single-case run of the `ge-sample` probe on commit `86e55611` (2026-10-28)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `86e55611` is the commit that adds the probe (case 109 in

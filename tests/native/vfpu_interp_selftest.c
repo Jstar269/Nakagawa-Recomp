@@ -38,6 +38,9 @@
 //   * vh2f.s/.p, vuc2i.s, vsocp.s/.p, vwbn.s and vrndf1.s/vrndf2.s return the
 //     PSP-VFPU-FORMS-001 words in both lanes, and their unmeasured widths and
 //     prefixes fail closed;
+//   * vdet.p/.t/.q, vsbn.s, vt5551.q, vt5650.q and the vc2i/vuc2i words with
+//     .q size bits return the pspautotests words recorded on a PSP, and their
+//     unrecorded widths and prefixes fail closed;
 //   * vocp, vcrs.t and vfim.s return the NaN, infinity, denormal and signed-zero
 //     words of PSP-VFPU-WIDEROPS-001, PSP-VFPU-PREFIX-001 and the pspautotests
 //     .expected files in both lanes;
@@ -3595,6 +3598,294 @@ static int check_vfpu_forms_measured(void) {
     return bad;
 }
 
+/* Forms a PSP executes that both lanes refused until now (issue #326 boundary): vdet, vsbn.s,
+ * vt5551.q/vt5650.q and the vc2i/vuc2i words with .q size bits. The expected words are result
+ * words of the pspautotests e37443a6 tests/cpu/vfpu .expected files (recorded on a PSP). A form the
+ * generated code emits directly runs through its body (the overlap-diff header) and the
+ * interpreter; a form it routes to sr_vfpu_interp runs through the interpreter alone. */
+static int psp_autotest_cell(const char *label, const char *form, uint32_t routed_word,
+                             const CpuState *before, const CpuState *expect) {
+    const int c = form != NULL ? find_overlap_diff_case(form) : -1;
+    const uint32_t w = form == NULL ? routed_word : c >= 0 ? overlap_diff_cases[c].w : 0u;
+    CpuState interp = *before, aot = *before;
+    const int kind = (form == NULL || c >= 0) ? sr_vfpu_interp(&interp, w) : -1;
+    int ok = kind == SR_VFPU_COMPUTE && memcmp(&interp, expect, sizeof(*expect)) == 0;
+    if (form != NULL) {
+        if (c >= 0) overlap_diff_run_codegen(&aot, c);
+        ok &= c >= 0 && memcmp(&aot, expect, sizeof(*expect)) == 0;
+    }
+    g_checks++;
+    if (ok) return 0;
+    g_failures++;
+    fprintf(stderr, "FAIL: pspautotests %s word 0x%08x kind=%d\n", label, w, kind);
+    return 1;
+}
+
+/* Words outside the recorded domain refuse with no state change, prefixes not consumed. */
+static int psp_autotest_refused(const char *label, uint32_t w, uint32_t sp, uint32_t tp, uint32_t dp) {
+    CpuState s;
+    setup_identity_compute(&s);
+    for (int i = 0; i < 128; i++) s.vi[i] = 0x3f800000u | ((uint32_t)i << 16);
+    s.vfpuCtrl[0] = sp;
+    s.vfpuCtrl[1] = tp;
+    s.vfpuCtrl[2] = dp;
+    const CpuState before = s;
+    const int kind = sr_vfpu_interp(&s, w);
+    g_checks++;
+    if (kind == SR_VFPU_OTHER && memcmp(&s, &before, sizeof(s)) == 0) return 0;
+    g_failures++;
+    fprintf(stderr, "FAIL: pspautotests %s word 0x%08x was not refused (kind=%d)\n", label, w, kind);
+    return 1;
+}
+
+static uint32_t psp_autotest_float_bits(float f) {
+    uint32_t b;
+    memcpy(&b, &f, 4);
+    return b;
+}
+
+/* vdet: s.x * t.y - s.y * t.x through the measured sum-of-products adder (sr_vfpu_dot_bits),
+ * so vector.expected's s = (1, 2), t = (-0.1, 1000) gives 1000.199951 (0x447a0ccc), not the
+ * 0x447a0ccd of a rounded product and a rounded subtract. */
+static int check_pspautotests_vdet(void) {
+    /* vector.expected vdet_p, vdet.p S000, C100, C200 over the first five test vectors: s.x,
+     * s.y, t.x, t.y and the S000 word whose %f print the file records. */
+    static const uint32_t vector_rows[25][5] = {
+        {0x3f800000u, 0x40000000u, 0x3f800000u, 0x40000000u, 0x00000000u},
+        {0x3f800000u, 0x40000000u, 0x40a00000u, 0x40c00000u, 0xc0800000u},
+        {0x3f800000u, 0x40000000u, 0xbf800000u, 0xc0000000u, 0x00000000u},
+        {0x3f800000u, 0x40000000u, 0xc0800000u, 0xc0a00000u, 0x40400000u},
+        {0x3f800000u, 0x40000000u, 0xbdcccccdu, 0x447a0000u, 0x447a0cccu},
+        {0x40a00000u, 0x40c00000u, 0x3f800000u, 0x40000000u, 0x40800000u},
+        {0x40a00000u, 0x40c00000u, 0x40a00000u, 0x40c00000u, 0x00000000u},
+        {0x40a00000u, 0x40c00000u, 0xbf800000u, 0xc0000000u, 0xc0800000u},
+        {0x40a00000u, 0x40c00000u, 0xc0800000u, 0xc0a00000u, 0xbf800000u},
+        {0x40a00000u, 0x40c00000u, 0xbdcccccdu, 0x447a0000u, 0x459c44ccu},
+        {0xbf800000u, 0xc0000000u, 0x3f800000u, 0x40000000u, 0x00000000u},
+        {0xbf800000u, 0xc0000000u, 0x40a00000u, 0x40c00000u, 0x40800000u},
+        {0xbf800000u, 0xc0000000u, 0xbf800000u, 0xc0000000u, 0x00000000u},
+        {0xbf800000u, 0xc0000000u, 0xc0800000u, 0xc0a00000u, 0xc0400000u},
+        {0xbf800000u, 0xc0000000u, 0xbdcccccdu, 0x447a0000u, 0xc47a0cccu},
+        {0xc0800000u, 0xc0a00000u, 0x3f800000u, 0x40000000u, 0xc0400000u},
+        {0xc0800000u, 0xc0a00000u, 0x40a00000u, 0x40c00000u, 0x3f800000u},
+        {0xc0800000u, 0xc0a00000u, 0xbf800000u, 0xc0000000u, 0x40400000u},
+        {0xc0800000u, 0xc0a00000u, 0xc0800000u, 0xc0a00000u, 0x00000000u},
+        {0xc0800000u, 0xc0a00000u, 0xbdcccccdu, 0x447a0000u, 0xc57a0800u},
+        {0xbdcccccdu, 0x447a0000u, 0x3f800000u, 0x40000000u, 0xc47a0cccu},
+        {0xbdcccccdu, 0x447a0000u, 0x40a00000u, 0x40c00000u, 0xc59c44ccu},
+        {0xbdcccccdu, 0x447a0000u, 0xbf800000u, 0xc0000000u, 0x447a0cccu},
+        {0xbdcccccdu, 0x447a0000u, 0xc0800000u, 0xc0a00000u, 0x457a0800u},
+        {0xbdcccccdu, 0x447a0000u, 0xbdcccccdu, 0x447a0000u, 0x00000000u},
+    };
+    /* nan_gen.expected (inf * 0, inf - inf), signed_zero.expected (every vdet.p row, ending
+     * with "1 - 1") and prefix_lanes.expected (vdet.p, no prefix), same layout. */
+    static const uint32_t special_rows[11][5] = {
+        {0x7f800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x7f800001u},
+        {0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800001u},
+        {0x3f800000u, 0x3f800000u, 0x80000000u, 0x80000000u, 0x00000000u},
+        {0xbf800000u, 0xbf800000u, 0x00000000u, 0x00000000u, 0x00000000u},
+        {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x00000000u},
+        {0x3f800000u, 0x3f800000u, 0x00000000u, 0x80000000u, 0x00000000u},
+        {0x3f800000u, 0x3f800000u, 0x80000000u, 0x00000000u, 0x00000000u},
+        {0x3f800000u, 0x3f800000u, 0x80000000u, 0x80000000u, 0x00000000u},
+        {0x3f800000u, 0x3f800000u, 0x80000000u, 0x80000000u, 0x00000000u},
+        {0x3f800000u, 0x3f800000u, 0x3f800000u, 0xbf800000u, 0xc0000000u},
+        {0x3f800000u, 0x40000000u, 0x3f800000u, 0x3f800000u, 0xbf800000u},
+    };
+    int bad = 0;
+    uint8_t si[4], ti[4], di[1];
+    CpuState before, expect;
+    vreg_idx(0x04, 2, si);
+    vreg_idx(0x08, 2, ti);
+    vreg_idx(0x00, 1, di);
+    for (int k = 0; k < 36; k++) {
+        const uint32_t *row = k < 25 ? vector_rows[k] : special_rows[k - 25];
+        setup_identity_compute(&before);
+        for (int i = 0; i < 128; i++) before.vi[i] = 0x3f800000u | ((uint32_t)i << 16);
+        before.vi[si[0]] = row[0];
+        before.vi[si[1]] = row[1];
+        before.vi[ti[0]] = row[2];
+        before.vi[ti[1]] = row[3];
+        expect = before;
+        expect.vi[di[0]] = row[4];
+        bad |= psp_autotest_cell(k < 25 ? "vdet.p vector.expected" : "vdet.p special operands",
+                                 "vdet-p-recorded", 0u, &before, &expect);
+    }
+    /* overlap.expected: vdet.p S000, C000, C100 with M000 = 1..16 and M100 = 101..116 in
+     * column order writes 0xc2c80000 (-100) to S000 and leaves the rest of M000 alone. */
+    setup_identity_compute(&before);
+    for (int col = 0; col < 4; col++) {
+        uint8_t m0[4], m1[4];
+        vreg_idx(col, 4, m0);
+        vreg_idx(0x04 | col, 4, m1);
+        for (int r = 0; r < 4; r++) {
+            before.vi[m0[r]] = psp_autotest_float_bits((float)(1 + 4 * col + r));
+            before.vi[m1[r]] = psp_autotest_float_bits((float)(101 + 4 * col + r));
+        }
+    }
+    expect = before;
+    expect.vi[di[0]] = 0xc2c80000u;
+    bad |= psp_autotest_cell("vdet.p overlap.expected", "vdet-p-overlap", 0u, &before, &expect);
+    /* undefined.expected: every register S<m><c><r> holds 1000 + 100m + 10c + r and only S000
+     * changes, to 0xc2c80000 (.p), 0x49a1aec0 (.t) and 0x4a21d454 (.q). The .t and .q words
+     * are the adder over (s.x, s.y, s.z[, s.w]) and (t.y, -t.x, t.z[, t.w]). */
+    static const struct { const char *form; uint32_t want; } undefined_rows[3] = {
+        {"vdet-p-recorded", 0xc2c80000u}, {"vdet-t-recorded", 0x49a1aec0u},
+        {"vdet-q-recorded", 0x4a21d454u},
+    };
+    setup_identity_compute(&before);
+    for (int m = 0; m < 8; m++)
+        for (int c = 0; c < 4; c++)
+            for (int r = 0; r < 4; r++) {
+                uint8_t one[1];
+                vreg_idx((m << 2) | c | (r << 5), 1, one);
+                before.vi[one[0]] = psp_autotest_float_bits((float)(1000 + 100 * m + 10 * c + r));
+            }
+    for (int k = 0; k < 3; k++) {
+        expect = before;
+        expect.vi[di[0]] = undefined_rows[k].want;
+        bad |= psp_autotest_cell("vdet undefined.expected", undefined_rows[k].form, 0u, &before, &expect);
+    }
+    /* vdet.s (undefined.expected records +0 for one input, too little to fix a rule) and any
+     * pending prefix (prefix_lanes.expected records constants in the lanes past .p taking
+     * part in the sum, which no lane models) stay refused. */
+    bad |= psp_autotest_refused("vdet.s", 0x67080400u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vdet.p under an S prefix", 0x67080480u, 0xf00e4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vdet.p under a T prefix", 0x67080480u, 0xe4u, 0x1bu, 0u);
+    bad |= psp_autotest_refused("vdet.q under a D prefix", 0x67088480u, 0xe4u, 0xe4u, 0x1u);
+    return bad;
+}
+
+/* vsbn.s S010, S000, S100 (vector.expected checkVsbn): 19 source words, each against the eight
+ * integer T words 0, 8, 16, 32, -127, -128, 128 and 129. A source whose exponent field is 0 or
+ * 255 (the zeros and infinities here) is returned unchanged; otherwise its exponent field
+ * becomes (127 + t) & 0xff. */
+static int check_pspautotests_vsbn(void) {
+    static const uint32_t t_words[8] = {0u, 8u, 16u, 32u, 0xffffff81u, 0xffffff80u, 128u, 129u};
+    static const struct { uint32_t in, want[8]; } rows[19] = {
+        {0x1e3ce508u, {0x3fbce508u, 0x43bce508u, 0x47bce508u, 0x4fbce508u, 0x003ce508u, 0x7fbce508u, 0x7fbce508u, 0x003ce508u}},
+        {0x3f800000u, {0x3f800000u, 0x43800000u, 0x47800000u, 0x4f800000u, 0x00000000u, 0x7f800000u, 0x7f800000u, 0x00000000u}},
+        {0x42c80000u, {0x3fc80000u, 0x43c80000u, 0x47c80000u, 0x4fc80000u, 0x00480000u, 0x7fc80000u, 0x7fc80000u, 0x00480000u}},
+        {0x4cbebc20u, {0x3fbebc20u, 0x43bebc20u, 0x47bebc20u, 0x4fbebc20u, 0x003ebc20u, 0x7fbebc20u, 0x7fbebc20u, 0x003ebc20u}},
+        {0x40000000u, {0x3f800000u, 0x43800000u, 0x47800000u, 0x4f800000u, 0x00000000u, 0x7f800000u, 0x7f800000u, 0x00000000u}},
+        {0x40400000u, {0x3fc00000u, 0x43c00000u, 0x47c00000u, 0x4fc00000u, 0x00400000u, 0x7fc00000u, 0x7fc00000u, 0x00400000u}},
+        {0x40800000u, {0x3f800000u, 0x43800000u, 0x47800000u, 0x4f800000u, 0x00000000u, 0x7f800000u, 0x7f800000u, 0x00000000u}},
+        {0x40a00000u, {0x3fa00000u, 0x43a00000u, 0x47a00000u, 0x4fa00000u, 0x00200000u, 0x7fa00000u, 0x7fa00000u, 0x00200000u}},
+        {0x42c80000u, {0x3fc80000u, 0x43c80000u, 0x47c80000u, 0x4fc80000u, 0x00480000u, 0x7fc80000u, 0x7fc80000u, 0x00480000u}},
+        {0x42cc0000u, {0x3fcc0000u, 0x43cc0000u, 0x47cc0000u, 0x4fcc0000u, 0x004c0000u, 0x7fcc0000u, 0x7fcc0000u, 0x004c0000u}},
+        {0x42d00000u, {0x3fd00000u, 0x43d00000u, 0x47d00000u, 0x4fd00000u, 0x00500000u, 0x7fd00000u, 0x7fd00000u, 0x00500000u}},
+        {0x42da0000u, {0x3fda0000u, 0x43da0000u, 0x47da0000u, 0x4fda0000u, 0x005a0000u, 0x7fda0000u, 0x7fda0000u, 0x005a0000u}},
+        {0xc2c80000u, {0xbfc80000u, 0xc3c80000u, 0xc7c80000u, 0xcfc80000u, 0x80480000u, 0xffc80000u, 0xffc80000u, 0x80480000u}},
+        {0xcb189680u, {0xbf989680u, 0xc3989680u, 0xc7989680u, 0xcf989680u, 0x80189680u, 0xff989680u, 0xff989680u, 0x80189680u}},
+        {0xba83126fu, {0xbf83126fu, 0xc383126fu, 0xc783126fu, 0xcf83126fu, 0x8003126fu, 0xff83126fu, 0xff83126fu, 0x8003126fu}},
+        {0xbf800000u, {0xbf800000u, 0xc3800000u, 0xc7800000u, 0xcf800000u, 0x80000000u, 0xff800000u, 0xff800000u, 0x80000000u}},
+        {0x7f800000u, {0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u}},
+        {0xff800000u, {0xff800000u, 0xff800000u, 0xff800000u, 0xff800000u, 0xff800000u, 0xff800000u, 0xff800000u, 0xff800000u}},
+        {0x80000000u, {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u}},
+    };
+    int bad = 0;
+    uint8_t si[1], ti[1], di[1];
+    vreg_idx(0x00, 1, si);
+    vreg_idx(0x04, 1, ti);
+    vreg_idx(0x01, 1, di);
+    for (int k = 0; k < 19; k++)
+        for (int j = 0; j < 8; j++) {
+            CpuState before, expect;
+            setup_identity_compute(&before);
+            for (int i = 0; i < 128; i++) before.vi[i] = 0x3f800000u | ((uint32_t)i << 16);
+            before.vi[si[0]] = rows[k].in;
+            before.vi[ti[0]] = t_words[j];
+            expect = before;
+            expect.vi[di[0]] = rows[k].want[j];
+            bad |= psp_autotest_cell("vsbn.s vector.expected", "vsbn-s-recorded", 0u, &before, &expect);
+        }
+    /* No width but .s and no pending prefix was recorded. */
+    bad |= psp_autotest_refused("vsbn.p", 0x61040081u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vsbn.q", 0x61048081u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vsbn.s under an S prefix", 0x61040001u, 0xf00e4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vsbn.s under a T prefix", 0x61040001u, 0xe4u, 0xf00e4u, 0u);
+    bad |= psp_autotest_refused("vsbn.s under a D prefix", 0x61040001u, 0xe4u, 0xe4u, 0x100u);
+    return bad;
+}
+
+/* vt5551.q and vt5650.q pack four colours into a pair, the even lane in the low half, like
+ * vt4444.q. colors.expected (vt5551/vt5650.q C010.p, C000.q of FFFF00FF, 801100FF, 7F5500FF,
+ * 00AA00FF) and overlap.expected (vt5551/vt5650.q C000, C000 with C000 = 1, 2, 3, 4). The
+ * generated code routes both forms to sr_vfpu_interp. */
+static int check_pspautotests_vt5551_vt5650(void) {
+    static const uint32_t colors[4] = {0xffff00ffu, 0x801100ffu, 0x7f5500ffu, 0x00aa00ffu};
+    static const uint32_t ones[4] = {0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u};
+    static const struct { const char *label; uint32_t w; const uint32_t *src; uint32_t want[2]; } rows[4] = {
+        {"vt5551.q colors.expected", 0xd05a8081u, colors, {0x881ffc1fu, 0x541f281fu}},
+        {"vt5650.q colors.expected", 0xd05b8081u, colors, {0x101ff81fu, 0xa81f501fu}},
+        {"vt5551.q overlap.expected", 0xd05a8080u, ones, {0x00004000u, 0x40002000u}},
+        {"vt5650.q overlap.expected", 0xd05b8080u, ones, {0x00008000u, 0x80004000u}},
+    };
+    int bad = 0;
+    for (int k = 0; k < 4; k++) {
+        uint8_t si[4], di[2];
+        CpuState before, expect;
+        setup_identity_compute(&before);
+        for (int i = 0; i < 128; i++) before.vi[i] = 0x3f800000u | ((uint32_t)i << 16);
+        vreg_idx((int)((rows[k].w >> 8) & 0x7fu), 4, si);
+        vreg_idx((int)(rows[k].w & 0x7fu), 2, di);
+        for (int i = 0; i < 4; i++) before.vi[si[i]] = rows[k].src[i];
+        expect = before;
+        expect.vi[di[0]] = rows[k].want[0];
+        expect.vi[di[1]] = rows[k].want[1];
+        bad |= psp_autotest_cell(rows[k].label, NULL, rows[k].w, &before, &expect);
+    }
+    /* The other widths and every prefix are unrecorded. */
+    bad |= psp_autotest_refused("vt5551.p", 0xd05a0080u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vt5650.t", 0xd05b8000u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vt5551.q under negate-all", 0xd05a8081u, 0xf00e4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vt5650.q under a D write mask", 0xd05b8081u, 0xe4u, 0xe4u, 0x100u);
+    return bad;
+}
+
+/* convert.expected runs vc2i and vuc2i as the words 0xd0398081 and 0xd0388081, which carry the
+ * .q size bits (C010, S000): the PSP widens the one source word S000 into C010 as the .s forms
+ * do. The generated code routes vc2i to sr_vfpu_interp and emits vuc2i directly. */
+static int check_pspautotests_byte_unpack_sizes(void) {
+    static const uint32_t patterns[4] = {0x01234567u, 0xfedcba89u, 0xfccf00ffu, 0xffffffffu};
+    static const uint32_t c2i[4][4] = {
+        {0x67000000u, 0x45000000u, 0x23000000u, 0x01000000u},
+        {0x89000000u, 0xba000000u, 0xdc000000u, 0xfe000000u},
+        {0xff000000u, 0x00000000u, 0xcf000000u, 0xfc000000u},
+        {0xff000000u, 0xff000000u, 0xff000000u, 0xff000000u},
+    };
+    static const uint32_t uc2i[4][4] = {
+        {0x33b3b3b3u, 0x22a2a2a2u, 0x11919191u, 0x00808080u},
+        {0x44c4c4c4u, 0x5d5d5d5du, 0x6e6e6e6eu, 0x7f7f7f7fu},
+        {0x7fffffffu, 0x00000000u, 0x67e7e7e7u, 0x7e7e7e7eu},
+        {0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu},
+    };
+    int bad = 0;
+    uint8_t si[1], di[4];
+    vreg_idx(0x00, 1, si);
+    vreg_idx(0x01, 4, di);
+    for (int p = 0; p < 4; p++)
+        for (int f = 0; f < 2; f++) {
+            CpuState before, expect;
+            setup_identity_compute(&before);
+            for (int i = 0; i < 128; i++) before.vi[i] = 0x3f800000u | ((uint32_t)i << 16);
+            before.vi[si[0]] = patterns[p];
+            expect = before;
+            for (int i = 0; i < 4; i++) expect.vi[di[i]] = f == 0 ? c2i[p][i] : uc2i[p][i];
+            bad |= psp_autotest_cell(f == 0 ? "vc2i .q size bits" : "vuc2i .q size bits",
+                                     f == 0 ? NULL : "uc2i-q-recorded", 0xd0398081u, &before, &expect);
+        }
+    /* A .q source field with the transpose or row-offset bit names another word as a quad
+     * than as a single; that, the .p and .t size bits and any prefix are unrecorded. */
+    bad |= psp_autotest_refused("vc2i .q size, source field 0x20", 0xd039a081u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vuc2i .q size, source field 0x40", 0xd038c081u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vc2i .t size", 0xd0398001u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vuc2i .t size", 0xd0388001u, 0xe4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vc2i .q size under negate-all", 0xd0398081u, 0xf00e4u, 0xe4u, 0u);
+    bad |= psp_autotest_refused("vuc2i .q size under a D prefix", 0xd0388081u, 0xe4u, 0xe4u, 0x1u);
+    return bad;
+}
+
 /* Alias and edge-value sweep (issue #326): every census form the AOT emits directly, at every
  * register-overlap signature its encoding allows (tools/vfpu_overlap_diff_gen.py), runs through
  * the generated body and sr_vfpu_interp from the same seeded state. About 30% of the lanes come
@@ -4245,6 +4536,10 @@ int main(void) {
     bad |= check_vrndi_rule_cells();
     bad |= check_mtvc_control_write_masks();
     bad |= check_vfpu_forms_measured();
+    bad |= check_pspautotests_vdet();
+    bad |= check_pspautotests_vsbn();
+    bad |= check_pspautotests_vt5551_vt5650();
+    bad |= check_pspautotests_byte_unpack_sizes();
     bad |= check_cop2_control_transfers();
     bad |= check_vfpu_cc_write_mask();
     bad |= check_vcmp_denormal_operands();

@@ -159,6 +159,17 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     cases.append((0xD0220000, "rndf1-s-forms", 1))
     cases.append((0xD0230000, "rndf2-s-forms", 1))
 
+    # Words pspautotests e37443a6 recorded on a PSP for forms both lanes refused before:
+    # vdet.p S000, C100, C200 and S000, C000, C100, vdet.t/.q S000, C100, C200, vsbn.s S010,
+    # S000, S100 and the vuc2i word with .q size bits (vuc2i C010, S000).
+    # check_pspautotests_vdet(), _vsbn() and _byte_unpack_sizes() find them by name.
+    cases.append((0x67080480, "vdet-p-recorded", 2))
+    cases.append((0x67040080, "vdet-p-overlap", 2))
+    cases.append((0x67088400, "vdet-t-recorded", 3))
+    cases.append((0x67088480, "vdet-q-recorded", 4))
+    cases.append((0x61040001, "vsbn-s-recorded", 1))
+    cases.append((0xD0388081, "uc2i-q-recorded", 4))
+
     # vf2in/vf2iz/vf2iu/vf2id.s at scale 0 (PSP-VFPU-CONVERT-001, probe case vfpu-convert, PSP-3000,
     # 2026-11-08): check_vf2i_measured_cells() finds them by name and runs the measured denormal and
     # NaN cells through both lanes. Physical source v[0], destination v[4].

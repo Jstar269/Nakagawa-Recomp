@@ -277,6 +277,49 @@ int main(void) {{
                 self.assertIn("issue=326", line)
                 self.assertIn("return;", line)
 
+    def test_pspautotests_recorded_forms_translate_at_their_recorded_widths(self):
+        # pspautotests e37443a6 tests/cpu/vfpu (recorded on a PSP) holds results for
+        # vdet.p/.t/.q, vsbn.s, vuc2i.q, vc2i.q and vt5551.q/vt5650.q. Before this
+        # change each word below raised Unsupported and ran as a VFPU_UNSUPPORTED stop.
+        # The direct forms keep the identity-prefix guard; the routed ones call
+        # sr_vfpu_interp, which refuses prefixes on them.
+        direct = {
+            0x67080480: ("float _s[4]={s->v[16],s->v[17]},_t[4]={s->v[32],s->v[33]};",
+                         "sr_vfpu_det(_s,_t,2)", "s->v[0]=_dd[0];"),
+            0x67088400: ("sr_vfpu_det(_s,_t,3)",),
+            0x67088480: ("sr_vfpu_det(_s,_t,4)",),
+            0x61040001: ("s->vi[4]=sr_vfpu_sbn(s->vi[0],s->vi[16]);",),
+            0xD0388081: ("uint32_t _s=s->vi[0];", "s->vi[4]=sr_vfpu_uc2i(_s>>0);",
+                         "s->vi[7]=sr_vfpu_uc2i(_s>>24);"),
+        }
+        for word, fragments in direct.items():
+            with self.subTest(word=f"0x{word:08x}"):
+                body, saddr, ssize = codegen.vfpu_effect(0x3400, word)
+                self.assertEqual((saddr, ssize), (None, 0))
+                self.assertNotIn("sr_vfpu_interp", body)
+                for fragment in fragments:
+                    self.assertIn(fragment, body)
+                for token in ("s->vfpuCtrl[0]!=0xe4u", "s->vfpuCtrl[2]!=0u",
+                              "VFPU_UNSUPPORTED", "sr_unimplemented", "return;"):
+                    self.assertIn(token, body)
+        for word in (0xD0398081, 0xD05A8081, 0xD05B8081):
+            with self.subTest(word=f"0x{word:08x}"):
+                body, saddr, ssize = codegen.vfpu_effect(0x3400, word)
+                self.assertEqual((saddr, ssize), (None, 0))
+                self.assertIn(f"sr_vfpu_interp(s,0x{word:08x}u)", body)
+                self.assertIn("VFPU_UNSUPPORTED", body)
+        # Unrecorded widths, and .q sources whose register field transposes or offsets
+        # the column, stay unsupported and fail closed through the interpreter.
+        for word in (0x67080400, 0x61040081, 0x61048081, 0xD0388001, 0xD038C081,
+                     0xD0398001, 0xD039A081, 0xD05A0080, 0xD05B8000):
+            with self.subTest(word=f"0x{word:08x}"):
+                with self.assertRaises(codegen.Unsupported):
+                    codegen.vfpu_effect(0x3400, word)
+                line = codegen.normal_line(0x3400, word)
+                self.assertIn(f"sr_vfpu_interp(s,0x{word:08x}u)", line)
+                self.assertIn("issue=326", line)
+                self.assertIn("return;", line)
+
     def test_left_right_quad_ops_always_use_single_step_decoder(self):
         for op in (0x35,0x3d):
             word=(op<<26)|(4<<21)|(7<<16)|2
