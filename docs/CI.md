@@ -727,7 +727,7 @@ texture cache, per-draw state template, filtering and blend cases against the so
 run's exit 77 also fails it, and so does a `dst-read mutant N: SKIP` line in its log (audit
 2026-11-17 F-1cbdad44). The recipe passes two kinds of SKIP with the step still green: the
 gpu-timestamps legs (its own and the twin's) and `ge-first-bad-draw-selftest` (`GE_FBD_SKIP_STATUS=0`).
-The interlock dst-read and stencil-once cells would SKIP on a device that refuses the interlock, but the
+The interlock dst-read, stencil-once and stencil-order cells would SKIP on a device that refuses the interlock, but the
 hosted lavapipe check before this step requires `VK_EXT_fragment_shader_interlock` and fails without it. Its scaled-upload case then runs alone at render scales 2 and 4, where
 every device pixel of an uploaded target must hold its guest pixel, and so does its mip-lod case,
 where the shader's per-fragment mip level must not change with the render scale, and so does its
@@ -757,9 +757,16 @@ the snapshot path, the known difference must stay inside each overlap, and the d
 state. `stencil-once` runs alone too, at scales 1 and 4 on the snapshot path and at scale 1 on the interlock
 path: a write-once stencil state (the first fragment to pass at a pixel stores a stencil that rejects the later
 ones) must draw overlapping primitives in one batch with no split and equal the software GE bit for bit, over a
-triangle mesh, a 7200-state matrix in each framebuffer format and three depth legs. The dst-read cells then run
-with the host twin (#2050) on, native and full colour, on both paths at scales 1 and 4, and `stencil-once` with
-the native twin on the interlock path: the image and the path taken must be those of the twin-off run, a native
+triangle mesh, a 7200-state matrix in each framebuffer format and three depth legs. `stencil-order` (#3244) runs
+alone at scales 1 and 4 on both paths and with `--depth 32` on the interlock path: stencil states that read their
+own writes and are not write-once, as many overlapping sprites (and, at scale 1, a triangle mesh) over a background
+that holds every stencil value, must equal the software GE bit for bit in colour and depth. On the interlock path,
+which orders the fragments at each pixel, each state's primitives must share one batch with no split; on the
+snapshot path, and for the shader-depth state with `--depth 32`, they must split. A list that also holds a state
+that textures from its own target must record the others in interlock ops apart from it. The dst-read cells then run
+with the host twin (#2050) on, native and full colour, on both paths at scales 1 and 4, `stencil-once` with
+the native twin on the interlock path, and `stencil-order` with it on the interlock path at scales 1 and 4 and on
+the snapshot path at 4: the image and the path taken must be those of the twin-off run, a native
 twin must equal its image, and a full-colour twin of the overlapping pair must hold the blends at 8 bits per
 channel, in drawing order on the interlock path. A device that refuses the
 interlock prints one SKIP line for each interlock leg, and the recipe's last line names every leg that printed a

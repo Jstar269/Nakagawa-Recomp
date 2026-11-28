@@ -11377,33 +11377,41 @@ typedef struct DroTexVtx { float u, v; uint32_t rgba; float x, y, z; } DroTexVtx
  * 8888 target) texturing from its own target, texel for texel (REPLACE, nearest). The first sprite
  * copies columns 0-15 to columns 16-31; the second, whose box meets the first's, copies columns
  * 16-31, the first sprite's output, to columns 32-47. */
+static void dro_feedback_emit(StpList *l);
+
 static uint32_t dro_feedback_list(void) {
     StpList l;
     stp_begin(&l, DRO_BASE, 3u, 0);
-    stp_emit(&l, 0xDC, 3u | (0x80u << 8) | (0x80u << 16));
-    stp_emit(&l, 0xDD, 2u << 16);
-    stp_emit(&l, 0xE9, 0);
-    stp_emit(&l, 0x21, 0);
-    stp_emit(&l, 0xA0, DRO_BASE & 0x00FFFFFFu);
-    stp_emit(&l, 0xA8, 512u | ((DRO_BASE & 0xFF000000u) >> 8));
-    stp_emit(&l, 0xB8, 9u | (9u << 8));
-    stp_emit(&l, 0xC0, 0); stp_emit(&l, 0xC2, 0); stp_emit(&l, 0xC3, 3);
-    stp_emit(&l, 0xC6, 0); stp_emit(&l, 0xC7, 0);
-    stp_emit(&l, 0xC9, 3u);                                /* REPLACE, colour only */
-    stp_emit(&l, 0xCB, 0);
-    stp_emit(&l, 0x1E, 1);
-    stp_emit(&l, 0x12, 3u | (7u << 2) | (3u << 7) | (1u << 23));
+    dro_feedback_emit(&l);
+    stp_end(&l);
+    return DRO_LIST;
+}
+
+/* The feedback pair's state and sprites, into an open 8888 list at DRO_BASE (dro_feedback_list,
+ * and stencil-order's mixed list). Its vertices are at DRO_VERTS. */
+static void dro_feedback_emit(StpList *l) {
+    stp_emit(l, 0xDC, 3u | (0x80u << 8) | (0x80u << 16));
+    stp_emit(l, 0xDD, 2u << 16);
+    stp_emit(l, 0xE9, 0);
+    stp_emit(l, 0x21, 0);
+    stp_emit(l, 0xA0, DRO_BASE & 0x00FFFFFFu);
+    stp_emit(l, 0xA8, 512u | ((DRO_BASE & 0xFF000000u) >> 8));
+    stp_emit(l, 0xB8, 9u | (9u << 8));
+    stp_emit(l, 0xC0, 0); stp_emit(l, 0xC2, 0); stp_emit(l, 0xC3, 3);
+    stp_emit(l, 0xC6, 0); stp_emit(l, 0xC7, 0);
+    stp_emit(l, 0xC9, 3u);                                /* REPLACE, colour only */
+    stp_emit(l, 0xCB, 0);
+    stp_emit(l, 0x1E, 1);
+    stp_emit(l, 0x12, 3u | (7u << 2) | (3u << 7) | (1u << 23));
     DroTexVtx *v = (DroTexVtx *)SR_HOST(DRO_VERTS);
     v[0] = (DroTexVtx){ 0.0f, 40.0f, 0xFFFFFFFFu, 16.0f, 40.0f, 0.0f };
     v[1] = (DroTexVtx){ 16.0f, 72.0f, 0xFFFFFFFFu, 32.0f, 72.0f, 0.0f };
     v[2] = (DroTexVtx){ 16.0f, 40.0f, 0xFFFFFFFFu, 32.0f, 40.0f, 0.0f };
     v[3] = (DroTexVtx){ 32.0f, 72.0f, 0xFFFFFFFFu, 48.0f, 72.0f, 0.0f };
-    stp_emit(&l, 0x01, DRO_VERTS & 0x00FFFFFFu);
-    stp_emit(&l, 0x04, (6u << 16) | 4u);
-    stp_emit(&l, 0x1E, 0);
-    stp_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23));
-    stp_end(&l);
-    return DRO_LIST;
+    stp_emit(l, 0x01, DRO_VERTS & 0x00FFFFFFu);
+    stp_emit(l, 0x04, (6u << 16) | 4u);
+    stp_emit(l, 0x1E, 0);
+    stp_emit(l, 0x12, (7u << 2) | (3u << 7) | (1u << 23));
 }
 
 static int coherence_run_dst_read_feedback(void) {
@@ -11712,6 +11720,9 @@ static int coherence_run_dst_read_one(const char *name) {
  *    the overlap. A state called write-once that is not one leaves the second sprite out where
  *    ge.c draws it, and the other way round;
  *  - anchors: states whose answer is known from the definition must merge (no split) or split once;
+ *    on the interlock path a state that is not write-once merges too, in interlock order
+ *    (interlock_orders), and so do the matrix's and the depth legs' (son_want_splits), except the
+ *    depth-blind leg and the feedback leg, which split on either path;
  *  - depth legs: the draw-once state under the depth test, over a depth wall that hides the first
  *    sprite in part of the overlap. With depth writes off, or the depth test ALWAYS and depth writes
  *    on, it merges, and colour and depth equal ge.c. Under GEQUAL with depth writes on it must
@@ -11740,8 +11751,15 @@ static const uint32_t k_son_amask[5] = { 0x00u, 0xF0u, 0x0Fu, 0x80u, 0xFFu };
 static const uint32_t k_son_ref[5] = { 0x00u, 0x80u, 0xFFu, 0x5Au, 0x0Fu };
 
 typedef struct SonRun {
-    unsigned long long splits, once_batches, once_tris, fallbacks, rmw_ops;
+    unsigned long long splits, once_batches, once_tris, fallbacks, rmw_ops, ordered;
 } SonRun;
+
+/* The splits a pair of overlapping sprites in one state makes: none for a write-once state, none
+ * on the interlock path, which orders the fragments of the batch they share (interlock_orders),
+ * and one otherwise, and for a depth-blind state (append_depth_blind) on either path. */
+static unsigned son_want_splits(int once, int blind, int ordered) {
+    return once ? 0u : (ordered && !blind) ? 0u : 1u;
+}
 
 /* The stencil state of a cell: the stencil-fail and depth-fail ops are KEEP. */
 static void son_state(StpList *l, uint32_t func, uint32_t ref, uint32_t smask, uint32_t zpass,
@@ -11779,6 +11797,7 @@ static int son_run_both(uint32_t fmt, uint32_t list, int structured, uint8_t *gp
     if (structured) son_fill_background(fmt); else stp_fill_background(SON_BASE, fmt);
     const unsigned long long s0 = s_replay_stats.stencil_splits, b0 = s_cnt_once_batches;
     const unsigned long long t0 = s_cnt_once_tris, f0 = s_replay_stats.fallback_prims, o0 = s_cnt_rmw_ops;
+    const unsigned long long m0 = s_cnt_ordered_merges;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list, 0);
     GeGpuFbDescriptor desc = { .addr = SON_BASE, .format = fmt, .stride = 512u,
@@ -11796,6 +11815,7 @@ static int son_run_both(uint32_t fmt, uint32_t list, int structured, uint8_t *gp
     run->once_tris = s_cnt_once_tris - t0;
     run->fallbacks = s_replay_stats.fallback_prims - f0;
     run->rmw_ops = s_cnt_rmw_ops - o0;
+    run->ordered = s_cnt_ordered_merges - m0;
     coherence_reset_targets();
     if (structured) son_fill_background(fmt); else stp_fill_background(SON_BASE, fmt);
     ge_set_gpu_hooks(NULL);
@@ -12072,7 +12092,7 @@ static int coherence_run_stencil_once(void) {
     }
 
     /* matrix */
-    unsigned long long matrix_splits = 0, matrix_once = 0;
+    unsigned long long matrix_splits = 0, matrix_once = 0, matrix_ordered = 0;
     unsigned matrix_bad = 0;
     for (uint32_t fmt = 0; fmt < 4u; fmt++)
         for (uint32_t first = 0; first < SON_STATES; first += SON_PER_LIST) {
@@ -12084,6 +12104,7 @@ static int coherence_run_stencil_once(void) {
             }
             matrix_splits += run.splits;
             matrix_once += run.once_batches;
+            matrix_ordered += run.ordered;
             const unsigned differing = son_differing(fmt, gpu_out, &at, &g, &w);
             if (differing || run.fallbacks) {
                 const uint32_t x = at & 0xFFFFu, y = at >> 16;
@@ -12098,10 +12119,12 @@ static int coherence_run_stencil_once(void) {
                 ok = 0;
             }
         }
-    if (matrix_splits == 0u || (!ordered && matrix_once == 0u)) {
-        fprintf(stderr, "gpu coherence selftest [stencil-once]: matrix: %llu splits and %llu batches drawn "
-                        "last to first (want some of each: it holds states of both kinds)\n",
-                matrix_splits, matrix_once);
+    if (ordered ? matrix_splits != 0u || matrix_ordered == 0u : matrix_splits == 0u || matrix_once == 0u) {
+        fprintf(stderr, "gpu coherence selftest [stencil-once]: matrix: %llu splits, %llu batches drawn "
+                        "last to first, %llu sprites merged in interlock order (want %s)\n",
+                matrix_splits, matrix_once, matrix_ordered,
+                ordered ? "no split, and some merged in order"
+                        : "some of each of the first two: it holds states of both kinds");
         ok = 0;
     }
 
@@ -12110,10 +12133,13 @@ static int coherence_run_stencil_once(void) {
         const SonAnchor *a = &k_son_anchors[i];
         if (!son_run_both(a->fmt, son_anchor_list(a), 1, gpu_out, NULL, NULL, &run)) { ok = 0; continue; }
         const unsigned differing = son_differing(a->fmt, gpu_out, &at, &g, &w);
-        if (differing || run.fallbacks || run.splits != (a->once ? 0u : 1u)) {
-            fprintf(stderr, "gpu coherence selftest [stencil-once]: anchor '%s': %llu splits (want %u), %u "
-                            "pixels differ from ge.c, %llu fallback primitives\n", a->name, run.splits,
-                    a->once ? 0u : 1u, differing, run.fallbacks);
+        const unsigned want = son_want_splits(a->once, 0, ordered);
+        const unsigned want_ordered = a->once || want ? 0u : 1u;
+        if (differing || run.fallbacks || run.splits != want || run.ordered != want_ordered) {
+            fprintf(stderr, "gpu coherence selftest [stencil-once]: anchor '%s': %llu splits (want %u), %llu "
+                            "merged in interlock order (want %u), %u pixels differ from ge.c, %llu fallback "
+                            "primitives\n", a->name, run.splits, want, run.ordered, want_ordered, differing,
+                    run.fallbacks);
             ok = 0;
         }
     }
@@ -12126,11 +12152,15 @@ static int coherence_run_stencil_once(void) {
         const unsigned differing = son_differing(fmt, gpu_out, &at, &g, &w);
         unsigned zdiff = 0;
         for (uint32_t i = 0; i < 480u * FB_H; i++) zdiff += gz[i] != wz[i];
-        if (differing || zdiff || run.fallbacks || run.splits != (leg->once ? 0u : 1u)) {
+        /* With depth writes the leg's state owns depth in the shader on the interlock path (its
+         * stencil-fail KEEP can run: rmw_shader_depth), which depth=32 keeps on the snapshot path. */
+        const int leg_ordered = ordered && !(s_depth32 && leg->zwrite);
+        const unsigned want = son_want_splits(leg->once, leg->zfail != 0u, leg_ordered);
+        if (differing || zdiff || run.fallbacks || run.splits != want) {
             fprintf(stderr, "gpu coherence selftest [stencil-once]: depth leg '%s' fmt=%u: colour differs "
                             "from ge.c in %u pixels, depth in %u; %llu splits (want %u), %llu fallback "
                             "primitives\n", leg->name, fmt, differing, zdiff, run.splits,
-                    leg->once ? 0u : 1u, run.fallbacks);
+                    want, run.fallbacks);
             if (differing)
                 fprintf(stderr, "gpu coherence selftest [stencil-once]: the first at x=%u y=%u gpu=%0*x "
                                 "ge_c=%0*x\n", at & 0xFFFFu, at >> 16, fmt == 3u ? 8 : 4, g, fmt == 3u ? 8 : 4, w);
@@ -12176,6 +12206,205 @@ static int coherence_run_stencil_once(void) {
                matrix_splits, (unsigned)(sizeof k_son_anchors / sizeof k_son_anchors[0]),
                ordered ? "interlock" : "snapshot");
     (void)mesh_drawn;
+    return ok;
+}
+
+/* stencil-order (#3244): stencil states that read their own writes and are not write-once
+ * (stencil_reads_own_writes), each drawn as SOR_SPRITES overlapping sprites in one SPRITES command
+ * over son_fill_background, so most sprites read pixels the ones before them wrote. On the
+ * interlock path every list's sprites share one batch in interlock order (interlock_orders): no
+ * stencil split, and sprites merged over boxes they meet. On the snapshot path such a sprite
+ * splits the batch, and none merges in order. Every list must equal ge.c bit for bit, depth
+ * included where it writes depth, with no software fallback:
+ *  - 5551, alpha-blended (in the shader) and dithered, the stencil test ALWAYS with KEEP ops, the
+ *    depth test GEQUAL with writes over a cleared depth buffer, sprites at hashed depths, and the
+ *    alpha test GREATER 0 with some sprites at alpha 0: Ace Combat Joint Assault's flight state,
+ *    whose depth the shader owns on the interlock path (rmw_shader_depth). At 1x the same state
+ *    also draws a flat-shaded mesh of overlapping triangles;
+ *  - 4444, the test ALWAYS with INCR on depth pass (the op reads the old stencil), unblended;
+ *  - 8888, GEQUAL 0x80 through mask 0xFF with INCR, blended (the test reads the stencil);
+ *  - 8888, EQUAL 0x50 through mask 0xF0 with INVERT, under an alpha write mask of 0x0F;
+ *  - mixed (8888): the GEQUAL list's sprites, dro_feedback_emit's pair (a state that textures from
+ *    its own target, which rmw_refuses keeps on the snapshot path), then the sprites again, all in
+ *    one list. On the interlock path submit_list records the runs apart: the sprites in interlock
+ *    ops, the pair on the snapshot path, where it splits once. */
+#define SOR_SPRITES 96u
+#define SOR_VERTS 0x08070000u
+#define SOR_MESH_TRIS 160u
+
+typedef struct SorList {
+    const char *name;
+    uint32_t fmt, func, ref, smask, ops, amask;
+    int blend, dither, depth, atest, mixed;
+} SorList;
+
+static const SorList k_sor_lists[] = {
+    { "5551 ALWAYS KEEP, blended, dithered, GEQUAL with depth writes, alpha test",
+      1u, 1u, 0x00u, 0xFFu, 0u, 0x00u, 1, 1, 1, 1, 0 },
+    { "4444 ALWAYS, INCR", 2u, 1u, 0x00u, 0xFFu, 4u << 16, 0x00u, 0, 0, 0, 0, 0 },
+    { "8888 GEQUAL 0x80, INCR, blended", 3u, 7u, 0x80u, 0xFFu, 4u << 16, 0x00u, 1, 0, 0, 0, 0 },
+    { "8888 EQUAL 0x50 mask 0xF0, INVERT, alpha mask 0x0F", 3u, 2u, 0x50u, 0xF0u, 3u | (3u << 16), 0x0Fu,
+      0, 0, 0, 0, 0 },
+    { "mixed 8888: GEQUAL 0x80 INCR, the feedback pair, GEQUAL again", 3u, 7u, 0x80u, 0xFFu, 4u << 16, 0x00u,
+      1, 0, 0, 0, 1 },
+};
+
+/* SOR_SPRITES hashed sprites at whole pixels inside x 96-336, y 16-176, 8 to 47 pixels a side, so
+ * each meets several others; alpha 0 on every seventh when `atest` (the alpha test rejects it). */
+static void sor_sprites(StpList *l, uint32_t *vaddr, uint32_t seed, int depth, int atest) {
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(*vaddr);
+    for (uint32_t i = 0; i < SOR_SPRITES; i++) {
+        const uint32_t h = wrap_hash(seed + i * 2u), k = wrap_hash(seed + i * 2u + 1u);
+        const float x = (float)(96u + h % 200u), y = (float)(16u + (h >> 8) % 120u);
+        const float w = (float)(8u + (h >> 16) % 40u), hh = (float)(8u + (h >> 24) % 40u);
+        const float z = depth ? (float)(k % 60000u) : 0.0f;
+        uint32_t c = (k >> 8) | 0x01000000u;
+        if (atest && i % 7u == 3u) c &= 0x00FFFFFFu;
+        v[2u * i] = (ParityGuestVtx){ c, x, y, z };
+        v[2u * i + 1u] = (ParityGuestVtx){ c, x + w, y + hh, z };
+    }
+    stp_emit(l, 0x01, *vaddr & 0x00FFFFFFu);
+    stp_emit(l, 0x04, (6u << 16) | (2u * SOR_SPRITES));
+    *vaddr += 2u * SOR_SPRITES * (uint32_t)sizeof(ParityGuestVtx);
+}
+
+/* SOR_MESH_TRIS flat-shaded triangles at hashed sixteenths of a pixel inside x 96-336, y 16-176,
+ * each at one hashed depth, in one TRIANGLES command. */
+static void sor_mesh(StpList *l, uint32_t *vaddr, uint32_t seed) {
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(*vaddr);
+    for (uint32_t t = 0; t < SOR_MESH_TRIS; t++) {
+        const uint32_t k = wrap_hash(seed + t * 4u);
+        const float z = (float)(k % 60000u);
+        uint32_t c = (k >> 8) | 0x01000000u;
+        if (t % 7u == 3u) c &= 0x00FFFFFFu;
+        const uint32_t h0 = wrap_hash(seed + t * 4u + 1u);
+        const float cx = 96.0f + (float)(h0 % 3600u) / 16.0f, cy = 16.0f + (float)((h0 >> 12) % 2400u) / 16.0f;
+        for (uint32_t j = 0; j < 3u; j++) {
+            const uint32_t h = wrap_hash(seed + t * 4u + 2u + j);
+            const float dx = (float)((int)(h % 513u) - 256) / 16.0f;
+            const float dy = (float)((int)((h >> 10) % 513u) - 256) / 16.0f;
+            v[3u * t + j] = (ParityGuestVtx){ c, cx + dx, cy + dy, z };
+        }
+    }
+    stp_emit(l, 0x01, *vaddr & 0x00FFFFFFu);
+    stp_emit(l, 0x04, (3u << 16) | (3u * SOR_MESH_TRIS));
+    *vaddr += 3u * SOR_MESH_TRIS * (uint32_t)sizeof(ParityGuestVtx);
+}
+
+static uint32_t sor_list(const SorList *s, int mesh) {
+    StpList l;
+    stp_begin(&l, SON_BASE, s->fmt, s->depth);
+    uint32_t vaddr = SOR_VERTS;
+    if (s->depth) {
+        stp_emit(&l, 0xD3, 1u | 0x400u);                   /* clear mode: depth only, to 0 */
+        stp_sprite(&l, &vaddr, 0u, 0.0f, 0.0f, 480.0f, 272.0f, 0.0f);
+        stp_emit(&l, 0xD3, 0);
+        stp_emit(&l, 0xDE, 7u);                             /* GEQUAL */
+        stp_emit(&l, 0xE7, 0u);                             /* depth writes on */
+    }
+    if (s->dither) {
+        stp_emit(&l, 0xE2, 0x4E2Bu); stp_emit(&l, 0xE3, 0xC1F3u);
+        stp_emit(&l, 0xE4, 0x2A7Eu); stp_emit(&l, 0xE5, 0xD05Bu);
+        stp_emit(&l, 0x20, 1);
+    }
+    if (s->atest) {
+        stp_emit(&l, 0x22, 1);
+        stp_emit(&l, 0xDB, 6u | (0xFFu << 16));             /* GREATER 0 */
+    }
+    stp_emit(&l, 0x50, 0);                                  /* flat shading */
+    for (int part = 0; part < (s->mixed ? 3 : 1); part++) {
+        if (part == 1) { dro_feedback_emit(&l); continue; }
+        stp_emit(&l, 0xDC, s->func | (s->ref << 8) | (s->smask << 16));
+        stp_emit(&l, 0xDD, s->ops);
+        stp_emit(&l, 0xE9, s->amask);
+        stp_emit(&l, 0x21, s->blend ? 1u : 0u);
+        sor_sprites(&l, &vaddr, 0x50A0u + (uint32_t)part * 977u + s->fmt * 131u, s->depth, s->atest);
+    }
+    if (mesh) sor_mesh(&l, &vaddr, 0x50B0u);
+    stp_emit(&l, 0x22, 0);
+    stp_emit(&l, 0x20, 0);
+    stp_emit(&l, 0x50, 1);
+    stp_end(&l);
+    return SON_LIST;
+}
+
+static int coherence_run_stencil_order(void) {
+    if (dro_interlock_refused()) {
+        printf("gpu coherence selftest: SKIP stencil-order (SR_GPU_DST_READ=interlock was refused; the "
+               "reason is printed above)\n");
+        return 1;
+    }
+    uint8_t *gpu_out = (uint8_t *)malloc(FB_W * FB_H * 4u);
+    uint16_t *gz = (uint16_t *)malloc(480u * FB_H * 2u), *wz = (uint16_t *)malloc(480u * FB_H * 2u);
+    if (!gpu_out || !gz || !wz) { free(gpu_out); free(gz); free(wz); return 0; }
+    GeState saved = *s_ge;
+    const int ordered = dro_ordered();
+    int ok = 1;
+    unsigned long long merged = 0, splits = 0;
+    unsigned lists = 0;
+    for (unsigned i = 0; i < sizeof k_sor_lists / sizeof k_sor_lists[0]; i++) {
+        const SorList *s = &k_sor_lists[i];
+        for (int mesh = 0; mesh < (s->depth && s_scale == 1 ? 2 : 1); mesh++) {
+            SonRun run = {0};
+            uint32_t at = 0, g = 0, w = 0;
+            const char *name = mesh ? "5551 Ace Combat state, with the triangle mesh" : s->name;
+            if (!son_run_both(s->fmt, sor_list(s, mesh), 1, gpu_out, s->depth ? gz : NULL,
+                              s->depth ? wz : NULL, &run)) {
+                fprintf(stderr, "gpu coherence selftest [stencil-order]: %s: the GPU run failed\n", name);
+                ok = 0;
+                continue;
+            }
+            lists++;
+            const unsigned differing = son_differing(s->fmt, gpu_out, &at, &g, &w);
+            unsigned zdiff = 0;
+            for (uint32_t p = 0; s->depth && p < 480u * FB_H; p++) zdiff += gz[p] != wz[p];
+            unsigned drawn = 0;
+            {
+                /* ge.c's picture against a fresh copy of the background */
+                const uint32_t bpp = s->fmt == 3u ? 4u : 2u;
+                uint8_t *sw = (uint8_t *)malloc(FB_W * FB_H * bpp);
+                if (sw) {
+                    memcpy(sw, SR_HOST(SON_BASE), FB_W * FB_H * bpp);
+                    son_fill_background(s->fmt);
+                    for (uint32_t p = 0; p < FB_W * FB_H; p++)
+                        drawn += memcmp(sw + p * bpp, (const uint8_t *)SR_HOST(SON_BASE) + p * bpp, bpp) != 0;
+                    memcpy(SR_HOST(SON_BASE), sw, FB_W * FB_H * bpp);
+                    free(sw);
+                }
+            }
+            merged += run.ordered;
+            splits += run.splits;
+            /* The mixed list's feedback pair splits on either path. With depth=32 the depth list's
+             * shader-owned depth keeps it on the snapshot path (rmw_refuses), so it splits there. */
+            const int list_ordered = ordered && !(s_depth32 && s->depth);
+            const unsigned long long want_splits_max = s->mixed ? 1u : 0u;
+            const int counts_ok = list_ordered ? run.splits == want_splits_max && run.ordered > 0u &&
+                                                     run.rmw_ops >= (s->mixed ? 2u : 1u)
+                                               : run.splits > want_splits_max && run.ordered == 0u;
+            if (differing || zdiff || run.fallbacks || drawn < 4096u || !counts_ok) {
+                fprintf(stderr, "gpu coherence selftest [stencil-order]: %s: colour differs from ge.c in %u "
+                                "pixels, depth in %u; %llu fallback primitives; ge.c changed %u pixels (want at "
+                                "least 4096); %llu stencil splits, %llu sprites merged in interlock order, %llu "
+                                "interlock ops (want %s)\n", name, differing, zdiff, run.fallbacks, drawn,
+                        run.splits, run.ordered, run.rmw_ops,
+                        list_ordered ? (s->mixed ? "1 split, some merged, at least 2 interlock ops"
+                                                 : "no split, some merged, an interlock op")
+                                : "splits, none merged");
+                if (differing)
+                    fprintf(stderr, "gpu coherence selftest [stencil-order]: the first at x=%u y=%u gpu=%0*x "
+                                    "ge_c=%0*x\n", at & 0xFFFFu, at >> 16, s->fmt == 3u ? 8 : 4, g,
+                            s->fmt == 3u ? 8 : 4, w);
+                ok = 0;
+            }
+        }
+    }
+    *s_ge = saved;
+    coherence_reset_targets();
+    free(gpu_out); free(gz); free(wz);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s lists=%u exact (colour, and depth where written), %llu "
+               "stencil splits, %llu sprites merged in interlock order (%s path)\n",
+               "stencil-order", lists, splits, merged, ordered ? "interlock" : "snapshot");
     return ok;
 }
 
@@ -17967,6 +18196,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "dst-read") == 0) return coherence_run_dst_read();
         if (strncmp(only, "dst-read-", 9) == 0) return coherence_run_dst_read_one(only);
         if (strcmp(only, "stencil-once") == 0) return coherence_run_stencil_once();
+        if (strcmp(only, "stencil-order") == 0) return coherence_run_stencil_order();
         if (strcmp(only, "stencil-parity") == 0) return coherence_run_stencil_parity();
         if (strcmp(only, "fallback-reasons") == 0) return coherence_run_fallback_reasons();
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale_at(0);
@@ -18092,6 +18322,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_lines()) ok = 0;
     if (!coherence_run_dst_read()) ok = 0;
     if (!coherence_run_stencil_once()) ok = 0;
+    if (!coherence_run_stencil_order()) ok = 0;
     if (!coherence_run_tnl_parity()) ok = 0;
     /* Last: it rewrites ge.c's depth surface. */
     if (!coherence_run_scaled_upload()) ok = 0;
