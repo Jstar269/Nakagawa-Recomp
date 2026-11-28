@@ -765,7 +765,7 @@ class TestNonFiniteVertex(unittest.TestCase):
         self.assertIn("ge_vtx_finite(", gpu_src,
                       "the Vulkan hooks must test the shared rule")
         self.assertIn("static int hook_finite(", gpu_src)
-        self.assertIn('"tris=%lu spr=%lu lines=%lu nonfinite=%lu', gpu_src,
+        self.assertIn('"tris=%lu spr=%lu lines=%lu points=%lu point_splits=%llu nonfinite=%lu', gpu_src,
                       "the Vulkan drop must be counted in the GEGPU stats line")
         for hook in ("tri", "sprite", "line", "point"):
             self.assertRegex(gpu_src, rf"(?s)static int hook_{hook}\(.{{0,400}}?hook_finite\(vv",

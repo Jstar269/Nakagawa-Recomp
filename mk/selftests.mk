@@ -1058,7 +1058,9 @@ native-core-tests: asset-index-selftest
 # against the destination) at 2 and 4, with the native twin and on the snapshot path, rtt-depth-alias (a depth read
 # inside a colour target's span) at 4, and rtt-1x-reads (#2279: the render-target reads that
 # decode guest VRAM at 1x at every scale) and rtt-vram-view (a target read through each view of
-# VRAM) at 2 and 4 (the whole-suite run covers 1x). The 32-bit host depth buffer (#2051) runs
+# VRAM) at 2 and 4 (the whole-suite run covers 1x). points (#3239: points drawn on the GPU,
+# no readback, equal to ge.c) runs alone at 2 and 4, with the native twin at 4, and on each
+# destination-read path at 1 and 4. The 32-bit host depth buffer (#2051) runs
 # host-depth with the key off and then on (`--depth 32`) at scales 1 and 4, the key-off run
 # writing the depth readback's hash that the key-on run must match (`--depth-ref`), then the
 # whole suite with the key on, and host-depth once more with the native twin. soft-shadow (Ace's
@@ -1185,6 +1187,13 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-1x-reads
 	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-vram-view
 	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-vram-view
+	$(GPU_COHERENCE_RUN) --scale 2 --case points
+	$(GPU_COHERENCE_RUN) --scale 4 --case points
+	$(GPU_COHERENCE_RUN) --twin native --scale 4 --case points
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --case points
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --scale 4 --case points
+	$(GPU_COHERENCE_RUN) --dst-read interlock --case points
+	$(GPU_COHERENCE_RUN) --dst-read interlock --scale 4 --case points
 	$(GPU_COHERENCE_RUN) --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
 	$(GPU_COHERENCE_RUN) --depth 32 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
 	$(GPU_COHERENCE_RUN) --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt

@@ -1339,11 +1339,11 @@ One console is one data point; see §11. Nothing here closes issue #70
   The Vulkan backend runs the same cells: `src/rt/gpu_sdl3vk/ge_gpu_selftest.inc` carries the block and the
   PSP digest table byte for byte (`tools/test_psp_oracle.py` pins all three copies), and
   `gpu_coherence_selftest --case psp-raster` (also in its default pass) draws every cell through `ge.c` with the
-  GPU hooks on at render scale 1 and compares the window it reads back with the PSP's digest. On 2026-11-11 146
-  cells are drawn on the GPU and equal the PSP. 23 are drawn by the software fallback and equal the PSP after
-  the readback, which proves nothing about the Vulkan raster: the depth test with stencil (`z-lt-st`,
-  `z-gt-st`), points (`e-points`), partial pixel masks (`msk-8888`, `msk-565`, `clr-ca-msk`) and the logic
-  operations (`lo-*`). 20 are drawn on the GPU and differ from the PSP by at most 2 per colour field, because
+  GPU hooks on at render scale 1 and compares the window it reads back with the PSP's digest. On 2026-11-28 147
+  cells are drawn on the GPU and equal the PSP, the points cell among them since the GPU draws points (#3239).
+  22 are drawn by the software fallback and equal the PSP after the readback, which proves nothing about the
+  Vulkan raster: the depth test with stencil (`z-lt-st`, `z-gt-st`), partial pixel masks (`msk-8888`,
+  `msk-565`, `clr-ca-msk`) and the logic operations (`lo-*`). 20 are drawn on the GPU and differ from the PSP by at most 2 per colour field, because
   Vulkan most likely blends and combines texture and vertex colours in floating point where the PSP truncates integer
   products: `b-sa-isa`, `b-dc-sc`, `b-idc-isc`, `b-da-ida`, `b-sub-sa-fix`, `b-rsub-sa-isa`, `tf-mod-rgb`,
   `tf-mod-rgb-x2`, `tf-mod-rgba`, `tf-mod-rgba-x2`, `tf-mod-rgba-1`, `tf-dec-rgba`, `tf-dec-rgba-x2`,
