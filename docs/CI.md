@@ -85,8 +85,8 @@ The jobs:
 | `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
 | `coverage_upload` ("Upload coverage to Codecov (informational)") | not present | 1 job, added later, about a minute after `python_tools` (and `c_coverage`) end: the only job with `id-token: write`, it runs no candidate byte (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | 5 parts since #3166 ([Native gates in parallel parts](#native-gates-in-parallel-parts)): `core`, `translation`, `gpu`, `player`, `routes`, medians 7.0-15.1 min over 12 full runs (measured 2026-11-27 to 2026-11-28: core 15.1, translation 9.1, gpu 12.9, player 12.3, routes 7.0), against 6.4-12.9 expected from the step medians |
-| `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, planned at about 16 min, and three planned at about 14 min; medians 16.4-19.7 min a shard over 27 full runs (measured 2026-11-27 to 2026-11-28: the `test_production_smoke` shard 18.6, the others 16.4, 19.7 and 18.3) |
-| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 6 groups of parts since #3166, medians 8.9-13.3 min over 21 full runs (measured 2026-11-27 to 2026-11-28: smoke-ladder-fuzz 10.9, player 10.0, homebrew 10.2, routes 13.3, cosim 8.9, selftests 11.3), against 9.3-13.6 expected (smoke-ladder-fuzz 13.1, player 10.1, homebrew 10.5, cosim 9.3, selftests 12.4, each the sum of its steps' medians, about half a minute under a whole job; routes at its measured 13.6). Before #3166, 4 groups, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7), medians 7.3-25.0 min over the 20 full runs of 2026-11-25 to 2026-11-26 (smoke 25.0, selftests 20.1, routes 13.6, ladder-fuzz 7.3) |
+| `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, planned at about 16 min, and three planned at about 14 min; medians 16.4-19.7 min a shard over 50 successful full runs (measured 2026-11-26 to 2026-11-28: the `test_production_smoke` shard 18.6, the others 16.4, 19.7 and 18.3) |
+| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 6 groups of parts since #3166, medians 8.9-13.3 min over 17 successful full runs (measured 2026-11-27 to 2026-11-28: smoke-ladder-fuzz 10.9, player 10.0, homebrew 10.2, routes 13.3, cosim 8.9, selftests 11.3), against 9.3-13.6 expected (smoke-ladder-fuzz 13.1, player 10.1, homebrew 10.5, cosim 9.3, selftests 12.4, each the sum of its steps' medians, about half a minute under a whole job; routes at its measured 13.6). Before #3166, 4 groups, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7), medians 7.3-25.0 min over the 20 full runs of 2026-11-25 to 2026-11-26 (smoke 25.0, selftests 20.1, routes 13.6, ladder-fuzz 7.3) |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged on a full run; does not run on a quick one |
@@ -116,8 +116,10 @@ The jobs:
   the two homebrew programs (3 seconds locally in WSL).
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone is planned
-  at about 16 minutes (its shard's median was 18.6 over 27 full runs, measured 2026-11-27 to
-  2026-11-28) and has a shard to itself, so a fifth shard would not shorten the job.
+  at about 16 minutes and has a shard to itself, so on the planned weights a fifth shard would
+  not shorten the job. Measured over 50 successful full runs (2026-11-26 to 2026-11-28), its
+  shard's median was 18.6 minutes and another shard's 19.7, so the weights in
+  `tools/ci_test_weights.json` are stale.
 - **Windows.** The eight parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
   and run in six matrix groups: `smoke-ladder-fuzz` (smoke, ladder, fuzz), `player`, `homebrew`,
   `routes`, `cosim` and `selftests`. A group runs the shared setup and the runtime-object
@@ -142,10 +144,10 @@ The jobs:
   `homebrew` and `cosim`, each a group of its own, and put `smoke` in one group with the ladder
   and the fuzzer; no step moved in the workflow and no command changed. From those runs' step
   medians plus the shared setup, the groups are expected to take `smoke-ladder-fuzz` 13.1
-  minutes, `player` 10.1, `homebrew` 10.5, `cosim` 9.3 and `selftests` 12.4, and `routes` to stay at its measured 13.6.
-  Over 21 full runs (measured 2026-11-27 to 2026-11-28) their medians were `smoke-ladder-fuzz` 10.9
-  minutes, `player` 10.0, `homebrew` 10.2, `routes` 13.3, `cosim` 8.9 and `selftests` 11.3.
-  Steps that read what another step builds share its
+  minutes, `player` 10.1, `homebrew` 10.5, `cosim` 9.3 and `selftests` 12.4, and `routes` to
+  stay at its measured 13.6. Over 17 successful full runs (measured 2026-11-27 to 2026-11-28)
+  their medians were `smoke-ladder-fuzz` 10.9 minutes, `player` 10.0, `homebrew` 10.2, `routes`
+  13.3, `cosim` 8.9 and `selftests` 11.3. Steps that read what another step builds share its
   part: the staged production smoke follows the production smoke (`smoke`), and the installer
   package and the staging smoke use `build/nakagawa_player.exe` from the player build
   (`player`). The homebrew route tests build their own player under a scratch `BUILD_ROOT`,
@@ -186,8 +188,9 @@ fails, for example, the Windows smoke part does not learn about its ladder part 
 slowest shard, and the longest Windows group about 13 minutes instead of 10-12, which is still
 shorter than a Python shard, so a run on idle runners takes about as long as before, and less
 time waiting when other runs are queued. The smoke group later grew to the 25.0-minute median
-above; since #3166 the longest Windows groups are expected at about 13 to 14 minutes (`routes` and `smoke-ladder-fuzz`), for two
-more Windows runners per run.
+above; since #3166 the longest Windows groups are expected at about 13 to 14 minutes (`routes` and
+`smoke-ladder-fuzz`), and were measured at medians of 13.3 and 10.9 over the 17 runs above, for
+two more Windows runners per run.
 `tools/test_public_ci_wiring.py` (`PublicExportJobTests`, `WindowsRuntimePartitionTests`)
 pins the merged jobs: every former step with its command and condition, its order, every
 Windows step in exactly one pinned part, and every Windows part in exactly one group.
@@ -333,14 +336,14 @@ settings.
 
 Hosted CI has two tiers. The **quick checks** are `Classify change`, `Hygiene and security` (with its
 Markdown step), the public export audit, `Generated files and repository lints` and their aggregate,
-`CI quick checks`: about 7 runner-minutes and 4.2 minutes of wall time at the median (28 quick runs,
-measured 2026-11-26 to 2026-11-28). The **full checks** add the Python tooling gates, the native
-and translation gates, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the
-Windows installer job and the profile-zero fixture build, as the changed paths route them, and their
-aggregate, `CI required`: about 224 runner-minutes and 27.8 minutes of wall time at the median for a
-full run that routes the Python suite (23 runs; 25.0 to 36.8 minutes for the middle half; same
-window). OSV-Scanner, Dependency Review, the provenance attestation and the Trusted CI verdict run
-on every push in both tiers.
+`CI quick checks`: about 6 runner-minutes and 4 minutes from first job start to last job end at the
+median (172 successful quick runs, 2026-11-26 to 2026-11-28). The **full checks** add the Python
+tooling gates, the native and translation gates, the GCC 16 canary, the Android launcher build, the
+Windows runtime gate, the Windows installer job and the profile-zero fixture build, as the changed
+paths route them, and their aggregate, `CI required`: about 217 runner-minutes and 27 minutes at the
+median for a change that routes everything, on the current layout (12 successful full runs,
+2026-11-27 to 2026-11-28). OSV-Scanner, Dependency Review, the provenance attestation and the
+Trusted CI verdict run on every push in both tiers.
 
 The repository variable `NK_CI_TIERS` switches the tiers. While it is not `on`, only a Draft runs the
 quick checks: every other pull request runs the full checks on each push, its head lands on its own
@@ -1180,10 +1183,12 @@ shards planned from run 42270920833's weights (2026-11-06); every shard planned 
 seconds, but the suite had grown to about 58 minutes, and the slowest shard took 21 to 24
 minutes. The suite now runs on four shards, for the full suite and the Makefile-coupled
 subset alike: `test_production_smoke` alone, planned at about 16 minutes, and three planned
-at about 14 minutes each. Over 27 full runs (measured 2026-11-27 to 2026-11-28) the shards'
-medians were 16.4 to 19.7 minutes, the `test_production_smoke` shard 18.6. That is the fewest
-shards at which the heaviest module sets the job, the rule
-`tools/test_ci_test_shards.py` holds both counts to; see [Jobs per run](#jobs-per-run).
+at about 14 minutes each. Four is the fewest shards at which the heaviest module sets the
+job, the rule `tools/test_ci_test_shards.py` holds both counts to on the planned weights; see
+[Jobs per run](#jobs-per-run). Over 50 successful full runs (measured 2026-11-26 to
+2026-11-28) the shards' medians were 16.4 to 19.7 minutes: another shard, at 19.7, ran longer
+than the `test_production_smoke` shard, at 18.6, so the weights in
+`tools/ci_test_weights.json` are stale.
 The job limit stays at 60 minutes: on the busy self-hosted pool a step that planned to
 about 7 minutes took 17-20 minutes on 2026-11-01.
 `python tools/ci_test_shards.py --check` rejects weights for modules that no longer
