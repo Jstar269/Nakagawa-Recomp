@@ -1126,11 +1126,16 @@ static size_t iso_dir_record(uint8_t *record, const uint8_t *name, size_t name_l
 
 /* A minimal ISO whose PSP_GAME/USRDIR/module holds one guest module: PVD at
  * 16, root 17, PSP_GAME 18, USRDIR 19, module directory 20, data 21. */
-static void write_guest_module_iso(const char *path, const char *name,
-                                   const unsigned char *module, size_t module_size) {
-    enum { SECTOR = 2048, DATA_LBA = 21 };
+/* A disc whose PSP_GAME/USRDIR/module holds one file. With disc_id it also has a
+   PSP_GAME/PARAM.SFO naming that disc, as a game disc does; without, it has none. */
+static void write_guest_module_disc(const char *path, const char *disc_id, const char *name,
+                                    const unsigned char *module, size_t module_size) {
+    enum { SECTOR = 2048, SFO_LBA = 21, DATA_LBA = 22 };
     static const uint8_t dot[1] = { 0 };
     static const uint8_t dotdot[1] = { 1 };
+    uint8_t sfo[256];
+    size_t sfo_size = disc_id != NULL
+        ? build_player_test_param_sfo(sfo, sizeof(sfo), disc_id, "Guest module fixture") : 0;
     size_t data_sectors = (module_size + SECTOR - 1) / SECTOR;
     size_t total = ((size_t)DATA_LBA + data_sectors) * SECTOR;
     uint8_t *image = (uint8_t *)calloc(1, total);
@@ -1149,6 +1154,11 @@ static void write_guest_module_iso(const char *path, const char *name,
     off = 0;
     off += iso_dir_record(game + off, dot, 1, 18, SECTOR, true);
     off += iso_dir_record(game + off, dotdot, 1, 17, SECTOR, true);
+    if (sfo_size != 0) {
+        off += iso_dir_record(game + off, (const uint8_t *)"PARAM.SFO;1", 11, SFO_LBA,
+                              (uint32_t)sfo_size, false);
+        memcpy(image + (size_t)SFO_LBA * SECTOR, sfo, sfo_size);
+    }
     off += iso_dir_record(game + off, (const uint8_t *)"USRDIR", 6, 19, SECTOR, true);
     uint8_t *usrdir = image + 19 * SECTOR;
     off = 0;
@@ -1167,6 +1177,11 @@ static void write_guest_module_iso(const char *path, const char *name,
     assert(fwrite(image, 1, total, file) == total);
     assert(fclose(file) == 0);
     free(image);
+}
+
+static void write_guest_module_iso(const char *path, const char *name,
+                                   const unsigned char *module, size_t module_size) {
+    write_guest_module_disc(path, NULL, name, module, module_size);
 }
 
 /* A disc whose PSP_GAME/SYSDIR/EBOOT.BIN holds the given bytes. */
@@ -1236,6 +1251,26 @@ static size_t seal_with_builtin_recipe(uint8_t *out, size_t cap, const uint8_t *
     return psp_seal_type2(out, cap, payload, payload_len, 0, (uint32_t)payload_len,
                           seal_tag, recipe->key, builtin_value(vault_name),
                           builtin_value("kirk.cmd1.key"));
+}
+
+/* payload sealed as a library module a game ships on its disc (#3235): under one
+   recipe of the disc-library table, with the header fields the boundary reads (module
+   attribute, decrypt mode); seal_tag may differ from recipe_tag to put another tag in
+   the header. */
+static size_t seal_with_disc_library_recipe(uint8_t *out, size_t cap, const uint8_t *payload,
+                                            size_t payload_len, uint32_t recipe_tag,
+                                            uint32_t seal_tag, uint16_t attribute,
+                                            uint8_t decrypt_mode) {
+    const NkPspBuiltinTag *recipe = NULL;
+    char vault_name[32];
+    for (size_t i = 0; i < nk_psp_disc_library_tag_count; i++) {
+        if (nk_psp_disc_library_tags[i].tag == recipe_tag) recipe = &nk_psp_disc_library_tags[i];
+    }
+    assert(recipe != NULL && recipe->key != NULL);
+    snprintf(vault_name, sizeof(vault_name), "kirk.keyvault.%d", recipe->code);
+    return psp_seal_type2_as(out, cap, payload, payload_len, 0, (uint32_t)payload_len,
+                             seal_tag, recipe->key, builtin_value(vault_name),
+                             builtin_value("kirk.cmd1.key"), attribute, decrypt_mode);
 }
 
 /* A disc with a readable PARAM.SFO, an EBOOT.BIN that is a plain MIPS ELF or an
@@ -17949,6 +17984,124 @@ int main(int argc, char **argv) {
                 assert(module_check && module_check->status == PREFLIGHT_OK);
                 assert(strstr(module_check->message, "Guest modules: 1 of 1 ready.") != NULL);
                 assert(remove(module_copy) == 0);
+                write_guest_module_iso(module_iso_path, "libfont.prx", prx_bytes,
+                                       sizeof(prx_bytes));
+            }
+
+            /* #3235: a library module the game ships under PSP_GAME/USRDIR carries a
+               user-module tag firmware also carries. Read from a disc that names itself
+               a game disc it is decrypted with the built-in tables; the same file on an
+               image with no PARAM.SFO, with a kernel header, or under a VSH firmware tag
+               is refused as firmware by name and nothing is written. */
+            {
+                uint8_t library[0x150 + 96];
+                unsigned char read_back[128];
+                size_t library_len;
+                FILE *produced;
+                const PlayerPreflightCheck *blocking;
+
+                /* The second layer: a key store filled with the built-in tables alone,
+                   which is what every route but the disc route's guest modules uses,
+                   holds no recipe for either tag. Only the library loader adds them, and
+                   the player loads it for a guest module, never for the executable. */
+                {
+                    static const bool for_module[] = {false, false, true, true};
+                    for (int store = 0; store < 4; store++) {
+                        NkKeystore *probe_keys = nk_keystore_create();
+                        char load_error[160] = "";
+                        bool expect = store >= 2;
+                        assert(probe_keys != NULL);
+                        if (store == 0) { /* the loose route: nk_keystore_load_builtin alone */
+                            assert(nk_keystore_load_builtin(probe_keys, load_error,
+                                                            sizeof(load_error)) == NK_PSP_OK);
+                        } else if (store == 2) { /* the disc route's loader on top of it */
+                            assert(nk_keystore_load_builtin(probe_keys, load_error,
+                                                            sizeof(load_error)) == NK_PSP_OK);
+                            assert(nk_keystore_load_builtin_disc_libraries(
+                                       probe_keys, load_error, sizeof(load_error)) == NK_PSP_OK);
+                        } else { /* the player's own stores: executable, then guest module */
+                            assert(player_disc_keys_load(probe_keys, for_module[store], load_error,
+                                                         sizeof(load_error)));
+                        }
+                        assert(nk_psp_disc_library_tag_count == 2u);
+                        for (size_t t = 0; t < nk_psp_disc_library_tag_count; t++) {
+                            NkPrxTagEntry recipe;
+                            int missing = nk_keystore_get_prx_tag(
+                                probe_keys, nk_psp_disc_library_tags[t].tag, &recipe);
+                            assert(expect ? missing == 0 : missing != 0);
+                        }
+                        nk_keystore_free(probe_keys);
+                    }
+                }
+
+                for (uint32_t tag = 0x457B05F0u; tag <= 0x457B06F0u; tag += 0x100u) {
+                    library_len = seal_with_disc_library_recipe(
+                        library, sizeof(library), prx_bytes, sizeof(prx_bytes), tag, tag,
+                        0x0006u, 4u);
+                    write_guest_module_disc(module_iso_path, "ULUS99996", "libfont.prx",
+                                            library, library_len);
+                    remove(module_copy);
+                    player_app_build_compatibility_preflight(wiz, true, true,
+                                                             &executable_report);
+                    module_check = find_preflight_check(&wiz->wizard.preflight, "GUEST_MODULES");
+                    assert(module_check && module_check->status == PREFLIGHT_OK);
+                    assert(strstr(module_check->message,
+                                  "Guest modules: 1 of 1 ready; 1 decrypted from the disc "
+                                  "with the built-in tables.") != NULL);
+                    produced = fopen(module_copy, "rb");
+                    assert(produced != NULL);
+                    assert(fread(read_back, 1, sizeof(read_back), produced) ==
+                           sizeof(prx_bytes));
+                    assert(fclose(produced) == 0);
+                    assert(memcmp(read_back, prx_bytes, sizeof(prx_bytes)) == 0);
+                    assert(remove(module_copy) == 0);
+                }
+
+                /* No PARAM.SFO: the image is not read as a game disc. */
+                library_len = seal_with_disc_library_recipe(
+                    library, sizeof(library), prx_bytes, sizeof(prx_bytes), 0x457B06F0u,
+                    0x457B06F0u, 0x0006u, 4u);
+                write_guest_module_iso(module_iso_path, "libfont.prx", library, library_len);
+                player_app_build_compatibility_preflight(wiz, true, true, &executable_report);
+                module_check = find_preflight_check(&wiz->wizard.preflight, "GUEST_MODULES");
+                assert(module_check && module_check->status == PREFLIGHT_MISSING);
+                assert(strstr(module_check->message, "ENCRYPTED_MODULE: libfont.prx is encrypted "
+                                                     "and built-in decryption stopped: "
+                                                     "FIRMWARE_OUT_OF_SCOPE (") != NULL);
+                assert(strstr(module_check->message, "it is not read as a game disc") != NULL);
+                assert(!nk_platform_file_exists(module_copy));
+                blocking = module_check;
+                assert(strstr(player_preflight_plain_message(blocking),
+                              "it is PSP system software, or signed like it, which Nakagawa "
+                              "never decrypts") != NULL);
+
+                /* A kernel-mode header under the library tag. */
+                library_len = seal_with_disc_library_recipe(
+                    library, sizeof(library), prx_bytes, sizeof(prx_bytes), 0x457B06F0u,
+                    0x457B06F0u, 0x1006u, 4u);
+                write_guest_module_disc(module_iso_path, "ULUS99996", "libfont.prx", library,
+                                        library_len);
+                player_app_build_compatibility_preflight(wiz, true, true, &executable_report);
+                module_check = find_preflight_check(&wiz->wizard.preflight, "GUEST_MODULES");
+                assert(module_check && module_check->status == PREFLIGHT_MISSING);
+                assert(strstr(module_check->message, "FIRMWARE_OUT_OF_SCOPE (") != NULL);
+                assert(strstr(module_check->message,
+                              "is not a plain user-mode library module") != NULL);
+                assert(!nk_platform_file_exists(module_copy));
+
+                /* A VSH firmware-module tag, on the same game disc. */
+                library_len = seal_with_disc_library_recipe(
+                    library, sizeof(library), prx_bytes, sizeof(prx_bytes), 0x457B06F0u,
+                    0x380290F0u, 0x0006u, 4u);
+                write_guest_module_disc(module_iso_path, "ULUS99996", "libfont.prx", library,
+                                        library_len);
+                player_app_build_compatibility_preflight(wiz, true, true, &executable_report);
+                module_check = find_preflight_check(&wiz->wizard.preflight, "GUEST_MODULES");
+                assert(module_check && module_check->status == PREFLIGHT_MISSING);
+                assert(strstr(module_check->message, "FIRMWARE_OUT_OF_SCOPE (") != NULL);
+                assert(strstr(module_check->message, "flash0 VSH firmware module") != NULL);
+                assert(!nk_platform_file_exists(module_copy));
+
                 write_guest_module_iso(module_iso_path, "libfont.prx", prx_bytes,
                                        sizeof(prx_bytes));
             }

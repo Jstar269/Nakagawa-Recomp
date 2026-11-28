@@ -117,9 +117,16 @@ def status_code(status: int) -> str | None:
     return EXIT_STATUS_CODES.get(status, "INTERNAL_ERROR")
 
 
-def _run_tool(tool: Path, encrypted: Path, destination: Path) -> tuple[int, str]:
+def _run_tool_member(tool: Path, iso: Path, member: str, destination: Path) -> tuple[int, str]:
+    """Decrypt one file of a disc image, which ``nk_decrypt`` reads out of the image itself.
+
+    The engine, not this caller, establishes where the bytes came from: that is what lets it
+    open the library modules a game ships on its own disc and still refuse the same bytes as a
+    loose file (``nk_container_decrypt_disc_member``, src/core/nk_psp_container.h).
+    """
     proc = subprocess.run(
-        [str(tool), "decrypt", "--in", str(encrypted), "--out", str(destination)],
+        [str(tool), "disc-member", "--iso", str(iso), "--member", member,
+         "--out", str(destination)],
         capture_output=True, text=True,
     )
     lines = (proc.stdout + proc.stderr).strip().splitlines()
@@ -140,6 +147,10 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
     refuses (firmware is refused by name) stays encrypted and the bring-up names that
     boundary. A member gone from the image after discovery is a row with status -1 and code
     ``DISC_DECRYPT_MEMBER_MISSING``; the other members are still decrypted.
+
+    With ``tool``, the engine reads each member out of the image itself (``nk_decrypt
+    disc-member``), so no encrypted copy is written anywhere. A ``runner`` (the tests' seam)
+    is instead handed a staged copy of the member under the per-title folder.
     """
     from . import iso_inspect as ii
 
@@ -148,13 +159,27 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
     if out_dir is None:
         raise ValueError(f"{disc_id!r} is not a disc ID")
     iso = ii._plain_iso_path(iso, user_data_root)
+    # member, its bytes (None when the engine reads them itself), staged input, output
+    decrypt_member: Callable[[str, Optional[bytes], Path, Path], tuple[int, str]]
     if runner is None:
         if tool is None:
             raise ValueError("decrypt_disc needs the nk_decrypt tool or a runner")
         tool_path = Path(tool)
 
-        def runner(encrypted: Path, destination: Path) -> tuple[int, str]:
-            return _run_tool(tool_path, encrypted, destination)
+        def decrypt_member(member: str, _blob: Optional[bytes], _encrypted: Path,
+                           destination: Path) -> tuple[int, str]:
+            return _run_tool_member(tool_path, iso, member, destination)
+    else:
+        staged_runner = runner
+
+        def decrypt_member(_member: str, blob: Optional[bytes], encrypted: Path,
+                           destination: Path) -> tuple[int, str]:
+            assert blob is not None
+            encrypted.write_bytes(blob)
+            try:
+                return staged_runner(encrypted, destination)
+            finally:
+                encrypted.unlink(missing_ok=True)
 
     size = iso.stat().st_size
     items: list[tuple[tuple[str, ...], str]] = []
@@ -195,22 +220,24 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
                     rows.append({**row, "status": -1, "code": "DISC_DECRYPT_MEMBER_MISSING",
                                  "message": "encrypted disc member disappeared after discovery"})
                     continue
-                lba, count = extent
-                blob = ii._read_iso_extent(stream, size, lba, count, 0, count)
-            encrypted = Path(staging) / (name + ".enc")
-            encrypted.write_bytes(blob)
+                # The engine reads the member out of the image itself; only a runner is
+                # handed the bytes.
+                blob = None
+                if runner is not None:
+                    lba, count = extent
+                    blob = ii._read_iso_extent(stream, size, lba, count, 0, count)
             staged_file = tempfile.NamedTemporaryFile(
                 prefix=f".{destination.name}.", suffix=".tmp", dir=out_dir, delete=False
             )
             staged_output = Path(staged_file.name)
             staged_file.close()
             try:
-                status, message = runner(encrypted, staged_output)
+                status, message = decrypt_member(row["member"], blob,
+                                                 Path(staging) / (name + ".enc"), staged_output)
                 if status == 0:
                     os.replace(staged_output, destination)
             finally:
                 staged_output.unlink(missing_ok=True)
-            encrypted.unlink(missing_ok=True)
             rows.append({**row, "status": status, "code": status_code(status),
                          "message": message})
     return rows

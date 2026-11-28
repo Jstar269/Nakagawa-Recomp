@@ -382,10 +382,11 @@ def _round16(value: int) -> int:
 
 
 def build_psp_header(container_size: int, elf_size: int, comp: bool,
-                     seg_sizes: tuple[int, int, int, int]) -> bytearray:
+                     seg_sizes: tuple[int, int, int, int], *,
+                     attribute: int = 0x0200, decrypt_mode: int = 0) -> bytearray:
     header = bytearray(0x80)
     header[:4] = b"~PSP"
-    struct.pack_into("<H", header, 0x04, 0x0200)         # attribute
+    struct.pack_into("<H", header, 0x04, attribute)      # 0x1000 kernel, 0x0800 VSH
     struct.pack_into("<H", header, 0x06, 0x0001 if comp else 0x0000)
     header[0x0A:0x0A + 9] = b"synthetic"                 # modname (clearly fake)
     header[0x26] = 0x01                                  # module version
@@ -399,11 +400,13 @@ def build_psp_header(container_size: int, elf_size: int, comp: bool,
     struct.pack_into("<4I", header, 0x54,
                      seg_sizes[0], seg_sizes[1], seg_sizes[2], seg_sizes[3])
     struct.pack_into("<I", header, 0x78, 0x06060000)     # devkitversion
+    header[0x7C] = decrypt_mode                          # 4: a user module
     return header
 
 
 def seal_type2_psp(payload: bytes, tag: int, tag_key: bytes, kirk_cmd1_key: bytes,
-                   keyvault_key: bytes, *, compressed: bool, elf_size: int) -> bytes:
+                   keyvault_key: bytes, *, compressed: bool, elf_size: int,
+                   attribute: int = 0x0200, decrypt_mode: int = 0) -> bytes:
     """Seal ``payload`` into an encrypted ``~PSP`` type-2 container.
 
     Mirrors the production decode path: KIRK CMD1 wrapping, the type-2 header
@@ -426,7 +429,8 @@ def seal_type2_psp(payload: bytes, tag: int, tag_key: bytes, kirk_cmd1_key: byte
     # Header copy used as CMD1 predata; filled once the container size is known.
     container_size = 0x150 + chk_size
     header = build_psp_header(container_size, elf_size, compressed,
-                              (elf_size, 0x100, 0, 0))
+                              (elf_size, 0x100, 0, 0),
+                              attribute=attribute, decrypt_mode=decrypt_mode)
     assert len(header) == 0x80
 
     # Per-header wrap keys, varied by (fake) tag key; never a real key.
@@ -1127,25 +1131,46 @@ BUILTIN_GAME_TAG = 0xD91613F0
 FIRMWARE_TAGS = (0x0B000000, 0x0E000000, 0x0F000000, 0x862648D1, 0x07000000, 0x0B2B92F0,
                  0x06000000, 0x0B2B10F0)
 # One tag from each flash0 firmware-module family PPSSPP's table carries (kernel modules:
-# 0x4C94xxF0, 0xCFEFxxF0, 0x16D59E03; VSH modules: 0x457BxxF0, 0x3802xxF0, 0x76202403,
-# 0x0F037303), with the name the refusal gives it.
+# 0x4C94xxF0, 0xCFEFxxF0, 0x16D59E03; user modules: 0x457BxxF0, 0x76202403; VSH modules:
+# 0x3802xxF0, 0x0F037303), with the name the refusal gives it. The two user-module tags
+# game discs also carry (DISC_LIBRARY_TAGS) are here too: as loose bytes they are refused
+# like the rest.
+DISC_LIBRARY_TAGS = (0x457B05F0, 0x457B06F0)
 FIRMWARE_MODULE_TAGS = {
     0x4C9494F0: "flash0 kernel firmware module", 0x4C940FF0: "flash0 kernel firmware module",
     0xCFEF09F0: "flash0 kernel firmware module", 0x16D59E03: "flash0 kernel firmware module",
-    0x457B90F0: "flash0 VSH firmware module", 0x380290F0: "flash0 VSH firmware module",
-    0x380280F0: "flash0 VSH firmware module", 0x76202403: "flash0 VSH firmware module",
+    0x457B90F0: "flash0 user-mode firmware module", 0x380290F0: "flash0 VSH firmware module",
+    0x380280F0: "flash0 VSH firmware module", 0x76202403: "flash0 user-mode firmware module",
     0x0F037303: "flash0 VSH firmware module",
+    0x457B05F0: "flash0 user-mode firmware module", 0x457B06F0: "flash0 user-mode firmware module",
 }
 
 
 def is_firmware_module_tag(tag: int) -> bool:
-    """True for a tag in one of the flash0 kernel or VSH module families."""
+    """True for a tag in one of the flash0 kernel, user or VSH module families."""
     return (tag & 0xFFFF00FF) in (0x4C9400F0, 0xCFEF00F0, 0x457B00F0, 0x380200F0) or tag in (
         0x16D59E03, 0x76202403, 0x0F037303)
 
 
+def _table_block(text: str, name: str) -> str:
+    """The initializer of one C table in the built-in key file."""
+    found = re.search(r"\b%s\[\] = \{\n(.*?)\n\};" % re.escape(name), text, re.S)
+    assert found is not None, name
+    return found.group(1)
+
+
+def _table_recipes(block: str) -> dict:
+    return {int(tag, 16): {"code": int(code, 16), "key": key, "key144": key144, "xor": xor}
+            for tag, code, key, key144, xor in re.findall(
+                r"\{0x([0-9A-F]{8}), 0x([0-9A-F]{2}), (\w+), (\w+), (\w+)\}", block)}
+
+
 def builtin_table() -> tuple[dict, dict, dict]:
-    """Parse the public built-in table: byte arrays, recipes, flat values, firmware tags."""
+    """Parse the public built-in table: byte arrays, recipes, flat values, firmware tags.
+
+    ``recipes`` is the game table (``nk_psp_builtin_tags``), what every key store holds;
+    ``disc_libraries`` is the separate table only the disc route loads.
+    """
     text = BUILTIN_TABLE.read_text(encoding="utf-8")
     arrays = {
         name: bytes(int(v, 16) for v in re.findall(r"0x([0-9A-Fa-f]{2})\b", body))
@@ -1154,16 +1179,16 @@ def builtin_table() -> tuple[dict, dict, dict]:
     for name, body in re.findall(r"static const u32 (\w+)\[\] = \{([^}]*)\};", text):
         arrays[name] = b"".join(struct.pack("<I", int(v, 16))
                                 for v in re.findall(r"0x([0-9A-Fa-f]{8})\b", body))
-    recipes = {}
-    for tag, code, key, key144, xor in re.findall(
-            r"\{0x([0-9A-F]{8}), 0x([0-9A-F]{2}), (\w+), (\w+), (\w+)\}", text):
-        recipes[int(tag, 16)] = {"code": int(code, 16), "key": key, "key144": key144,
-                                 "xor": xor}
+    recipes = _table_recipes(_table_block(text, "nk_psp_builtin_tags"))
+    disc_libraries = _table_recipes(_table_block(text, "nk_psp_disc_library_tags"))
+    every_recipe = re.findall(r"\{0x([0-9A-F]{8}), 0x[0-9A-F]{2}, \w+, \w+, \w+\}", text)
+    assert len(every_recipe) == len(recipes) + len(disc_libraries), "a recipe outside both tables"
     values = {name: arrays[cname]
               for name, cname in re.findall(r'\{"([A-Za-z0-9._]+)", (\w+), sizeof', text)}
     firmware = {int(tag, 16): what
                 for tag, what in re.findall(r'\{0x([0-9A-F]{8}), "([^"]+)"\}', text)}
-    return arrays, recipes, {"values": values, "firmware": firmware}
+    return arrays, recipes, {"values": values, "firmware": firmware,
+                             "disc_libraries": disc_libraries}
 
 
 def seal_with_builtin_table(payload: bytes, header_tag: int = BUILTIN_GAME_TAG) -> bytes:
@@ -1298,6 +1323,20 @@ class TestBuiltinTables(unittest.TestCase):
         self.assertFalse(set(self.firmware) & set(self.recipes))
         self.assertFalse([tag for tag in self.recipes if is_firmware_module_tag(tag)])
         self.assertTrue(set(FIRMWARE_MODULE_TAGS) <= set(self.firmware))
+        # #3235: the only recipes for a listed tag are the two user-module tags measured on
+        # game discs. They are in their own table, which the game table does not include,
+        # both stay in the refusal list, and they use the keyvault row the 2.00 user-module
+        # tag in the game table already uses, so no keyvault row came back with them.
+        _, _, extra = builtin_table()
+        libraries = extra["disc_libraries"]
+        self.assertEqual(set(libraries), set(DISC_LIBRARY_TAGS))
+        self.assertFalse(set(libraries) & set(self.recipes))
+        self.assertTrue(set(libraries) <= set(self.firmware))
+        for tag, recipe in libraries.items():
+            self.assertEqual(self.firmware[tag], "flash0 user-mode firmware module")
+            self.assertEqual((recipe["code"], recipe["key144"], recipe["xor"]),
+                             (0x5B, "NULL", "NULL"))
+            self.assertEqual(recipe["code"], self.recipes[0x3ACE4DCE]["code"])
         self.assertFalse([name for name in self.values if name.startswith("psar.")])
         used = {recipe["code"] for recipe in self.recipes.values()}
         rows = {int(name.rsplit(".", 1)[1]) for name in self.values
@@ -2519,6 +2558,492 @@ class TestNpumdimg(unittest.TestCase):
 
 # The clear text of the well-formed coded stream the LZRC corpus below mutates
 # (synthetic bytes; lzrc_literals encodes them).
+# ---------------------------------------------------------------------------
+# Library modules a game ships on its own disc (#3235)
+# ---------------------------------------------------------------------------
+
+def build_disc_image(files: dict[str, bytes], *, disc_id: str | None = "TEST93235",
+                     sfo: bytes | None = None) -> bytes:
+    """A small ISO9660 image holding ``files`` (path inside the image -> bytes).
+
+    ``PSP_GAME/PARAM.SFO`` is added with ``disc_id`` unless that is None (an image with no
+    game identity) or ``sfo`` gives its bytes. Directories may span several sectors; a record
+    never crosses one. Synthetic bytes only.
+    """
+    tree: dict = {}
+    entries = dict(files)
+    if sfo is None and disc_id is not None:
+        sfo = build_sfo({"DISC_ID": disc_id, "DISC_VERSION": "1.00", "CATEGORY": "UG",
+                         "TITLE": "Synthetic disc"})
+    if sfo is not None:
+        entries["PSP_GAME/PARAM.SFO"] = sfo
+    for path, data in entries.items():
+        node = tree
+        parts = path.split("/")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            assert isinstance(node, dict), path
+        node[parts[-1]] = data
+
+    def dir_sectors(node: dict) -> int:
+        used, sectors = 2 * 34, 1
+        for name, child in node.items():
+            stored = len(name) + (0 if isinstance(child, dict) else 2)   # ";1" on a file
+            rec = 33 + stored + (0 if stored % 2 else 1)
+            if used + rec > NP_SECTOR:
+                sectors, used = sectors + 1, 0
+            used += rec
+        return sectors
+
+    next_lba = 18
+    placed: list[tuple[dict, int, int, int]] = []   # node, lba, sectors, parent lba
+
+    def place(node: dict, parent: int) -> int:
+        nonlocal next_lba
+        lba, sectors = next_lba, dir_sectors(node)
+        next_lba += sectors
+        placed.append((node, lba, sectors, parent if parent else lba))
+        for name, child in node.items():
+            if isinstance(child, dict):
+                node[name] = ("dir", place(child, lba), child)
+        return lba
+
+    root_lba = place(tree, 0)
+    extents = {id(node): (lba, sectors) for node, lba, sectors, _ in placed}
+    blobs: list[tuple[int, bytes]] = []
+    for node, _lba, _sectors, _parent in placed:
+        for name, child in list(node.items()):
+            if isinstance(child, bytes):
+                node[name] = ("file", next_lba, child)
+                blobs.append((next_lba, child))
+                next_lba += max(1, -(-len(child) // NP_SECTOR))
+    image = bytearray(next_lba * NP_SECTOR)
+    for node, lba, sectors, parent in placed:
+        size = sectors * NP_SECTOR
+        parent_size = next(s for n, l, s, _ in placed if l == parent) * NP_SECTOR
+        records = [_iso_record(b"\0", lba, size, True),
+                   _iso_record(b"\1", parent, parent_size, True)]
+        for name, child in node.items():
+            if child[0] == "dir":
+                child_lba, child_sectors = extents[id(child[2])]
+                records.append(_iso_record(name.encode("ascii"), child_lba,
+                                           child_sectors * NP_SECTOR, True))
+            else:
+                records.append(_iso_record(name.encode("ascii") + b";1", child[1],
+                                           len(child[2]), False))
+        at = lba * NP_SECTOR
+        for rec in records:
+            if at % NP_SECTOR + len(rec) > NP_SECTOR:
+                at = (at // NP_SECTOR + 1) * NP_SECTOR
+            image[at:at + len(rec)] = rec
+            at += len(rec)
+    for lba, data in blobs:
+        image[lba * NP_SECTOR:lba * NP_SECTOR + len(data)] = data
+    at = 16 * NP_SECTOR
+    image[at:at + 7] = b"\x01CD001\x01"
+    image[at + 40:at + 48] = b"SYNTHVOL"
+    struct.pack_into("<I", image, at + 80, next_lba)
+    struct.pack_into(">I", image, at + 84, next_lba)
+    image[at + 156:at + 190] = _iso_record(b"\0", root_lba,
+                                           extents[id(tree)][1] * NP_SECTOR, True)
+    image[17 * NP_SECTOR:17 * NP_SECTOR + 7] = b"\xffCD001\x01"
+    return bytes(image)
+
+
+def sce_wrap(container: bytes) -> bytes:
+    """The ``~SCE`` outer header the disc libraries carry: its size at +4, then the module."""
+    return b"~SCE" + struct.pack("<I", 0x40) + bytes(0x38) + container
+
+
+def seal_disc_library(payload: bytes, tag: int, *, header_tag: int | None = None,
+                      attribute: int = 0x0006, decrypt_mode: int = 4) -> bytes:
+    """Seal ``payload`` as a disc library module, with the recipe read from the public table.
+
+    The keys come at run time from ``nk_psp_disc_library_tags`` in
+    ``src/core/nk_psp_builtin_keys.c`` (the repository carries no sealed bytes). The header
+    declares what the 78 measured disc libraries declare: a user module (decrypt mode 4,
+    no kernel or VSH attribute bit). ``header_tag`` puts another tag in the header.
+    """
+    arrays, _recipes, extra = builtin_table()
+    recipe = extra["disc_libraries"][tag]
+    values = extra["values"]
+    return seal_type2_psp(
+        payload, tag if header_tag is None else header_tag, arrays[recipe["key"]],
+        values["kirk.cmd1.key"], values[f"kirk.keyvault.{recipe['code']}"],
+        compressed=False, elf_size=len(payload),
+        attribute=attribute, decrypt_mode=decrypt_mode,
+    )
+
+
+LIBRARY_MEMBER = "PSP_GAME/USRDIR/MODULE/LIBFONT.PRX"
+
+
+@unittest.skipUnless(CC, "TOOLCHAIN_MISSING: no C compiler on PATH")
+class TestDiscLibraryModules(unittest.TestCase):
+    """A library module read from the user's game disc image is decrypted; the same bytes
+    from anywhere else, and every firmware form from anywhere at all, are refused (#3235)."""
+
+    tmp: ClassVar[Path]
+    exe: ClassVar[Path]
+    elf: ClassVar[bytes]
+    firmware: ClassVar[dict[int, str]]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_disc_library_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
+        cls.exe = build_tool()
+        cls.elf = tiny_elf(b"NK3235-LIBRARY")
+        cls.firmware = builtin_table()[2]["firmware"]
+
+    def _member(self, name: str, image: bytes, member: str, *extra: str):
+        iso = self.tmp / f"{name}.iso"
+        dst = self.tmp / f"{name}.out"
+        iso.write_bytes(image)
+        dst.unlink(missing_ok=True)
+        out = run_bounded([str(self.exe), "disc-member", *extra, "--iso", str(iso),
+                           "--member", member, "--out", str(dst)],
+                          capture_output=True, text=True)
+        self.assertFalse(Path(str(dst) + ".tmp").exists(), "a partial output was left behind")
+        return out, dst
+
+    def _loose(self, name: str, data: bytes, *extra: str, command: str = "decrypt"):
+        src = self.tmp / f"{name}.BIN"
+        dst = self.tmp / f"{name}.out"
+        src.write_bytes(data)
+        dst.unlink(missing_ok=True)
+        args = [str(self.exe), command, *extra, "--in", str(src)]
+        if command == "decrypt":
+            args += ["--out", str(dst)]
+        return run_bounded(args, capture_output=True, text=True), dst
+
+    def _refused_as_firmware(self, out, dst, needle: str = "never decrypts firmware"):
+        self.assertEqual(out.returncode, 10, out.stdout + out.stderr)
+        self.assertIn("FIRMWARE_OUT_OF_SCOPE", out.stdout)
+        self.assertIn(needle, out.stdout)
+        self.assertNotIn("KEY_REQUIRED", out.stdout)
+        self.assertNotIn("DECRYPT_OK", out.stdout)
+        self.assertFalse(dst.exists())
+
+    def test_a_library_module_read_from_the_game_disc_is_decrypted(self):
+        for tag in DISC_LIBRARY_TAGS:
+            sealed = seal_disc_library(self.elf, tag)
+            for form, container in (("sce", sce_wrap(sealed)), ("bare", sealed)):
+                image = build_disc_image({LIBRARY_MEMBER: container})
+                for member in (LIBRARY_MEMBER, LIBRARY_MEMBER.lower()):
+                    with self.subTest(tag=f"0x{tag:08X}", form=form, member=member):
+                        out, dst = self._member(f"ok_{tag:08X}_{form}", image, member)
+                        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                        self.assertIn("DECRYPT_OK", out.stdout)
+                        self.assertEqual(dst.read_bytes(), self.elf)
+
+    def test_the_same_bytes_from_any_other_source_are_refused(self):
+        absent = self.tmp / "no-such-keys.json"
+        for tag in DISC_LIBRARY_TAGS:
+            sealed = seal_disc_library(self.elf, tag)
+            pbp = build_pbp(build_sfo({"DISC_ID": "TEST93235", "CATEGORY": "UG"}),
+                            sealed, b"")
+            for form, data in (("bare", sealed), ("sce", sce_wrap(sealed)), ("pbp", pbp)):
+                for extra in ((), ("--key-file", str(absent))):
+                    with self.subTest(tag=f"0x{tag:08X}", form=form,
+                                      key_store="empty" if extra else "built-in"):
+                        out, dst = self._loose(f"loose_{tag:08X}_{form}", data, *extra)
+                        self._refused_as_firmware(out, dst)
+                        self.assertIn(f"container tag 0x{tag:08X} marks a flash0 user-mode "
+                                      "firmware module", out.stdout)
+                        self.assertIn("only when it reads it from PSP_GAME/USRDIR", out.stdout)
+            with self.subTest(tag=f"0x{tag:08X}", command="probe"):
+                out, dst = self._loose(f"probe_{tag:08X}", sealed, command="probe")
+                self._refused_as_firmware(out, dst)
+
+    def test_the_source_decides_even_when_the_key_store_holds_the_recipe(self):
+        # A key file that carries a recipe for the tag: the loose file is still refused by
+        # name, so the refusal is the source rule and not a missing key; the disc route
+        # opens the same bytes with the same key file.
+        tag = DISC_LIBRARY_TAGS[1]
+        entries, tag_key = synthetic_entries(tag, 0x5B)
+        sealed = seal_type2_psp(
+            self.elf, tag, tag_key, bytes.fromhex(entries["kirk.cmd1.key"]),
+            bytes.fromhex(entries["kirk.keyvault.91"]), compressed=False,
+            elf_size=len(self.elf), attribute=0x0000, decrypt_mode=4)
+        keyfile = self.tmp / "library_recipe.json"
+        write_keyfile(keyfile, entries)
+        out, dst = self._loose("keyed_loose", sealed, "--key-file", str(keyfile))
+        self._refused_as_firmware(out, dst)
+        out, dst = self._member("keyed_disc", build_disc_image({LIBRARY_MEMBER: sealed}),
+                                LIBRARY_MEMBER, "--key-file", str(keyfile))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(dst.read_bytes(), self.elf)
+
+    def test_the_disc_update_folder_is_refused_by_path(self):
+        # A container the game table opens anywhere else on the disc: under
+        # PSP_GAME/SYSDIR/UPDATE the path alone refuses it, whatever it is.
+        game = seal_with_builtin_table(self.elf)
+        library = sce_wrap(seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1]))
+        image = build_disc_image({
+            "PSP_GAME/SYSDIR/EBOOT.BIN": game,
+            "PSP_GAME/SYSDIR/UPDATE/EBOOT.BIN": game,
+            "PSP_GAME/SYSDIR/UPDATE/LIBFONT.PRX": library,
+            "PSP_GAME/SYSDIR/UPDATE/DEEP/EBOOT.BIN": game,
+        })
+        out, dst = self._member("update_control", image, "PSP_GAME/SYSDIR/EBOOT.BIN")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(dst.read_bytes(), self.elf)
+        for member in ("PSP_GAME/SYSDIR/UPDATE/EBOOT.BIN", "psp_game/sysdir/update/eboot.bin",
+                       "PSP_GAME/SYSDIR/UPDATE/LIBFONT.PRX",
+                       "PSP_GAME/SYSDIR/UPDATE/DEEP/EBOOT.BIN",
+                       "PSP_GAME/SYSDIR/UPDATE/NOT_THERE.BIN", "PSP_GAME/SYSDIR/UPDATE"):
+            with self.subTest(member=member):
+                out, dst = self._member("update_refused", image, member)
+                self._refused_as_firmware(out, dst)
+                self.assertIn("PSP_GAME/SYSDIR/UPDATE holds the disc's system software update",
+                              out.stdout)
+        # Refused before the image is read at all: there is no image at this path.
+        dst = self.tmp / "update_no_image.out"
+        out = run_bounded([str(self.exe), "disc-member", "--iso",
+                           str(self.tmp / "no-such-image.iso"), "--member",
+                           "PSP_GAME/SYSDIR/UPDATE/EBOOT.BIN", "--out", str(dst)],
+                          capture_output=True, text=True)
+        self._refused_as_firmware(out, dst)
+
+    def test_every_listed_tag_is_refused_loose_and_all_but_the_two_from_a_disc(self):
+        # Every refusal of #2717 still refuses. Each container declares a user module, so
+        # only its tag is in question.
+        self.assertGreaterEqual(len(self.firmware), 100)
+        self.assertTrue(set(FIRMWARE_TAGS) | set(FIRMWARE_MODULE_TAGS) <= set(self.firmware))
+        sealed = {tag: seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1], header_tag=tag)
+                  for tag in self.firmware}
+        image = build_disc_image({f"PSP_GAME/USRDIR/MODULE/T{tag:08X}.PRX": data
+                                  for tag, data in sealed.items()})
+        for tag, what in self.firmware.items():
+            with self.subTest(tag=f"0x{tag:08X}", source="loose"):
+                out, dst = self._loose("every_loose", sealed[tag])
+                self._refused_as_firmware(out, dst)
+                self.assertIn(f"container tag 0x{tag:08X} marks a {what}", out.stdout)
+            if tag in DISC_LIBRARY_TAGS:
+                continue
+            with self.subTest(tag=f"0x{tag:08X}", source="disc"):
+                out, dst = self._member("every_disc", image,
+                                        f"PSP_GAME/USRDIR/MODULE/T{tag:08X}.PRX")
+                self._refused_as_firmware(out, dst)
+                self.assertIn(f"container tag 0x{tag:08X} marks a {what}", out.stdout)
+
+    def test_firmware_forms_without_a_tag_are_refused_from_a_disc(self):
+        bare_kirk = bytearray(0x200)
+        struct.pack_into("<I", bare_kirk, 0x60, 1)   # KIRK command-1 mode: the IPL form
+        updater = build_pbp(build_sfo({"CATEGORY": "MG"}),
+                            seal_with_builtin_table(self.elf, 0x0B000000), b"PSAR" + bytes(64))
+        forms = {"PSAR.PRX": b"PSAR" + bytes(0x200), "IPL.PRX": bytes(bare_kirk),
+                 "UPDATER.PRX": updater}
+        image = build_disc_image({f"PSP_GAME/USRDIR/{name}": data
+                                  for name, data in forms.items()})
+        for name in forms:
+            with self.subTest(form=name):
+                out, dst = self._member("form_disc", image, f"PSP_GAME/USRDIR/{name}")
+                self._refused_as_firmware(out, dst)
+
+    def test_a_library_tag_that_is_not_a_plain_user_module_is_refused(self):
+        tag = DISC_LIBRARY_TAGS[1]
+        cases = {
+            "kernel": seal_disc_library(self.elf, tag, attribute=0x1006),
+            "vsh": seal_disc_library(self.elf, tag, attribute=0x0800),
+            "kernel_mode": seal_disc_library(self.elf, tag, decrypt_mode=2),
+            "vsh_mode": seal_disc_library(self.elf, tag, decrypt_mode=3),
+            "no_mode": seal_disc_library(self.elf, tag, decrypt_mode=0),
+            "packaged": build_pbp(build_sfo({"CATEGORY": "MG"}),
+                                  seal_disc_library(self.elf, tag), b""),
+        }
+        image = build_disc_image({f"PSP_GAME/USRDIR/{name.upper()}.PRX": data
+                                  for name, data in cases.items()})
+        for name in cases:
+            with self.subTest(case=name):
+                out, dst = self._member("not_user", image,
+                                        f"PSP_GAME/USRDIR/{name.upper()}.PRX")
+                self._refused_as_firmware(out, dst)
+                self.assertIn("is not a plain user-mode library module", out.stdout)
+
+    def test_a_library_tag_outside_usrdir_is_refused(self):
+        library = sce_wrap(seal_disc_library(self.elf, DISC_LIBRARY_TAGS[0]))
+        image = build_disc_image({"PSP_GAME/SYSDIR/LIBFONT.PRX": library,
+                                  "PSP_GAME/SYSDIR/MODULE/LIBFONT.PRX": library})
+        for member in ("PSP_GAME/SYSDIR/LIBFONT.PRX", "PSP_GAME/SYSDIR/MODULE/LIBFONT.PRX"):
+            with self.subTest(member=member):
+                out, dst = self._member("sysdir", image, member)
+                self._refused_as_firmware(out, dst)
+                self.assertIn("only when it reads it from PSP_GAME/USRDIR", out.stdout)
+
+    def test_an_image_with_no_game_identity_opens_nothing_extra(self):
+        library = sce_wrap(seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1]))
+        images = {
+            "no_sfo": build_disc_image({LIBRARY_MEMBER: library}, disc_id=None),
+            "no_disc_id": build_disc_image({LIBRARY_MEMBER: library},
+                                           sfo=build_sfo({"CATEGORY": "UG", "TITLE": "x"})),
+            "empty_disc_id": build_disc_image({LIBRARY_MEMBER: library},
+                                              sfo=build_sfo({"DISC_ID": ""})),
+            "sfo_garbage": build_disc_image({LIBRARY_MEMBER: library}, sfo=b"\0PSF" + bytes(40)),
+        }
+        for name, image in images.items():
+            with self.subTest(image=name):
+                out, dst = self._member(f"identity_{name}", image, LIBRARY_MEMBER)
+                self._refused_as_firmware(out, dst)
+                self.assertIn("it is not read as a game disc", out.stdout)
+        # The game table is unaffected: such an image's executable still decrypts.
+        plain_disc = build_disc_image({"PSP_GAME/SYSDIR/EBOOT.BIN": seal_with_builtin_table(self.elf)},
+                                      disc_id=None)
+        out, dst = self._member("identity_eboot", plain_disc, "PSP_GAME/SYSDIR/EBOOT.BIN")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(dst.read_bytes(), self.elf)
+
+    def test_only_a_plain_path_below_the_program_folders_is_read(self):
+        library = sce_wrap(seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1]))
+        image = build_disc_image({
+            LIBRARY_MEMBER: library,
+            "PSP_GAME/SYSDIR/UPDATE/EBOOT.BIN": library,
+            "LIBFONT.PRX": library,
+            "PSP_GAME/LIBFONT.PRX": library,
+        })
+        malformed = (
+            "PSP_GAME/USRDIR/../SYSDIR/UPDATE/EBOOT.BIN", "PSP_GAME/USRDIR/./MODULE/LIBFONT.PRX",
+            "PSP_GAME\\USRDIR\\MODULE\\LIBFONT.PRX", "PSP_GAME/USRDIR/MODULE\\LIBFONT.PRX",
+            "/PSP_GAME/USRDIR/MODULE/LIBFONT.PRX",
+            "PSP_GAME//USRDIR/MODULE/LIBFONT.PRX", "PSP_GAME/USRDIR/MODULE/LIBFONT.PRX;1",
+            "PSP_GAME/USRDIR/MODULE/LIBFONT.PRX/", "LIBFONT.PRX", "PSP_GAME/LIBFONT.PRX",
+            "PSP_GAME/USRDIR", "UMD_DATA.BIN", "PSP_GAME/USRDIR/" + "A" * 300 + ".PRX",
+        )
+        for member in malformed:
+            with self.subTest(member=member[:60]):
+                out, dst = self._member("path", image, member)
+                self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+                self.assertIn("MALFORMED_INPUT", out.stdout)
+                self.assertFalse(dst.exists())
+        for member in ("PSP_GAME/USRDIR/MODULE/NOT_THERE.PRX", "PSP_GAME/USRDIR/MODULE",
+                       "PSP_GAME/USRDIR/MODULE/LIBFONT.PRX/INSIDE"):
+            with self.subTest(member=member):
+                out, dst = self._member("path", image, member)
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertIn("no file at that path", out.stdout)
+                self.assertFalse(dst.exists())
+        # Not a disc image at all.
+        out, dst = self._member("not_an_image", library + bytes(40 * NP_SECTOR), LIBRARY_MEMBER)
+        self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+        self.assertIn("no ISO9660 primary volume descriptor", out.stdout)
+
+    def test_a_damaged_image_fails_closed(self):
+        library = sce_wrap(seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1]))
+        image = bytearray(build_disc_image({LIBRARY_MEMBER: library}))
+        out, dst = self._member("truncated", bytes(image[:-NP_SECTOR]), LIBRARY_MEMBER)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("IO_FAILURE", out.stdout)
+        self.assertFalse(dst.exists())
+        # The root directory's extent points past the image.
+        broken = bytearray(image)
+        struct.pack_into("<I", broken, 16 * NP_SECTOR + 156 + 2, 0x00FFFFFF)
+        out, dst = self._member("bad_root", bytes(broken), LIBRARY_MEMBER)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertFalse(dst.exists())
+        # A changed library byte is an integrity failure, as for any container.
+        tampered = bytearray(image)
+        at = image.rindex(library[-32:])
+        tampered[at] ^= 0xFF
+        out, dst = self._member("tampered", bytes(tampered), LIBRARY_MEMBER)
+        self.assertEqual(out.returncode, 5, out.stdout + out.stderr)
+        self.assertIn("INTEGRITY_FAILURE", out.stdout)
+        self.assertFalse(dst.exists())
+
+    def test_a_changed_header_field_opens_nothing(self):
+        # The two header fields the rule reads, changed on a sealed library that is already
+        # on a game disc. Toward kernel or VSH, or away from the user decrypt mode, the
+        # refusal fires first; a change that still reads as a user module reaches the
+        # decryption, whose check of the sealed header matches no container type.
+        sealed = seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1])
+        image = build_disc_image({LIBRARY_MEMBER: sealed})
+        at = image.index(sealed)
+        self.assertEqual((image[at + 0x04], image[at + 0x05], image[at + 0x7C]), (0x06, 0x00, 4))
+        for name, offset, value in (("kernel_attribute", 0x05, 0x10), ("vsh_attribute", 0x05, 0x08),
+                                    ("kernel_mode", 0x7C, 2), ("no_mode", 0x7C, 0)):
+            with self.subTest(change=name):
+                changed = bytearray(image)
+                changed[at + offset] = value
+                out, dst = self._member("header_" + name, bytes(changed), LIBRARY_MEMBER)
+                self._refused_as_firmware(out, dst)
+                self.assertIn("is not a plain user-mode library module", out.stdout)
+        changed = bytearray(image)
+        changed[at + 0x04] = 0x02           # still no kernel or VSH bit: the rule lets it by
+        out, dst = self._member("header_user_attribute", bytes(changed), LIBRARY_MEMBER)
+        self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+        self.assertIn("MALFORMED_INPUT", out.stdout)
+        self.assertIn("its header is corrupt, was modified", out.stdout)
+        self.assertNotIn("DECRYPT_OK", out.stdout)
+        self.assertFalse(dst.exists())
+
+    def test_the_reader_takes_one_plain_file_record(self):
+        # The directory reader on records a well-formed game disc does not have.
+        other_elf = tiny_elf(b"NK3235-SECOND")
+        first = seal_disc_library(self.elf, DISC_LIBRARY_TAGS[1])
+        second = seal_disc_library(other_elf, DISC_LIBRARY_TAGS[1])
+        image = build_disc_image({LIBRARY_MEMBER: first,
+                                  "PSP_GAME/USRDIR/MODULE/LIBFONU.PRX": second})
+
+        def record(data: bytes, stored_name: bytes) -> int:
+            needle = bytes([len(stored_name)]) + stored_name
+            at = data.index(needle)
+            self.assertEqual(data.find(needle, at + 1), -1, stored_name)
+            return at - 32
+
+        def refused_as_malformed(name: str, data: bytes, needle: str):
+            out, dst = self._member(name, data, LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+            self.assertIn("MALFORMED_INPUT", out.stdout)
+            self.assertIn(needle, out.stdout)
+            self.assertFalse(dst.exists())
+
+        library_record = record(image, b"LIBFONT.PRX;1")
+        self.assertEqual(struct.unpack_from("<I", image, library_record + 10)[0], len(first))
+
+        with self.subTest(case="a file stored in several extents"):
+            changed = bytearray(image)
+            changed[library_record + 25] |= 0x80
+            refused_as_malformed("multi_extent", bytes(changed), "stored in several extents")
+
+        for name, size in (("over_the_cap", 64 * 1024 * 1024 + 1), ("empty", 0)):
+            with self.subTest(case="a file size outside what a program file can be", size=name):
+                changed = bytearray(image)
+                struct.pack_into("<I", changed, library_record + 10, size)
+                refused_as_malformed("member_size_" + name, bytes(changed),
+                                     "outside what a program file can be")
+
+        module_dir = record(image, b"MODULE")
+        for name, size in (("over_the_cap", 1024 * 1024 + NP_SECTOR), ("empty", 0)):
+            with self.subTest(case="a directory of an impossible size", size=name):
+                changed = bytearray(image)
+                struct.pack_into("<I", changed, module_dir + 10, size)
+                refused_as_malformed("dir_size_" + name, bytes(changed),
+                                     "a directory of the disc image has an impossible size")
+
+        # Two records of one name: the first is the file. An associated file (flag 0x04)
+        # shares its file's name and is passed over.
+        twice = bytearray(image)
+        second_record = record(image, b"LIBFONU.PRX;1")
+        twice[second_record + 33:second_record + 33 + 13] = b"LIBFONT.PRX;1"
+        with self.subTest(case="two records of one name"):
+            out, dst = self._member("duplicate_first", bytes(twice), LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertEqual(dst.read_bytes(), self.elf)
+        with self.subTest(case="an associated file before the file"):
+            associated = bytearray(twice)
+            associated[library_record + 25] |= 0x04
+            out, dst = self._member("associated_first", bytes(associated), LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertEqual(dst.read_bytes(), other_elf)
+        with self.subTest(case="only an associated file of that name"):
+            associated = bytearray(image)
+            associated[library_record + 25] |= 0x04
+            out, dst = self._member("associated_only", bytes(associated), LIBRARY_MEMBER)
+            self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+            self.assertIn("no file at that path", out.stdout)
+            self.assertFalse(dst.exists())
+
+
 _LZRC_SEED_CLEAR = bytes(range(0x20, 0x60)) * 2 + b"NK295 synthetic literals. " * 6
 
 

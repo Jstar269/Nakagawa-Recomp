@@ -77,6 +77,11 @@ void nk_keystore_free(NkKeystore *ks);
 /* Load the built-in game tables.  Returns 0, or NK_PSP_ERR_INTERNAL with err
  * when the compiled table breaks the KeyStore rules (a build defect). */
 int nk_keystore_load_builtin(NkKeystore *ks, char *err, size_t err_len);
+/* Add the recipes of the library modules games ship on their own disc
+ * (nk_psp_disc_library_tags) to a KeyStore that holds the built-in tables.
+ * Only the disc route loads them (nk_container_decrypt_disc_member): the
+ * boundary refuses their tags from every other source before any lookup. */
+int nk_keystore_load_builtin_disc_libraries(NkKeystore *ks, char *err, size_t err_len);
 /* Parse and validate JSON text.  Returns 0 or NK_PSP_ERR_KEYFILE with err. */
 int nk_keystore_load_json(NkKeystore *ks, const char *text, size_t len,
                           char *err, size_t err_len);

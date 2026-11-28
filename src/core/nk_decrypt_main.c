@@ -19,6 +19,15 @@
  *          (KEY_REQUIRED followed by the entry, MALFORMED_INPUT,
  *          INTEGRITY_FAILURE and so on; docs/FAILURE_CODES.md lists them)
  *          and exits with that status's code.
+ *   disc-member [--key-file FILE] --iso IMAGE --member PATH --out FILE
+ *          The same boundary for one file of a disc image, which the program
+ *          reads out of the image itself (PATH is the file's path inside it,
+ *          below PSP_GAME/SYSDIR or PSP_GAME/USRDIR).  This is the only
+ *          command that opens the library modules a game ships on its own
+ *          disc under a tag firmware also carries, and only from
+ *          PSP_GAME/USRDIR of a game disc image; PSP_GAME/SYSDIR/UPDATE is
+ *          FIRMWARE_OUT_OF_SCOPE by path.  No option tells decrypt where a
+ *          loose file came from.
  *   npumdimg [--key-file FILE] --in EBOOT.PBP --out FILE.iso
  *          Turn a PSN release of a UMD game (a PBP whose DATA.PSAR is an
  *          NPUMDIMG image) back into its ISO: written beside FILE.iso,
@@ -485,6 +494,61 @@ static int cmd_decrypt(const char *key_path, const char *in_path,
     return 0;
 }
 
+/* --------------------------- disc-member ------------------------------- */
+
+static int cmd_disc_member(const char *key_path, const char *iso_path,
+                           const char *member_path, const char *out_path)
+{
+    u8 *plain = NULL;
+    size_t plain_size = 0;
+    NkKeystore *ks = NULL;
+    NkPspCtx ctx;
+    int rc;
+
+    if (iso_path == NULL || member_path == NULL || out_path == NULL) {
+        fprintf(stderr, "disc-member: --iso, --member and --out are required\n");
+        return 2;
+    }
+    ks = nk_keystore_create();
+    if (ks == NULL) {
+        printf("INTERNAL_ERROR out of memory\n");
+        return 9;
+    }
+    rc = load_keys(ks, key_path);
+    if (rc == 0 && key_path == NULL) {
+        /* The disc route's two library recipes; a key file brings its own. */
+        char key_err[256];
+        if (nk_keystore_load_builtin_disc_libraries(ks, key_err, sizeof(key_err)) != NK_PSP_OK) {
+            printf("INTERNAL_ERROR %s\n", key_err);
+            rc = 9;
+        }
+    }
+    if (rc != 0) {
+        nk_keystore_free(ks);
+        return rc;
+    }
+
+    nk_psp_ctx_init(&ctx, ks);
+    rc = nk_container_decrypt_disc_member_file(&ctx, iso_path, member_path, &plain,
+                                               &plain_size);
+    if (rc != NK_PSP_OK) {
+        int code = print_diagnostic(rc, &ctx);
+        nk_keystore_free(ks);
+        return code;
+    }
+    /* Success: only now is the output file created. */
+    if (write_file(out_path, plain, plain_size) != 0) {
+        printf("IO_FAILURE cannot write %s\n", out_path);
+        free(plain);
+        nk_keystore_free(ks);
+        return 1;
+    }
+    printf("DECRYPT_OK %u bytes\n", (unsigned)plain_size);
+    free(plain);
+    nk_keystore_free(ks);
+    return 0;
+}
+
 /* ---------------------------- npumdimg --------------------------------- */
 
 static int cmd_npumdimg(const char *key_path, const char *in_path,
@@ -523,6 +587,7 @@ static void usage(void)
             "usage: nk_decrypt kat --vector {aes-ecb|aes-cbc|aes-cmac|sha1}\n"
             "       nk_decrypt probe --in FILE [--key-file FILE]\n"
             "       nk_decrypt decrypt [--key-file FILE] --in FILE --out FILE\n"
+            "       nk_decrypt disc-member [--key-file FILE] --iso IMAGE --member PATH --out FILE\n"
             "       nk_decrypt npumdimg [--key-file FILE] --in EBOOT.PBP --out FILE.iso\n");
 }
 
@@ -533,6 +598,8 @@ static int run(int argc, char **argv)
     const char *in_path = NULL;
     const char *out_path = NULL;
     const char *key_path = NULL;
+    const char *iso_path = NULL;
+    const char *member_path = NULL;
     int i;
 
     if (argc < 2) {
@@ -549,6 +616,10 @@ static int run(int argc, char **argv)
             out_path = argv[++i];
         } else if (strcmp(argv[i], "--key-file") == 0 && i + 1 < argc) {
             key_path = argv[++i];
+        } else if (strcmp(argv[i], "--iso") == 0 && i + 1 < argc) {
+            iso_path = argv[++i];
+        } else if (strcmp(argv[i], "--member") == 0 && i + 1 < argc) {
+            member_path = argv[++i];
         } else {
             fprintf(stderr, "nk_decrypt: unknown argument '%s'\n", argv[i]);
             usage();
@@ -560,6 +631,8 @@ static int run(int argc, char **argv)
     if (strcmp(cmd, "probe") == 0) return cmd_probe(in_path, key_path);
     if (strcmp(cmd, "decrypt") == 0)
         return cmd_decrypt(key_path, in_path, out_path);
+    if (strcmp(cmd, "disc-member") == 0)
+        return cmd_disc_member(key_path, iso_path, member_path, out_path);
     if (strcmp(cmd, "npumdimg") == 0)
         return cmd_npumdimg(key_path, in_path, out_path);
 

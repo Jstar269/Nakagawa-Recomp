@@ -169,8 +169,10 @@ tables it carries. Each decrypted file goes into the per-title folder below
 only after it checks out as a valid PSP program. Nothing is downloaded or
 uploaded, and nothing leaves your PC. Nakagawa never reads a key file and never
 decrypts PSP firmware: an updater, the boot loader or other system software is
-refused by name. You only need to put files there yourself when a file can't be
-decrypted.
+refused by name. The library files a game ships in its own folder on the disc
+(`libfont.prx`, `psmf.prx` and the like) are part of the game and are decrypted
+with it; the same file from anywhere but your disc image is refused. You only
+need to put files there yourself when a file can't be decrypted.
 
 This is not legal advice. Laws on decrypting and copying games differ by
 country. Check the rules where you live.

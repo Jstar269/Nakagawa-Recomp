@@ -171,8 +171,12 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
   Console-bound values (fuse ID, secure-install ID, licence files) come only from the user and are never
   committed. The project ships no firmware or firmware-only key and never decrypts firmware, even privately:
   updater PSAR archives, the IPL, the Media Engine image, system-menu files and encrypted `flash0` modules are
-  refused by name before any decryption step. A user's plain `flash0` files (such as fonts) stay local, never
-  committed, packaged or uploaded.
+  refused by name before any decryption step. A library module a game ships on its own disc is part of that
+  game, even under a tag a firmware module also carries: the boundary opens it only when it reads it itself
+  from `PSP_GAME/USRDIR` of the user's game disc image, and refuses as firmware the same bytes from any other
+  source and anything it is asked to read from that image's `PSP_GAME/SYSDIR/UPDATE` folder; a disc image
+  carries no signature the boundary can check, so this is a rule about the source, not proof of it. A user's
+  plain `flash0` files (such as fonts) stay local, never committed, packaged or uploaded.
 - Treat `place_game_here/`, `logs/`, `memstick/`, `keys/`, `oracle/`, `fs/`, `build/`, and local third-party
   material as sensitive. Never run `git clean -fdx` where inputs exist.
 - Public CI and private title routes are different evidence classes. Missing private or oracle inputs are

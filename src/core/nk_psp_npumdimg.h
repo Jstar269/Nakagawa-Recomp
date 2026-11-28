@@ -19,6 +19,8 @@
 #ifndef NK_PSP_NPUMDIMG_H
 #define NK_PSP_NPUMDIMG_H
 
+#include <stdio.h>
+
 #include "nk_psp_crypto.h"
 
 #ifdef __cplusplus
@@ -110,6 +112,15 @@ int nk_npumdimg_convert_file(NkPspCtx *ctx, const char *pbp_path,
                              NkPbpInfo *info);
 int nk_npumdimg_check_iso_file(NkPspCtx *ctx, const char *iso_path,
                                const char *expected_disc_id);
+
+/* The two readers the disc-file boundary (nk_psp_container.c) shares with
+ * this file.  nk_psp_sfo_string copies one PARAM.SFO string value, 0 when
+ * found.  nk_psar_source_open_file opens a file (UTF-8 path) as a source the
+ * caller closes with fclose(*f); NK_PSP_ERR_INPUT when it cannot. */
+int nk_psp_sfo_string(const uint8_t *sfo, size_t size, const char *key, char *out,
+                      size_t out_size);
+int nk_psar_source_open_file(NkPspCtx *ctx, const char *path, FILE **f,
+                             NkPsarSource *src);
 
 #ifdef __cplusplus
 }

@@ -4,7 +4,9 @@ The decryption boundary that turns the encrypted executable and modules of a gam
 locally, from the user's own disc image (issue #295). It was added in PRs #548 and #550, removed as a temporary measure
 in PR #1187, and restored with built-in key tables after the maintainer's decision of 2026-10-27 to decrypt the way
 PPSSPP does. Firmware is never decrypted: updater PSAR archives, the IPL, the Media Engine image, system-menu files and
-encrypted `flash0` kernel and VSH modules are refused by name before any decryption step runs (`AGENTS.md` section 5).
+encrypted `flash0` modules are refused by name before any decryption step runs (`AGENTS.md` section 5). A library
+module a game ships on its own disc is opened only when the boundary reads it itself from `PSP_GAME/USRDIR` of the
+user's game disc image (issue #3235).
 
 Every derived file below is labelled `derived-translated` in the trusted provenance record
 (`docs/provenance/INDEPENDENCE_MODEL.md`); none is "independent". The project-authored files are listed last.
@@ -36,10 +38,21 @@ Every derived file below is labelled `derived-translated` in the trusted provena
     the five upstream commits to `Core/ELF/PrxDecrypter.*` and `ext/libkirk` between the pin and
     `5b3ddcc0628585b7b091c9a9904dba58bb4118c8` found no new or changed game key, tag recipe or cipher fix missing here;
   - every `flash0` firmware-module tag, removed on 2026-11-17: the kernel-module families `0x4C94xxF0` (with
-    `key_2DA8`), `0xCFEFxxF0` and `0x16D59E03`, and the VSH-module families `0x457BxxF0`, `0x3802xxF0` (with
-    `key_380210F0`, `key_380280F0` and `key_380283F0`), `0x76202403` and `0x0F037303`, with their key arrays and the
-    keyvault row `0x62` that only they name. They are listed in `nk_psp_firmware_tags` with the firmware container
-    tags, so an encrypted module copied from a console's `flash0` is refused by name before any key lookup;
+    `key_2DA8`), `0xCFEFxxF0` and `0x16D59E03`, the user-module family `0x457BxxF0` with `0x76202403`, and the
+    VSH-module family `0x3802xxF0` (with `key_380210F0`, `key_380280F0` and `key_380283F0`) with `0x0F037303`, with
+    their key arrays and the keyvault row `0x62` that only the kernel families name. They are listed in
+    `nk_psp_firmware_tags` with the firmware container tags, so an encrypted module copied from a console's `flash0`
+    is refused by name before any key lookup. (The refusal named the `0x457BxxF0` family and `0x76202403` "VSH"
+    until 2026-11-28; their keyvault row, `0x5B`, is the user-module row the 2.00 user tag `0x3ACE4DCE` uses.)
+  - carried again since 2026-11-28 (issue #3235), in their own table: `keys280_1` and `keys300_1`, the keys of the
+    user-module tags `0x457B05F0` and `0x457B06F0`, values and names unchanged from the pinned `PrxDecrypter.cpp`
+    (the bytes this repository carried before 2026-11-17 were compared with the pinned file again). A survey of 38
+    retail discs found these two tags, and no other listed tag, on 78 library modules games ship under
+    `PSP_GAME/USRDIR` (`libfont.prx`, `psmf.prx`, `libpsmfplayer.prx`, `libccc.prx`, `libadler.prx` and other SDK
+    libraries), each declaring a user module in its header. The recipes are in `nk_psp_disc_library_tags`, not in
+    the game table: `nk_keystore_load_builtin_disc_libraries` adds them for the disc route only, and both tags stay
+    in `nk_psp_firmware_tags`, so the same bytes from any other source are refused before any key lookup. No other
+    tag of the family, no kernel or VSH key and no keyvault row came back;
   - the type-3 DRM BB patch tag `0x89742B04`, the SPRX decrypt-mode pad `xor_91E0A9AD` and the KIRK command-2 results,
     which need the installing console's context (PBP/NPDRM);
   - amctrl's fixed-key tables (`key_357C`, `key_363C`, `dnas_key1A90`, `dnas_key1AA0`), which only PGD data and
@@ -125,8 +138,9 @@ commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value 
 
 ## Project-authored files
 
-`nk_psp_container.c/.h` (framing, decompression dispatch, the firmware refusal), `nk_psp_keystore.c/.h` (built-in and
-key-file loading, no PSAR entry name), `nk_psp_crypto.c/.h` (the error contract and result names), `nk_psp_ec.c/.h`,
+`nk_psp_container.c/.h` (framing, decompression dispatch, the firmware refusal and, since 2026-11-28, the disc-file
+route that reads a file out of a game disc image and applies the source rule of issue #3235), `nk_psp_keystore.c/.h`
+(built-in and key-file loading, no PSAR entry name), `nk_psp_crypto.c/.h` (the error contract and result names), `nk_psp_ec.c/.h`,
 `nk_psp_inflate.c/.h` and `nk_decrypt_main.c` (the `nk_decrypt` command line, with its `npumdimg` subcommand) are
 project-authored from the format rules
 and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-1952, SEC 1). Since 2026-11-18,

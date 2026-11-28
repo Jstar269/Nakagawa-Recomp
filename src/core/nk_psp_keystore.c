@@ -404,30 +404,12 @@ done:
     return status;
 }
 
-/* The built-in game tables, through the same name, length and duplicate
- * rules a key file meets.  A table that breaks them is a build defect, so it
- * fails closed as an internal error rather than loading part of the set. */
-int nk_keystore_load_builtin(NkKeystore *ks, char *err, size_t err_len)
+/* Append compiled tag recipes, through the duplicate rule a key file meets. */
+static int load_builtin_recipes(NkKeystore *ks, const NkPspBuiltinTag *recipes,
+                                size_t count, char *err, size_t err_len)
 {
-    if (err_len) err[0] = '\0';
-    if (ks == NULL) return NK_PSP_ERR_INTERNAL;
-    for (size_t i = 0; i < nk_psp_builtin_value_count; i++) {
-        const NkPspBuiltinValue *value = &nk_psp_builtin_values[i];
-        int want = flat_entry_length(value->name);
-        if (want < 0 || value->bytes == NULL || (size_t)want != value->len ||
-            ks->flat_count >= NK_KEYSTORE_MAX_ENTRIES ||
-            nk_keystore_get(ks, value->name, NULL, NULL) == 0) {
-            snprintf(err, err_len, "built-in value %s is malformed or repeated",
-                     value->name ? value->name : "(unnamed)");
-            return NK_PSP_ERR_INTERNAL;
-        }
-        FlatEntry *slot = &ks->flat[ks->flat_count++];
-        snprintf(slot->name, sizeof(slot->name), "%s", value->name);
-        memcpy(slot->bytes, value->bytes, value->len);
-        slot->len = value->len;
-    }
-    for (size_t i = 0; i < nk_psp_builtin_tag_count; i++) {
-        const NkPspBuiltinTag *recipe = &nk_psp_builtin_tags[i];
+    for (size_t i = 0; i < count; i++) {
+        const NkPspBuiltinTag *recipe = &recipes[i];
         NkPrxTagEntry existing;
         if (ks->tag_count >= NK_KEYSTORE_MAX_ENTRIES || recipe->code > 127 ||
             (recipe->key == NULL && recipe->key144 == NULL) ||
@@ -463,6 +445,41 @@ int nk_keystore_load_builtin(NkKeystore *ks, char *err, size_t err_len)
         }
     }
     return NK_PSP_OK;
+}
+
+/* The built-in game tables, through the same name, length and duplicate
+ * rules a key file meets.  A table that breaks them is a build defect, so it
+ * fails closed as an internal error rather than loading part of the set. */
+int nk_keystore_load_builtin(NkKeystore *ks, char *err, size_t err_len)
+{
+    if (err_len) err[0] = '\0';
+    if (ks == NULL) return NK_PSP_ERR_INTERNAL;
+    for (size_t i = 0; i < nk_psp_builtin_value_count; i++) {
+        const NkPspBuiltinValue *value = &nk_psp_builtin_values[i];
+        int want = flat_entry_length(value->name);
+        if (want < 0 || value->bytes == NULL || (size_t)want != value->len ||
+            ks->flat_count >= NK_KEYSTORE_MAX_ENTRIES ||
+            nk_keystore_get(ks, value->name, NULL, NULL) == 0) {
+            snprintf(err, err_len, "built-in value %s is malformed or repeated",
+                     value->name ? value->name : "(unnamed)");
+            return NK_PSP_ERR_INTERNAL;
+        }
+        FlatEntry *slot = &ks->flat[ks->flat_count++];
+        snprintf(slot->name, sizeof(slot->name), "%s", value->name);
+        memcpy(slot->bytes, value->bytes, value->len);
+        slot->len = value->len;
+    }
+    return load_builtin_recipes(ks, nk_psp_builtin_tags, nk_psp_builtin_tag_count,
+                                err, err_len);
+}
+
+/* The two library-module recipes of the disc route (nk_psp_disc_library_tags). */
+int nk_keystore_load_builtin_disc_libraries(NkKeystore *ks, char *err, size_t err_len)
+{
+    if (err_len) err[0] = '\0';
+    if (ks == NULL) return NK_PSP_ERR_INTERNAL;
+    return load_builtin_recipes(ks, nk_psp_disc_library_tags,
+                                nk_psp_disc_library_tag_count, err, err_len);
 }
 
 int nk_keystore_load_file(NkKeystore *ks, const char *path,
