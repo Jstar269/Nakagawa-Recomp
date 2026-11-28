@@ -108,7 +108,8 @@ static unsigned char *guarded_context(uint32_t *arena_bytes)
     memset(block + size, (int)GUARD_FILL, GUARD_BYTES);
     if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(size, block),
                          (Clay_Dimensions){ 800.0f, 600.0f }, error_handler)) {
-        fprintf(stderr, "FAIL: guarded Clay initialization failed\n");
+        fprintf(stderr, "FAIL: guarded Clay initialization of a %u-byte arena failed after %d Clay errors\n",
+                (unsigned)size, clay_error_count);
         free(block);
         return NULL;
     }

@@ -6,7 +6,7 @@
 # See NOTICE.md for upstream lineage and modification provenance.
 
 # Split out of the root Makefile (#1531), text unchanged: runtime title configuration, the profile stamps and the hardware gate inputs.
-# The root Makefile includes it where the text used to be, so evaluation order is unchanged.
+# The root Makefile includes it at a fixed point among its mk/ files; make reads them in that order, so moving the include can change what `:=` assignments and rule prerequisites see.
 
 # Runtime title configuration. The compiled runtime carries no title identity of its
 # own: tools/title_runtime_config.py turns a *validated* title manifest's optional

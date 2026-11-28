@@ -3977,7 +3977,7 @@ static void test_progress_chunk_cannot_wrap(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
-/* Review 2026-11-20 (#2847, A): the answer to a load that is no longer the current one raises
+/* #2847 review finding A: the answer to a load that is no longer the current one raises
  * nothing. rcheevos calls an abandoned load back RC_ABORTED ("The requested game is no longer
  * active") when game B is loaded over it, and when its session answer arrives after
  * nk_ach_unload_game; the player ends the frames of whatever channel is live on GAME_FAILED, so

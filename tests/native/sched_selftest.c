@@ -2605,9 +2605,9 @@ static void test_delivered_vblank_writes_no_guest_memory(void) {
     }
 }
 
-/* #363: a dormant worker stays dormant. The runtime used to restart a DORMANT thread
- * holding the worker role on the next VBLANK, as a surrogate for a callback that re-arms
- * the guest's frame loop; nothing on the PSP restarts an exited thread, so a delivered
+/* #363: a dormant worker stays dormant. The runtime must not restart a DORMANT thread
+ * holding the worker role on the next VBLANK as a surrogate for a callback that re-arms
+ * the guest's frame loop: nothing on the PSP restarts an exited thread, so a delivered
  * VBLANK must leave it DORMANT and record no firing. */
 static void test_dormant_worker_is_not_relaunched_at_vblank(void) {
     if (!cfg_has(SR_TITLE_CFG_WORKER_ENTRY)) return;

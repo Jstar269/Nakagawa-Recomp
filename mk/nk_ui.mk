@@ -24,7 +24,7 @@ NK_UI_BACKEND_SRCS := \
 	src/ui/backend/nk_ui_sdlr.c \
 	src/ui/backend/nk_ui_vk.c
 
-# The screens that came out of the old scr_title.c: the title page, the one-card flow pages,
+# The title-flow screens: the title page, the one-card flow pages,
 # About, the setup wizard, the game-found card, Settings, Controls and the developer log, with
 # the frame and form code they share (scr_flow.c, scr_form.c), and the on-screen keyboard
 # the nickname editor uses (ui_keyboard.c); the hidden moment, Love All and the launcher

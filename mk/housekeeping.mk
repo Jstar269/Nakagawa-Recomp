@@ -6,7 +6,7 @@
 # See NOTICE.md for upstream lineage and modification provenance.
 
 # Split out of the root Makefile (#1531), text unchanged: profile stamps, project fonts, compile and the clean targets.
-# The root Makefile includes it where the text used to be, so evaluation order is unchanged.
+# The root Makefile includes it at a fixed point among its mk/ files; make reads them in that order, so moving the include can change what `:=` assignments and rule prerequisites see.
 
 # Treat profile stamps as generated included makefiles. GNU Make restarts after
 # creating a missing flavour, so objects invalidated by that recipe are absent

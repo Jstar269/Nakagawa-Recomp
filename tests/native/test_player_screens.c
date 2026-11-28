@@ -1739,7 +1739,7 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
     }
     if (which == FLOW_ERROR_LONG) {
         /* A message of about 600 characters, more than four lines on the card
-           (#2071 moved this case here from the old renderer's tests). */
+           (#2071). */
         static const char long_message[] =
             "Build setup could not continue because a required file was missing. "
             "Check the message, follow the suggested recovery steps, and try again. "

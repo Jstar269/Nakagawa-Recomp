@@ -6,7 +6,7 @@
 # See NOTICE.md for upstream lineage and modification provenance.
 
 # Split out of the root Makefile (#1531), text unchanged: help, compiler-info, readiness, provenance, contribution and aggregate test targets.
-# The root Makefile includes it where the text used to be, so evaluation order is unchanged.
+# The root Makefile includes it at a fixed point among its mk/ files; make reads them in that order, so moving the include can change what `:=` assignments and rule prerequisites see.
 
 # Stable diagnostic surface for CI and local setup checks. This target performs no
 # compilation and makes GNU Make's selected compiler and assignment origin explicit.

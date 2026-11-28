@@ -6,7 +6,7 @@
 # See NOTICE.md for upstream lineage and modification provenance.
 
 # Split out of the root Makefile (#1531), text unchanged: production, showcase, display and title smoke gates and the platform ladders.
-# The root Makefile includes it where the text used to be, so evaluation order is unchanged.
+# The root Makefile includes it at a fixed point among its mk/ files; make reads them in that order, so moving the include can change what `:=` assignments and rule prerequisites see.
 
 # Two-phase build: `pipeline` (codegen) must finish and write the chunk .c files
 # BEFORE `compile` is parsed, because CHUNK_OBJS is derived via $(wildcard) and is

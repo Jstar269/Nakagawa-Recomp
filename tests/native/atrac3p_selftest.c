@@ -666,7 +666,8 @@ static int run_fixture(const char *dir)
     frames = m.frames;
 
     if (atrac3p_create(channels, block_align, &h) != 0 || !h) {
-        fprintf(stderr, "FAIL: fixture create\n");
+        fprintf(stderr, "FAIL: fixture create (channels=%d block_align=%d) returned no handle\n",
+                channels, block_align);
         goto out;
     }
 
@@ -675,7 +676,8 @@ static int run_fixture(const char *dir)
     stream = (int16_t *)malloc(stream_bytes);
     buf = (uint8_t *)malloc((size_t)block_align);
     if (!stream || !buf) {
-        fprintf(stderr, "FAIL: fixture allocation\n");
+        fprintf(stderr, "FAIL: fixture allocation (stream %zu bytes, block %d bytes)\n",
+                stream_bytes, block_align);
         goto out;
     }
 
