@@ -52,8 +52,8 @@ void sr_hle_test_power_set_external(int external) { s_power_external = external 
 /* Retained clock request in MHz. Public behaviour reference: PSPSDK
  * src/power/psppower.h (scePowerSetClockFrequency) and PPSSPP
  * Core/HLE/scePower.cpp, where the Set calls update the frequencies the Get
- * calls report. The getters below previously returned fixed 333/166; they now
- * reflect the last accepted Set request, retained verbatim. PSPAutotests
+ * calls report. The getters below reflect the last accepted Set request,
+ * retained verbatim, rather than a fixed 333/166. PSPAutotests
  * tests/power/freq.expected (2ed7c9c5, recorded on a PSP) shows the PSP stepping
  * an accepted request (19 reads back as PLL 190, CPU 18, bus 95), which is not
  * modelled here.

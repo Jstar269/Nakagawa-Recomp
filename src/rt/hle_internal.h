@@ -1730,8 +1730,8 @@ static inline void hle_note_buf(uint32_t *set, int *n, int cap, uint32_t buf) {
 }
 /* Argument 5+idx of an HLE call. PSP userland is MIPS EABI: arguments 1..8 arrive in
  * a0-a3,t0-t3 (r4..r11) and only 9+ go to the stack (sp+0) -- same as PPSSPP's PARAM(n).
- * This used to read the o32 stack home slots (sp+16+), which EABI callers never write:
- * every >4-argument HLE call received stack garbage (found via sceMpegRingbufferConstruct
+ * It must not read the o32 stack home slots (sp+16+), which EABI callers never write: every
+ * >4-argument HLE call would receive stack garbage (found via sceMpegRingbufferConstruct
  * getting its fill callback from there -- the movie player jumped into the ring buffer). */
 static inline uint32_t stack_arg(CpuState *s, int idx) {
     return idx < 4 ? s->r[8 + idx] : MEM_R32(s->r[29] + (uint32_t)(idx - 4) * 4);

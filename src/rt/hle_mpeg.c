@@ -434,10 +434,10 @@ static void psmf_media_reset(SrPsmfPlayer *p) {
 }
 
 /* Give back everything a player acquired -- queued access units, the producer, the H.264
- * decoder instance and the audio decoder -- and free its slot.  Issue #279: Delete used to
- * reset the decoder and then forget its id, so every movie kept one of a backend's few
+ * decoder instance and the audio decoder -- and free its slot.  Issue #279: Delete must not
+ * only reset the decoder and then forget its id, or every movie keeps one of a backend's few
  * decoder instances (four for Media Foundation and FFmpeg) and the fifth movie of a session
- * got none. */
+ * gets none. */
 void psmf_player_release(SrPsmfPlayer *p) {
     if (!p) return;
     /* A slot no player holds owns nothing.  One never used is still zero-filled, so its h264
