@@ -20,7 +20,6 @@ Tracks #
 
 <!-- One line each; write N/A where a line does not apply. Never paste private data, paths or captures. -->
 
-- Base and head SHAs: <!-- the main commit you branched from, and the head commit you checked -->
 - Scope and uncertainty: <!-- what this covers, what it does not, and what you are unsure of -->
 - Private inputs and PSP hardware: <!-- whether a game or a PSP was used or is needed, and what ran on it -->
 - Blockers: <!-- anything that stops this from landing, or none -->
