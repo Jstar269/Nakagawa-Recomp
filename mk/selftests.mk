@@ -1053,7 +1053,9 @@ native-core-tests: asset-index-selftest
 # uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4; rtt-scale and rtt-scale-offset (#2052:
 # a quarter-size render target, its own or a sub-rectangle of a larger one, sampled back, linear,
 # at the render scale and not at 1x, then read by the CPU) and rtt-edge (a texture inside a target
-# clamps and repeats at its own size) run alone at scales 2 and 4, rtt-depth-alias (a depth read
+# clamps and repeats at its own size) run alone at scales 2 and 4, rtt-palette (#3216: an 8888
+# target read as CLUT32, bound directly with the palette looked up in the shader, plain and blended
+# against the destination) at 2 and 4, with the native twin and on the snapshot path, rtt-depth-alias (a depth read
 # inside a colour target's span) at 4, and rtt-1x-reads (#2279: the render-target reads that
 # decode guest VRAM at 1x at every scale) and rtt-vram-view (a target read through each view of
 # VRAM) at 2 and 4 (the whole-suite run covers 1x). The 32-bit host depth buffer (#2051) runs
@@ -1170,6 +1172,10 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-scale-offset
 	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-edge
 	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-edge
+	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-palette
+	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-palette
+	$(GPU_COHERENCE_RUN) --twin native --case rtt-palette
+	$(GPU_COHERENCE_RUN) --dst-read snapshot --case rtt-palette
 	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-depth-alias
 	$(GPU_COHERENCE_RUN) --scale 2 --case rtt-1x-reads
 	$(GPU_COHERENCE_RUN) --scale 4 --case rtt-1x-reads
