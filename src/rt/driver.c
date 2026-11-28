@@ -148,7 +148,6 @@ static LONG WINAPI sr_crash_filter(EXCEPTION_POINTERS *ep) {
         if (guest_mapped) {
             uint32_t guest_addr = guest_fault;
             fprintf(stderr, " -> guest 0x%08x", guest_addr);
-            // Check if address is in a known memory watch
             for (int i = 0; i < g_sr_mem_watch_count; i++) {
                 if (guest_addr >= g_sr_mem_watches[i].start && guest_addr < g_sr_mem_watches[i].end) {
                     fprintf(stderr, " [WATCHED: %s]", g_sr_mem_watches[i].label);

@@ -408,10 +408,6 @@ NkUiPadFamily nk_overlay_host_pad_family(const NkOverlayHost *host) {
     return family;
 }
 
-bool nk_overlay_host_pad_connected(const NkOverlayHost *host) {
-    return host != NULL && nk_ui_input_pad_connected(&host->input.input);
-}
-
 NkOverlayScreen nk_overlay_host_screen(const NkOverlayHost *host) {
     return host != NULL && host->state.open ? host->state.screen : NK_OVERLAY_SCREEN_MENU;
 }
