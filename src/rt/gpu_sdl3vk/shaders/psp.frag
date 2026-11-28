@@ -40,6 +40,9 @@ layout(location = 0) out vec4 o_color;
 #endif
 
 layout(set = 0, binding = 0) uniform sampler2D u_tex;
+/* The palette of a render target read as CLUT32 (ge_gpu.c pal_get, #3216): 256 x 1, the entry for
+ * each value of the index byte. Read only when cfg.y bit 28 is set on a direct bind. */
+layout(set = 3, binding = 0) uniform sampler2D u_pal;
 /* The destination snapshot (shader blend) has a set of its own, bound once per render op, so the
  * host twin (ge_gpu.c, Enhanced 32-bit colour) binds its own snapshot without a second copy of
  * every texture's set. */
@@ -342,6 +345,14 @@ void main() {
                 vec4 t01 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c1.y), 0);
                 vec4 t11 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c1.y), 0);
                 t = mix(mix(t00, t10, rtt_f.x), mix(t01, t11, rtt_f.x), rtt_f.y) * 255.0;
+            }
+            /* A direct bind read as CLUT32 (cfg.y bit 28, nearest only): the texel's four bytes are
+             * the index, R lowest as in guest VRAM; cfg.x bits 3-7 hold CLUTFORMAT's shift, and
+             * u_pal the entry for each value of the byte the shift leaves lowest. */
+            if (rtt_box && ((pc.cfg.y >> 28) & 1) != 0) {
+                uvec4 q = uvec4(t + vec4(0.5));
+                uint raw = q.r | (q.g << 8) | (q.b << 16) | (q.a << 24);
+                t = texelFetch(u_pal, ivec2(int((raw >> uint((pc.cfg.x >> 3) & 31)) & 255u), 0), 0) * 255.0;
             }
             int  tf    = pc.cfg.x & 7;
             bool rgba  = (flags & 2) != 0;

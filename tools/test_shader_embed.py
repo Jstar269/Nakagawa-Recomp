@@ -645,10 +645,10 @@ class DstReadVariantTests(unittest.TestCase):
 
     # The default module, psp.frag built without SR_DST_INTERLOCK: a change meant for the variant
     # alone (an #ifdef) must not change it. A deliberate change to the default fragment stage
-    # updates this hash; the last one is the merge of a directly bound render target read at its
-    # texture's own size (#2052) with the host mip chain's textureGrad branch (#1273), and the
-    # module is the same with and without the variant's #ifdef blocks in the source.
-    DEFAULT_FRAG_SPIRV_SHA256 = "ff1d4401edc5477b0def6118eebf08022d65eca410d68affd475480075ab1c1c"
+    # updates this hash; the last one is the palette lookup of an 8888 render target read as
+    # CLUT32 (#3216, u_pal in set 3), and the module is the same with and without the variant's
+    # #ifdef blocks in the source.
+    DEFAULT_FRAG_SPIRV_SHA256 = "09af338e9f008405dd6b27cdad6c5f59f2669920ef5449ef44d24bd05acc5e38"
 
     def manifest_entry(self, embedded: str) -> dict:
         manifest = shader_embed.load_manifest(shader_embed.MANIFEST)
