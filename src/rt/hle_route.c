@@ -1546,7 +1546,7 @@ static uint32_t h_CtrlButtons(void) {
      * closed on their first frame (walkthrough B16, reproduced with a plain mouse click). There
      * the pulse runs only when the user named it (SR_PAD, SR_PADPERIOD, SR_PADWIDTH or
      * SR_PADSTART). Headless runs (the offscreen sink, a dummy video driver, an acceptance
-     * launch) and runs with an explicit SR_PAD or a route/pad script keep the pulse as is.
+     * launch) and runs with an explicit SR_PAD or a route/pad script keep the pulse.
      *
      * A connected pad is not the only way a human drives this runtime: the keyboard path is
      * equally live, and gui_pad_present() is false for it (it reports gamepad presence only;

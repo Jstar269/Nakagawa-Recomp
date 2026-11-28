@@ -478,6 +478,7 @@ static void partition_free_block(uint32_t addr, uint32_t size) {
 
     /* Check if this freed block reaches or exceeds the bump pointer s_heap. */
     if (addr + size >= s_heap) {
+        /* Check if it coalesces with the last free block in the free list. */
         if (s_nfree_blocks > 0 &&
             s_free_blocks[s_nfree_blocks - 1].addr + s_free_blocks[s_nfree_blocks - 1].size == addr) {
             s_heap = s_free_blocks[s_nfree_blocks - 1].addr;
@@ -4047,7 +4048,7 @@ uint32_t sr_hle_test_msgpipe_max_capacity(void) { return MSG_PIPE_MAX_CAPACITY; 
 
 #endif /* SR_HLE_THREAD_SELFTEST */
 /* Mailboxes grow as the FPL and VPL tables do (pool_table_grow): the PSP gives no mailbox limit,
- * so a 33rd CreateMbx must not answer NO_MEMORY. */
+ * so CreateMbx must not answer NO_MEMORY at a fixed count (a 32-slot table did on the 33rd). */
 static HlePoolTable s_mbx_table = {NULL, 0u, sizeof(Mbx), "mailbox"};
 
 size_t mbx_slot_count(void) { return s_mbx_table.nchunks * HLE_POOL_CHUNK; }
