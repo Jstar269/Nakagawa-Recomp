@@ -345,7 +345,7 @@ void sr_hle_test_ctrl_bad_span_note_reset(void) { s_ctrl_bad_span_noted = 0; }
 static uint32_t ctrl_fill_n(uint32_t buf, uint32_t nbufs, int negate, int peek) {
     /* Contract order: an out-of-contract request is refused before the ring is
      * consulted, so a rejected call can neither consume history nor write a byte.
-     * Clamping an oversized request the way this used to is a fabricated success:
+     * Clamping an oversized request would be a fabricated success:
      * the guest asked for something the API cannot do and was told it worked. */
     if (nbufs > CTRL_RING) return SCE_CTRL_ERROR_INVALID_SIZE;
     /* A zero count is refused with the same code (issue #1390 acceptance, from the

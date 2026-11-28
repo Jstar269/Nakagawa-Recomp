@@ -1336,10 +1336,6 @@ void ge_zbuf_note_external_write(void) {
     ge_zbuf_note_write();
 }
 
-void ge_zbuf_invalidate_guest_range(uint32_t addr) {
-    ge_zbuf_invalidate_guest_span(addr, 1u);
-}
-
 void ge_zbuf_invalidate_guest_span(uint32_t addr, uint32_t bytes) {
     if (!s_zbuf_guest_valid ||
         !ge_zbuf_range_overlaps(SR_PHYS(addr), bytes)) return;
@@ -4747,7 +4743,7 @@ static float c8f(uint32_t col, int chan) { return (float)((col >> (chan*8)) & 0x
 
 /* Lighting inputs that only depend on GE registers: the material and scene colours as
  * floats, each light's colours, and a directional light's normalized direction. They are
- * the same expressions light_vertex used to evaluate for every vertex, computed once after
+ * the expressions light_vertex would otherwise evaluate for every vertex, computed once after
  * the GE state last changed (every list command bumps s_ge_state_serial), so every value
  * is bit-identical to the per-vertex evaluation. */
 typedef struct {

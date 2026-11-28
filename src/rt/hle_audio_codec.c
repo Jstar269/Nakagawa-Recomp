@@ -1350,10 +1350,10 @@ static uint32_t h_AtracDecodeData(CpuState *s) {
     return atrac_published(id, atrac_decode_data(s));
 }
 /* sceAtracGetNextSample(id, *outN): how many samples the NEXT DecodeData call
- * will produce. Previously registered to the generic success handler, which
- * leaves the caller's output variable untouched -- so the game read whatever
- * was already there and got a truthful-looking answer by accident or not at
- * all. This is the most frequently called stub on the boot route (4049 calls).
+ * will produce. It must not use the generic success handler, which leaves the
+ * caller's output variable untouched -- the game would read whatever was
+ * already there and get a truthful-looking answer by accident or not at all.
+ * The boot route calls it 4049 times.
  *
  * No new state is needed: h_AtracDecodeData advances posSample by the
  * codec-specific samples-per-frame value only when a frame is consumed and stops at
@@ -2503,10 +2503,10 @@ void hle_register_atrac_handlers(void) {
     sr_hle_register(0x780f88d1, "sceAtracGetAtracID", h_AtracGetAtracID);
     sr_hle_register(0x2dd3e298, "sceAtracGetBufferInfoForResetting", h_AtracGetBufferInfoForResetting);
     sr_hle_register(0xca3ca3d2, "sceAtracGetBufferInfoForReseting", h_AtracGetBufferInfoForResetting);
-    /* 0x31668bba was a single-nibble transcription error for 0x31668baa (the
-     * canonical NID in src/rt/nid_names.h, reproducible as sha1(name)[0:4]).
-     * No guest import can carry the typo, so this registration was previously
-     * unreachable and a real sceAtracGetChannel call was an unhandled-NID miss.
+    /* The NID is 0x31668baa (the canonical NID in src/rt/nid_names.h,
+     * reproducible as sha1(name)[0:4]), not the single-nibble transcription
+     * 0x31668bba: no guest import carries that typo, so registering it would
+     * leave a real sceAtracGetChannel call an unhandled-NID miss.
      * TD-24 batch 3 models it with h_AtracGetChannel (parsed fmt channels);
      * sceAtracGetOutputChannel reports the channels DecodeData writes (#286
      * tracks the remaining mono-to-stereo output mapping). */

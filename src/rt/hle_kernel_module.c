@@ -1594,7 +1594,7 @@ static uint32_t h_ExitGame(CpuState *s) {
  * [image_base, image_end); the program the host loader placed is the main module and
  * owns [sr_loaded_base(), sr_loaded_end()). A program LoadExec booted is itself a module
  * record. The main module's UID comes from the shared pool the first time a guest asks
- * for it, so it never aliases another kernel object (it used to be the constant 0x112,
+ * for it, so it never aliases another kernel object (a constant would: 0x112, for one, is
  * the third UID the pool hands out, which a thread or semaphore also receives). */
 uint32_t s_main_module_uid;
 

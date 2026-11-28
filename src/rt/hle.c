@@ -478,7 +478,6 @@ static void partition_free_block(uint32_t addr, uint32_t size) {
 
     /* Check if this freed block reaches or exceeds the bump pointer s_heap. */
     if (addr + size >= s_heap) {
-        /* Check if it coalesces with the last free block in the free list. */
         if (s_nfree_blocks > 0 &&
             s_free_blocks[s_nfree_blocks - 1].addr + s_free_blocks[s_nfree_blocks - 1].size == addr) {
             s_heap = s_free_blocks[s_nfree_blocks - 1].addr;
@@ -2411,7 +2410,7 @@ void fpl_table_reset(void) {
     pool_table_free(&s_fpl_table);
 }
 
-/* FPL and VPL UIDs come from the shared sr_alloc_uid pool (a fixed 0x500 + slot range used to
+/* FPL and VPL UIDs come from the shared sr_alloc_uid pool (a fixed 0x500 + slot range would
  * alias a semaphore or thread UID once the pool reached it), so a lookup matches the stored UID. */
 FplPool *fpl_lookup(uint32_t uid) {
     if (uid == 0u) return NULL;
@@ -4048,7 +4047,7 @@ uint32_t sr_hle_test_msgpipe_max_capacity(void) { return MSG_PIPE_MAX_CAPACITY; 
 
 #endif /* SR_HLE_THREAD_SELFTEST */
 /* Mailboxes grow as the FPL and VPL tables do (pool_table_grow): the PSP gives no mailbox limit,
- * and a 33rd CreateMbx used to answer NO_MEMORY. */
+ * so a 33rd CreateMbx must not answer NO_MEMORY. */
 static HlePoolTable s_mbx_table = {NULL, 0u, sizeof(Mbx), "mailbox"};
 
 size_t mbx_slot_count(void) { return s_mbx_table.nchunks * HLE_POOL_CHUNK; }

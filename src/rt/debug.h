@@ -84,53 +84,6 @@ static inline void dbg_mem(uint32_t addr, uint32_t val, int write, uint32_t pc) 
     }
 }
 
-static inline void dbg_hle(uint32_t nid, const char *name, uint32_t pc) {
-    if (SR_DBG(SR_DBG_HLE)) {
-        fprintf(stderr, "HLE: nid=0x%08" PRIx32 "(%s) pc=0x%08" PRIx32 "\n", nid, name ? name : "?", pc);
-    }
-}
-
-static inline void dbg_sched(const char *event, uint32_t uid, uint32_t detail) {
-    if (SR_DBG(SR_DBG_SCHED)) {
-        fprintf(stderr, "SCHED: %s uid=0x%" PRIx32 " detail=0x%" PRIx32 "\n", event, uid, detail);
-    }
-}
-
-static inline void dbg_ge(const char *event, uint32_t param) {
-    if (SR_DBG(SR_DBG_GE)) {
-        fprintf(stderr, "GE: %s param=0x%08" PRIx32 "\n", event, param);
-    }
-}
-
-static inline void dbg_input(uint32_t buttons) {
-    if (SR_DBG(SR_DBG_INPUT)) {
-        fprintf(stderr, "INPUT: buttons=0x%08" PRIx32 "\n", buttons);
-    }
-}
-
-static inline void dbg_fs(const char *op, const char *path, uint32_t result) {
-    if (SR_DBG(SR_DBG_FS)) {
-        fprintf(stderr, "FS: %s(%s) -> 0x%08" PRIx32 "\n", op, path ? path : "?", result);
-    }
-}
-
-static inline void dbg_video(const char *event, uint32_t param) {
-    if (SR_DBG(SR_DBG_VIDEO)) {
-        fprintf(stderr, "VIDEO: %s param=0x%08" PRIx32 "\n", event, param);
-    }
-}
-
-static inline void dbg_misc(const char *fmt, ...) {
-    if (SR_DBG(SR_DBG_MISC)) {
-        va_list ap;
-        va_start(ap, fmt);
-        fprintf(stderr, "MISC: ");
-        vfprintf(stderr, fmt, ap);
-        fprintf(stderr, "\n");
-        va_end(ap);
-    }
-}
-
 // ---- memory trap replacement ----
 // Replaces the old hardcoded MEM_TRAP in recomp.h. Use SR_DBG_MEM_TRAP()
 // in memory write paths to conditionally log writes to watched addresses.
