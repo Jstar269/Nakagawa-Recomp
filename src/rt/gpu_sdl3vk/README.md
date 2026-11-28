@@ -426,7 +426,7 @@ into one target and read it back as a texture keep the scale in these cases:
     offset (`texsize.zw`): `rtt-scale-offset` runs the bloom-like pass with its buffer as a
     sub-rectangle of a 512-wide target.
 - **An 8888 target read as CLUT32 through an 8888 palette, with nearest filtering both ways**, is
-  bound directly too (#3216): a colour ramp a title applies to its own picture, one pass per
+  bound directly too (#3230): a colour ramp a title applies to its own picture, one pass per
   channel, many draws a frame. Each texel's four bytes are the index (red lowest, as in guest
   VRAM), and CLUTFORMAT's shift and mask pick the byte that reads the palette. `psp.frag` shifts
   the texel and reads `u_pal` (descriptor set 3, a 256 x 1 image `pal_get` builds from CLUT RAM
@@ -528,7 +528,7 @@ of the buffer's values (the target's own format, another format of the same size
 16-bit target or CLUT32 of an 8888 target; for depth, a 16-bit format or CLUT16), so a scaled read
 is possible. These read at 1x only because no such path is implemented; #2279 stays open for them.
 One has its path: CLUT32 of an 8888 target through an 8888 palette with nearest filtering binds the
-target's image (the palette read above, #3216).
+target's image (the palette read above, #3230).
 What each path would need:
 
 - a 16-bit target read as another 16-bit format (5650, 5551, 4444): repack each filter tap from

@@ -2730,7 +2730,7 @@ The render-target reads that decode at 1x (#2279; the README lists each with its
 - a scaled form could exist but is not implemented, so these read at 1x and #2279 stays open for them, each in a
   format whose texel is one of the buffer's values: a 16-bit target read as another 16-bit format, CLUT16 and CLUT32
   at the target's pixel size (but for an 8888 target read as CLUT32 through an 8888 palette with nearest
-  filtering, which binds the target's image and looks the palette up in the shader: `rtt-palette`, #3216), a
+  filtering, which binds the target's image and looks the palette up in the shader: `rtt-palette`, #3230), a
   swizzled read, a read with another non-zero buffer width, a read through the
   0x04200000 or 0x04600000 view, a mipmapped read, and a depth read in a 16-bit format (outside every colour target,
   or inside one whose depth was written last).
