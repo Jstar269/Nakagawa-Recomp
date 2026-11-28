@@ -918,17 +918,48 @@ for supported contracts and how changes are announced.
 Exit codes of a start from the command line (`--help` prints the same list; a code can have several causes):
 
 - `0`: Done. A game that was started returns its own exit code instead, whatever it is.
-- `1`: The launcher window could not be created, a UI test failed, a --screenshot could not be saved, the manifest overlay could not be loaded, or a --stage-only or --headless-launch run could not read, convert or inspect the disc image.
-- `2`: The command line, the data folder, the --launch-title name or the library entry was refused, or staging needs a supported --iso.
-- `3`: The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or staging (--stage-only, or --launch-now with --headless-launch) cannot set it up (not in the catalog, no profile, out of memory).
-- `4`: The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, or staging (--stage-only, or --launch-now with --headless-launch) failed.
+- `1`: The launcher window could not be created, a UI test failed, a --screenshot could not be saved, the manifest overlay could not be loaded, or a --stage-only, --prepare or --headless-launch run could not read, convert or inspect the disc image.
+- `2`: The command line, the data folder, the --launch-title name or the library entry was refused, staging needs a supported --iso, or the --prepare disc is not the one --expect-disc names.
+- `3`: The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or staging (--stage-only, --prepare, or --launch-now with --headless-launch) cannot set it up (not in the catalog, no profile, out of memory), or --prepare has no build tools it may use without asking.
+- `4`: The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, staging (--stage-only, --prepare, or --launch-now with --headless-launch) failed, or a --prepare build failed.
 - `5`: The game's window request was lost.
-- `6`: The game ended abnormally (a crash), or in staging (--stage-only, or --launch-now with --headless-launch) the game's folder path is too long for the library record.
-- `7`: A headless run timed out, or in staging (--stage-only, or --launch-now with --headless-launch) the game could not be saved to the library.
-- `8`: A headless acceptance checkpoint was not reached, or in staging (--stage-only, or --launch-now with --headless-launch) the game's data folder could not be checked.
-- `9`: In staging (--stage-only, or --launch-now with --headless-launch), another run holds the game's staging, or a file takes the game's folder name.
+- `6`: The game ended abnormally (a crash), or in staging (--stage-only, --prepare, or --launch-now with --headless-launch) the game's folder path is too long for the library record.
+- `7`: A headless run timed out, or in staging (--stage-only, --prepare, or --launch-now with --headless-launch) the game could not be saved to the library.
+- `8`: A headless acceptance checkpoint was not reached, or in staging (--stage-only, --prepare, or --launch-now with --headless-launch) the game's data folder could not be checked.
+- `9`: In staging (--stage-only, --prepare, or --launch-now with --headless-launch), another run holds the game's staging, or a file takes the game's folder name.
 
 When a `--launch-title` start is refused, the player also shows a message box, so a front-end with no console still tells the user.
+
+### RecompLauncher
+
+[RecompLauncher](https://recomplauncher.com) installs the release ZIP and sets up Hot Shots Tennis: Get a Grip
+(UCUS-98701) from your own disc image through its Easy Setup. It reads `recomplauncher.json` at the top of the ZIP,
+beside `bin\`; the same file is at the top of the source tree. Starting `nakagawa_player.exe` yourself is unchanged:
+with no options it opens the launcher window and your usual library.
+
+- **Setup step:** `nakagawa_player.exe --prepare --user-data-root=<folder> --expect-disc=UCUS98701 --game=<disc image>`.
+  It takes the same images as the library (`.iso`, `.cso`, `.zso`, `.chd` or a PSN `EBOOT.PBP`), refuses any other
+  disc before writing anything, sets up the game's files, and builds the game for your PC with the build tools in
+  the ZIP's `prereqs\` folder, without a window and without asking anything. It prints `progress <0 to 1> <text>`
+  lines as it goes and ends with the reason when it stops. `--game` is the same as `--iso`. The authentic build is
+  always made; when the settings choose Ace for the game, its Ace build follows. Run again with nothing to do, it
+  says `Already built` and exits 0; after an update of Nakagawa it builds again.
+- **Done when:** `<folder>\packages\UCUS98701\package.json` exists. The build moves the finished package into place
+  in one step, so that file is never there for a half-built game. The build reads the disc image, so it cannot run
+  again without it.
+- **Play:** `nakagawa_player.exe --user-data-root=<folder> --launch-title=UCUS98701` starts the game straight away,
+  with no launcher window. Exit code 2 means the game is not set up in that folder; 3 means the build for the chosen
+  play mode is missing (Ace has its own), so set up again.
+- **Everything in one folder:** RecompLauncher passes its own data folder (`recompdata` in the game's folder) as
+  `--user-data-root`, so the library, builds, settings (`config\settings.json`), saves (`saves\`), logs (`logs\`)
+  and cheats (`cheats\UCUS98701.ini`) stay there, separate from the library of a Nakagawa you start yourself.
+- **Settings in RecompLauncher:** the window, internal resolution (1x to 4x), picture scaling, V-Sync, the play mode
+  (Authentic, Enhanced or Ace), Widescreen, texture filtering and supersampling are the player's own settings,
+  written into that `settings.json`; the player reads them when the game starts. RecompLauncher also turns off the
+  player's update check at start, since it brings each release itself.
+- `tools/test_recomplauncher_manifest.py` checks the file against the player's options, folders and settings.
+  `NK_RECOMPLAUNCHER_SCHEMA=<downloaded schema.json>` adds the full check against
+  [the schema](https://recomplauncher.com/schema/recomplauncher.json); tests never download it.
 
 ### System fonts
 

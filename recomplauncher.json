@@ -1,0 +1,156 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Nakagawa Recomp",
+  "repo": "Jstar269/Nakagawa-Recomp",
+  "inputs": [
+    {
+      "id": "game",
+      "role": "game",
+      "label": "Your own copy of Hot Shots Tennis: Get a Grip for PSP, USA release (UCUS-98701): a disc image (.iso, .cso, .zso or .chd) or a PSN EBOOT.PBP.",
+      "formats": [
+        { "type": "file", "extensions": ["iso", "cso", "zso", "chd", "pbp"] }
+      ],
+      "check": { "ids": ["UCUS-98701", "UCUS98701"] }
+    }
+  ],
+  "prepare": {
+    "program": ["bin/nakagawa_player.exe", "bin/nakagawa_player"],
+    "args": [
+      "--prepare",
+      "--user-data-root={data}",
+      "--expect-disc=UCUS98701",
+      "--game={input:game}"
+    ],
+    "label": "Building Hot Shots Tennis for your PC from your disc",
+    "done": ["{data}/packages/UCUS98701/package.json"]
+  },
+  "start": {
+    "program": ["bin/nakagawa_player.exe", "bin/nakagawa_player"],
+    "args": ["--user-data-root={data}", "--launch-title=UCUS98701"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "json",
+      "file": [{ "path": "{data}/config/settings.json" }],
+      "ensure": { "schema_version": "2" },
+      "always": { "check_updates_at_start": "false" }
+    }
+  ],
+  "groups": [{ "id": "Display" }, { "id": "Play mode" }, { "id": "Enhanced and Ace" }],
+  "settings": [
+    {
+      "id": "fullscreen",
+      "label": "Window",
+      "group": "Display",
+      "help": "Plays in a window or full screen.",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "false" } },
+        { "label": "Full screen", "set": { "fullscreen": "true" } }
+      ],
+      "defaults": { "fullscreen": "false" }
+    },
+    {
+      "id": "resolution_scale",
+      "label": "Internal resolution",
+      "group": "Display",
+      "help": "What the game draws at. 1x is the PSP's own 480x272.",
+      "choices": [
+        { "label": "1x (480x272)", "set": { "resolution_scale": "1" } },
+        { "label": "2x (960x544)", "set": { "resolution_scale": "2" } },
+        { "label": "3x (1440x816)", "set": { "resolution_scale": "3" } },
+        { "label": "4x (1920x1088)", "set": { "resolution_scale": "4" } }
+      ],
+      "defaults": { "resolution_scale": "1" }
+    },
+    {
+      "id": "present_scaling",
+      "label": "Picture scaling",
+      "group": "Display",
+      "help": "How the picture is enlarged to fit your screen.",
+      "choices": [
+        { "label": "Sharp", "set": { "present_scaling": "\"sharp\"" } },
+        { "label": "Whole steps", "set": { "present_scaling": "\"integer\"" } },
+        { "label": "Smooth", "set": { "present_scaling": "\"bilinear\"" } }
+      ],
+      "defaults": { "present_scaling": "\"sharp\"" }
+    },
+    {
+      "id": "vsync",
+      "label": "V-Sync",
+      "group": "Display",
+      "help": "Waits for your screen, so the picture never tears.",
+      "choices": [
+        { "label": "On", "set": { "vsync": "true" } },
+        { "label": "Off", "set": { "vsync": "false" } }
+      ],
+      "defaults": { "vsync": "true" }
+    },
+    {
+      "id": "play_mode",
+      "label": "Play mode",
+      "group": "Play mode",
+      "help": "Authentic is the game as released. Enhanced adds the options below. Ace is Enhanced at 60 FPS; it has its own build, so press Set Up again after choosing it.",
+      "choices": [
+        { "label": "Authentic", "set": { "title_play/UCUS98701/mode": "\"authentic\"" } },
+        { "label": "Enhanced", "set": { "title_play/UCUS98701/mode": "\"enhanced\"" } },
+        { "label": "Ace (60 FPS)", "set": { "title_play/UCUS98701/mode": "\"ace\"" } }
+      ],
+      "defaults": { "title_play/UCUS98701/mode": "\"authentic\"" }
+    },
+    {
+      "id": "widescreen",
+      "label": "Widescreen",
+      "group": "Enhanced and Ace",
+      "help": "Shows more of the court; the HUD keeps its shape. Some objects pop in at the sides.",
+      "choices": [
+        { "label": "Off", "set": { "enhanced/wide": "\"off\"" } },
+        { "label": "On", "set": { "enhanced/wide": "\"fill\"" } }
+      ],
+      "defaults": { "enhanced/wide": "\"off\"" }
+    },
+    {
+      "id": "texture_filtering",
+      "label": "Texture filtering",
+      "group": "Enhanced and Ace",
+      "help": "Keeps slanted surfaces such as the court sharp.",
+      "choices": [
+        { "label": "16x", "set": { "enhanced/af": "\"16\"" } },
+        { "label": "8x", "set": { "enhanced/af": "\"8\"" } },
+        { "label": "4x", "set": { "enhanced/af": "\"4\"" } },
+        { "label": "2x", "set": { "enhanced/af": "\"2\"" } },
+        { "label": "Off", "set": { "enhanced/af": "\"0\"" } }
+      ],
+      "defaults": { "enhanced/af": "\"16\"" }
+    },
+    {
+      "id": "supersampling",
+      "label": "Supersampling",
+      "group": "Enhanced and Ace",
+      "help": "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
+      "choices": [
+        { "label": "Off", "set": { "enhanced/ssaa": "\"off\"" } },
+        { "label": "2x", "set": { "enhanced/ssaa": "\"2\"" } },
+        { "label": "4x", "set": { "enhanced/ssaa": "\"4\"" } }
+      ],
+      "defaults": { "enhanced/ssaa": "\"off\"" }
+    }
+  ],
+  "folders": {
+    "saves": [{ "path": "{data}/saves" }],
+    "logs": [{ "path": "{data}/logs" }],
+    "cheats": [{ "path": "{data}/cheats" }],
+    "data": [{ "path": "{data}" }]
+  },
+  "saves": ["{data}/saves"],
+  "actions": [
+    { "id": "open_saves", "label": "Open saves folder", "open": "saves" },
+    { "id": "open_logs", "label": "Open logs folder", "open": "logs" },
+    { "id": "open_cheats", "label": "Open cheats folder", "help": "Cheat files are named <disc ID>.ini, here UCUS98701.ini.", "open": "cheats" }
+  ],
+  "exit_codes": {
+    "2": "Hot Shots Tennis isn't set up in this install yet. Press Set Up again and pick your disc image.",
+    "3": "Hot Shots Tennis isn't built for the play mode you chose. Press Set Up again to build it, or choose Authentic or Enhanced."
+  }
+}

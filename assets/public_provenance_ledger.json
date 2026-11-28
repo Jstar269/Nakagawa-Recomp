@@ -2366,6 +2366,14 @@
       }
     },
     {
+      "path": "recomplauncher.json",
+      "classification": "reviewed_configuration",
+      "evidence": {
+        "source": "configuration review",
+        "statement": "configuration or dependency metadata reviewed for public release"
+      }
+    },
+    {
       "path": "src/core/PROVENANCE.md",
       "classification": "project_authored_attested",
       "evidence": {
@@ -21886,6 +21894,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "recomp-helper-inventory-tests-346",
+        "evidence_tier": "S",
+        "authorship": "project-authored-independent record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_recomplauncher_manifest.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "recomplauncher_manifest_test_20261126",
         "evidence_tier": "S",
         "authorship": "project-authored-independent record",
         "upstream_attribution": null

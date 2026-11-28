@@ -4224,6 +4224,31 @@ static void destroy_staging_job(PlayerStagingJob **job_slot) {
 
 /* Console progress for the synchronous routes: one line per whole-percent
  * step, so a long disc shows it is moving without flooding the log. */
+/* --prepare (a launcher's headless setup step, such as RecompLauncher's prepare): progress goes
+ * to stdout as `progress <0..1> <text>` lines, the form such a launcher shows under its step.
+ * Staging takes the first fifth of the bar and the package build the rest. */
+static bool s_player_prepare_active;
+
+static void player_prepare_progress(float fraction, const char *text) {
+    if (fraction < 0.0f) fraction = 0.0f;
+    if (fraction > 1.0f) fraction = 1.0f;
+    printf("progress %.3f %s\n", (double)fraction, text && text[0] ? text : "Working");
+    fflush(stdout);
+}
+
+/* Disc IDs as people write them: UCUS98701, ucus-98701 and UCUS 98701 are one disc. */
+static bool player_disc_ids_match(const char *left, const char *right) {
+    if (!left || !right) return false;
+    for (;;) {
+        while (*left == '-' || *left == '_' || *left == ' ') left++;
+        while (*right == '-' || *right == '_' || *right == ' ') right++;
+        if (!*left || !*right) return !*left && !*right;
+        if (toupper((unsigned char)*left) != toupper((unsigned char)*right)) return false;
+        left++;
+        right++;
+    }
+}
+
 static void staging_console_progress(const char *current_path, int percent,
                                      size_t files_extracted, size_t total_files,
                                      void *userdata) {
@@ -4233,6 +4258,10 @@ static void staging_console_progress(const char *current_path, int percent,
     *last_percent = percent;
     printf("[PLAYER] STAGING_PROGRESS percent=%d files=%zu/%zu\n", percent,
            files_extracted, total_files);
+    if (s_player_prepare_active) {
+        player_prepare_progress(0.02f + 0.18f * (float)percent / 100.0f,
+                                "Setting up the game's files");
+    }
     fflush(stdout);
 }
 
@@ -4368,6 +4397,171 @@ static int player_stage_for_launch_now(PlayerApp *app) {
         app, &app->inspecting_game, NULL, 0, NULL, 0);
     if (status != NK_LAUNCH_DATA_ROOT_MISSING) return 0;
     return player_stage_inspected_title(app);
+}
+
+/* Where a package build stands, from 0 to 1: its stage, and within the compile stage the
+   parts compiled. */
+static float player_prepare_build_fraction(const PackageBuildSession *session) {
+    switch (session->current_stage) {
+    case PACKAGE_BUILD_STAGE_PREFLIGHT: return 0.02f;
+    case PACKAGE_BUILD_STAGE_EXTRACT: return 0.06f;
+    case PACKAGE_BUILD_STAGE_COMPILE: {
+        float parts = package_builder_compile_fraction(session);
+        return 0.10f + 0.80f * (parts < 0.0f ? 0.0f : parts);
+    }
+    case PACKAGE_BUILD_STAGE_PACKAGE: return 0.92f;
+    case PACKAGE_BUILD_STAGE_COMPLETE: return 0.99f;
+    default: return 0.0f;
+    }
+}
+
+/* How often a long build says it is still going (a launcher may stop a step that prints
+   nothing for a long time). */
+#define PLAYER_PREPARE_HEARTBEAT_MS 30000u
+
+/* The same package age check as the launcher's "built by an older Nakagawa" prompt, run
+   here once for this game, so a new release builds its game again. Nothing is shown or saved. */
+static bool player_prepare_package_outdated(PlayerApp *app, const GameRecord *game) {
+    PlayerOutdatedScan *scan = (PlayerOutdatedScan *)calloc(1, sizeof(*scan));
+    if (!scan) return false;
+    bool outdated = false;
+    if (player_app_outdated_scan_begin(app, scan)) {
+        player_outdated_scan_run(scan);
+        for (int i = 0; i < scan->count; i++) {
+            if (scan->outdated[i] && strcmp(scan->disc_ids[i], game->disc_id) == 0) outdated = true;
+        }
+        app->outdated.scan_running = false;
+    }
+    free(scan);
+    return outdated;
+}
+
+/* One package of --prepare: the one app->games[index] selects now (its authentic package, or
+ * the Ace build its enhancement_package_id names), built through the same session as BUILD
+ * PACKAGE while this thread waits for its child, and counted only once it validates. A package
+ * that validates and is not from an older Nakagawa is kept. Its progress fills [base, base +
+ * span] of the bar. Returns 0 or the exit code. */
+static int player_prepare_build_package(PlayerApp *app, int index, bool outdated, float base,
+                                        float span, const char *what) {
+    const GameRecord *game = &app->games[index];
+    char reason[1024] = "";
+    char line[160];
+    if (player_app_validate_runtime_package(app, game, NULL, reason, sizeof(reason)) ==
+            NK_RUNTIME_PACKAGE_OK && !outdated) {
+        printf("[PLAYER] PREPARE_PACKAGE status=PASS disc_id=%s variant=%s build=reused\n",
+               game->disc_id, game->enhancement_package_id[0] ? game->enhancement_package_id
+                                                              : "authentic");
+        snprintf(line, sizeof(line), "%s is already built", what);
+        player_prepare_progress(base + span, line);
+        return 0;
+    }
+
+    snprintf(line, sizeof(line), "Building %s for this PC. This can take a while.", what);
+    player_prepare_progress(base, line);
+    if (!player_app_start_package_build(app, index)) {
+        fprintf(stderr, "[PLAYER] The build did not start: %s\n",
+                app->last_error.message[0] ? app->last_error.message
+                                           : "no reason was given.");
+        printf("[PLAYER] PREPARE_RESULT status=FAIL disc_id=%s stage=start\n", game->disc_id);
+        return 4;
+    }
+    if (!app->build_session.is_building) {
+        /* The consent card for the build tools download is up: only a person may agree. */
+        fprintf(stderr, "[PLAYER] Building needs Python, GCC and make, and this copy of Nakagawa "
+                "has none it may use without asking first. Use the release ZIP, which carries "
+                "them in its prereqs folder, or open Nakagawa Recomp once and accept the build "
+                "tools download from a game's page; then set up again.\n");
+        printf("[PLAYER] PREPARE_RESULT status=FAIL disc_id=%s stage=tools\n", game->disc_id);
+        return 3;
+    }
+
+    char last_message[sizeof(app->build_session.current_message)] = "";
+    float last_fraction = -1.0f;
+    uint64_t last_line_ms = SDL_GetTicks();
+    while (app->build_session.is_building) {
+        SDL_Delay(200);
+        uint64_t now = SDL_GetTicks();
+        player_app_poll_package_build(app, now);
+        const PackageBuildSession *session = &app->build_session;
+        float fraction = base + span * player_prepare_build_fraction(session);
+        if (fraction < last_fraction) fraction = last_fraction; /* a failed stage reads 0 */
+        bool changed = strcmp(session->current_message, last_message) != 0 ||
+                       fraction >= last_fraction + 0.01f;
+        if (changed || now - last_line_ms >= PLAYER_PREPARE_HEARTBEAT_MS) {
+            player_prepare_progress(fraction, session->current_message[0]
+                                                  ? session->current_message : line);
+            snprintf(last_message, sizeof(last_message), "%s", session->current_message);
+            last_fraction = fraction;
+            last_line_ms = now;
+        }
+    }
+
+    const PackageBuildSession *session = &app->build_session;
+    if (session->is_failed || session->is_cancelled || !session->is_complete) {
+        const size_t reason_length = strlen(session->failure_boundary);
+        fprintf(stderr, "[PLAYER] The build stopped%s%s%s Its log: %s\n",
+                reason_length ? ": " : "", session->failure_boundary,
+                reason_length && session->failure_boundary[reason_length - 1u] == '.' ? "" : ".",
+                session->log_file_path[0] ? session->log_file_path : "(none)");
+        printf("[PLAYER] PREPARE_RESULT status=FAIL disc_id=%s stage=%s exit=%d\n",
+               game->disc_id, session->current_stage_name[0] ? session->current_stage_name
+                                                             : "build",
+               session->exit_code);
+        return 4;
+    }
+    /* The build may have bound the executable this entry was saved without. */
+    (void)player_app_adopt_profile_executable(app, index);
+    game = &app->games[index];
+    reason[0] = '\0';
+    if (player_app_validate_runtime_package(app, game, NULL, reason, sizeof(reason)) !=
+        NK_RUNTIME_PACKAGE_OK) {
+        fprintf(stderr, "[PLAYER] The build finished, but its package does not check out: %s\n",
+                reason[0] ? reason : "no reason was given.");
+        printf("[PLAYER] PREPARE_RESULT status=FAIL disc_id=%s stage=validate\n", game->disc_id);
+        return 4;
+    }
+    printf("[PLAYER] PREPARE_PACKAGE status=PASS disc_id=%s variant=%s build=new\n",
+           game->disc_id, game->enhancement_package_id[0] ? game->enhancement_package_id
+                                                          : "authentic");
+    return 0;
+}
+
+/* --prepare, after staging. The authentic package is always built: it is the file a launcher
+ * checks to know the game is set up (packages/<disc ID>/package.json). When the settings play
+ * the game as Ace, its Ace build follows, so Play finds the package it starts. The build never
+ * asks anything: one that would need the tool download's consent card stops with code 3. */
+static int player_prepare_build(PlayerApp *app) {
+    int index = player_app_find_added_game(app, &app->inspecting_game);
+    if (index < 0) {
+        fprintf(stderr, "[PLAYER] Disc %s is not in the library after setting it up. Run the "
+                "setup again; the files will be reused.\n", app->inspecting_game.disc_id);
+        return 7;
+    }
+    /* What the settings select (player_app_select_package_variant), kept for the second build. */
+    player_app_refresh_title_enhancements(app);
+    GameRecord *game = &app->games[index];
+    char selected[sizeof(game->enhancement_package_id)];
+    snprintf(selected, sizeof(selected), "%s", game->enhancement_package_id);
+    const bool selected_hook_only = game->enhancement_hook_only;
+    const bool outdated = player_prepare_package_outdated(app, game);
+    const float authentic_span = selected[0] ? 0.40f : 0.80f;
+
+    game->enhancement_package_id[0] = '\0';
+    game->enhancement_hook_only = false;
+    int code = player_prepare_build_package(app, index, outdated, 0.20f, authentic_span,
+                                            "the game");
+    if (code == 0 && selected[0]) {
+        game = &app->games[index];
+        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
+                 selected);
+        game->enhancement_hook_only = selected_hook_only;
+        code = player_prepare_build_package(app, index, outdated, 0.20f + authentic_span, 0.40f,
+                                            "its Ace build");
+    }
+    if (code != 0) return code;
+    printf("[PLAYER] PREPARE_RESULT status=PASS disc_id=%s\n", app->games[index].disc_id);
+    player_prepare_progress(1.0f, "Ready to play");
+    return 0;
 }
 
 /* Bound on one headless --launch-index run. A guest that reaches its own exit
@@ -4629,9 +4823,14 @@ static const PlayerCliOption k_player_cli_options[] = {
     {"--help", NULL, "Print this list and exit.", false},
     {"--version", NULL, "Print the version and build commit on one line and exit.", false},
     {"--user-data-root", "<folder>", "Keep the library, settings, logs and saves in <folder>.", false},
-    {"--iso", "<path>", "Add a disc image (with --stage, --stage-only or --launch-now).", false},
+    {"--iso", "<path>", "Add a disc image (with --stage, --stage-only, --prepare or --launch-now).", false},
+    {"--game", "<path>", "The same as --iso.", false},
     {"--stage", NULL, "Stage the --iso image into the library, then open the launcher.", false},
     {"--stage-only", NULL, "Stage the --iso image and exit.", false},
+    {"--prepare", NULL,
+     "Stage the --iso image, build it for this PC without a window, print progress, then exit.",
+     false},
+    {"--expect-disc", "<disc ID>", "With --prepare: refuse any disc but this one.", false},
     {"--launch-now", NULL, "Start the --iso game without opening the launcher window.", false},
     {"--launch-title", "<disc ID>",
      "Start a library game by disc ID (or <disc ID>:<SHA-1>) without the launcher window.",
@@ -4755,15 +4954,15 @@ typedef struct {
 
 static const PlayerExitCode k_player_exit_codes[] = {
     {0, "Done. A game that was started returns its own exit code instead, whatever it is."},
-    {1, "The launcher window could not be created, a UI test failed, a --screenshot could not be saved, the manifest overlay could not be loaded, or a --stage-only or --headless-launch run could not read, convert or inspect the disc image."},
-    {2, "The command line, the data folder, the --launch-title name or the library entry was refused, or staging needs a supported --iso."},
-    {3, "The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or staging (--stage-only, or --launch-now with --headless-launch) cannot set it up (not in the catalog, no profile, out of memory)."},
-    {4, "The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, or staging (--stage-only, or --launch-now with --headless-launch) failed."},
+    {1, "The launcher window could not be created, a UI test failed, a --screenshot could not be saved, the manifest overlay could not be loaded, or a --stage-only, --prepare or --headless-launch run could not read, convert or inspect the disc image."},
+    {2, "The command line, the data folder, the --launch-title name or the library entry was refused, staging needs a supported --iso, or the --prepare disc is not the one --expect-disc names."},
+    {3, "The game has no runtime prepared for this PC (build it in Nakagawa Recomp), or staging (--stage-only, --prepare, or --launch-now with --headless-launch) cannot set it up (not in the catalog, no profile, out of memory), or --prepare has no build tools it may use without asking."},
+    {4, "The game or the launcher could not start (a missing SDL3_ttf.dll included), an experimental profile could not be made, staging (--stage-only, --prepare, or --launch-now with --headless-launch) failed, or a --prepare build failed."},
     {5, "The game's window request was lost."},
-    {6, "The game ended abnormally (a crash), or in staging (--stage-only, or --launch-now with --headless-launch) the game's folder path is too long for the library record."},
-    {7, "A headless run timed out, or in staging (--stage-only, or --launch-now with --headless-launch) the game could not be saved to the library."},
-    {8, "A headless acceptance checkpoint was not reached, or in staging (--stage-only, or --launch-now with --headless-launch) the game's data folder could not be checked."},
-    {9, "In staging (--stage-only, or --launch-now with --headless-launch), another run holds the game's staging, or a file takes the game's folder name."},
+    {6, "The game ended abnormally (a crash), or in staging (--stage-only, --prepare, or --launch-now with --headless-launch) the game's folder path is too long for the library record."},
+    {7, "A headless run timed out, or in staging (--stage-only, --prepare, or --launch-now with --headless-launch) the game could not be saved to the library."},
+    {8, "A headless acceptance checkpoint was not reached, or in staging (--stage-only, --prepare, or --launch-now with --headless-launch) the game's data folder could not be checked."},
+    {9, "In staging (--stage-only, --prepare, or --launch-now with --headless-launch), another run holds the game's staging, or a file takes the game's folder name."},
 };
 
 static void player_cli_print_usage(void) {
@@ -5081,6 +5280,10 @@ struct PlayerRun {
     bool launch_now;
     bool stage_initial_iso;
     bool stage_only;
+    /* --prepare: --stage-only, then the package build, headless (a launcher's setup step). */
+    bool prepare;
+    /* --expect-disc=<disc ID>: the only disc --prepare takes. */
+    const char *expect_disc;
     bool launch_index_requested;
     int launch_index;
     /* --launch-title=<value>: one library game, named by its disc ID (#2152). */
@@ -6517,8 +6720,22 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
             run->test_view = argv[i] + 7;
         } else if (strncmp(argv[i], "--manifest-overlay=", 19) == 0) {
             run->manifest_overlay_path = argv[i] + 19;
-        } else if (strncmp(argv[i], "--iso=", 6) == 0) {
-            run->initial_iso_path = argv[i] + 6;
+        } else if (strncmp(argv[i], "--iso=", 6) == 0 || strncmp(argv[i], "--game=", 7) == 0) {
+            /* --game is --iso's other name (a launcher's {input:game} template). */
+            const char *path = argv[i] + (argv[i][2] == 'i' ? 6 : 7);
+            if (run->initial_iso_path && strcmp(run->initial_iso_path, path) != 0) {
+                fprintf(stderr, "[PLAYER] Give one disc image: --iso and --game name "
+                                "different files.\n");
+                return 2;
+            }
+            run->initial_iso_path = path;
+        } else if (strcmp(argv[i], "--prepare") == 0) {
+            run->stage_initial_iso = true;
+            run->stage_only = true;
+            run->prepare = true;
+            s_player_prepare_active = true;
+        } else if (strncmp(argv[i], "--expect-disc=", 14) == 0) {
+            run->expect_disc = argv[i] + 14;
         } else if (strncmp(argv[i], "--user-data-root=", 17) == 0) {
             /* Applied by player_apply_user_data_root before the library loaded. A Steam
                shortcut made here passes the same folder on (#2152). */
@@ -6609,6 +6826,16 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
 
     if (run->launch_title && run->launch_index_requested) {
         fprintf(stderr, "[PLAYER] Use --launch-title or --launch-index, not both.\n");
+        return 2;
+    }
+    if (run->expect_disc && !run->prepare) {
+        fprintf(stderr, "[PLAYER] --expect-disc is read only with --prepare.\n");
+        return 2;
+    }
+    if (run->prepare && (run->launch_now || run->launch_title || run->launch_index_requested ||
+                         app->launch_headless)) {
+        fprintf(stderr, "[PLAYER] --prepare sets a game up and exits: start it with a second "
+                        "run (--launch-title=<disc ID>).\n");
         return 2;
     }
     if ((app->headless_accept_presented_frames > 0u &&
@@ -6704,8 +6931,12 @@ static int player_load_library(PlayerRun *run) {
         if (base) player_app_set_install_root(app, base);
     }
     if (run->stage_only && !run->initial_iso_path) {
-        fprintf(stderr, "[PLAYER] --stage-only requires --iso=<path>.\n");
+        fprintf(stderr, run->prepare ? "[PLAYER] --prepare requires --game=<path> (or --iso).\n"
+                                     : "[PLAYER] --stage-only requires --iso=<path>.\n");
         return 2;
+    }
+    if (run->prepare) {
+        player_prepare_progress(0.0f, "Reading your disc image");
     }
 
     /* Title manifests the user keeps in <user data>/manifests are loaded on every
@@ -6847,6 +7078,14 @@ static int player_load_library(PlayerRun *run) {
         if (iso_inspect_file(run->initial_iso_path, &res)) {
             printf("[PLAYER] Inspected ISO %s -> Disc ID: %s, Title: %s, Supported: %d\n",
                    run->initial_iso_path, res.disc_id, res.title_name, res.is_supported ? 1 : 0);
+            if (run->expect_disc && !player_disc_ids_match(res.disc_id, run->expect_disc)) {
+                /* Before anything is written: the setup step was handed another game. */
+                fprintf(stderr, "[PLAYER] This disc image is %s (%s), not %s. Pick your copy of "
+                        "%s, then set up again.\n", res.disc_id,
+                        res.title_name[0] ? res.title_name : "another game", run->expect_disc,
+                        run->expect_disc);
+                return 2;
+            }
             char profile_error[256] = "";
             if (!player_populate_inspected_game(app, run->initial_iso_path, run->initial_source_image,
                                                 &res, profile_error, sizeof(profile_error))) {
@@ -6885,7 +7124,10 @@ static int player_load_library(PlayerRun *run) {
                                                           res.param_sfo_parsed,
                                                           &res.executables);
                 if (run->stage_only) {
-                    return player_stage_inspected_title(app);
+                    if (run->prepare) player_prepare_progress(0.02f, "Setting up the game's files");
+                    int staged = player_stage_inspected_title(app);
+                    if (staged != 0 || !run->prepare) return staged;
+                    return player_prepare_build(app);
                 }
                 player_app_wizard_begin_extraction(app);
             } else {
