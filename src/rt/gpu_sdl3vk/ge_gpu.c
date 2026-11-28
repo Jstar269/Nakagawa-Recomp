@@ -13,7 +13,8 @@
  * Architecture: ge.c keeps doing vertex decode + T&L + clipping + primitive acceptance
  * (the parts validated against PPSSPP), then hands SCREEN-SPACE primitives to this
  * backend through the GeGpuHooks seam. Primitives render on the GPU, except the states it
- * cannot draw exactly (gpu_state_unsupported_reason, points, textured lines): those go to
+ * cannot draw exactly (gpu_state_unsupported_reason, textured lines, textured points with mip
+ * levels): those go to
  * ge.c's software rasterizer, counted by reason (GEGPU_FALLBACK_*); unmappable blend modes
  * are approximated (see build_state). GE framebuffers are PERSISTENT GPU images (color RGBA8 + shared D16
  * depth keyed by zbp): no guest-VRAM upload/readback per flush. Guest VRAM is read only
@@ -85,7 +86,8 @@
  *    colour write mask; any other mask (and in clear mode an alpha mask that is not) falls
  *    back to ge.c (gpu_state_unsupported_reason).
  *  - Lines: an untextured line runs ge.c draw_line_vtx's DDA here and draws its pixels as
- *    one-pixel quads (hook_line). Points and textured lines fall back to ge.c.
+ *    one-pixel quads (hook_line). A point is a one-pixel quad with ge.c's values (hook_point).
+ *    Textured lines, and textured points with mip levels, fall back to ge.c.
  *  - Render scale (default 1): SR_RESOLUTION_SCALE carries the player's Settings >
  *    Internal Render Resolution choice (1..4); SR_GPU_SCALE overrides it as an
  *    explicit diagnostic (sr_parse_render_scale in ge_gpu.h). Targets/depth/snapshot images are
@@ -9240,29 +9242,69 @@ static int hook_line(const GeVtx *A, const GeVtx *B, int persp) {
     return cpu_profile_hook_leave(1);
 }
 
+/* A point's texel coordinate on one axis, moved to where psp.frag's own rounding and filter
+ * rule return ge.c sample_level_f's sample unchanged: the centre of texel floor(u) for nearest,
+ * and for linear the tap pair and 1/16 weight ge.c truncates from u - 0.5. Both are multiples of
+ * 1/32, which psp.frag's 1/4096 rounding keeps, so a coordinate within 1/8192 below a texel edge
+ * samples ge.c's texel instead of the next one. */
+static float point_texel_axis(float u, int linear) {
+    if (!linear) return floorf(u) + 0.5f;
+    const float su = u - 0.5f, u0 = floorf(su);
+    int fx = (int)((su - u0) * 16.0f);
+    if (fx < 0) fx = 0;
+    if (fx > 15) fx = 15;
+    return u0 + (float)fx / 16.0f + 0.5f;
+}
+
+/* Points draw ge.c draw_point_vtx's pixel: a one-pixel quad at the vertex's position truncated
+ * toward zero, carrying the values ge.c gives it, constant across the quad. A transform-mode
+ * point outside [minz, maxz] is dropped; its depth is the one ge.c stores (clamp_z) and its fog
+ * factor ge.c's, as for lines. A point has no footprint (ge.c samples it with rho2 0), so its
+ * texture is sampled at one coordinate with the magnification filter at level 0, which psp.frag
+ * gets from a constant coordinate: the CPU divides it by rw as ge.c does and places it with
+ * point_texel_axis. A textured point with mip levels stays on ge.c: its level comes from ge.c's
+ * level of detail, which for a slope level reads the point's q. Everything else is the fragment
+ * stage of any primitive, so a state the GPU path cannot draw falls back as for a sprite. */
 static int hook_point(const GeVtx *A, int persp) {
     if (!s_ready) return 0;
     cpu_profile_hook_enter();
     { const GeVtx *vv[1] = { A };
       if (!hook_finite(vv, 1)) return cpu_profile_hook_leave(1); }
-    const int fb = fallback_hook_result(software_fallback_begin(GEGPU_FALLBACK_POINT));
+    const int textured = s_ge->tex_enable && !s_ge->clear && s_ge->tex_addr;
+    const int forced = textured && ge_tex_mip_active(s_ge) ? GEGPU_FALLBACK_POINT
+                     : color_test_colour_inexact(0, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1;
+    const int fb = fallback_hook_result(software_fallback_begin(forced));
     if (fb >= 0) return cpu_profile_hook_leave(fb);
+    /* ge.c zrange_ok: a transform-mode point outside the depth range draws nothing. */
+    if (persp && ((int)A->z < (int)s_ge->minz || (int)A->z > (int)s_ge->maxz)) return cpu_profile_hook_leave(1);
     Batch b;
-    state_get(persp, 1, &b);
+    state_get(persp, 1, &b);              /* sprite semantics: no culling */
     if (!begin_target()) return cpu_profile_hook_leave(target_failed_fallback());
-    float x0 = floorf(A->x), y0 = floorf(A->y);
+    const float x0 = truncf(A->x), y0 = truncf(A->y);   /* ge.c: (int)A->x, (int)A->y */
+    const float z = A->z < 0.0f ? 0.0f : A->z > 65535.0f ? 65535.0f : (float)(uint16_t)A->z;
+    const int use_fog = persp && s_ge->fog_enable && !s_ge->clear;
+    const float fog = ((float)(use_fog ? (int)(line_clamp01(A->fog) * 256.0f) : 256) + 0.5f) / 256.0f;
+    float u = 0.0f, v = 0.0f;
+    if (textured) {
+        u = A->u; v = A->v;
+        if (persp && A->rw != 0.0f) { u /= A->rw; v /= A->rw; }
+        const int linear = (s_ge->tex_filter >> 8) & 1u;   /* no footprint: magnification */
+        u = point_texel_axis(u, linear);
+        v = point_texel_axis(v, linear);
+    }
     ensure_room(6);
     uint64_t vertex_started = cpu_profile_now();
     uint32_t first = s_nverts;
-    put_vert(x0,        y0,        A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0 + 1.0f, y0,        A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0,        y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0 + 1.0f, y0,        A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0 + 1.0f, y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0,        y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
+    memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    put_vert(x0,        y0,        z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0 + 1.0f, y0,        z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0,        y0 + 1.0f, z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0 + 1.0f, y0,        z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0 + 1.0f, y0 + 1.0f, z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0,        y0 + 1.0f, z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
-    movie_note_write(s_cur, 0, 1, x0, y0, x0 + 1.0f, y0 + 1.0f);   /* #2111 */
+    movie_note_write(s_cur, movie_draw_samples(&b), 1, x0, y0, x0 + 1.0f, y0 + 1.0f);   /* #2111 */
     s_cnt_line++;
     return cpu_profile_hook_leave(1);
 }

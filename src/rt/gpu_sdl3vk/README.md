@@ -73,7 +73,8 @@ Enabled with `SR_GPU_GE=1`. Implementation:
 - **Guest VRAM stays authoritative**: at every flush point (GE list END, framebuffer
   retarget, texture-from-VRAM, CLUT-from-VRAM, present, software fallback) the target
   is rendered and written back to guest VRAM + the software z-buffer in the native
-  format (16-bit round trip is lossless). Anything unsupported — lines, points,
+  format (16-bit round trip is lossless). Anything unsupported — textured lines, textured
+  points with mip levels,
   doubled-alpha blend factors, min/max/absdiff blend equations, two distinct FIX
   constants, partial-byte write masks — flushes and falls back to the software
   rasterizer in correct order. Presentation/snapshot code is unchanged.
