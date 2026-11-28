@@ -13,7 +13,8 @@
  * Architecture: ge.c keeps doing vertex decode + T&L + clipping + primitive acceptance
  * (the parts validated against PPSSPP), then hands SCREEN-SPACE primitives to this
  * backend through the GeGpuHooks seam. Primitives render on the GPU, except the states it
- * cannot draw exactly (gpu_state_unsupported_reason, points, textured lines): those go to
+ * cannot draw exactly (gpu_state_unsupported_reason, textured lines, clear-mode points, textured
+ * points with mip levels): those go to
  * ge.c's software rasterizer, counted by reason (GEGPU_FALLBACK_*); unmappable blend modes
  * are approximated (see build_state). GE framebuffers are PERSISTENT GPU images (color RGBA8 + shared D16
  * depth keyed by zbp): no guest-VRAM upload/readback per flush. Guest VRAM is read only
@@ -62,7 +63,8 @@
  *    ge.c's integer blend_chan()/factor_component() formulas verbatim. The snapshot is
  *    refreshed per state build (pending batches submit first), so the one remaining
  *    approximation is overlapping primitives INSIDE a single batch reading the
- *    pre-batch destination — the standard shader-blend hazard, same as PPSSPP.
+ *    pre-batch destination — the standard shader-blend hazard, same as PPSSPP. Points
+ *    avoid it: one on a pixel its batch drew opens the next batch (point_batch_place).
  *  - Stencil (the PSP keeps it in destination alpha): the fragment shader runs ge.c's
  *    stencil test and ops against the destination snapshot, with pipeline blending off.
  *    Where the depth test runs, its fail op (unless it always passes) and the stencil-fail
@@ -87,7 +89,8 @@
  *    colour write mask; any other mask (and in clear mode an alpha mask that is not) falls
  *    back to ge.c (gpu_state_unsupported_reason).
  *  - Lines: an untextured line runs ge.c draw_line_vtx's DDA here and draws its pixels as
- *    one-pixel quads (hook_line). Points and textured lines fall back to ge.c.
+ *    one-pixel quads (hook_line). A point is a one-pixel quad with ge.c's values (hook_point).
+ *    Textured lines, clear-mode points and textured points with mip levels fall back to ge.c.
  *  - Render scale (default 1): SR_RESOLUTION_SCALE carries the player's Settings >
  *    Internal Render Resolution choice (1..4); SR_GPU_SCALE overrides it as an
  *    explicit diagnostic (sr_parse_render_scale in ge_gpu.h). Targets/depth/snapshot images are
@@ -297,6 +300,10 @@ typedef struct {
      * VK_NULL_HANDLE for every other batch, which never reads set 3. */
     VkDescriptorSet pset;
     uint32_t first, count;
+    /* A run of points that read the destination (point_batch_place): batch_extends joins only equal
+     * values, so a point that lands on a pixel the run drew starts a batch of its own. 0 for every
+     * other batch. */
+    uint8_t point;
 } Batch;
 
 /* Everything besides level 0 that shapes a cached mip chain and its sampler (#1373). All
@@ -1011,7 +1018,8 @@ static int s_log = 0;
 static int s_stats = 0;
 static int s_tex_shadow_enabled = 1;
 static size_t s_tex_shadow_bytes;
-static unsigned long s_cnt_submit = 0, s_cnt_tri = 0, s_cnt_spr = 0, s_cnt_line = 0;
+static unsigned long s_cnt_submit = 0, s_cnt_tri = 0, s_cnt_spr = 0, s_cnt_line = 0, s_cnt_point = 0;
+static unsigned long long s_cnt_point_splits = 0;  /* points that opened a batch on a drawn pixel */
 static unsigned long s_cnt_nonfinite = 0;
 static uint64_t s_cnt_batches = 0, s_cnt_verts = 0;
 unsigned long s_cnt_present_gpu = 0;
@@ -3492,13 +3500,13 @@ static void stats_emit(int final) {
     if (!final && now - last_ms < 5000) return;
     last_ms = now;
     fprintf(stderr, "GEGPU stats: submits=%lu batches=%llu verts=%llu avg_batches=%.2f "
-            "tris=%lu spr=%lu lines=%lu nonfinite=%lu tnl[prims=%lu tris=%lu] rtt=%lu snap=%lu "
+            "tris=%lu spr=%lu lines=%lu points=%lu point_splits=%llu nonfinite=%lu tnl[prims=%lu tris=%lu] rtt=%lu snap=%lu "
             "present[gpu=%lu cpu=%lu] upload=%lu readback=%lu texup=%lu dirty=%lu xferblit=%lu pipes=%d texs=%d "
             "shadow[invalidations=%llu checks=%llu hits=%llu misses=%llu bytes=%llu avoided=%llu required=%llu] "
             "movie[tex=%lu present_tex=%lu present_target=%lu present_ge_held=%lu dropped=%llu] final=%d\n",
             s_cnt_submit, (unsigned long long)s_cnt_batches, (unsigned long long)s_cnt_verts,
             s_cnt_submit ? (double)s_cnt_batches / (double)s_cnt_submit : 0.0,
-            s_cnt_tri, s_cnt_spr, s_cnt_line, s_cnt_nonfinite, s_cnt_tnl_prims, s_cnt_tnl_tris,
+            s_cnt_tri, s_cnt_spr, s_cnt_line, s_cnt_point, s_cnt_point_splits, s_cnt_nonfinite, s_cnt_tnl_prims, s_cnt_tnl_tris,
             s_cnt_rtt, s_cnt_snap,
             s_cnt_present_gpu, s_cnt_present_cpu, s_cnt_upload, s_cnt_readback, s_cnt_texup,
             s_cnt_dirty, s_cnt_xferblit, s_pipe_n, s_tex_n,
@@ -8486,7 +8494,8 @@ static int batch_extends(const Batch *last, const Batch *b, uint32_t first) {
     return last->first + last->count == first && !memcmp(&last->key, &b->key, sizeof(b->key)) &&
            last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
            !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
-           !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset && last->pset == b->pset;
+           !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset && last->pset == b->pset &&
+           last->point == b->point;
 }
 
 static void depth_blind_pair(const Batch *b, Batch *colour, Batch *stencil) {
@@ -8697,8 +8706,9 @@ static int tri_colours_vary(const GeVtx *A, const GeVtx *B, const GeVtx *C) {
 /* Software primitives by reason, always counted (gegpu_fallback_counts, #2151). */
 static unsigned long long s_fallback_sw_prims[GEGPU_FALLBACK_REASONS];
 
-/* `forced` is the reason a primitive kind always falls back (lines, points), or -1 for one
- * that falls back only under an unsupported state. `counted` 0 leaves the primitive out of the
+/* `forced` is the reason a primitive falls back whatever its fragment state (a textured line, a
+ * clear-mode or mip-textured point, a colour test the GPU cannot match), or -1 for one that falls
+ * back only under an unsupported state. `counted` 0 leaves the primitive out of the
  * per-reason count: a T&L primitive declined here reaches hook_tri as triangles, and hook_tri counts
  * those it hands to ge.c (it may draw some on the GPU instead). The readback, if any, is counted
  * either way.
@@ -9386,30 +9396,122 @@ static int hook_line(const GeVtx *A, const GeVtx *B, int persp) {
     return cpu_profile_hook_leave(1);
 }
 
+/* A point's texel coordinate on one axis, moved to where psp.frag's own rounding and filter
+ * rule return ge.c sample_level_f's sample unchanged: the centre of texel floor(u) for nearest,
+ * and for linear the tap pair and 1/16 weight ge.c truncates from u - 0.5. Both are multiples of
+ * 1/32, which psp.frag's 1/4096 rounding keeps, so a coordinate within 1/8192 below a texel edge
+ * samples ge.c's texel instead of the next one. */
+static float point_texel_axis(float u, int linear) {
+    if (!linear) return floorf(u) + 0.5f;
+    const float su = u - 0.5f, u0 = floorf(su);
+    int fx = (int)((su - u0) * 16.0f);
+    if (fx < 0) fx = 0;
+    if (fx > 15) fx = 15;
+    return u0 + (float)fx / 16.0f + 0.5f;
+}
+
+/* Points whose state reads the destination in the shader (F_SHBLEND, which state_get sets for a
+ * blend on a 16-bit target, under dithering, under the stencil test or in a mode fixed-function
+ * blending cannot express, and F_STENCIL). On the snapshot path every primitive of a batch reads
+ * the destination from before the batch, so two such points of one batch on one pixel would not
+ * see each other, where ge.c blends the second over the first. They share a batch until one lands
+ * on a guest pixel an earlier point of the batch drew; that point opens the next batch (Batch.point
+ * differs, so batch_extends keeps them apart), and submit_list copies the destination for it where
+ * the copy is stale. A point's quad covers one guest pixel at every render scale. s_point_stamp
+ * marks the pixels of the open batch; s_point_open says which batch that is, and any other batch
+ * last in the list (another primitive, a flush) opens a new one. A widescreen wing canvas draws
+ * from s_wbatch, which s_point_open does not follow: there each such point is a batch of its own. */
+static uint32_t s_point_stamp[FB_W * FB_H], s_point_stamp_now = 1u;
+static struct { uint32_t flushgen, nbatch, first, count; } s_point_open;
+static uint8_t s_point_gen = 1u;
+
+static void point_batch_place(Batch *b, float x, float y) {
+    if (!batch_reads_dst(b)) { b->point = 0; return; }
+    const Batch *last = s_nbatch ? &s_batch[s_nbatch - 1u] : NULL;
+    const int open = !s_wing_dst && last && last->point == s_point_gen && s_point_open.flushgen == s_flushgen &&
+                     s_point_open.nbatch == s_nbatch && s_point_open.first == last->first &&
+                     s_point_open.count == last->count;
+    const int inside = x >= 0.0f && y >= 0.0f && x < (float)FB_W && y < (float)FB_H;
+    const uint32_t px = inside ? (uint32_t)y * FB_W + (uint32_t)x : 0u;
+    const int hit = open && inside && s_point_stamp[px] == s_point_stamp_now;
+    if (!open || hit) {
+        if (hit) s_cnt_point_splits++;
+        /* The new value never equals the last batch's, which batch_extends would join. */
+        do s_point_gen = (uint8_t)(s_point_gen == 255u ? 1u : s_point_gen + 1u);
+        while (last && last->point == s_point_gen);
+        if (++s_point_stamp_now == 0u) {
+            memset(s_point_stamp, 0, sizeof s_point_stamp);
+            s_point_stamp_now = 1u;
+        }
+    }
+    b->point = s_point_gen;
+    if (inside) s_point_stamp[px] = s_point_stamp_now;
+}
+
+/* After append: the batch a point that reads the destination went into is the open one. */
+static void point_batch_note(const Batch *b) {
+    if (!b->point || s_wing_dst || !s_nbatch || s_batch[s_nbatch - 1u].point != b->point) return;
+    s_point_open.flushgen = s_flushgen;
+    s_point_open.nbatch = s_nbatch;
+    s_point_open.first = s_batch[s_nbatch - 1u].first;
+    s_point_open.count = s_batch[s_nbatch - 1u].count;
+}
+
+/* Points draw ge.c draw_point_vtx's pixel: a one-pixel quad at the vertex's position truncated
+ * toward zero, carrying the values ge.c gives it, constant across the quad. A transform-mode
+ * point outside [minz, maxz] is dropped before anything else, as ge.c drops it whatever its state;
+ * its depth is the one ge.c stores (clamp_z) and its fog factor ge.c's, as for lines. A point has
+ * no footprint (ge.c samples it with rho2 0), so its texture is sampled at one coordinate with the
+ * magnification filter at level 0, which psp.frag gets from a constant coordinate: the CPU divides
+ * it by rw as ge.c does and places it with point_texel_axis. Two kinds stay on ge.c
+ * (GEGPU_FALLBACK_POINT): a point in clear mode, which ge.c draws with its tests and without
+ * touching alpha (draw_point_vtx has no clear branch) where the GPU path's clear state is a
+ * sprite's; and a textured point with mip levels, whose level comes from ge.c's level of detail,
+ * which for a slope level reads the point's q. Everything else is the fragment stage of any
+ * primitive, so a state the GPU path cannot draw falls back as for a sprite. */
 static int hook_point(const GeVtx *A, int persp) {
     if (!s_ready) return 0;
     cpu_profile_hook_enter();
     { const GeVtx *vv[1] = { A };
       if (!hook_finite(vv, 1)) return cpu_profile_hook_leave(1); }
-    const int fb = fallback_hook_result(software_fallback_begin(GEGPU_FALLBACK_POINT));
+    /* ge.c zrange_ok, checked after a declining hook: the point draws nothing on either side. */
+    if (persp && ((int)A->z < (int)s_ge->minz || (int)A->z > (int)s_ge->maxz)) return cpu_profile_hook_leave(1);
+    const int textured = s_ge->tex_enable && !s_ge->clear && s_ge->tex_addr;
+    const int forced = s_ge->clear || (textured && ge_tex_mip_active(s_ge)) ? GEGPU_FALLBACK_POINT
+                     : color_test_colour_inexact(0, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1;
+    const int fb = fallback_hook_result(software_fallback_begin(forced));
     if (fb >= 0) return cpu_profile_hook_leave(fb);
     Batch b;
-    state_get(persp, 1, &b);
+    state_get(persp, 1, &b);              /* sprite semantics: no culling */
     if (!begin_target()) return cpu_profile_hook_leave(target_failed_fallback());
-    float x0 = floorf(A->x), y0 = floorf(A->y);
+    const float x0 = truncf(A->x), y0 = truncf(A->y);   /* ge.c: (int)A->x, (int)A->y */
+    const float z = A->z < 0.0f ? 0.0f : A->z > 65535.0f ? 65535.0f : (float)(uint16_t)A->z;
+    const int use_fog = persp && s_ge->fog_enable;
+    const float fog = ((float)(use_fog ? (int)(line_clamp01(A->fog) * 256.0f) : 256) + 0.5f) / 256.0f;
+    float u = 0.0f, v = 0.0f;
+    if (textured) {
+        u = A->u; v = A->v;
+        if (persp && A->rw != 0.0f) { u /= A->rw; v /= A->rw; }
+        const int linear = (s_ge->tex_filter >> 8) & 1u;   /* no footprint: magnification */
+        u = point_texel_axis(u, linear);
+        v = point_texel_axis(v, linear);
+    }
     ensure_room(6);
+    point_batch_place(&b, x0, y0);
     uint64_t vertex_started = cpu_profile_now();
     uint32_t first = s_nverts;
-    put_vert(x0,        y0,        A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0 + 1.0f, y0,        A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0,        y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0 + 1.0f, y0,        A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0 + 1.0f, y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
-    put_vert(x0,        y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
+    memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    put_vert(x0,        y0,        z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0 + 1.0f, y0,        z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0,        y0 + 1.0f, z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0 + 1.0f, y0,        z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0 + 1.0f, y0 + 1.0f, z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
+    put_vert(x0,        y0 + 1.0f, z, 1.0f, u, v, fog, A->r, A->g, A->b, A->a);
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
-    movie_note_write(s_cur, 0, 1, x0, y0, x0 + 1.0f, y0 + 1.0f);   /* #2111 */
-    s_cnt_line++;
+    point_batch_note(&b);
+    movie_note_write(s_cur, movie_draw_samples(&b), 1, x0, y0, x0 + 1.0f, y0 + 1.0f);   /* #2111 */
+    s_cnt_point++;
     return cpu_profile_hook_leave(1);
 }
 
@@ -9680,7 +9782,7 @@ void gegpu_fallback_counts(GeGpuFallbackCounts *out) {
     memset(out, 0, sizeof(*out));
     if (!s_ready) return;
     out->ready = 1;
-    out->gpu_prims = (uint32_t)(s_cnt_tri + s_cnt_spr + s_cnt_line + s_cnt_tnl_tris);
+    out->gpu_prims = (uint32_t)(s_cnt_tri + s_cnt_spr + s_cnt_line + s_cnt_point + s_cnt_tnl_tris);
     for (int i = 0; i < GEGPU_FALLBACK_REASONS; i++) {
         out->sw_prims[i] = s_fallback_sw_prims[i];
         out->readbacks[i] = s_replay_stats.fallback_readbacks[i];

@@ -167,7 +167,7 @@ typedef enum NkRenderEffect {
     NK_RENDER_EFFECT_WIDE_STRIDE,  /* frame buffers wider than 512 pixels */
     NK_RENDER_EFFECT_MIPS,         /* mipmap levels no Vulkan texture holds */
     NK_RENDER_EFFECT_LINE,         /* lines the GPU path does not draw */
-    NK_RENDER_EFFECT_POINT,        /* points */
+    NK_RENDER_EFFECT_POINT,        /* points the GPU path does not draw */
     NK_RENDER_EFFECT_COUNT
 } NkRenderEffect;
 
